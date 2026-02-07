@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
-import { useParams, Link } from 'react-router-dom'
+import { useParams, useSearchParams, Link } from 'react-router-dom'
 import { ArrowLeft, Users } from 'lucide-react'
 import { createGameWebSocket, fetchGameState, SpectatorObservation, SpectatorPlayerInfo, sendGuiClick } from '../api'
 import GameScene from '../components/GameScene'
@@ -18,6 +18,8 @@ function arraysEqual<T>(a: T[], b: T[]): boolean {
 
 export default function Game() {
   const { id } = useParams<{ id: string }>()
+  const [searchParams] = useSearchParams()
+  const gameType = searchParams.get('gameType')
   const [error, setError] = useState<string | null>(null)
   const [connectionStatus, setConnectionStatus] = useState<'connecting' | 'connected' | 'disconnected'>('connecting')
   const [selectedPlayerId, setSelectedPlayerId] = useState<string | null>(null)
@@ -150,7 +152,7 @@ export default function Game() {
     <div className="h-full flex flex-col bg-background">
       {/* Header */}
       <div className="flex items-center gap-4 px-4 py-3 border-b border-border bg-card pr-16">
-        <Link to="/">
+        <Link to={gameType ? `/games/${gameType}/sessions` : '/'}>
           <Button variant="ghost" size="icon" className="h-8 w-8">
             <ArrowLeft className="h-4 w-4" />
           </Button>
@@ -186,8 +188,8 @@ export default function Game() {
           <div className="flex items-center justify-center h-full">
             <div className="text-center">
               <p className="text-destructive">{error}</p>
-              <Link to="/" className="text-sm text-muted-foreground hover:text-foreground mt-2 inline-block">
-                Return to home
+              <Link to={gameType ? `/games/${gameType}/sessions` : '/'} className="text-sm text-muted-foreground hover:text-foreground mt-2 inline-block">
+                {gameType ? 'Return to sessions' : 'Return to home'}
               </Link>
             </div>
           </div>
