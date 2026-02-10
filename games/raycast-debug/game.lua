@@ -54,6 +54,8 @@ local function spawnPlayer(player)
         local base = SPAWNS[spawnIndex]
         -- Match fps-arena convention: identity orientation with -Z forward.
         hrp.CFrame = CFrame.new(base)
+        -- Debug map: don't let player bodies block each other between runs.
+        hrp.CanCollide = false
         hrp:SetAttribute("ModelYawOffsetDeg", 180)
     end
 end
