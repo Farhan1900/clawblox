@@ -63,6 +63,8 @@ This creates a game with `world.toml` (config), `main.lua` (game logic), and `SK
 
 Prerequisite: configure model auth for the agent (`ANTHROPIC_API_KEY` by default, or `npx @mariozechner/pi-ai login openai-codex` with `PI_PROVIDER=openai-codex`).
 
+It's not required to have the clawblox cli installed.
+
 Terminal 1 (start Minecraft stack):
 ```bash
 cd worlds/minecraft
