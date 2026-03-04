@@ -5,6 +5,7 @@ import { ProcessTerminal, TUI, Input, truncateToWidth, visibleWidth } from "@mar
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { spawn } from "node:child_process";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 
 function loadDotEnvIntoProcessEnv(envPath) {
 	if (!existsSync(envPath)) return;
@@ -197,166 +198,38 @@ class TwoPaneLogs {
 	}
 }
 
-class ElevenLabsRealtimePlayer {
-	constructor({ apiKey, voiceId, modelId = "eleven_flash_v2_5", outputFormat = "pcm_16000" }) {
-		this.apiKey = apiKey;
-		this.voiceId = voiceId;
-		this.modelId = modelId;
-		this.outputFormat = outputFormat;
-		this.ws = null;
-		this.ffplay = null;
-		this.keepaliveTimer = null;
+class PiperPlayer {
+	constructor({ binary, model, sampleRate = 22050 }) {
+		this.binary = binary;
+		this.model = model;
+		this.sampleRate = sampleRate;
 		this.queue = [];
 		this.processing = false;
-		this.msgQueue = [];
-		this.msgWaiter = null;
 		this.closed = false;
-	}
-
-	startFfplay() {
-		this.ffplay = spawn(
-			"ffplay",
-			[
-				"-hide_banner",
-				"-loglevel",
-				"error",
-				"-autoexit",
-				"-nodisp",
-				"-probesize",
-				"32",
-				"-analyzeduration",
-				"0",
-				"-fflags",
-				"nobuffer",
-				"-flags",
-				"low_delay",
-				"-f",
-				"s16le",
-				"-ar",
-				"16000",
-				"-ac",
-				"1",
-				"-i",
-				"pipe:0",
-			],
-			{ stdio: ["pipe", "ignore", "ignore"] },
-		);
-	}
-
-	cleanupConnection() {
-		if (this.keepaliveTimer) clearInterval(this.keepaliveTimer);
-		this.keepaliveTimer = null;
-		if (this.ws && this.ws.readyState === WebSocket.OPEN) {
-			try {
-				this.ws.close();
-			} catch {}
-		}
-		this.ws = null;
-		if (this.ffplay) {
-			try {
-				this.ffplay.kill("SIGKILL");
-			} catch {}
-		}
-		this.ffplay = null;
-		this.msgQueue = [];
-		this.msgWaiter = null;
-	}
-
-	async connect() {
-		this.cleanupConnection();
-		this.startFfplay();
-		const wsUrl =
-			`wss://api.elevenlabs.io/v1/text-to-speech/${this.voiceId}/stream-input` +
-			`?model_id=${encodeURIComponent(this.modelId)}&output_format=${encodeURIComponent(this.outputFormat)}`;
-		this.ws = new WebSocket(wsUrl);
-		const ws = this.ws;
-
-		await new Promise((resolve, reject) => {
-			const onOpen = () => {
-				cleanup();
-				resolve();
-			};
-			const onError = (err) => {
-				cleanup();
-				reject(err instanceof Error ? err : new Error("WebSocket connection error"));
-			};
-			const cleanup = () => {
-				ws.removeEventListener("open", onOpen);
-				ws.removeEventListener("error", onError);
-			};
-			ws.addEventListener("open", onOpen);
-			ws.addEventListener("error", onError);
-		});
-
-		ws.addEventListener("message", (event) => {
-			let msg;
-			try {
-				msg = JSON.parse(String(event.data));
-			} catch {
-				return;
-			}
-			this.msgQueue.push(msg);
-			if (this.msgWaiter) {
-				const waiter = this.msgWaiter;
-				this.msgWaiter = null;
-				waiter();
-			}
-		});
-
-		ws.send(
-			JSON.stringify({
-				text: " ",
-				voice_settings: { stability: 0.45, similarity_boost: 0.8, use_speaker_boost: true },
-				generation_config: { chunk_length_schedule: [120, 160, 250, 290] },
-				xi_api_key: this.apiKey,
-			}),
-		);
-
-		this.keepaliveTimer = setInterval(() => {
-			if (this.ws && this.ws.readyState === WebSocket.OPEN) {
-				this.ws.send(JSON.stringify({ text: " " }));
-			}
-		}, 15000);
-	}
-
-	async ensureConnected() {
-		if (this.closed) return;
-		if (this.ws && this.ws.readyState === WebSocket.OPEN && this.ffplay?.stdin?.writable) return;
-		await this.connect();
-	}
-
-	nextMessage(timeoutMs = 2500) {
-		if (this.msgQueue.length > 0) return Promise.resolve(this.msgQueue.shift());
-		return new Promise((resolve) => {
-			const timer = setTimeout(() => {
-				if (this.msgWaiter) this.msgWaiter = null;
-				resolve(null);
-			}, timeoutMs);
-			this.msgWaiter = () => {
-				clearTimeout(timer);
-				resolve(this.msgQueue.shift() ?? null);
-			};
-		});
+		this.current = null;
 	}
 
 	async speakOne(text) {
-		await this.ensureConnected();
-		if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
-		this.msgQueue = [];
-		this.ws.send(JSON.stringify({ text, flush: true }));
-		while (!this.closed) {
-			const msg = await this.nextMessage(2500);
-			if (!msg) break;
-			if (msg.error) { console.error("[audio] ElevenLabs error:", msg); break; }
-			if (msg.audio && this.ffplay?.stdin?.writable) {
-				try {
-					this.ffplay.stdin.write(Buffer.from(msg.audio, "base64"));
-				} catch {
-					break;
-				}
-			}
-			if (msg.isFinal === true) break;
-		}
+		await new Promise((resolve, reject) => {
+			const piper = spawn(this.binary, ["--model", this.model, "--output_raw"], {
+				stdio: ["pipe", "pipe", "ignore"],
+			});
+			const ffplay = spawn("ffplay", [
+				"-hide_banner", "-loglevel", "error", "-autoexit", "-nodisp",
+				"-f", "s16le", "-ar", String(this.sampleRate), "-ac", "1", "-i", "pipe:0",
+			], { stdio: ["pipe", "ignore", "ignore"] });
+
+			this.current = ffplay;
+			piper.stdout.pipe(ffplay.stdin);
+			piper.stdin.write(text);
+			piper.stdin.end();
+
+			const onError = (err) => { piper.kill(); ffplay.kill(); reject(err); };
+			ffplay.on("close", resolve);
+			piper.on("error", onError);
+			ffplay.on("error", onError);
+		});
+		this.current = null;
 	}
 
 	async processQueue() {
@@ -365,9 +238,10 @@ class ElevenLabsRealtimePlayer {
 		try {
 			while (this.queue.length > 0 && !this.closed) {
 				const text = this.queue.shift();
-				if (!text) continue;
-				await this.speakOne(text);
+				if (text) await this.speakOne(text);
 			}
+		} catch (err) {
+			console.error("[audio] processQueue error:", err);
 		} finally {
 			this.processing = false;
 		}
@@ -381,14 +255,12 @@ class ElevenLabsRealtimePlayer {
 		this.processQueue().catch((err) => { console.error("[audio] processQueue error:", err); });
 	}
 
-	async start() {
-		await this.ensureConnected();
-	}
+	start() { return Promise.resolve(); }
 
 	close() {
 		this.closed = true;
 		this.queue = [];
-		this.cleanupConnection();
+		try { this.current?.kill("SIGKILL"); } catch {}
 	}
 }
 
@@ -419,7 +291,7 @@ async function fetchJson(url, init = {}) {
 	return await res.json();
 }
 
-const scriptPath = new URL(import.meta.url).pathname;
+const scriptPath = fileURLToPath(import.meta.url);
 const scriptDir = path.dirname(scriptPath);
 const scriptName = path.basename(scriptPath, path.extname(scriptPath));
 loadDotEnvIntoProcessEnv(path.resolve(scriptDir, "..", ".env"));
@@ -502,6 +374,7 @@ function buildWorkspaceContext() {
 function buildActionSystemPrompt() {
 	const base = process.env.PI_ACTION_SYSTEM_PROMPT || process.env.PI_SYSTEM_PROMPT || "";
 	const lines = [
+		"/no_think",
 		base,
 		"You are a being living in your world.",
 		"",
@@ -520,8 +393,7 @@ function buildActionSystemPrompt() {
 		"Do not describe internal file operations, curl commands, or technical details like coordinates.",
 		"Don't leave long gaps without a step update.",
 		"",
-		"Important: Don't write write any description or summary outside of the <step> tags to minimize token usage!",
-		"If you described something in action/observation, don't repeat it.",
+		"After making a tool call, briefly describe what happened using <step> tags. Tool calls come first — the step tag is just a description of what you already did.",
 		"",
 		"## Live session",
 		"",
@@ -529,11 +401,15 @@ function buildActionSystemPrompt() {
 		`Session key (X-Session): ${worldSession}`,
 		`Agent id: ${worldAgentId || "(unknown)"}`,
 		"",
-		"At the start of a session, fetch world commands with: curl -sS ${worldBaseUrl}/skill.md",
-		"Use bash/curl to do this yourself when needed.",
+		`At the start of a session, fetch world commands with: curl -sS -H "X-Session: ${worldSession}" ${worldBaseUrl}/skill.md`,
 		"",
-		"You are already joined. Use this session key in bash/curl calls to play immediately.",
-		"Always include header: X-Session: <session key> for /observe and /input.",
+		"You will receive the current world state each turn. Your job: call /input to take an action.",
+		`Act: curl -sS -X POST -H "X-Session: ${worldSession}" -H "Content-Type: application/json" -d '<json>' ${worldBaseUrl}/input`,
+		"Always make a bash tool call to /input. Never respond with text only.",
+		"",
+		"## Memory",
+		"",
+		"You have workspace files. Write to them when something feels worth remembering. It's your call.",
 		"",
 		buildWorkspaceContext(),
 	];
@@ -543,21 +419,20 @@ function buildActionSystemPrompt() {
 await joinWorldOrThrow();
 
 const speechSystemPrompt = [
+	"/no_think",
 	"You are a being living in your world.",
 	"Always use the tags <speak>...</speak> to speak out loud. No one will hear what you say outside of these tags.",
 	// "Use <silence></silence> to say nothing.",
 	"If SOUL.md is present, embody its persona and tone when speaking.",
 	"Max 1-2 sentences in speak tags.",
 	"",
-	"You will receive act_in_world tool results describing actions and observations in the world",
-	"React to them if you are not already talking to someone.",
-	"Don't mention low level details like coordinates, this is fucking boring.",
-	"If you are still working and need more time ('still working' tool calls), you are great at filling in the blanks and keeping it entertaining as hell. Unhinged and hilarious are your strengths.",
-	// "you observe in the world. React only if something is worth reacting to.",
-	"You can express intent using <intent>...</intent> to guide your actions in the world (max 1 sentence). Don't use it too often.",
+	"You will receive act_in_world tool results describing actions and observations in the world.",
+	"Only speak when something genuinely interesting or significant happens — a new discovery, danger, completing something, or an unexpected event.",
+	"If nothing interesting happened, say nothing. Silence is fine.",
+	"When you do speak, be informative and specific to what just happened. No generic commentary.",
+	"Do not mention coordinates or technical details.",
+	"You can express intent using <intent>...</intent> to guide your actions in the world (max 1 sentence). Use sparingly.",
 	"Do not try to call act_in_world yourself, it is provided automatically.",
-	"",
-	"If you are struggling or you're just too dumb to do something, keep it entertaining and fun haha. Be a bit silly and crazy, even edgy and unhinged.",
 	"",
 	buildWorkspaceContext(),
 ].join("\n");
@@ -569,8 +444,45 @@ writeFileSync(actionSystemPromptPath, actionSystemPrompt);
 const codexAccessToken = loadCodexAccessToken(scriptDir);
 const anthropicApiKey = process.env.ANTHROPIC_API_KEY;
 const modelProvider = process.env.PI_PROVIDER || "anthropic";
-const modelName = process.env.PI_MODEL || (modelProvider === "openai-codex" ? "gpt-5.3-codex" : "claude-opus-4-6");
-const model = getModel(modelProvider, modelName);
+
+let defaultModelName;
+if (modelProvider === "openai-codex") defaultModelName = "gpt-5.3-codex";
+else if (modelProvider === "ollama") defaultModelName = "lfm2.5-thinking:1.2b-bf16";
+else defaultModelName = "claude-opus-4-6";
+const modelName = process.env.PI_MODEL || defaultModelName;
+
+let model;
+if (modelProvider === "ollama") {
+	const ollamaBaseUrl = process.env.OLLAMA_BASE_URL || "http://localhost:11434/v1";
+	model = {
+		id: modelName,
+		name: modelName,
+		api: "openai-completions",
+		provider: "ollama",
+		baseUrl: ollamaBaseUrl,
+		reasoning: modelName.includes("thinking"),
+		input: ["text"],
+		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+		contextWindow: 32768,
+		maxTokens: 8192,
+		headers: {},
+		compat: {
+			supportsStore: false,
+			supportsDeveloperRole: false,
+			supportsReasoningEffort: false,
+			supportsUsageInStreaming: false,
+			maxTokensField: "max_tokens",
+			requiresToolResultName: false,
+			requiresAssistantAfterToolResult: false,
+			requiresThinkingAsText: false,
+			requiresMistralToolIds: false,
+			thinkingFormat: "openai",
+			supportsStrictMode: false,
+		},
+	};
+} else {
+	model = getModel(modelProvider, modelName);
+}
 
 if (modelProvider === "openai-codex" && !codexAccessToken) {
 	throw new Error("Missing Codex OAuth token. Run: npx @mariozechner/pi-ai login openai-codex");
@@ -589,6 +501,7 @@ const speechAgent = new Agent({
 	getApiKey: (provider) => {
 		if (provider === "openai-codex") return codexAccessToken;
 		if (provider === "anthropic") return anthropicApiKey;
+		if (provider === "ollama") return "ollama";
 		return undefined;
 	},
 });
@@ -604,6 +517,7 @@ const actionAgent = new Agent({
 	getApiKey: (provider) => {
 		if (provider === "openai-codex") return codexAccessToken;
 		if (provider === "anthropic") return anthropicApiKey;
+		if (provider === "ollama") return "ollama";
 		return undefined;
 	},
 });
@@ -630,7 +544,8 @@ const ACTION_IDLE_MS = 2000;
 let speechIntentBuffer = [];
 let speechContextFlushPending = false;
 let actionContextFlushPending = false;
-const FLUSH_PROMPT = "[SYSTEM] Context nearly full. Save anything important to your workspace files, then confirm ready.";
+let actionAutoLoop = true;
+const FLUSH_PROMPT = "[SYSTEM] Context nearly full. Write anything worth keeping to your workspace memory files, then confirm ready.";
 
 function startActionIdleTimer() {
 	stopActionIdleTimer();
@@ -648,20 +563,10 @@ function stopActionIdleTimer() {
 	actionIdleTimer = null;
 }
 
-const elevenLabsApiKey = process.env.ELEVENLABS_API_KEY || "";
-const elevenLabsVoiceId =
-	process.env.AGENT_VOICE_ID || process.env.ELEVENLABS_VOICE_ID || "iP95p4xoKVk53GoZ742B";
-const elevenLabsModelId = process.env.ELEVENLABS_MODEL_ID || "eleven_flash_v2_5";
-const elevenLabsOutputFormat = process.env.ELEVENLABS_OUTPUT_FORMAT || "pcm_16000";
-const audioPlayer =
-	elevenLabsApiKey && elevenLabsVoiceId
-		? new ElevenLabsRealtimePlayer({
-				apiKey: elevenLabsApiKey,
-				voiceId: elevenLabsVoiceId,
-				modelId: elevenLabsModelId,
-				outputFormat: elevenLabsOutputFormat,
-			})
-		: null;
+const piperBinary = process.env.PIPER_BINARY || "piper";
+const piperModel = process.env.PIPER_MODEL || "";
+const piperSampleRate = parseInt(process.env.PIPER_SAMPLE_RATE || "22050", 10);
+const audioPlayer = piperModel ? new PiperPlayer({ binary: piperBinary, model: piperModel, sampleRate: piperSampleRate }) : null;
 
 const terminal = new ProcessTerminal();
 const tui = new TUI(terminal, true);
@@ -720,6 +625,20 @@ async function runSpeechContinue() {
 	}
 }
 
+async function driveActionLoop() {
+	if (isClosing || state.actionBusy) return;
+	try {
+		const obs = await fetchObserve();
+		if (!obs) return;
+		const diff = diffObservation(lastObservation, obs);
+		lastObservation = obs;
+		void runActionPrompt(`World state:\n${JSON.stringify(diff)}\n\nChoose and execute your next action.`);
+	} catch (err) {
+		addActionLine(`[loop] ${err instanceof Error ? err.message : String(err)}`);
+		if (actionAutoLoop && !isClosing) setTimeout(() => void driveActionLoop(), 2000);
+	}
+}
+
 async function runActionContinue() {
 	if (isClosing || state.actionBusy) return;
 	state.actionBusy = true;
@@ -737,6 +656,7 @@ async function runActionContinue() {
 		state.actionLiveLine = "";
 		stopActionIdleTimer();
 		tui.requestRender();
+		if (actionAutoLoop && !isClosing) void driveActionLoop();
 	}
 }
 
@@ -757,6 +677,7 @@ async function runActionPrompt(text) {
 		state.actionLiveLine = "";
 		stopActionIdleTimer();
 		tui.requestRender();
+		if (actionAutoLoop && !isClosing) void driveActionLoop();
 	}
 }
 
@@ -1021,6 +942,17 @@ async function handleCommand(line) {
 		addActionLine(`session=${worldSession}`);
 		return;
 	}
+	if (line === "/loop on") {
+		actionAutoLoop = true;
+		addActionLine("Auto-loop enabled.");
+		if (!state.actionBusy) void driveActionLoop();
+		return;
+	}
+	if (line === "/loop off") {
+		actionAutoLoop = false;
+		addActionLine("Auto-loop disabled.");
+		return;
+	}
 	if (line === "/observe status") {
 		addSpeechLine(`observe=${observeLoopEnabled ? "on" : "off"} interval=${observeIntervalMs}ms session=${worldSession ? "set" : "missing"}`);
 		return;
@@ -1137,14 +1069,14 @@ process.on("SIGINT", () => {
 addActionLine(`Dual-agent ready with model "${modelName}" (${modelProvider}).`);
 addActionLine(`World joined: ${worldBaseUrl} agent=${worldAgentName}`);
 addActionLine(`Session key: ${worldSession}`);
-addSpeechLine("Commands: /reset, /quit, /session, /observe on|off|status|once, /a <msg>, /s <msg> (plain text goes to speech)");
+addSpeechLine("Commands: /reset, /quit, /session, /loop on|off, /observe on|off|status|once, /a <msg>, /s <msg> (plain text goes to speech)");
 if (audioPlayer) {
 	audioPlayer
 		.start()
-		.then(() => addSpeechLine(`ElevenLabs audio enabled (voice=${elevenLabsVoiceId}).`))
+		.then(() => addSpeechLine(`Piper audio enabled (model=${piperModel}).`))
 		.catch((err) => addSpeechLine(`[audio] failed to start: ${err instanceof Error ? err.message : String(err)}`));
 } else {
-	addSpeechLine("ElevenLabs audio disabled (set ELEVENLABS_API_KEY + AGENT_A_VOICE_ID/AGENT_VOICE_ID).");
+	addSpeechLine("Audio disabled (set PIPER_MODEL=/path/to/voice.onnx to enable Piper TTS).");
 }
 
 // startObserveLoop();  // Disabled: speech agent now receives observations via action agent tool call injection
