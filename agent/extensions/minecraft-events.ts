@@ -1,13 +1,18 @@
 /**
- * Minecraft Mineflayer Survival Extension
+ * Minecraft Mineflayer Extension (Minimal)
  *
- * Uses WebSocket for real-time bot events (no polling, no blocked-during-tools).
- * Uses POST /interrupt to cancel running tools and execute emergency actions.
- * Uses POST /input for normal strategic tools.
+ * Only 3 tools: mc_register_session, mc_look, mc_eval.
+ * Everything else the agent can do via mc_eval.
+ *
+ * WebSocket for real-time bot events.
+ * POST /interrupt to cancel running tools.
+ * POST /input for normal tools.
  */
 
 import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-agent";
 import { Type } from "@sinclair/typebox";
+import { mkdirSync, writeFileSync } from "node:fs";
+import { dirname } from "node:path";
 
 const BRIDGE_URL = "http://localhost:8081";
 
@@ -16,15 +21,49 @@ let ws: InstanceType<typeof WebSocket> | null = null;
 let lastHealth = 20;
 let lastFood = 20;
 let cooldownUntil = 0;
-let reflexCooldownUntil = 0;
 let extensionCtx: ExtensionContext | null = null;
 let piRef: ExtensionAPI | null = null;
 let autoLoopEnabled = true;
 const AUTO_LOOP_STEER = "continue";
+let justDied = false;
+
+// ─── Between-Action Event Log ───
+interface EventLogEntry { time: number; msg: string; }
+let eventLog: EventLogEntry[] = [];
+const MAX_EVENT_LOG = 20;
+
+function logEvent(msg: string) {
+  eventLog.push({ time: Date.now(), msg });
+  if (eventLog.length > MAX_EVENT_LOG) eventLog.shift();
+}
+
+function flushEventLog(): string | null {
+  if (eventLog.length === 0) return null;
+  const lines = eventLog.map(e => `- ${e.msg}`).join("\n");
+  eventLog = [];
+  return lines;
+}
+
+function withEventRecap(text: string): string {
+  const recap = flushEventLog();
+  if (!recap) return text;
+  return `[Events since last action]\n${recap}\n\n${text}`;
+}
+
+function toolResult(text: string) {
+  return { content: [{ type: "text" as const, text: withEventRecap(text) }] };
+}
+
+function mcResult(resp: { ok: boolean; result?: any; error?: string }, pretty = true) {
+  const text = resp.ok
+    ? (pretty ? JSON.stringify(resp.result, null, 2) : JSON.stringify(resp.result))
+    : `Error: ${resp.error}`;
+  return toolResult(text);
+}
 
 // ─── Bridge Communication ───
 
-async function mc(code: string, timeout = 29000): Promise<{ ok: boolean; result?: any; error?: string }> {
+async function mc(code: string, timeout = 35000): Promise<{ ok: boolean; result?: any; error?: string }> {
   if (!session) return { ok: false, error: "No session" };
   try {
     const controller = new AbortController();
@@ -37,12 +76,12 @@ async function mc(code: string, timeout = 29000): Promise<{ ok: boolean; result?
     });
     clearTimeout(timer);
     return (await resp.json()) as any;
-  } catch {
-    return { ok: false, error: "Bridge unreachable" };
+  } catch (err: any) {
+    const msg = err?.name === "AbortError" ? "Execution timed out" : "Bridge unreachable";
+    return { ok: false, error: msg };
   }
 }
 
-/** Interrupt: cancels running /input, stops bot, runs priority code */
 async function interrupt(code?: string): Promise<{ ok: boolean; result?: any; error?: string }> {
   if (!session) return { ok: false, error: "No session" };
   try {
@@ -59,42 +98,6 @@ async function interrupt(code?: string): Promise<{ ok: boolean; result?: any; er
   }
 }
 
-// ─── Auto-Reflex Actions (via /interrupt, never blocked) ───
-
-const FLEE_CODE = `
-  const pos = bot.entity.position;
-  const hostiles = Object.values(bot.entities).filter(e => e.type === "hostile" && e.position.distanceTo(pos) < 12);
-  if (hostiles.length > 0) {
-    let hx=0,hz=0;
-    for (const h of hostiles) { hx+=h.position.x; hz+=h.position.z; }
-    hx/=hostiles.length; hz/=hostiles.length;
-    const away = new Vec3(pos.x-hx, 0, pos.z-hz).normalize();
-    await bot.lookAt(pos.plus(away.scaled(20).offset(0, pos.y, 0)));
-  }
-  bot.setControlState("sprint", true);
-  bot.setControlState("forward", true);
-  bot.setControlState("jump", true);
-  await sleep(3000);
-  bot.clearControlStates();
-  return { health: bot.health, pos: bot.entity.position };
-`;
-
-const ATTACK_CODE = `
-  const sword = bot.inventory.items().find(i => i.name.includes("sword"));
-  if (sword) await bot.equip(sword, "hand");
-  const mob = Object.values(bot.entities).find(e => e.type === "hostile" && e.position.distanceTo(bot.entity.position) < 4);
-  if (mob) {
-    for (let i = 0; i < 5; i++) {
-      const m = Object.values(bot.entities).find(e => e === mob);
-      if (!m) break;
-      await bot.lookAt(m.position.offset(0, 1.5, 0));
-      await bot.attack(m);
-      await sleep(400);
-    }
-  }
-  return { health: bot.health, pos: bot.entity.position };
-`;
-
 // ─── WebSocket Event Handling ───
 
 function connectWs() {
@@ -108,7 +111,6 @@ function connectWs() {
 
     const now = Date.now();
 
-    // Update status bar on any event with health
     if (event.data?.health !== undefined) {
       updateStatusBar(event.data.health, event.data.food);
     }
@@ -126,11 +128,11 @@ function connectWs() {
         const f = event.data.food;
         const dmg = lastHealth - h;
 
-        // AUTO-REFLEX: only at near-death → interrupt & flee
-        if (dmg > 0 && h <= 4 && now > reflexCooldownUntil) {
-          reflexCooldownUntil = now + 5000;
-          interrupt(FLEE_CODE);
-          notify(`🏃 AUTO-FLEE: Health ${Math.round(h)}/20! Interrupting and running!`);
+        if (dmg > 0) {
+          logEvent(`Took ${Math.round(dmg)} damage (health: ${Math.round(h)}/20)`);
+        }
+        if (f < lastFood) {
+          logEvent(`Food dropped to ${f}/20`);
         }
 
         // Alert LLM only on significant damage or getting low
@@ -139,7 +141,6 @@ function connectWs() {
           sendAlert(`⚠️ Health getting low: ${Math.round(h)}/20. Took ${Math.round(dmg)} damage.`);
         }
 
-        // Low food warning
         if (f <= 6 && lastFood > 6 && now > cooldownUntil) {
           cooldownUntil = now + 15000;
           sendAlert(`🍖 Hungry! Food: ${f}/20. Need food soon.`);
@@ -152,26 +153,48 @@ function connectWs() {
       }
 
       case "hurt": {
-        // Immediate reaction — hurt fires even during /input execution
         const h = event.data.health;
-        if (h <= 4 && now > reflexCooldownUntil) {
-          reflexCooldownUntil = now + 5000;
-          interrupt(FLEE_CODE);
-          notify(`🏃 AUTO-FLEE: Hurt! Health ${Math.round(h)}/20!`);
-        }
+        const pos = event.data.pos;
+        const posText = pos ? ` at (${pos.x}, ${pos.y}, ${pos.z})` : "";
+        logEvent(`Hurt${posText}! Health now ${Math.round(h)}/20`);
         lastHealth = h;
         break;
       }
 
       case "death": {
-        if (now > cooldownUntil) {
-          cooldownUntil = now + 10000;
-          sendAlert(`💀 I DIED! Need to respawn and recover.`);
+        justDied = true;
+        const lostItems = event.data.deathInventory;
+        const lostText = Array.isArray(lostItems) && lostItems.length > 0 ? lostItems.join(", ") : "nothing";
+        const deathPos = event.data.deathPos;
+        const deathPosText = deathPos ? ` at (${deathPos.x}, ${deathPos.y}, ${deathPos.z})` : "";
+        logEvent(`DIED${deathPosText}! Lost items: [${lostText}]`);
+        if (now > deathCooldownUntil) {
+          deathCooldownUntil = now + 10000;
+          sendAlert(`💀 I DIED${deathPosText}! Lost items: [${lostText}]. Will respawn shortly.`);
         }
         break;
       }
 
+      case "spawn": {
+        const pos = event.data.pos;
+        const posText = pos ? `(${pos.x}, ${pos.y}, ${pos.z})` : "unknown";
+        const deathPos = event.data.deathPos;
+        const deathPosText = deathPos ? `(${deathPos.x}, ${deathPos.y}, ${deathPos.z})` : "unknown";
+        if (justDied) {
+          justDied = false;
+          logEvent(`Respawned at ${posText}. Items dropped at ${deathPosText}.`);
+          sendAlert(`🔄 Respawned at ${posText}! Inventory is empty. Items dropped at ${deathPosText}.`);
+        } else {
+          logEvent(`Spawned at ${posText}`);
+        }
+        lastHealth = event.data.health ?? 20;
+        lastFood = event.data.food ?? 20;
+        updateStatusBar(lastHealth, lastFood);
+        break;
+      }
+
       case "chat": {
+        logEvent(`Chat from ${event.data.username}: "${event.data.message}"`);
         if (now > cooldownUntil) {
           sendAlert(`💬 ${event.data.username}: "${event.data.message}"`);
           cooldownUntil = now + 1000;
@@ -179,13 +202,26 @@ function connectWs() {
         break;
       }
 
-      case "hostiles_nearby": {
-        // Only if very close and we have decent health — auto-attack
-        const hostiles = event.data.hostiles;
-        if (hostiles.length > 0 && hostiles[0].dist < 3 && lastHealth > 10 && now > reflexCooldownUntil) {
-          reflexCooldownUntil = now + 4000;
-          interrupt(ATTACK_CODE);
-          notify(`⚔️ AUTO-ATTACK: ${hostiles[0].name} at ${hostiles[0].dist}m`);
+      case "kicked": {
+        logEvent(`KICKED from server: ${event.data.reason ?? "unknown"}`);
+        sendAlert(`🚫 BOT KICKED from server! Reason: ${event.data.reason ?? "unknown"}`);
+        break;
+      }
+
+      case "player_joined": {
+        logEvent(`${event.data.username} joined the game`);
+        if (now > playerJoinLeaveCooldownUntil) {
+          playerJoinLeaveCooldownUntil = now + 3000;
+          sendAlert(`👋 ${event.data.username} joined the game.`);
+        }
+        break;
+      }
+
+      case "player_left": {
+        logEvent(`${event.data.username} left the game`);
+        if (now > playerJoinLeaveCooldownUntil) {
+          playerJoinLeaveCooldownUntil = now + 3000;
+          sendAlert(`👋 ${event.data.username} left the game.`);
         }
         break;
       }
@@ -206,10 +242,6 @@ function updateStatusBar(health: number, food?: number) {
   extensionCtx.ui.setStatus("mc", `🎮 ${hIcon}${Math.round(health)} 🍖${Math.round(f)}`);
 }
 
-function notify(msg: string) {
-  if (extensionCtx?.hasUI) extensionCtx.ui.notify(msg, "warning");
-}
-
 function sendAlert(msg: string) {
   if (!piRef) return;
   if (extensionCtx?.isIdle()) {
@@ -219,10 +251,37 @@ function sendAlert(msg: string) {
   }
 }
 
+function stripProjectContextFromSystemPrompt(prompt: string): string {
+  const marker = "\n\n# Project Context\n\n";
+  const markerIndex = prompt.indexOf(marker);
+  if (markerIndex === -1) return prompt;
+
+  const suffixMarker = "\nCurrent date and time:";
+  const suffixIndex = prompt.indexOf(suffixMarker, markerIndex);
+  if (suffixIndex === -1) {
+    return prompt.slice(0, markerIndex).trimEnd();
+  }
+  return `${prompt.slice(0, markerIndex)}${prompt.slice(suffixIndex)}`;
+}
+
+function writeSystemPromptSnapshot(prompt: string) {
+  const outputPath = process.env.PI_SYSTEM_PROMPT_SNAPSHOT_FILE;
+  if (!outputPath) return;
+  if (!prompt.trim()) return;
+  mkdirSync(dirname(outputPath), { recursive: true });
+  writeFileSync(outputPath, prompt.endsWith("\n") ? prompt : `${prompt}\n`, "utf8");
+}
+
 // ─── Extension Entry ───
 
 export default function (pi: ExtensionAPI) {
   piRef = pi;
+
+  pi.on("before_agent_start", async (event) => {
+    const systemPrompt = stripProjectContextFromSystemPrompt(event.systemPrompt);
+    writeSystemPromptSnapshot(systemPrompt);
+    return { systemPrompt };
+  });
 
   pi.registerCommand("mc-auto", {
     description: "Control autonomous loop: /mc-auto on|off|status",
@@ -260,7 +319,8 @@ export default function (pi: ExtensionAPI) {
     pi.sendUserMessage(AUTO_LOOP_STEER, { deliverAs: "steer", triggerTurn: true });
   });
 
-  // ── Register Session Tool ──
+  // ── mc_register_session ──
+
   pi.registerTool({
     name: "mc_register_session",
     label: "MC Register",
@@ -273,251 +333,97 @@ export default function (pi: ExtensionAPI) {
       lastHealth = 20;
       lastFood = 20;
       cooldownUntil = 0;
-      reflexCooldownUntil = 0;
       extensionCtx = ctx;
 
       connectWs();
 
       return {
-        content: [{ type: "text", text: "WebSocket connected. Auto-reflexes: flee on hurt ≤8hp (via /interrupt, never blocked). Alerts: damage, hunger, death, chat." }],
+        content: [{ type: "text", text: "WebSocket connected. Alerts: damage, hunger, death, chat." }],
       };
     },
   });
 
-  // ── Strategic Tools ──
+  // ── mc_look ──
 
   pi.registerTool({
-    name: "mc_status",
-    label: "MC Status",
-    description: "Get full bot status: health, food, position, time, inventory, nearby entities and blocks.",
-    parameters: Type.Object({}),
-    async execute() {
+    name: "mc_look",
+    label: "MC Look",
+    description: "Observe the world: self status, inventory, all nearby entities, and block counts. Raw data, no filtering.",
+    parameters: Type.Object({
+      radius: Type.Optional(Type.Number({ description: "Scan radius in blocks (default 16, max 64)" })),
+    }),
+    async execute(_id, params) {
+      const radius = Math.min(params.radius ?? 16, 64);
       const resp = await mc(`
         const pos = bot.entity.position;
-        const hostiles = Object.values(bot.entities).filter(e => e !== bot.entity && e.type === "hostile" && e.position.distanceTo(pos) < 30).map(e => ({ name: e.name, dist: Math.round(e.position.distanceTo(pos)), pos: e.position }));
-        const passives = Object.values(bot.entities).filter(e => e !== bot.entity && (e.type === "animal" || e.type === "passive") && e.position.distanceTo(pos) < 30).map(e => ({ name: e.name, dist: Math.round(e.position.distanceTo(pos)) }));
-        const inv = bot.inventory.items().map(i => i.name + " x" + i.count);
-        const nearbyBlocks = {};
-        for (let x=-4;x<=4;x++) for (let y=-2;y<=2;y++) for (let z=-4;z<=4;z++) {
-          const b = bot.blockAt(pos.offset(x,y,z));
-          if (b && b.name !== "air" && b.name !== "cave_air") nearbyBlocks[b.name] = (nearbyBlocks[b.name]||0)+1;
+        const pf = pos.floored();
+        const R = ${radius};
+        const result = {};
+
+        result.self = {
+          pos: { x: Math.round(pos.x), y: Math.round(pos.y), z: Math.round(pos.z) },
+          health: bot.health,
+          food: bot.food,
+          onGround: bot.entity.onGround,
+          biome: bot.blockAt(pf)?.biome?.name || "unknown",
+          lightLevel: bot.blockAt(pf.offset(0,1,0))?.light || 0,
+          timeOfDay: bot.time.timeOfDay,
+          isDay: bot.time.timeOfDay < 13000,
+          isRaining: bot.isRaining,
+        };
+
+        result.inventory = bot.inventory.items().map(i => i.name + " x" + i.count);
+        result.heldItem = bot.heldItem?.name || "empty";
+
+        const entities = [];
+        for (const e of Object.values(bot.entities)) {
+          if (e === bot.entity) continue;
+          const d = e.position.distanceTo(pos);
+          if (d > R * 2) continue;
+          entities.push({
+            name: e.name || e.displayName,
+            type: e.type,
+            dist: Math.round(d),
+            pos: { x: Math.round(e.position.x), y: Math.round(e.position.y), z: Math.round(e.position.z) },
+          });
         }
-        return { health: bot.health, food: bot.food, pos: { x: Math.round(pos.x), y: Math.round(pos.y), z: Math.round(pos.z) }, time: bot.time.timeOfDay, isDay: bot.time.timeOfDay < 13000, inv, hostiles, passives, nearbyBlocks };
+        entities.sort((a, b) => a.dist - b.dist);
+        result.entities = entities.slice(0, 40);
+
+        const blocks = {};
+        const step = R > 32 ? 2 : 1;
+        for (let x = -R; x <= R; x += step) {
+          for (let z = -R; z <= R; z += step) {
+            for (let y = -4; y <= 4; y++) {
+              const b = bot.blockAt(pf.offset(x, y, z));
+              if (b && b.name !== "air" && b.name !== "cave_air") {
+                blocks[b.name] = (blocks[b.name] || 0) + 1;
+              }
+            }
+          }
+        }
+        result.blocks = blocks;
+
+        return result;
       `);
-      return { content: [{ type: "text", text: resp.ok ? JSON.stringify(resp.result, null, 2) : `Error: ${resp.error}` }] };
+      return mcResult(resp);
     },
   });
+
+  // ── mc_eval ──
 
   pi.registerTool({
     name: "mc_eval",
     label: "MC Eval",
-    description: "Run arbitrary JS on the bot. Variables: bot, goals, Vec3, sleep(ms). Return a value to see it.",
+    description: "Run arbitrary JS on the bot. Available: bot, goals, Vec3, sleep(ms). Return a value to see it.",
     parameters: Type.Object({
       code: Type.String({ description: "JavaScript code to execute" }),
+      timeout: Type.Optional(Type.Number({ description: "Timeout in ms (default 35000, max 120000)" })),
     }),
     async execute(_id, params) {
-      const resp = await mc(params.code);
-      return { content: [{ type: "text", text: resp.ok ? JSON.stringify(resp.result, null, 2) : `Error: ${resp.error}` }] };
-    },
-  });
-
-  pi.registerTool({
-    name: "mc_flee",
-    label: "MC Flee",
-    description: "Sprint away from nearest hostile mobs for a few seconds.",
-    parameters: Type.Object({}),
-    async execute() {
-      const resp = await interrupt(FLEE_CODE);
-      return { content: [{ type: "text", text: resp.ok ? JSON.stringify(resp.result) : `Error: ${resp.error}` }] };
-    },
-  });
-
-  pi.registerTool({
-    name: "mc_fight",
-    label: "MC Fight",
-    description: "Attack the nearest hostile mob in melee range.",
-    parameters: Type.Object({}),
-    async execute() {
-      const resp = await interrupt(ATTACK_CODE);
-      return { content: [{ type: "text", text: resp.ok ? JSON.stringify(resp.result) : `Error: ${resp.error}` }] };
-    },
-  });
-
-  pi.registerTool({
-    name: "mc_goto",
-    label: "MC Go To",
-    description: "Pathfind to coordinates.",
-    parameters: Type.Object({
-      x: Type.Number(),
-      y: Type.Number(),
-      z: Type.Number(),
-      range: Type.Optional(Type.Number({ description: "How close to get (default 2)" })),
-    }),
-    async execute(_id, params) {
-      const r = params.range ?? 2;
-      const resp = await mc(`await bot.pathfinder.goto(new goals.GoalNear(${params.x}, ${params.y}, ${params.z}, ${r})); return { pos: bot.entity.position };`);
-      return { content: [{ type: "text", text: resp.ok ? JSON.stringify(resp.result) : `Error: ${resp.error}` }] };
-    },
-  });
-
-  pi.registerTool({
-    name: "mc_mine",
-    label: "MC Mine",
-    description: "Mine a specific block type nearby. Returns inventory after.",
-    parameters: Type.Object({
-      block: Type.String({ description: "Block name like 'stone', 'oak_log', 'iron_ore'" }),
-      count: Type.Optional(Type.Number({ description: "How many to mine (default 5)" })),
-    }),
-    async execute(_id, params) {
-      const count = params.count ?? 5;
-      const resp = await mc(`
-        const pickaxe = bot.inventory.items().find(i => i.name.includes("pickaxe"));
-        const axe = bot.inventory.items().find(i => i.name.includes("axe") && !i.name.includes("pickaxe"));
-        const blockName = "${params.block}";
-        if (blockName.includes("log") || blockName.includes("plank")) { if (axe) await bot.equip(axe, "hand"); }
-        else { if (pickaxe) await bot.equip(pickaxe, "hand"); }
-        const blockId = bot.registry.blocksByName[blockName]?.id;
-        if (blockId === undefined) return "Unknown block: " + blockName;
-        let mined = 0;
-        for (let i = 0; i < ${count}; i++) {
-          if (bot.health <= 8) break;
-          const b = bot.findBlock({ matching: blockId, maxDistance: 32 });
-          if (!b) break;
-          try {
-            await bot.pathfinder.goto(new goals.GoalNear(b.position.x, b.position.y, b.position.z, 1));
-            await bot.dig(b);
-            mined++;
-            await sleep(200);
-          } catch(e) { break; }
-        }
-        return { mined, inv: bot.inventory.items().map(i => i.name + " x" + i.count) };
-      `);
-      return { content: [{ type: "text", text: resp.ok ? JSON.stringify(resp.result, null, 2) : `Error: ${resp.error}` }] };
-    },
-  });
-
-  pi.registerTool({
-    name: "mc_craft",
-    label: "MC Craft",
-    description: "Craft an item. Finds or places a crafting table if needed.",
-    parameters: Type.Object({
-      item: Type.String({ description: "Item name like 'wooden_pickaxe', 'stone_sword', 'stick'" }),
-      count: Type.Optional(Type.Number({ description: "How many to craft (default 1)" })),
-    }),
-    async execute(_id, params) {
-      const count = params.count ?? 1;
-      const resp = await mc(`
-        const itemName = "${params.item}";
-        const itemId = bot.registry.itemsByName[itemName]?.id;
-        if (itemId === undefined) return "Unknown item: " + itemName;
-        let recipes = bot.recipesFor(itemId);
-        if (recipes.length > 0) {
-          await bot.craft(recipes[0], ${count});
-          return { crafted: itemName, inv: bot.inventory.items().map(i => i.name + " x" + i.count) };
-        }
-        const ctId = bot.registry.blocksByName.crafting_table.id;
-        let ct = bot.findBlock({ matching: ctId, maxDistance: 32 });
-        if (!ct) {
-          let tableItem = bot.inventory.items().find(i => i.name === "crafting_table");
-          if (!tableItem) {
-            const r = bot.recipesFor(bot.registry.itemsByName.crafting_table.id);
-            if (r.length > 0) { await bot.craft(r[0]); tableItem = bot.inventory.items().find(i => i.name === "crafting_table"); }
-          }
-          if (tableItem) {
-            await bot.equip(tableItem, "hand");
-            // Place 1 block away from player to avoid hitbox overlap rejection
-            const pos = bot.entity.position.floored();
-            const dirs = [[1,0],[0,1],[-1,0],[0,-1]];
-            for (const [dx, dz] of dirs) {
-              const ground = bot.blockAt(pos.offset(dx, -1, dz));
-              const target = bot.blockAt(pos.offset(dx, 0, dz));
-              if (ground && ground.name !== "air" && target && target.name === "air") {
-                await bot.lookAt(pos.offset(dx, 0.5, dz));
-                try { await bot.placeBlock(ground, new Vec3(0, 1, 0)); await sleep(300); } catch(e) {}
-                break;
-              }
-            }
-            ct = bot.findBlock({ matching: ctId, maxDistance: 10 });
-          }
-        }
-        if (!ct) return "No crafting table available";
-        await bot.pathfinder.goto(new goals.GoalNear(ct.position.x, ct.position.y, ct.position.z, 2));
-        recipes = bot.recipesFor(itemId, null, 1, ct);
-        if (recipes.length === 0) return "No recipe for " + itemName + " (missing materials?)";
-        await bot.craft(recipes[0], ${count}, ct);
-        return { crafted: itemName, inv: bot.inventory.items().map(i => i.name + " x" + i.count) };
-      `);
-      return { content: [{ type: "text", text: resp.ok ? JSON.stringify(resp.result, null, 2) : `Error: ${resp.error}` }] };
-    },
-  });
-
-  pi.registerTool({
-    name: "mc_chat",
-    label: "MC Chat",
-    description: "Send a chat message in-game.",
-    parameters: Type.Object({ message: Type.String() }),
-    async execute(_id, params) {
-      const resp = await mc(`await bot.chat(${JSON.stringify(params.message)}); return "sent";`);
-      return { content: [{ type: "text", text: resp.ok ? "Sent" : `Error: ${resp.error}` }] };
-    },
-  });
-
-  pi.registerTool({
-    name: "mc_dig_shelter",
-    label: "MC Dig Shelter",
-    description: "Emergency: dig a 3-deep hole and try to seal the top. Quick underground shelter.",
-    parameters: Type.Object({}),
-    async execute() {
-      const resp = await mc(`
-        for (let i = 0; i < 3; i++) {
-          const b = bot.blockAt(bot.entity.position.floored().offset(0, -1, 0));
-          if (b && b.name !== "air" && b.name !== "water" && b.name !== "lava") await bot.dig(b);
-          await sleep(100);
-        }
-        const pos = bot.entity.position.floored();
-        const sealItem = bot.inventory.items().find(i => ["gravel","dirt","cobblestone","stone","spruce_planks","oak_planks"].includes(i.name));
-        if (sealItem) {
-          await bot.equip(sealItem, "hand");
-          // Seal above: place on the wall 2 blocks up (not at player position)
-          // First try placing block above head by referencing adjacent wall
-          for (const [dx,dz] of [[1,0],[-1,0],[0,1],[0,-1]]) {
-            const wall = bot.blockAt(pos.offset(dx, 2, dz));
-            if (wall && wall.name !== "air") {
-              try { await bot.placeBlock(wall, new Vec3(-dx, 0, -dz)); break; } catch(e) {}
-            }
-          }
-          // Also seal the top of the shaft (1 block above head)
-          for (const [dx,dz] of [[1,0],[-1,0],[0,1],[0,-1]]) {
-            const wall = bot.blockAt(pos.offset(dx, 3, dz));
-            if (wall && wall.name !== "air") {
-              const target = bot.blockAt(pos.offset(0, 3, 0));
-              if (target && target.name === "air") {
-                try { await bot.placeBlock(wall, new Vec3(-dx, 0, -dz)); break; } catch(e) {}
-              }
-            }
-          }
-        }
-        return { health: bot.health, pos: bot.entity.position };
-      `);
-      return { content: [{ type: "text", text: resp.ok ? JSON.stringify(resp.result) : `Error: ${resp.error}` }] };
-    },
-  });
-
-  pi.registerTool({
-    name: "mc_collect_drops",
-    label: "MC Collect Drops",
-    description: "Walk around and pick up nearby dropped items.",
-    parameters: Type.Object({}),
-    async execute() {
-      const resp = await mc(`
-        const items = Object.values(bot.entities).filter(e => e.name === "item" && e.position.distanceTo(bot.entity.position) < 15);
-        let collected = 0;
-        for (const it of items) {
-          try { await bot.pathfinder.goto(new goals.GoalNear(it.position.x, it.position.y, it.position.z, 0)); collected++; await sleep(300); } catch(e) {}
-        }
-        return { collected, inv: bot.inventory.items().map(i => i.name + " x" + i.count) };
-      `);
-      return { content: [{ type: "text", text: resp.ok ? JSON.stringify(resp.result, null, 2) : `Error: ${resp.error}` }] };
+      const timeout = Math.min(params.timeout ?? 35000, 120000);
+      const resp = await mc(params.code, timeout);
+      return mcResult(resp);
     },
   });
 
