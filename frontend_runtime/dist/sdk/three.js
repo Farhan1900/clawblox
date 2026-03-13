@@ -270,9 +270,390 @@ export function createFollowCameraController(THREE, camera, options = {}) {
 export function createCameraModeController(THREE, camera, options = {}) {
   const followCtl = createFollowCameraController(THREE, camera, options.follow || {})
   const tmpForward = new THREE.Vector3(0, 0, 1)
+  const tmpOverviewTarget = new THREE.Vector3()
+  const tmpOverviewPos = new THREE.Vector3()
+  const spectatorOffset = options.spectatorOffset || new THREE.Vector3(0, 18, -18)
+  const defaultSpectatorOffset = spectatorOffset.lengthSq() > 1e-6
+    ? spectatorOffset.clone()
+    : new THREE.Vector3(0, 18, -18)
+  const controlsCanvas = options.canvas || null
+  const debugCamera = options.debugCamera ?? true
+  const controlsState = {
+    mode: 'follow',
+    attached: false,
+    disposed: false,
+    pan: new THREE.Vector3(0, 0, 0),
+    zoom: 1,
+    seeded: false,
+    keys: new Set(),
+    touchPoints: new Map(),
+    mouseDrag: null,
+    lastTouchCenter: null,
+    pinchStartDistance: null,
+    pinchStartZoom: null,
+    orbitYaw: 0,
+    orbitPitch: 0,
+    orbitSeeded: false,
+    debugTickCount: 0,
+  }
+
+  const overviewCfg = {
+    panSpeed: options.overviewPanSpeed ?? 55,
+    zoomSpeed: options.overviewZoomSpeed ?? 0.001,
+    minZoom: options.minOverviewZoom ?? 0.2,
+    maxZoom: options.maxOverviewZoom ?? 3.2,
+    touchPanSpeed: options.touchPanSpeed ?? 0.08,
+    panDragSign: options.invertOverviewPanDrag === false ? 1 : -1,
+    boundsPadding: options.spectatorBoundsPadding ?? -5,
+    rotateSpeed: options.overviewRotateSpeed ?? 0.005,
+    minPitch: THREE.MathUtils.degToRad(options.minOverviewPitchDeg ?? 12),
+    maxPitch: THREE.MathUtils.degToRad(options.maxOverviewPitchDeg ?? 85),
+  }
+
+  function dbg(...args) {
+    if (!debugCamera) return
+    console.log('[runtime-three camera]', ...args)
+  }
+
+  function shouldIgnoreKeyboardEvent(target) {
+    if (!(target instanceof HTMLElement)) return false
+    const tagName = target.tagName.toLowerCase()
+    return target.isContentEditable || tagName === 'input' || tagName === 'textarea' || tagName === 'select'
+  }
+
+  function distanceBetweenTouches() {
+    const points = Array.from(controlsState.touchPoints.values())
+    if (points.length < 2) return null
+    const dx = points[0].x - points[1].x
+    const dy = points[0].y - points[1].y
+    return Math.hypot(dx, dy)
+  }
+
+  function centerOfTouches() {
+    const points = Array.from(controlsState.touchPoints.values())
+    if (points.length === 0) return null
+    const sum = points.reduce((acc, p) => ({ x: acc.x + p.x, y: acc.y + p.y }), { x: 0, y: 0 })
+    return { x: sum.x / points.length, y: sum.y / points.length }
+  }
+
+  function computeBoundsFromState(state, padding = 0) {
+    let minX = Infinity
+    let maxX = -Infinity
+    let minZ = Infinity
+    let maxZ = -Infinity
+    const pushPos = (pos) => {
+      if (!Array.isArray(pos)) return
+      const x = Number(pos[0])
+      const z = Number(pos[2])
+      if (!Number.isFinite(x) || !Number.isFinite(z)) return
+      minX = Math.min(minX, x)
+      maxX = Math.max(maxX, x)
+      minZ = Math.min(minZ, z)
+      maxZ = Math.max(maxZ, z)
+    }
+    for (const e of state?.entities || []) pushPos(e?.position)
+    for (const p of state?.players || []) pushPos(p?.position)
+    if (!Number.isFinite(minX) || !Number.isFinite(maxX) || !Number.isFinite(minZ) || !Number.isFinite(maxZ)) {
+      return null
+    }
+    return {
+      minX: minX - padding,
+      maxX: maxX + padding,
+      minZ: minZ - padding,
+      maxZ: maxZ + padding,
+    }
+  }
+
+  function getSpectatorBounds() {
+    if (typeof options.spectatorBounds === 'function') {
+      return options.spectatorBounds()
+    }
+    if (options.spectatorBounds && typeof options.spectatorBounds === 'object') {
+      return options.spectatorBounds
+    }
+    const stateBuffer = options.stateBuffer
+    if (stateBuffer && typeof stateBuffer.latest === 'function') {
+      return computeBoundsFromState(stateBuffer.latest(), overviewCfg.boundsPadding)
+    }
+    return null
+  }
+
+  function clampPanToBounds() {
+    const bounds = getSpectatorBounds()
+    if (!bounds) return
+    const beforeX = controlsState.pan.x
+    const beforeZ = controlsState.pan.z
+    controlsState.pan.x = THREE.MathUtils.clamp(controlsState.pan.x, bounds.minX, bounds.maxX)
+    controlsState.pan.z = THREE.MathUtils.clamp(controlsState.pan.z, bounds.minZ, bounds.maxZ)
+    if (debugCamera && (beforeX !== controlsState.pan.x || beforeZ !== controlsState.pan.z)) {
+      dbg('clampPanToBounds', { beforeX, beforeZ, afterX: controlsState.pan.x, afterZ: controlsState.pan.z, bounds })
+    }
+  }
+
+  function panByScreenDelta(dx, dy) {
+    seedOrbitFromOffset()
+    const scale = overviewCfg.touchPanSpeed * controlsState.zoom
+    const before = { x: controlsState.pan.x, z: controlsState.pan.z }
+    const cosYaw = Math.cos(controlsState.orbitYaw)
+    const sinYaw = Math.sin(controlsState.orbitYaw)
+    const worldDx = (dx * cosYaw) + (dy * sinYaw)
+    const worldDz = (-dx * sinYaw) + (dy * cosYaw)
+    controlsState.pan.x += worldDx * scale * overviewCfg.panDragSign
+    controlsState.pan.z += worldDz * scale * overviewCfg.panDragSign
+    clampPanToBounds()
+    dbg('panByScreenDelta', {
+      dx,
+      dy,
+      worldDx,
+      worldDz,
+      scale,
+      panDragSign: overviewCfg.panDragSign,
+      yaw: controlsState.orbitYaw,
+      before,
+      after: { x: controlsState.pan.x, z: controlsState.pan.z },
+    })
+  }
+
+  function seedOrbitFromOffset() {
+    if (controlsState.orbitSeeded) return
+    const horizontal = Math.hypot(defaultSpectatorOffset.x, defaultSpectatorOffset.z)
+    controlsState.orbitYaw = Math.atan2(defaultSpectatorOffset.x, defaultSpectatorOffset.z)
+    controlsState.orbitPitch = Math.atan2(defaultSpectatorOffset.y, Math.max(1e-6, horizontal))
+    controlsState.orbitPitch = THREE.MathUtils.clamp(
+      controlsState.orbitPitch,
+      overviewCfg.minPitch,
+      overviewCfg.maxPitch
+    )
+    controlsState.orbitSeeded = true
+    dbg('seedOrbit', {
+      yaw: controlsState.orbitYaw,
+      pitch: controlsState.orbitPitch,
+    })
+  }
+
+  function rotateByScreenDelta(dx, dy) {
+    seedOrbitFromOffset()
+    const before = { yaw: controlsState.orbitYaw, pitch: controlsState.orbitPitch }
+    controlsState.orbitYaw -= dx * overviewCfg.rotateSpeed
+    controlsState.orbitPitch = THREE.MathUtils.clamp(
+      controlsState.orbitPitch + dy * overviewCfg.rotateSpeed,
+      overviewCfg.minPitch,
+      overviewCfg.maxPitch
+    )
+    dbg('rotateByScreenDelta', {
+      dx,
+      dy,
+      before,
+      after: { yaw: controlsState.orbitYaw, pitch: controlsState.orbitPitch },
+    })
+  }
+
+  function resetTouchState() {
+    if (controlsState.touchPoints.size < 2) {
+      controlsState.pinchStartDistance = null
+      controlsState.pinchStartZoom = null
+    }
+    controlsState.lastTouchCenter = centerOfTouches()
+  }
+
+  function endMouseDrag() {
+    controlsState.mouseDrag = null
+  }
+
+  function attachSpectatorControls() {
+    if (!controlsCanvas || controlsState.attached) return
+    controlsState.attached = true
+    controlsCanvas.style.touchAction = 'none'
+    dbg('attachSpectatorControls', {
+      hasCanvas: !!controlsCanvas,
+      touchAction: controlsCanvas.style.touchAction,
+      overviewCfg,
+      spectatorOffset: { x: spectatorOffset.x, y: spectatorOffset.y, z: spectatorOffset.z },
+    })
+
+    const onKeyDown = (event) => {
+      if (controlsState.mode !== 'spectator') return
+      if (shouldIgnoreKeyboardEvent(event.target)) return
+      const key = event.key.toLowerCase()
+      if (key === 'w' || key === 'a' || key === 's' || key === 'd') {
+        controlsState.keys.add(key)
+        dbg('keydown', key, 'held=', [...controlsState.keys])
+      }
+    }
+
+    const onKeyUp = (event) => {
+      const key = event.key.toLowerCase()
+      controlsState.keys.delete(key)
+      if (key === 'w' || key === 'a' || key === 's' || key === 'd') {
+        dbg('keyup', key, 'held=', [...controlsState.keys])
+      }
+    }
+
+    const onWindowBlur = () => {
+      controlsState.keys.clear()
+      dbg('windowBlur')
+    }
+
+    const onWheel = (event) => {
+      if (controlsState.mode !== 'spectator') return
+      event.preventDefault()
+      const before = controlsState.zoom
+      const nextZoom = controlsState.zoom * Math.exp(event.deltaY * overviewCfg.zoomSpeed)
+      controlsState.zoom = THREE.MathUtils.clamp(nextZoom, overviewCfg.minZoom, overviewCfg.maxZoom)
+      dbg('wheel', { deltaY: event.deltaY, before, after: controlsState.zoom })
+    }
+
+    const onContextMenu = (event) => {
+      if (controlsState.mode !== 'spectator') return
+      event.preventDefault()
+    }
+
+    const onPointerDown = (event) => {
+      if (controlsState.mode !== 'spectator') return
+      if (event.pointerType === 'mouse') {
+        const wantsRotate = event.button === 2 || (event.button === 0 && event.shiftKey)
+        const wantsPan = event.button === 0 && !event.shiftKey
+        if (!wantsRotate && !wantsPan) return
+        controlsState.mouseDrag = {
+          id: event.pointerId,
+          x: event.clientX,
+          y: event.clientY,
+          mode: wantsRotate ? 'rotate' : 'pan',
+        }
+        try { controlsCanvas.setPointerCapture?.(event.pointerId) } catch {}
+        dbg('mouseDownStart', {
+          id: event.pointerId,
+          x: event.clientX,
+          y: event.clientY,
+          mode: controlsState.mouseDrag.mode,
+          shiftKey: !!event.shiftKey,
+          button: event.button,
+        })
+        event.preventDefault()
+        return
+      }
+      if (event.pointerType !== 'touch') return
+      controlsState.touchPoints.set(event.pointerId, { x: event.clientX, y: event.clientY })
+      controlsState.lastTouchCenter = centerOfTouches()
+      dbg('pointerdown', { id: event.pointerId, type: event.pointerType, x: event.clientX, y: event.clientY, count: controlsState.touchPoints.size })
+      if (controlsState.touchPoints.size >= 2) {
+        controlsState.pinchStartDistance = distanceBetweenTouches()
+        controlsState.pinchStartZoom = controlsState.zoom
+        dbg('pinchStart', { dist: controlsState.pinchStartDistance, zoom: controlsState.pinchStartZoom })
+      }
+    }
+
+    const onPointerMove = (event) => {
+      if (controlsState.mode !== 'spectator') return
+      if (event.pointerType === 'mouse') {
+        const md = controlsState.mouseDrag
+        if (!md || md.id !== event.pointerId) return
+        const dx = event.clientX - md.x
+        const dy = event.clientY - md.y
+        md.x = event.clientX
+        md.y = event.clientY
+        if (md.mode === 'rotate') {
+          rotateByScreenDelta(dx, dy)
+          dbg('mouseDragRotate', { id: event.pointerId, dx, dy })
+        } else {
+          panByScreenDelta(dx, dy)
+          dbg('mouseDragPan', { id: event.pointerId, dx, dy })
+        }
+        event.preventDefault()
+        return
+      }
+      if (event.pointerType !== 'touch') return
+      const previous = controlsState.touchPoints.get(event.pointerId)
+      if (!previous) return
+      event.preventDefault()
+      controlsState.touchPoints.set(event.pointerId, { x: event.clientX, y: event.clientY })
+      dbg('pointermove', { id: event.pointerId, dx: event.clientX - previous.x, dy: event.clientY - previous.y, count: controlsState.touchPoints.size })
+
+      if (controlsState.touchPoints.size >= 2) {
+        const center = centerOfTouches()
+        const dist = distanceBetweenTouches()
+        if (center && controlsState.lastTouchCenter) {
+          panByScreenDelta(center.x - controlsState.lastTouchCenter.x, center.y - controlsState.lastTouchCenter.y)
+        }
+        if (dist && controlsState.pinchStartDistance && controlsState.pinchStartZoom) {
+          const ratio = dist / controlsState.pinchStartDistance
+          const nextZoom = controlsState.pinchStartZoom / ratio
+          controlsState.zoom = THREE.MathUtils.clamp(nextZoom, overviewCfg.minZoom, overviewCfg.maxZoom)
+          dbg('pinchZoom', { dist, ratio, zoom: controlsState.zoom })
+        }
+        controlsState.lastTouchCenter = center
+      } else {
+        panByScreenDelta(event.clientX - previous.x, event.clientY - previous.y)
+      }
+    }
+
+    const onPointerEnd = (event) => {
+      if (event.pointerType === 'mouse') {
+        if (controlsState.mouseDrag?.id === event.pointerId) {
+          dbg('mouseDownEnd', { id: event.pointerId, mode: controlsState.mouseDrag.mode })
+          endMouseDrag()
+          try { controlsCanvas.releasePointerCapture?.(event.pointerId) } catch {}
+        }
+        return
+      }
+      if (event.pointerType !== 'touch') return
+      controlsState.touchPoints.delete(event.pointerId)
+      resetTouchState()
+      dbg('pointerend', { id: event.pointerId, count: controlsState.touchPoints.size })
+    }
+
+    controlsCanvas.addEventListener('wheel', onWheel, { passive: false })
+    controlsCanvas.addEventListener('pointerdown', onPointerDown)
+    controlsCanvas.addEventListener('pointermove', onPointerMove, { passive: false })
+    controlsCanvas.addEventListener('pointerup', onPointerEnd)
+    controlsCanvas.addEventListener('pointercancel', onPointerEnd)
+    controlsCanvas.addEventListener('contextmenu', onContextMenu)
+    window.addEventListener('keydown', onKeyDown)
+    window.addEventListener('keyup', onKeyUp)
+    window.addEventListener('blur', onWindowBlur)
+
+    controlsState.dispose = () => {
+      dbg('disposeSpectatorControls')
+      controlsCanvas.removeEventListener('wheel', onWheel)
+      controlsCanvas.removeEventListener('pointerdown', onPointerDown)
+      controlsCanvas.removeEventListener('pointermove', onPointerMove)
+      controlsCanvas.removeEventListener('pointerup', onPointerEnd)
+      controlsCanvas.removeEventListener('pointercancel', onPointerEnd)
+      controlsCanvas.removeEventListener('contextmenu', onContextMenu)
+      window.removeEventListener('keydown', onKeyDown)
+      window.removeEventListener('keyup', onKeyUp)
+      window.removeEventListener('blur', onWindowBlur)
+      controlsState.attached = false
+      controlsState.keys.clear()
+      controlsState.touchPoints.clear()
+      endMouseDrag()
+      controlsState.lastTouchCenter = null
+      controlsState.pinchStartDistance = null
+      controlsState.pinchStartZoom = null
+    }
+  }
 
   function update({ mode = 'follow', targetPosition, targetForward, dt = 1 / 60, collisionAdjust = null }) {
     if (!targetPosition) return
+    controlsState.mode = mode
+    if (debugCamera) {
+      controlsState.debugTickCount += 1
+      if (controlsState.debugTickCount <= 10 || controlsState.debugTickCount % 60 === 0) {
+        dbg('update', {
+          mode,
+          dt,
+          targetPosition: { x: targetPosition.x, y: targetPosition.y, z: targetPosition.z },
+          pan: { x: controlsState.pan.x, y: controlsState.pan.y, z: controlsState.pan.z },
+          zoom: controlsState.zoom,
+          keys: [...controlsState.keys],
+          attached: controlsState.attached,
+        })
+      }
+    }
+
+    if (mode === 'spectator' && controlsCanvas) {
+      attachSpectatorControls()
+    }
 
     if (mode === 'first_person') {
       const pos = targetPosition.clone()
@@ -285,10 +666,79 @@ export function createCameraModeController(THREE, camera, options = {}) {
     }
 
     if (mode === 'spectator') {
-      const offset = options.spectatorOffset || new THREE.Vector3(0, 18, -18)
-      const target = targetPosition.clone().add(offset)
-      camera.position.lerp(target, 1 - Math.exp(-6 * dt))
-      camera.lookAt(targetPosition)
+      const dtSafe = Math.max(1 / 240, Math.min(0.1, dt || 1 / 60))
+      if (!controlsState.seeded) {
+        controlsState.pan.set(targetPosition.x, targetPosition.y, targetPosition.z)
+        controlsState.seeded = true
+        dbg('seedSpectatorPan', { x: controlsState.pan.x, y: controlsState.pan.y, z: controlsState.pan.z })
+      }
+
+      if (controlsCanvas) {
+        const direction = new THREE.Vector3()
+        if (controlsState.keys.has('w')) direction.z -= 1
+        if (controlsState.keys.has('s')) direction.z += 1
+        if (controlsState.keys.has('a')) direction.x -= 1
+        if (controlsState.keys.has('d')) direction.x += 1
+
+        if (direction.lengthSq() > 0) {
+          direction.normalize()
+          const step = (overviewCfg.panSpeed * controlsState.zoom) * dtSafe
+          seedOrbitFromOffset()
+          const cosYaw = Math.cos(controlsState.orbitYaw)
+          const sinYaw = Math.sin(controlsState.orbitYaw)
+          const localDx = -direction.x * step
+          const localDz = -direction.z * step
+          const worldDx = (localDx * cosYaw) + (localDz * sinYaw)
+          const worldDz = (-localDx * sinYaw) + (localDz * cosYaw)
+          const before = { x: controlsState.pan.x, z: controlsState.pan.z }
+          controlsState.pan.x += worldDx
+          controlsState.pan.z += worldDz
+          clampPanToBounds()
+          dbg('keyboardPan', {
+            step,
+            yaw: controlsState.orbitYaw,
+            localDx,
+            localDz,
+            worldDx,
+            worldDz,
+            before,
+            after: { x: controlsState.pan.x, z: controlsState.pan.z },
+            keys: [...controlsState.keys],
+          })
+        }
+
+        seedOrbitFromOffset()
+        const baseDistance = Math.max(0.001, defaultSpectatorOffset.length())
+        const orbitDistance = baseDistance * controlsState.zoom
+        const cosPitch = Math.cos(controlsState.orbitPitch)
+        const sinPitch = Math.sin(controlsState.orbitPitch)
+        const sinYaw = Math.sin(controlsState.orbitYaw)
+        const cosYaw = Math.cos(controlsState.orbitYaw)
+        tmpOverviewTarget.set(controlsState.pan.x, controlsState.pan.y, controlsState.pan.z)
+        tmpOverviewPos.set(
+          controlsState.pan.x + sinYaw * cosPitch * orbitDistance,
+          controlsState.pan.y + sinPitch * orbitDistance,
+          controlsState.pan.z + cosYaw * cosPitch * orbitDistance
+        )
+        camera.position.copy(tmpOverviewPos)
+        camera.lookAt(tmpOverviewTarget)
+        if (debugCamera && (controlsState.debugTickCount <= 10 || controlsState.debugTickCount % 60 === 0)) {
+          dbg('spectatorCameraPose', {
+            position: { x: camera.position.x, y: camera.position.y, z: camera.position.z },
+            lookAt: { x: tmpOverviewTarget.x, y: tmpOverviewTarget.y, z: tmpOverviewTarget.z },
+          })
+        }
+        return
+      }
+
+      tmpOverviewPos.set(
+        controlsState.pan.x + spectatorOffset.x,
+        controlsState.pan.y + spectatorOffset.y,
+        controlsState.pan.z + spectatorOffset.z
+      )
+      tmpOverviewTarget.set(controlsState.pan.x, controlsState.pan.y, controlsState.pan.z)
+      camera.position.lerp(tmpOverviewPos, 1 - Math.exp(-6 * dtSafe))
+      camera.lookAt(tmpOverviewTarget)
       return
     }
 
@@ -298,6 +748,20 @@ export function createCameraModeController(THREE, camera, options = {}) {
   return {
     update,
     follow: followCtl,
+    dispose() {
+      if (typeof controlsState.dispose === 'function') controlsState.dispose()
+      controlsState.disposed = true
+    },
+    spectator: {
+      state: controlsState,
+      reset(targetPosition = null) {
+        if (targetPosition) controlsState.pan.copy(targetPosition)
+        controlsState.zoom = 1
+        controlsState.orbitSeeded = false
+        seedOrbitFromOffset()
+        controlsState.seeded = !!targetPosition
+      },
+    },
   }
 }
 

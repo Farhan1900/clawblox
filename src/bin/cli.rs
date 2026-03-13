@@ -14,16 +14,18 @@ use dashmap::DashMap;
 use flate2::{write::GzEncoder, Compression};
 use futures_util::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
+use chrono::{SecondsFormat, Utc};
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::fs::OpenOptions;
 use std::io::Write;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
-use tokio::sync::broadcast;
+use tokio::sync::{broadcast, watch};
+use tokio::task::JoinHandle;
 use tokio::time::interval;
 use tower_http::cors::{Any, CorsLayer};
 use uuid::Uuid;
@@ -36,6 +38,8 @@ use tower_http::services::ServeDir;
 
 use clawblox::{
     db,
+    recording, replay,
+    replay_agent_log::{load_agent_timeline, ReplayAgentMessage, ReplayAgentTimeline},
     game::{
         constants::audio::{
             DEFAULT_BYTES_PER_SAMPLE, DEFAULT_CHANNELS, DEFAULT_PLAYBACK_SPEED,
@@ -101,6 +105,29 @@ enum Commands {
         /// Datastore backend for local DataStoreService
         #[arg(long, value_enum, default_value_t = LocalDatastore::Sqlite)]
         datastore: LocalDatastore,
+        /// Record session to a .clawrec file for later replay
+        #[arg(long)]
+        record: bool,
+        /// Directory to write recording output into (default: <world>/recordings)
+        #[arg(long, env = "CLAWBLOX_RECORD_DIR")]
+        record_dir: Option<PathBuf>,
+    },
+    /// Replay a recorded session
+    Replay {
+        /// Path to .clawrec recording file
+        file: PathBuf,
+        /// Playback speed multiplier
+        #[arg(long, default_value = "1.0")]
+        speed: f32,
+        /// Port to run the replay server on
+        #[arg(short, long, default_value = "8080")]
+        port: u16,
+        /// Override the world directory (for serving assets)
+        #[arg(long)]
+        world_dir: Option<PathBuf>,
+        /// Path to agent JSONL log file (from agent/logs/*/*.jsonl)
+        #[arg(long)]
+        agent: Option<PathBuf>,
     },
     /// Start a game locally in background (daemon mode)
     Start {
@@ -167,7 +194,16 @@ fn main() {
             port,
             daemon,
             datastore,
-        } => run_game(path, port, daemon, datastore),
+            record,
+            record_dir,
+        } => run_game(path, port, daemon, datastore, record, record_dir),
+        Commands::Replay {
+            file,
+            speed,
+            port,
+            world_dir,
+            agent,
+        } => run_replay(file, speed, port, world_dir, agent),
         Commands::Start {
             path,
             port,
@@ -712,7 +748,7 @@ export function createRenderer(ctx) {
         .expect("Failed to create renderer/src/index.js");
 
     // Create .gitignore
-    let gitignore = ".clawblox/\n.clawblox.log\n";
+    let gitignore = ".clawblox/\n.clawblox-*.log\n";
     let gitignore_path = project_dir.join(".gitignore");
     if !gitignore_path.exists() {
         std::fs::write(&gitignore_path, gitignore).expect("Failed to create .gitignore");
@@ -1054,6 +1090,26 @@ fn deploy_game(path: PathBuf, api_key_override: Option<String>, server_override:
 }
 
 // =============================================================================
+// File Locking
+// =============================================================================
+
+/// Acquire an exclusive advisory lock (blocking) on an open file.
+#[cfg(unix)]
+fn flock_exclusive(file: &std::fs::File) -> std::io::Result<()> {
+    use std::os::unix::io::AsRawFd;
+    let rc = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) };
+    if rc != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn flock_exclusive(_file: &std::fs::File) -> std::io::Result<()> {
+    Ok(())
+}
+
+// =============================================================================
 // PID File Management
 // =============================================================================
 
@@ -1181,6 +1237,17 @@ struct LocalRendererManifest {
     mode: String,
     entry_url: Option<String>,
     capabilities: Vec<String>,
+}
+
+fn default_renderer_manifest() -> LocalRendererManifest {
+    LocalRendererManifest {
+        schema_version: 1,
+        api_version: 1,
+        name: String::new(),
+        mode: "none".to_string(),
+        entry_url: None,
+        capabilities: Vec::new(),
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -1382,6 +1449,14 @@ fn maybe_build_renderer_package(
         .unwrap_or_else(|| "dist/renderer.bundle.js".to_string());
 
     let renderer_dir = game_dir.join("renderer");
+
+    // Acquire an exclusive lock so concurrent instances don't race on the build.
+    let lock_path = renderer_dir.join(".build.lock");
+    let lock_file = std::fs::File::create(&lock_path)
+        .map_err(|e| format!("Failed to create renderer build lock: {}", e))?;
+    flock_exclusive(&lock_file)
+        .map_err(|e| format!("Failed to acquire renderer build lock: {}", e))?;
+
     if package.scripts.contains_key("build") {
         if !command_exists("npm") {
             return Err(
@@ -1405,6 +1480,8 @@ fn maybe_build_renderer_package(
     } else {
         bundle_renderer_package_with_esbuild(game_dir, &entry_rel, &out_rel)?;
     }
+
+    drop(lock_file);
 
     let output_path = renderer_dir.join(&out_rel);
     if !output_path.is_file() {
@@ -1449,7 +1526,14 @@ fn maybe_build_renderer_package(
     })
 }
 
-fn run_game(path: PathBuf, port: u16, daemon: bool, datastore: LocalDatastore) {
+fn run_game(
+    path: PathBuf,
+    port: u16,
+    daemon: bool,
+    datastore: LocalDatastore,
+    record: bool,
+    record_dir: Option<PathBuf>,
+) {
     let path = std::fs::canonicalize(&path).unwrap_or_else(|_| {
         eprintln!("Error: Path '{}' does not exist", path.display());
         std::process::exit(1);
@@ -1542,7 +1626,8 @@ fn run_game(path: PathBuf, port: u16, daemon: bool, datastore: LocalDatastore) {
             GameManager::new_with_bridge(60, Some(bridge), ErrorMode::Halt, true)
         }
         LocalDatastore::Sqlite => {
-            let db_path = path.join(".clawblox").join("local.db");
+            let db_name = format!("local-{}.db", port);
+            let db_path = path.join(".clawblox").join(db_name);
             if let Some(parent) = db_path.parent() {
                 std::fs::create_dir_all(parent).unwrap_or_else(|e| {
                     eprintln!("Error: failed to create local datastore directory: {}", e);
@@ -1588,29 +1673,107 @@ fn run_game(path: PathBuf, port: u16, daemon: bool, datastore: LocalDatastore) {
     // Start HTTP server
     let rt = tokio::runtime::Runtime::new().unwrap();
     rt.block_on(async {
+        let recording_writer = if record {
+            let rec_dir = if let Some(dir) = record_dir.as_ref() {
+                if dir.is_absolute() {
+                    dir.clone()
+                } else {
+                    path.join(dir)
+                }
+            } else {
+                path.join("recordings")
+            };
+            let timestamp = chrono::Utc::now().format("%Y%m%d_%H%M%S").to_string();
+            let rec_path = rec_dir.join(format!("{}.clawrec", timestamp));
+            match recording::RecordingWriter::create(
+                &rec_path,
+                &config.name,
+                &path.to_string_lossy(),
+                60,
+            )
+            .await
+            {
+                Ok(writer) => {
+                    println!("Recording to: {}", rec_path.display());
+                    Some(Arc::new(tokio::sync::Mutex::new(writer)))
+                }
+                Err(e) => {
+                    eprintln!("Warning: failed to start recording: {}", e);
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
         let (audio_tx, _) = broadcast::channel::<AudioChunk>(64);
         let (speech_tx, _) = broadcast::channel::<SpeechEvent>(64);
         let (speech_progress_tx, _) = broadcast::channel::<SpeechProgressEvent>(128);
         let (playback_done_tx, _) = broadcast::channel::<PlaybackDoneEvent>(64);
+        let (chat_tx, _) = broadcast::channel::<LocalChatMessage>(128);
         let state = LocalState {
             game_id,
             instance_id,
             game_handle,
+            started_at: Instant::now(),
             skill_md,
             renderer_manifest,
             sessions: Arc::new(DashMap::new()),
-            log_file: path.join(".clawblox.log"),
+            log_file: path.join(format!(".clawblox-{}.log", port)),
             audio_tx,
             speech_tx,
             speech_progress_tx,
             playback_done_tx,
+            chat_tx,
             playback_done_seq: Arc::new(Mutex::new(0)),
             speech_seq: Arc::new(Mutex::new(0)),
             speech_progress_seq: Arc::new(Mutex::new(0)),
             authoritative_speech_event_cursor: Arc::new(Mutex::new(0)),
             audio_streams: Arc::new(Mutex::new(HashMap::new())),
             audio_speech_text: Arc::new(Mutex::new(HashMap::new())),
+            chat_state: Arc::new(Mutex::new(LocalChatState::default())),
+            recording_writer: recording_writer.clone(),
         };
+
+        // Spawn recording task if recording is enabled
+        let mut recording_shutdown_tx = None;
+        let mut recording_task: Option<JoinHandle<()>> = None;
+        if let Some(ref writer) = recording_writer {
+            let writer = writer.clone();
+            let game_handle = state.game_handle.clone();
+            let instance_id = state.instance_id;
+            let (shutdown_tx, mut shutdown_rx) = watch::channel(false);
+            recording_shutdown_tx = Some(shutdown_tx);
+            recording_task = Some(tokio::spawn(async move {
+                let mut tick_interval = interval(Duration::from_millis(16));
+                let mut last_tick: u64 = 0;
+                let start = Instant::now();
+                loop {
+                    tokio::select! {
+                        _ = shutdown_rx.changed() => {
+                            if *shutdown_rx.borrow() {
+                                break;
+                            }
+                        }
+                        _ = tick_interval.tick() => {
+                            let obs = game::get_spectator_observation_for_instance(&game_handle, instance_id);
+                            match obs {
+                                Ok(mut obs) => {
+                                    if obs.tick != last_tick {
+                                        resolve_local_spectator_assets(&mut obs);
+                                        let time_ms = start.elapsed().as_millis() as u64;
+                                        let mut w = writer.lock().await;
+                                        w.record_tick(obs.tick, time_ms, &obs).await;
+                                        last_tick = obs.tick;
+                                    }
+                                }
+                                Err(_) => break,
+                            }
+                        }
+                    }
+                }
+            }));
+        }
 
         let cors = CorsLayer::new()
             .allow_origin(Any)
@@ -1629,6 +1792,8 @@ fn run_game(path: PathBuf, port: u16, daemon: bool, datastore: LocalDatastore) {
             .route("/observe", get(local_observe))
             .route("/skill.md", get(local_skill))
             .route("/audio", post(local_audio))
+            .route("/chat", post(local_chat))
+            .route("/chat/messages", get(local_chat_messages))
             .nest_service("/renderer-files", ServeDir::new(path.join("renderer")))
             .nest_service("/assets", ServeDir::new(path.join("assets")))
             .nest_service("/static", ServeDir::new(path.join("static")))
@@ -1648,6 +1813,8 @@ fn run_game(path: PathBuf, port: u16, daemon: bool, datastore: LocalDatastore) {
         println!("  POST /join?name=X  - Join game, returns session token");
         println!("  POST /input        - Send input (requires X-Session header)");
         println!("  GET  /observe      - Player observation (requires X-Session header)");
+        println!("  POST /chat         - Send chat message (requires X-Session header)");
+        println!("  GET  /chat/messages - List local chat messages");
         println!("  GET  /skill.md     - Game skill definition");
 
         let listener = tokio::net::TcpListener::bind(addr)
@@ -1671,9 +1838,316 @@ fn run_game(path: PathBuf, port: u16, daemon: bool, datastore: LocalDatastore) {
                 eprintln!("Server error: {}", e);
             });
 
+        // Finalize recording on shutdown
+        if let Some(shutdown_tx) = recording_shutdown_tx {
+            let _ = shutdown_tx.send(true);
+        }
+        if let Some(task) = recording_task {
+            if let Err(err) = task.await {
+                eprintln!("Warning: recording task join failed: {}", err);
+            }
+        }
+        if let Some(writer) = recording_writer {
+            let mut w = writer.lock().await;
+            w.close(0, 0).await;
+            eprintln!("Recording saved.");
+        }
+
         // Also clean up here in case shutdown_signal didn't fire
         delete_pid_file(&pid_file);
     });
+}
+
+fn run_replay(
+    file: PathBuf,
+    speed: f32,
+    port: u16,
+    world_dir_override: Option<PathBuf>,
+    agent_log_file: Option<PathBuf>,
+) {
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    rt.block_on(async {
+        let reader = recording::RecordingReader::open(&file).await.unwrap_or_else(|e| {
+            eprintln!("Error: failed to open recording: {}", e);
+            std::process::exit(1);
+        });
+        let meta = reader.meta().await.unwrap_or_else(|e| {
+            eprintln!("Error: failed to read recording metadata: {}", e);
+            std::process::exit(1);
+        });
+
+        let world_dir = world_dir_override
+            .unwrap_or_else(|| PathBuf::from(&meta.world_dir));
+        if !world_dir.is_dir() {
+            eprintln!(
+                "Warning: world directory '{}' not found. Asset serving may fail. Use --world-dir to override.",
+                world_dir.display()
+            );
+        }
+
+        println!("Replaying: {}", file.display());
+        println!("World: {} ({})", meta.world_name, world_dir.display());
+        println!("Duration: {:.1}s, {} ticks", meta.duration_ms as f64 / 1000.0, meta.total_ticks);
+
+        let first_tick = reader.first_tick().unwrap_or_else(|| {
+            eprintln!("Error: recording has no checkpoints to replay");
+            std::process::exit(1);
+        });
+        let playback = replay::ReplayPlayback::new(
+            first_tick,
+            meta.total_ticks,
+            meta.tick_rate,
+            meta.duration_ms,
+            speed,
+        )
+        .unwrap_or_else(|e| {
+            eprintln!("Error: invalid replay playback state: {}", e);
+            std::process::exit(1);
+        });
+
+        let reader = Arc::new(reader);
+        let playback = Arc::new(tokio::sync::Mutex::new(playback));
+
+        // Load renderer manifest from world_dir
+        let renderer_manifest = {
+            let world_toml_path = world_dir.join("world.toml");
+            if world_toml_path.exists() {
+                let cfg = clawblox::config::WorldConfig::from_game_dir(&world_dir).ok();
+                cfg.map(|c| maybe_build_renderer_package(&world_dir, &c.renderer).ok())
+                    .flatten()
+                    .unwrap_or_else(default_renderer_manifest)
+            } else {
+                default_renderer_manifest()
+            }
+        };
+
+        let agent_timeline = if let Some(path) = agent_log_file.as_ref() {
+            match load_agent_timeline(path, meta.tick_rate) {
+                Ok(timeline) => {
+                    println!(
+                        "Loaded agent log: {} ({} messages, {} anchors)",
+                        path.display(),
+                        timeline.messages.len(),
+                        timeline.anchor_count
+                    );
+                    Some(Arc::new(timeline))
+                }
+                Err(err) => {
+                    eprintln!("Warning: failed to load agent log '{}': {}", path.display(), err);
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
+        let replay_state = ReplayState {
+            reader: reader.clone(),
+            playback: playback.clone(),
+            renderer_manifest,
+            agent_timeline,
+        };
+
+        let cors = CorsLayer::new()
+            .allow_origin(Any)
+            .allow_methods(Any)
+            .allow_headers(Any);
+
+        let app = Router::new()
+            .route("/", get(local_ui_index))
+            .route("/ui", get(local_ui_index))
+            .route("/ui/{*path}", get(local_ui_file))
+            .route("/spectate/ws", get(replay_spectate_ws))
+            .route("/renderer/manifest", get(replay_renderer_manifest))
+            .route("/replay/info", get(replay_info))
+            .route("/replay/agent", get(replay_agent_messages))
+            .route("/replay/seek", post(replay_seek))
+            .route("/replay/speed", post(replay_speed))
+            .route("/replay/pause", post(replay_pause))
+            .route("/replay/play", post(replay_play))
+            .nest_service("/renderer-files", ServeDir::new(world_dir.join("renderer")))
+            .nest_service("/assets", ServeDir::new(world_dir.join("assets")))
+            .nest_service("/static", ServeDir::new(world_dir.join("static")))
+            .with_state(replay_state)
+            .layer(cors);
+
+        let addr = SocketAddr::from(([0, 0, 0, 0], port));
+        println!("Replay server: http://localhost:{}", port);
+
+        let listener = tokio::net::TcpListener::bind(addr).await.unwrap_or_else(|e| {
+            eprintln!("Error: Port {} is already in use. Try --port <PORT>", port);
+            eprintln!("Details: {}", e);
+            std::process::exit(1);
+        });
+
+        axum::serve(listener, app)
+            .with_graceful_shutdown(async {
+                shutdown_signal().await;
+                eprintln!("\nReplay server stopped.");
+            })
+            .await
+            .unwrap_or_else(|e| {
+                eprintln!("Server error: {}", e);
+            });
+    });
+}
+
+#[derive(Clone)]
+struct ReplayState {
+    reader: Arc<recording::RecordingReader>,
+    playback: Arc<tokio::sync::Mutex<replay::ReplayPlayback>>,
+    renderer_manifest: LocalRendererManifest,
+    agent_timeline: Option<Arc<ReplayAgentTimeline>>,
+}
+
+async fn replay_spectate_ws(
+    State(state): State<ReplayState>,
+    ws: WebSocketUpgrade,
+) -> impl IntoResponse {
+    ws.on_upgrade(move |socket| handle_replay_ws(socket, state))
+}
+
+async fn handle_replay_ws(socket: WebSocket, state: ReplayState) {
+    let (mut sender, mut receiver) = socket.split();
+    let mut tick_interval = interval(Duration::from_millis(33));
+
+    loop {
+        tokio::select! {
+            msg = receiver.next() => {
+                match msg {
+                    Some(Ok(Message::Close(_))) | None => break,
+                    Some(Ok(Message::Ping(data))) => {
+                        if sender.send(Message::Pong(data)).await.is_err() { break; }
+                    }
+                    _ => {}
+                }
+            }
+            _ = tick_interval.tick() => {
+                let tick = {
+                    let mut pb = state.playback.lock().await;
+                    let tick = pb.current_tick();
+                    pb.advance_frame(Duration::from_millis(33));
+                    tick
+                };
+
+                match state.reader.get_state_at(tick).await {
+                    Ok(obs) => {
+                        if let Ok(json) = serde_json::to_vec(&obs) {
+                            let msg = Message::Text(String::from_utf8_lossy(&json).into_owned().into());
+                            if sender.send(msg).await.is_err() { break; }
+                        }
+                    }
+                    Err(err) => {
+                        let message = format!("Failed to load replay state at tick {}: {}", tick, err);
+                        eprintln!("{}", message);
+                        let payload = serde_json::json!({
+                            "type": "replay_error",
+                            "tick": tick,
+                            "message": message,
+                        });
+                        if sender.send(Message::Text(payload.to_string().into())).await.is_err() {
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+async fn replay_renderer_manifest(State(state): State<ReplayState>) -> Json<LocalRendererManifest> {
+    Json(state.renderer_manifest)
+}
+
+async fn replay_info(State(state): State<ReplayState>) -> Json<replay::ReplayInfo> {
+    let pb = state.playback.lock().await;
+    Json(pb.info())
+}
+
+#[derive(Deserialize)]
+struct ReplayAgentQuery {
+    tick: Option<u64>,
+}
+
+#[derive(Serialize)]
+struct ReplayAgentMessagesResponse {
+    enabled: bool,
+    current_tick: u64,
+    start_tick: u64,
+    end_tick: u64,
+    messages: Vec<ReplayAgentMessage>,
+}
+
+async fn replay_agent_messages(
+    State(state): State<ReplayState>,
+    Query(query): Query<ReplayAgentQuery>,
+) -> Json<ReplayAgentMessagesResponse> {
+    let current_tick = if let Some(tick) = query.tick {
+        tick
+    } else {
+        let pb = state.playback.lock().await;
+        pb.current_tick()
+    };
+    let start_tick = 0;
+    let end_tick = current_tick;
+
+    let Some(timeline) = state.agent_timeline.as_ref() else {
+        return Json(ReplayAgentMessagesResponse {
+            enabled: false,
+            current_tick,
+            start_tick,
+            end_tick,
+            messages: Vec::new(),
+        });
+    };
+
+    Json(ReplayAgentMessagesResponse {
+        enabled: true,
+        current_tick,
+        start_tick,
+        end_tick,
+        messages: timeline.messages.clone(),
+    })
+}
+
+#[derive(Deserialize)]
+struct SeekQuery {
+    tick: u64,
+}
+
+async fn replay_seek(
+    State(state): State<ReplayState>,
+    Query(q): Query<SeekQuery>,
+) -> axum::http::StatusCode {
+    let mut pb = state.playback.lock().await;
+    pb.seek(q.tick);
+    axum::http::StatusCode::OK
+}
+
+#[derive(Deserialize)]
+struct SpeedQuery {
+    value: f32,
+}
+
+async fn replay_speed(
+    State(state): State<ReplayState>,
+    Query(q): Query<SpeedQuery>,
+) -> axum::http::StatusCode {
+    let mut pb = state.playback.lock().await;
+    pb.set_speed(q.value);
+    axum::http::StatusCode::OK
+}
+
+async fn replay_pause(State(state): State<ReplayState>) -> axum::http::StatusCode {
+    let mut pb = state.playback.lock().await;
+    pb.set_paused(true);
+    axum::http::StatusCode::OK
+}
+
+async fn replay_play(State(state): State<ReplayState>) -> axum::http::StatusCode {
+    let mut pb = state.playback.lock().await;
+    pb.set_paused(false);
+    axum::http::StatusCode::OK
 }
 
 fn run_external_runtime(path: PathBuf, port: u16, daemon: bool, config: &clawblox::config::WorldConfig) {
@@ -1816,7 +2290,7 @@ fn start_game(path: PathBuf, port: u16, datastore: LocalDatastore) {
 
     kill_previous_instance(port);
 
-    let log_file_path = path.join(".clawblox.log");
+    let log_file_path = path.join(format!(".clawblox-{}.log", port));
     let log_file = std::fs::File::create(&log_file_path).unwrap_or_else(|e| {
         eprintln!("Error creating log file {}: {}", log_file_path.display(), e);
         std::process::exit(1);
@@ -1929,6 +2403,29 @@ struct PlaybackDoneEvent {
     seq: u64,
 }
 
+#[derive(Deserialize)]
+struct ChatPostRequest {
+    content: String,
+}
+
+#[derive(Serialize)]
+struct ChatPostResponse {
+    id: String,
+    created_at: String,
+}
+
+#[derive(Deserialize)]
+struct ChatMessagesQuery {
+    instance_id: Option<Uuid>,
+    after: Option<String>,
+    limit: Option<usize>,
+}
+
+#[derive(Serialize)]
+struct ChatMessagesResponse {
+    messages: Vec<LocalChatMessage>,
+}
+
 #[derive(Clone, Debug)]
 struct AudioStreamState {
     agent_id: Uuid,
@@ -1946,11 +2443,67 @@ struct AudioStreamState {
     playback_speed: f32,
 }
 
+const LOCAL_CHAT_MAX_MESSAGES: usize = 1000;
+const LOCAL_CHAT_DEFAULT_LIMIT: usize = 50;
+const LOCAL_CHAT_MAX_LIMIT: usize = 100;
+
+#[derive(Clone, Debug, Serialize)]
+struct LocalChatMessage {
+    id: String,
+    instance_id: Uuid,
+    agent_id: Uuid,
+    agent_name: String,
+    message_type: String,
+    content: String,
+    created_at: String,
+}
+
+#[derive(Debug, Default)]
+struct LocalChatState {
+    next_seq: u64,
+    messages: VecDeque<LocalChatMessage>,
+}
+
+impl LocalChatState {
+    fn push(&mut self, instance_id: Uuid, agent_id: Uuid, agent_name: String, content: String) -> LocalChatMessage {
+        self.next_seq = self.next_seq.saturating_add(1);
+        let msg = LocalChatMessage {
+            id: format!("local_{}", self.next_seq),
+            instance_id,
+            agent_id,
+            agent_name,
+            message_type: "text".to_string(),
+            content,
+            created_at: Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true),
+        };
+        self.messages.push_back(msg.clone());
+        while self.messages.len() > LOCAL_CHAT_MAX_MESSAGES {
+            self.messages.pop_front();
+        }
+        msg
+    }
+
+    fn list(&self, instance_id: Uuid, after: Option<&str>, limit: usize) -> Vec<LocalChatMessage> {
+        self.messages
+            .iter()
+            .filter(|m| m.instance_id == instance_id)
+            .filter(|m| after.map(|a| m.created_at.as_str() > a).unwrap_or(true))
+            .rev()
+            .take(limit)
+            .cloned()
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .collect()
+    }
+}
+
 #[derive(Clone)]
 struct LocalState {
     game_id: Uuid,
     instance_id: Uuid,
     game_handle: GameManagerHandle,
+    started_at: Instant,
     skill_md: Option<String>,
     renderer_manifest: LocalRendererManifest,
     sessions: Arc<DashMap<String, (Uuid, String)>>, // token -> (agent_id, name)
@@ -1959,6 +2512,7 @@ struct LocalState {
     speech_tx: broadcast::Sender<SpeechEvent>,
     speech_progress_tx: broadcast::Sender<SpeechProgressEvent>,
     playback_done_tx: broadcast::Sender<PlaybackDoneEvent>,
+    chat_tx: broadcast::Sender<LocalChatMessage>,
     playback_done_seq: Arc<Mutex<u64>>,
     speech_seq: Arc<Mutex<u64>>,
     speech_progress_seq: Arc<Mutex<u64>>,
@@ -1967,6 +2521,10 @@ struct LocalState {
     audio_streams: Arc<Mutex<HashMap<String, AudioStreamState>>>,
     /// Maps stream_id -> speech text for broadcasting on AudioEnded
     audio_speech_text: Arc<Mutex<HashMap<String, String>>>,
+    chat_state: Arc<Mutex<LocalChatState>>,
+    /// Session recording writer (None if not recording). Kept alive via Arc.
+    #[allow(dead_code)]
+    recording_writer: Option<Arc<tokio::sync::Mutex<recording::RecordingWriter>>>,
 }
 
 #[derive(Clone)]
@@ -2530,6 +3088,66 @@ async fn local_audio(
     Ok(axum::http::StatusCode::OK)
 }
 
+async fn local_chat(
+    State(state): State<LocalState>,
+    headers: axum::http::HeaderMap,
+    Json(body): Json<ChatPostRequest>,
+) -> Result<Json<ChatPostResponse>, (axum::http::StatusCode, String)> {
+    if let Some(err) = check_halted(&state) {
+        return Err((axum::http::StatusCode::SERVICE_UNAVAILABLE, err));
+    }
+
+    let (agent_id, agent_name) = get_session(&state, &headers)?;
+    let content = body.content.trim();
+    if content.is_empty() {
+        return Err((
+            axum::http::StatusCode::BAD_REQUEST,
+            "content must be 1-500 non-whitespace characters".to_string(),
+        ));
+    }
+    if content.chars().count() > 500 {
+        return Err((
+            axum::http::StatusCode::BAD_REQUEST,
+            "content exceeds 500 characters".to_string(),
+        ));
+    }
+
+    let msg = {
+        let mut chat = state.chat_state.lock().unwrap();
+        chat.push(state.instance_id, agent_id, agent_name, content.to_string())
+    };
+
+    let _ = state.chat_tx.send(msg.clone());
+
+    Ok(Json(ChatPostResponse {
+        id: msg.id,
+        created_at: msg.created_at,
+    }))
+}
+
+async fn local_chat_messages(
+    State(state): State<LocalState>,
+    Query(query): Query<ChatMessagesQuery>,
+) -> Result<Json<ChatMessagesResponse>, (axum::http::StatusCode, String)> {
+    if let Some(err) = check_halted(&state) {
+        return Err((axum::http::StatusCode::SERVICE_UNAVAILABLE, err));
+    }
+
+    let instance_id = query.instance_id.unwrap_or(state.instance_id);
+    let limit = query
+        .limit
+        .unwrap_or(LOCAL_CHAT_DEFAULT_LIMIT)
+        .clamp(1, LOCAL_CHAT_MAX_LIMIT);
+    let after = query.after.as_deref().map(str::trim).filter(|s| !s.is_empty());
+
+    let messages = {
+        let chat = state.chat_state.lock().unwrap();
+        chat.list(instance_id, after, limit)
+    };
+
+    Ok(Json(ChatMessagesResponse { messages }))
+}
+
 #[derive(Deserialize)]
 struct InputRequest {
     #[serde(rename = "type")]
@@ -2550,6 +3168,8 @@ async fn local_input(
     let (agent_id, agent_name) = get_session(&state, &headers)?;
 
     let speech_progress = extract_speech_progress_event(&input.input_type, &input.data);
+    let input_type = input.input_type.clone();
+    let input_data = input.data.clone();
 
     game::queue_input(
         &state.game_handle,
@@ -2565,6 +3185,17 @@ async fn local_input(
         .map_err(|e| (axum::http::StatusCode::BAD_REQUEST, e))?;
     resolve_local_player_assets(&mut observation);
     maybe_publish_authoritative_speech_events(&state, &observation.recent_events);
+
+    if let Some(writer) = &state.recording_writer {
+        let time_ms = state.started_at.elapsed().as_millis() as u64;
+        let tick = observation.tick;
+        let writer = writer.clone();
+        tokio::spawn(async move {
+            let w = writer.lock().await;
+            w.record_input(tick, time_ms, &agent_id, &input_type, &input_data)
+                .await;
+        });
+    }
 
     if let Some(progress) = speech_progress {
         maybe_publish_speech_progress(&state, &observation, &agent_name, progress);
@@ -2775,6 +3406,7 @@ async fn handle_spectate_ws(socket: WebSocket, state: LocalState, role: Spectate
     let mut speech_rx = state.speech_tx.subscribe();
     let mut speech_progress_rx = state.speech_progress_tx.subscribe();
     let mut playback_done_rx = state.playback_done_tx.subscribe();
+    let mut chat_rx = state.chat_tx.subscribe();
 
     let mut tick_interval = interval(Duration::from_millis(33));
     let mut last_tick: u64 = 0;
@@ -2849,6 +3481,24 @@ async fn handle_spectate_ws(socket: WebSocket, state: LocalState, role: Spectate
                         "speaker": event.speaker,
                         "stream_id": event.stream_id,
                         "seq": event.seq,
+                    })).unwrap_or_default();
+                    if sender.send(Message::Text(json.into())).await.is_err() {
+                        break;
+                    }
+                }
+            }
+
+            chat = chat_rx.recv() => {
+                if let Ok(chat) = chat {
+                    let json = serde_json::to_string(&serde_json::json!({
+                        "type": "chat_message",
+                        "id": chat.id,
+                        "instance_id": chat.instance_id,
+                        "agent_id": chat.agent_id,
+                        "agent_name": chat.agent_name,
+                        "message_type": chat.message_type,
+                        "content": chat.content,
+                        "created_at": chat.created_at,
                     })).unwrap_or_default();
                     if sender.send(Message::Text(json.into())).await.is_err() {
                         break;

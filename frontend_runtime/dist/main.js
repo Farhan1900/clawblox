@@ -6,6 +6,67 @@ const API_VERSION = 1
 const statusEl = document.getElementById('status')
 const metaEl = document.getElementById('meta')
 const canvas = document.getElementById('stage')
+const chatToggleEl = document.getElementById('chat-toggle')
+const chatPanelEl = document.getElementById('chat-panel')
+const chatFeedEl = document.getElementById('chat-feed')
+const chatFormEl = document.getElementById('chat-form')
+const chatInputEl = document.getElementById('chat-input')
+const chatSendEl = document.getElementById('chat-send')
+const chatConnectionEl = document.getElementById('chat-connection')
+const chatLocalStatusEl = document.getElementById('chat-local-status')
+const playerListCountEl = document.getElementById('player-list-count')
+const playerListBodyEl = document.getElementById('player-list-body')
+const replayPanelEl = document.getElementById('replay-panel')
+const replayPlayToggleEl = document.getElementById('replay-play-toggle')
+const replayPlayIconEl = document.getElementById('replay-play-icon')
+const replaySliderEl = document.getElementById('replay-slider')
+const replayTimeCurrentEl = document.getElementById('replay-time-current')
+const replayTimeTotalEl = document.getElementById('replay-time-total')
+const replaySpeedEl = document.getElementById('replay-speed')
+const agentLogPanelEl = document.getElementById('agent-log-panel')
+const agentLogFeedEl = document.getElementById('agent-log-feed')
+const agentLogStatusEl = document.getElementById('agent-log-status')
+const agentLogToggleEl = document.getElementById('agent-log-toggle')
+
+const chatState = {
+  open: false,
+  wsConnected: false,
+  loadedHistory: false,
+  sending: false,
+  messages: [],
+  seenIds: new Set(),
+  sessionToken: null,
+  agentId: null,
+  playerName: null,
+}
+let selectedSpectatorPlayerId = null
+let latestSpectatorState = null
+const replayState = {
+  enabled: false,
+  info: null,
+  pollTimer: null,
+  scrubbing: false,
+  agentEnabled: false,
+  agentLoaded: false,
+  agentMessages: [],
+  agentPanelOpen: readStoredBool('clawblox_agent_log_open', true),
+}
+
+function readStoredBool(key, fallback) {
+  try {
+    const raw = localStorage.getItem(key)
+    if (raw === null) return fallback
+    return raw === '1'
+  } catch (_) {
+    return fallback
+  }
+}
+
+function storeBool(key, value) {
+  try {
+    localStorage.setItem(key, value ? '1' : '0')
+  } catch (_) {}
+}
 
 function setStatus(text, level = 'muted') {
   statusEl.textContent = text
@@ -13,6 +74,512 @@ function setStatus(text, level = 'muted') {
   else if (level === 'warn') statusEl.style.color = 'var(--warn)'
   else if (level === 'error') statusEl.style.color = 'var(--error)'
   else statusEl.style.color = 'var(--muted)'
+}
+
+function setChatConnection(text) {
+  if (chatConnectionEl) chatConnectionEl.textContent = text
+}
+
+function setAgentLogStatus(text) {
+  if (agentLogStatusEl) agentLogStatusEl.textContent = text
+}
+
+function setAgentLogPanelOpen(open, persist = true) {
+  replayState.agentPanelOpen = !!open
+  if (agentLogPanelEl) {
+    agentLogPanelEl.classList.toggle('is-open', replayState.agentPanelOpen)
+  }
+  if (agentLogToggleEl) {
+    agentLogToggleEl.setAttribute('aria-expanded', replayState.agentPanelOpen ? 'true' : 'false')
+    agentLogToggleEl.setAttribute('aria-label', replayState.agentPanelOpen ? 'Close agent messages' : 'Open agent messages')
+    agentLogToggleEl.title = replayState.agentPanelOpen ? 'Hide agent messages' : 'Show agent messages'
+  }
+  if (persist) storeBool('clawblox_agent_log_open', replayState.agentPanelOpen)
+}
+
+function syncAgentLogVisibility() {
+  const shouldShow = replayState.enabled && replayState.agentEnabled
+  if (agentLogPanelEl) {
+    agentLogPanelEl.hidden = !shouldShow
+    agentLogPanelEl.classList.toggle('is-open', shouldShow && replayState.agentPanelOpen)
+  }
+  if (agentLogToggleEl) agentLogToggleEl.hidden = !shouldShow
+}
+
+function formatDurationMs(ms) {
+  const totalSeconds = Math.max(0, Math.floor((Number(ms) || 0) / 1000))
+  const hours = Math.floor(totalSeconds / 3600)
+  const minutes = Math.floor((totalSeconds % 3600) / 60)
+  const seconds = totalSeconds % 60
+  if (hours > 0) return `${hours}:${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`
+  return `${minutes}:${String(seconds).padStart(2, '0')}`
+}
+
+function tickToMs(tick, info) {
+  if (!info || !Number.isFinite(info.tick_rate) || info.tick_rate <= 0) return 0
+  return Math.max(0, Math.round(((tick - info.first_tick) / info.tick_rate) * 1000))
+}
+
+function setReplayMode(enabled) {
+  replayState.enabled = !!enabled
+  if (!replayState.enabled) {
+    replayState.agentLoaded = false
+    replayState.agentMessages = []
+  }
+  document.body.dataset.mode = replayState.enabled ? 'replay' : 'live'
+  if (replayPanelEl) replayPanelEl.hidden = !replayState.enabled
+  syncAgentLogVisibility()
+  if (replayState.enabled) {
+    setChatPanelOpen(false)
+    setChatLocalStatus('Replay mode')
+    setChatConnection('Replay')
+    setAgentLogStatus('Syncing...')
+  }
+}
+
+function setReplayPlayUi(paused) {
+  if (!replayPlayIconEl || !replayPlayToggleEl) return
+  if (paused) {
+    replayPlayIconEl.innerHTML = '<path d="M8 5v14l11-7z"/>'
+    replayPlayToggleEl.setAttribute('aria-label', 'Play replay')
+    replayPlayToggleEl.title = 'Play replay'
+  } else {
+    replayPlayIconEl.innerHTML = '<path d="M7 5h3v14H7zm7 0h3v14h-3z"/>'
+    replayPlayToggleEl.setAttribute('aria-label', 'Pause replay')
+    replayPlayToggleEl.title = 'Pause replay'
+  }
+}
+
+function renderReplayInfo(info) {
+  replayState.info = info
+  if (!replayState.enabled || !info) return
+  setReplayPlayUi(!!info.paused)
+  if (replaySliderEl) {
+    replaySliderEl.min = String(info.first_tick || 0)
+    replaySliderEl.max = String(info.total_ticks || info.first_tick || 0)
+    if (!replayState.scrubbing) replaySliderEl.value = String(info.current_tick || info.first_tick || 0)
+  }
+  if (replayTimeCurrentEl) replayTimeCurrentEl.textContent = formatDurationMs(tickToMs(info.current_tick || 0, info))
+  if (replayTimeTotalEl) replayTimeTotalEl.textContent = formatDurationMs(info.duration_ms || 0)
+  if (replaySpeedEl) {
+    const value = String(info.speed ?? 1)
+    if ([...replaySpeedEl.options].some((opt) => opt.value === value)) {
+      replaySpeedEl.value = value
+    }
+  }
+}
+
+function formatAgentLogTime(timestampMs) {
+  const ms = Number(timestampMs)
+  if (!Number.isFinite(ms)) return ''
+  const dt = new Date(ms)
+  if (!Number.isFinite(dt.getTime())) return ''
+  return dt.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })
+}
+
+function renderAgentLogMessages(currentTick, payload = null) {
+  if (!agentLogFeedEl) return
+  const shouldStick = userAtBottom(agentLogFeedEl)
+  const prevScrollTop = agentLogFeedEl.scrollTop
+  const prevScrollHeight = agentLogFeedEl.scrollHeight
+  if (payload) {
+    const enabled = !!payload?.enabled
+    replayState.agentEnabled = enabled
+    replayState.agentLoaded = true
+    replayState.agentMessages = Array.isArray(payload?.messages) ? payload.messages : []
+  }
+  const enabled = replayState.agentEnabled
+  syncAgentLogVisibility()
+
+  agentLogFeedEl.textContent = ''
+  if (!enabled) {
+    setAgentLogStatus('No file')
+    return
+  }
+
+  const allMessages = Array.isArray(replayState.agentMessages) ? replayState.agentMessages : []
+  const endTick = Number((currentTick ?? replayState.info?.current_tick) || 0)
+  const messages = allMessages.filter((msg) => Number(msg?.tick) <= endTick + 1e-6)
+  setAgentLogStatus(`${messages.length}/${allMessages.length}`)
+  if (!allMessages.length) {
+    const empty = document.createElement('div')
+    empty.className = 'agent-log-empty'
+    empty.textContent = 'No agent messages in this log.'
+    agentLogFeedEl.appendChild(empty)
+    return
+  }
+  if (!messages.length) {
+    const empty = document.createElement('div')
+    empty.className = 'agent-log-empty'
+    empty.textContent = 'No messages yet at this replay point.'
+    agentLogFeedEl.appendChild(empty)
+    return
+  }
+
+  for (const msg of messages) {
+    const row = document.createElement('div')
+    row.className = 'agent-log-message'
+
+    const meta = document.createElement('div')
+    meta.className = 'agent-log-message__meta'
+
+    const role = document.createElement('span')
+    role.className = 'agent-log-message__role'
+    role.textContent = String(msg?.role || 'message')
+
+    const tickNum = Number(msg?.tick)
+
+    const time = document.createElement('span')
+    time.className = 'agent-log-message__tick'
+    time.textContent = formatAgentLogTime(msg?.timestamp_ms)
+
+    meta.append(role, time)
+
+    const body = document.createElement('div')
+    body.textContent = String(msg?.text || '')
+
+    if (Number.isFinite(tickNum) && Math.abs(tickNum - endTick) <= 1) {
+      row.style.borderColor = 'rgba(126, 211, 255, 0.6)'
+      row.style.boxShadow = 'inset 0 0 0 1px rgba(126, 211, 255, 0.28)'
+    }
+
+    row.append(meta, body)
+    agentLogFeedEl.appendChild(row)
+  }
+  if (shouldStick) {
+    agentLogFeedEl.scrollTop = agentLogFeedEl.scrollHeight
+  } else {
+    const growth = agentLogFeedEl.scrollHeight - prevScrollHeight
+    agentLogFeedEl.scrollTop = Math.max(0, prevScrollTop + growth)
+  }
+}
+
+async function fetchReplayInfo() {
+  const resp = await fetch('/replay/info', { cache: 'no-store' })
+  if (!resp.ok) throw new Error(`replay info HTTP ${resp.status}`)
+  return resp.json()
+}
+
+async function fetchReplayAgentMessages() {
+  const resp = await fetch('/replay/agent', { cache: 'no-store' })
+  if (!resp.ok) throw new Error(`replay agent HTTP ${resp.status}`)
+  return resp.json()
+}
+
+async function probeReplayMode() {
+  try {
+    return await fetchReplayInfo()
+  } catch (err) {
+    const message = String(err?.message || err || '')
+    if (!message.includes('HTTP 404')) {
+      console.error(err)
+      setStatus('Replay detection failed', 'warn')
+    }
+    return null
+  }
+}
+
+async function postReplay(path) {
+  const resp = await fetch(path, { method: 'POST' })
+  if (!resp.ok) throw new Error(`${path} HTTP ${resp.status}`)
+}
+
+async function refreshReplayInfo() {
+  if (!replayState.enabled) return
+  try {
+    const info = await fetchReplayInfo()
+    renderReplayInfo(info)
+    if (!replayState.agentLoaded) {
+      const logs = await fetchReplayAgentMessages()
+      if (logs) renderAgentLogMessages(info?.current_tick || 0, logs)
+    } else {
+      renderAgentLogMessages(info?.current_tick || 0)
+    }
+  } catch (err) {
+    console.error(err)
+    setStatus('Replay status unavailable', 'warn')
+  }
+}
+
+function startReplayPolling() {
+  if (replayState.pollTimer) clearInterval(replayState.pollTimer)
+  replayState.pollTimer = setInterval(() => {
+    void refreshReplayInfo()
+  }, 300)
+}
+
+function renderPlayerList(players) {
+  if (!playerListBodyEl) return
+  const list = Array.isArray(players) ? [...players] : []
+  const availableIds = new Set(list.map((p) => String(p?.id || '')).filter(Boolean))
+  if (selectedSpectatorPlayerId && !availableIds.has(selectedSpectatorPlayerId)) {
+    selectedSpectatorPlayerId = null
+  }
+  list.sort((a, b) => String(a?.name || '').localeCompare(String(b?.name || '')))
+  if (playerListCountEl) playerListCountEl.textContent = String(list.length)
+  playerListBodyEl.textContent = ''
+
+  if (!list.length) {
+    const empty = document.createElement('div')
+    empty.className = 'player-list__empty'
+    empty.textContent = 'No players connected'
+    playerListBodyEl.appendChild(empty)
+    return
+  }
+
+  for (const player of list) {
+    const row = document.createElement('button')
+    row.className = 'player-list__row'
+    row.type = 'button'
+    row.title = 'Focus player'
+    const playerId = String(player?.id || '')
+    if (playerId && playerId === selectedSpectatorPlayerId) {
+      row.classList.add('is-selected')
+      row.setAttribute('aria-pressed', 'true')
+    } else {
+      row.setAttribute('aria-pressed', 'false')
+    }
+    const applySelection = () => {
+      selectedSpectatorPlayerId = playerId && playerId === selectedSpectatorPlayerId ? null : (playerId || null)
+      renderPlayerList(players)
+      if (latestSpectatorState && window.__renderer?.onState) {
+        const nextState = prioritizeSelectedPlayer(latestSpectatorState)
+        window.__renderer.onState(nextState)
+      }
+    }
+    row.addEventListener('pointerdown', (ev) => {
+      ev.preventDefault()
+      applySelection()
+    })
+    row.addEventListener('click', () => {
+      applySelection()
+    })
+
+    const name = document.createElement('div')
+    name.className = 'player-list__name'
+    name.textContent = String(player?.name || 'Player')
+
+    const hp = document.createElement('div')
+    hp.className = 'player-list__hp'
+    const health = Number(player?.health)
+    const healthText = Number.isFinite(health) ? `${Math.max(0, Math.round(health))} HP` : ''
+    hp.textContent = playerId && playerId === selectedSpectatorPlayerId
+      ? (healthText ? `${healthText} | click again for free camera` : 'Click again for free camera')
+      : healthText
+
+    row.append(name, hp)
+    playerListBodyEl.appendChild(row)
+  }
+}
+
+function prioritizeSelectedPlayer(state) {
+  if (!state) return state
+  if (!selectedSpectatorPlayerId || !Array.isArray(state.players)) {
+    if (state.selected_player_id === undefined) return state
+    return { ...state, selected_player_id: null }
+  }
+  const idx = state.players.findIndex((p) => String(p?.id || '') === selectedSpectatorPlayerId)
+  if (idx <= 0) {
+    if (state.selected_player_id === selectedSpectatorPlayerId) return state
+    return { ...state, selected_player_id: selectedSpectatorPlayerId }
+  }
+  const players = [...state.players]
+  const [selected] = players.splice(idx, 1)
+  players.unshift(selected)
+  return { ...state, players, selected_player_id: selectedSpectatorPlayerId }
+}
+
+function setChatLocalStatus(text) {
+  if (chatLocalStatusEl) chatLocalStatusEl.textContent = text
+}
+
+function updateChatSendUi() {
+  if (chatSendEl) chatSendEl.disabled = chatState.sending
+  if (chatInputEl) chatInputEl.disabled = false
+}
+
+function setChatPanelOpen(open) {
+  chatState.open = !!open
+  if (!chatPanelEl) return
+  chatPanelEl.classList.toggle('is-open', chatState.open)
+  if (chatToggleEl) {
+    chatToggleEl.setAttribute('aria-expanded', chatState.open ? 'true' : 'false')
+  }
+  if (chatState.open) renderChatFeed()
+}
+
+function makeLocalPlayerName() {
+  const key = 'clawblox_local_chat_name'
+  const existing = localStorage.getItem(key)
+  if (existing && existing.trim()) return existing.trim()
+  const generated = `Player-${Math.random().toString(36).slice(2, 6)}`
+  localStorage.setItem(key, generated)
+  return generated
+}
+
+async function ensureChatSession() {
+  if (chatState.sessionToken) return
+  const playerName = chatState.playerName || makeLocalPlayerName()
+  chatState.playerName = playerName
+  const resp = await fetch(`/join?name=${encodeURIComponent(playerName)}`, { method: 'POST' })
+  if (!resp.ok) throw new Error(`join failed: HTTP ${resp.status}`)
+  const data = await resp.json()
+  chatState.sessionToken = data.session || null
+  chatState.agentId = data.agent_id || null
+  setChatLocalStatus(`Chatting as ${playerName}`)
+}
+
+function userAtBottom(el) {
+  return el.scrollHeight - el.scrollTop - el.clientHeight < 16
+}
+
+function nameColor(name) {
+  let h = 0
+  for (let i = 0; i < name.length; i++) h = (h * 31 + name.charCodeAt(i)) >>> 0
+  const hue = h % 360
+  return `hsl(${hue}deg 70% 75%)`
+}
+
+function appendChatMessage(msg) {
+  const id = String(msg?.id || '')
+  if (!id || chatState.seenIds.has(id)) return
+  chatState.seenIds.add(id)
+  chatState.messages.push(msg)
+  if (chatState.messages.length > 200) {
+    const removed = chatState.messages.splice(0, chatState.messages.length - 200)
+    for (const item of removed) chatState.seenIds.delete(String(item.id || ''))
+  }
+  renderChatFeed()
+}
+
+function renderChatFeed() {
+  if (!chatFeedEl) return
+  const shouldStick = userAtBottom(chatFeedEl)
+  chatFeedEl.textContent = ''
+  if (!chatState.messages.length) {
+    const empty = document.createElement('div')
+    empty.className = 'chat-message chat-message--system'
+    empty.textContent = 'No messages yet.'
+    chatFeedEl.appendChild(empty)
+  } else {
+    for (const msg of chatState.messages) {
+      const row = document.createElement('div')
+      row.className = 'chat-message'
+
+      const meta = document.createElement('span')
+      meta.className = 'chat-message__meta'
+
+      const name = document.createElement('span')
+      name.className = 'chat-message__name'
+      name.textContent = String(msg.agent_name || 'Player')
+      name.style.color = nameColor(name.textContent)
+
+      const time = document.createElement('span')
+      time.className = 'chat-message__time'
+      const dt = new Date(String(msg.created_at || ''))
+      time.textContent = Number.isFinite(dt.getTime())
+        ? dt.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })
+        : ''
+
+      const body = document.createElement('span')
+      body.textContent = String(msg.content || '')
+
+      meta.append(name, time)
+      row.append(meta, body)
+      chatFeedEl.appendChild(row)
+    }
+  }
+  if (shouldStick) chatFeedEl.scrollTop = chatFeedEl.scrollHeight
+}
+
+async function loadChatHistory() {
+  if (replayState.enabled) return
+  try {
+    const resp = await fetch('/chat/messages?limit=50')
+    if (!resp.ok) throw new Error(`history HTTP ${resp.status}`)
+    const data = await resp.json()
+    const messages = Array.isArray(data?.messages) ? data.messages : []
+    for (const msg of messages) appendChatMessage(msg)
+    chatState.loadedHistory = true
+  } catch (err) {
+    console.error(err)
+    setChatLocalStatus('Failed to load chat history')
+  }
+}
+
+async function sendChatMessage(text) {
+  if (replayState.enabled) return
+  const content = String(text || '').trim()
+  if (!content) return
+  chatState.sending = true
+  updateChatSendUi()
+  try {
+    await ensureChatSession()
+    const resp = await fetch('/chat', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Session': chatState.sessionToken,
+      },
+      body: JSON.stringify({ content }),
+    })
+    if (!resp.ok) throw new Error(`chat send failed: HTTP ${resp.status}`)
+    if (chatInputEl) chatInputEl.value = ''
+    setChatLocalStatus(`Chatting as ${chatState.playerName}`)
+  } catch (err) {
+    console.error(err)
+    setChatLocalStatus(err instanceof Error ? err.message : 'Failed to send chat')
+  } finally {
+    chatState.sending = false
+    updateChatSendUi()
+  }
+}
+
+if (chatToggleEl) {
+  chatToggleEl.addEventListener('click', () => {
+    setChatPanelOpen(!chatState.open)
+    if (chatState.open && chatInputEl) chatInputEl.focus()
+  })
+}
+
+if (chatFormEl) {
+  chatFormEl.addEventListener('submit', (ev) => {
+    ev.preventDefault()
+    void sendChatMessage(chatInputEl?.value || '')
+  })
+}
+
+window.addEventListener('keydown', (ev) => {
+  const target = ev.target
+  const isTextField = target instanceof HTMLElement && (
+    target.tagName === 'INPUT' ||
+    target.tagName === 'TEXTAREA' ||
+    target.isContentEditable
+  )
+
+  if (ev.key === '/' && !isTextField) {
+    ev.preventDefault()
+    setChatPanelOpen(true)
+    chatInputEl?.focus()
+    return
+  }
+
+  if (ev.key === 'Escape' && chatState.open) {
+    if (document.activeElement === chatInputEl) {
+      chatInputEl.blur()
+    } else {
+      setChatPanelOpen(false)
+    }
+  }
+})
+
+updateChatSendUi()
+renderChatFeed()
+setChatLocalStatus('Read-only until you send a message.')
+setChatConnection('Connecting...')
+
+if (!chatState.open) {
+  setChatPanelOpen(false)
 }
 
 function resizeCanvas() {
@@ -441,6 +1008,18 @@ async function bootstrap() {
 
   setStatus('Loading renderer...', 'muted')
 
+  const replayInfo = await probeReplayMode()
+  if (replayInfo) {
+    setReplayMode(true)
+    renderReplayInfo(replayInfo)
+    const logs = await fetchReplayAgentMessages().catch((err) => {
+      console.error(err)
+      return null
+    })
+    if (logs) renderAgentLogMessages(replayInfo?.current_tick || 0, logs)
+    startReplayPolling()
+  }
+
   let manifest
   try {
     manifest = await loadManifest()
@@ -508,9 +1087,25 @@ async function bootstrap() {
   ws.binaryType = 'arraybuffer'
   spectateWs = ws
 
-  ws.onopen = () => setStatus(`Connected | ${rendererTarget}`, 'ok')
-  ws.onerror = () => setStatus('WebSocket error', 'error')
-  ws.onclose = () => setStatus('Disconnected', 'warn')
+  ws.onopen = () => {
+    chatState.wsConnected = true
+    setChatConnection(replayState.enabled ? 'Replay' : 'Live')
+    setStatus(
+      replayState.enabled ? `Connected | Replay | ${rendererTarget}` : `Connected | ${rendererTarget}`,
+      'ok'
+    )
+    if (!replayState.enabled && !chatState.loadedHistory) void loadChatHistory()
+  }
+  ws.onerror = () => {
+    setChatConnection('WS error')
+    setStatus('WebSocket error', 'error')
+  }
+  ws.onclose = () => {
+    chatState.wsConnected = false
+    setChatConnection('Offline')
+    setStatus('Disconnected', 'warn')
+    renderPlayerList([])
+  }
 
   ws.onmessage = (event) => {
     try {
@@ -525,14 +1120,28 @@ async function bootstrap() {
         onAudioChunk(data)
         return
       }
+      if (data && data.type === 'chat_message') {
+        appendChatMessage(data)
+        return
+      }
+      if (data && typeof data.type === 'string') {
+        if (data.type === 'replay_error') {
+          setStatus(data.message || 'Replay error', 'error')
+          console.error('[replay]', data.message || 'Replay error', data)
+        }
+        return
+      }
       const state = data
       if (state && state.error) {
         setStatus(state.error, 'error')
         return
       }
+      latestSpectatorState = state
       wsStats.frames += 1
       if (typeof state?.tick === 'number') wsStats.lastTick = state.tick
-      if (renderer.onState) renderer.onState(state)
+      renderPlayerList(state?.players)
+      const rendererState = prioritizeSelectedPlayer(state)
+      if (renderer.onState) renderer.onState(rendererState)
     } catch (error) {
       console.error(error)
       setStatus('Failed to parse spectator state', 'error')
@@ -541,7 +1150,70 @@ async function bootstrap() {
 
   window.addEventListener('beforeunload', () => {
     if (renderer.unmount) renderer.unmount()
+    if (replayState.pollTimer) clearInterval(replayState.pollTimer)
     ws.close()
+  })
+}
+
+if (replayPlayToggleEl) {
+  replayPlayToggleEl.addEventListener('click', async () => {
+    if (!replayState.enabled || !replayState.info) return
+    try {
+      if (replayState.info.paused) await postReplay('/replay/play')
+      else await postReplay('/replay/pause')
+      await refreshReplayInfo()
+    } catch (err) {
+      console.error(err)
+      setStatus('Failed to update replay playback', 'error')
+    }
+  })
+}
+
+if (replaySliderEl) {
+  replaySliderEl.addEventListener('pointerdown', () => {
+    replayState.scrubbing = true
+  })
+  replaySliderEl.addEventListener('input', () => {
+    if (!replayState.enabled || !replayState.info) return
+    const tick = Number(replaySliderEl.value)
+    if (replayTimeCurrentEl) replayTimeCurrentEl.textContent = formatDurationMs(tickToMs(tick, replayState.info))
+  })
+  replaySliderEl.addEventListener('change', async () => {
+    if (!replayState.enabled) return
+    try {
+      const tick = Number(replaySliderEl.value)
+      await postReplay(`/replay/seek?tick=${encodeURIComponent(String(tick))}`)
+      await refreshReplayInfo()
+    } catch (err) {
+      console.error(err)
+      setStatus('Failed to seek replay', 'error')
+    } finally {
+      replayState.scrubbing = false
+    }
+  })
+  replaySliderEl.addEventListener('pointerup', () => {
+    replayState.scrubbing = false
+  })
+}
+
+if (replaySpeedEl) {
+  replaySpeedEl.addEventListener('change', async () => {
+    if (!replayState.enabled) return
+    try {
+      await postReplay(`/replay/speed?value=${encodeURIComponent(replaySpeedEl.value)}`)
+      await refreshReplayInfo()
+    } catch (err) {
+      console.error(err)
+      setStatus('Failed to change replay speed', 'error')
+    }
+  })
+}
+
+if (agentLogToggleEl) {
+  setAgentLogPanelOpen(replayState.agentPanelOpen, false)
+  agentLogToggleEl.addEventListener('click', () => {
+    setAgentLogPanelOpen(!replayState.agentPanelOpen, true)
+    syncAgentLogVisibility()
   })
 }
 

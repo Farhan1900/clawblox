@@ -11,9 +11,11 @@ local BLOCK_SIZE = 0.75
 local PICKUP_RANGE = 6
 local PLACE_RANGE = 7
 local PLAYER_SPAWN_POSITION = Vector3.new(0, 5, 0)
+local OUT_OF_BOUNDS_Y = -200
 
 local heldBlocksByPlayer = {}
 local placingBlocks = {} -- { block, startPos, targetPos, elapsed, duration }
+local trackedBlocks = {}
 
 local blockColors = {
     Sand = Color3.fromRGB(214, 186, 128),
@@ -52,10 +54,10 @@ local mesas = {
     -- NE climbing path: large mesa (4) -> high shelf (7) -> peak (11)
     { name = "HighShelf",     size = {10, 7, 8},     pos = {25, 3.5, 28} },
     { name = "Peak",          size = {5, 11, 5},     pos = {28, 5.5, 32} },
-    -- SW climbing path: tall mesa (6) -> tower base (7) -> summit (10) -> spire (13.5)
+    -- SW climbing path: tall mesa (6) -> tower base (7) -> summit (10) -> spire (20)
     { name = "TowerBase",     size = {8, 7, 8},      pos = {-28, 3.5, -26} },
     { name = "Summit",        size = {6, 10, 6},     pos = {-28, 5, -30} },
-    { name = "Spire",         size = {4, 13.5, 4},   pos = {-30, 6.75, -33} },
+    { name = "Spire",         size = {4, 20, 4},     pos = {-30, 10, -33} },
 }
 
 for _, m in ipairs(mesas) do
@@ -74,9 +76,9 @@ end
 --------------------------------------------------------------------------------
 
 local function setBlockMetadata(block, colorName)
-    block:SetAttribute("RenderRole", "Block")
-    block:SetAttribute("BlockColorName", colorName)
-    block:SetAttribute("IsPickupBlock", true)
+    block:SetAttribute("RenderRole", "PickupObject")
+    block:SetAttribute("ItemColorName", colorName)
+    block:SetAttribute("IsPickupObject", true)
 end
 
 local function createBlock(name, position, colorName)
@@ -90,6 +92,7 @@ local function createBlock(name, position, colorName)
     block.CustomPhysicalProperties = blockPhysics
     setBlockMetadata(block, colorName)
     block.Parent = Workspace
+    trackedBlocks[block] = true
     return block
 end
 
@@ -125,8 +128,8 @@ local function getHumanoidRootPart(player)
 end
 
 local function setPlayerBlockState(player, block)
-    player:SetAttribute("HoldingBlock", block ~= nil)
-    player:SetAttribute("HeldBlockColor", block and block:GetAttribute("BlockColorName") or "")
+    -- Intentionally keep pickup/held state implicit in observations.
+    -- Agents can infer state from world changes and LastActionResult.
 end
 
 local function setupPlayer(player)
@@ -152,12 +155,7 @@ local function setupPlayer(player)
         end
     end
 
-    player:SetAttribute("BlockSize", BLOCK_SIZE)
-    player:SetAttribute("PickupRange", PICKUP_RANGE)
-    player:SetAttribute("PlaceRange", PLACE_RANGE)
-    player:SetAttribute("HoldingBlock", false)
-    player:SetAttribute("HeldBlockColor", "")
-    player:SetAttribute("LastBlockAction", "Ready")
+    player:SetAttribute("LastActionResult", "Ready")
 end
 
 local function cleanupPlayer(player)
@@ -166,6 +164,52 @@ local function cleanupPlayer(player)
         heldBlock:Destroy()
         heldBlocksByPlayer[player] = nil
     end
+end
+
+local function resetPlayerToSpawn(player)
+    local character = player.Character
+    if not character then
+        return
+    end
+
+    local hrp = character:FindFirstChild("HumanoidRootPart")
+    local humanoid = character:FindFirstChild("Humanoid")
+    if hrp then
+        hrp.Position = PLAYER_SPAWN_POSITION
+        hrp.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
+        hrp.AssemblyAngularVelocity = Vector3.new(0, 0, 0)
+    end
+    if humanoid then
+        humanoid:CancelMoveTo()
+    end
+end
+
+local function releaseBlockReferences(block)
+    for player, heldBlock in pairs(heldBlocksByPlayer) do
+        if heldBlock == block then
+            heldBlocksByPlayer[player] = nil
+            setPlayerBlockState(player, nil)
+            player:SetAttribute("LastActionResult", "ResetAfterFall")
+        end
+    end
+
+    local i = 1
+    while i <= #placingBlocks do
+        if placingBlocks[i].block == block then
+            table.remove(placingBlocks, i)
+        else
+            i = i + 1
+        end
+    end
+end
+
+local function destroyBlock(block)
+    if not block.Parent then
+        return
+    end
+    releaseBlockReferences(block)
+    trackedBlocks[block] = nil
+    block:Destroy()
 end
 
 --------------------------------------------------------------------------------
@@ -185,7 +229,7 @@ local function findNearestBlock(targetPosition, maxDistance)
     local closestDistance = maxDistance
 
     for _, inst in ipairs(Workspace:GetDescendants()) do
-        if inst:IsA("Part") and inst:GetAttribute("IsPickupBlock") then
+        if inst:IsA("Part") and inst:GetAttribute("IsPickupObject") then
             local distance = (inst.Position - targetPosition).Magnitude
             if distance <= closestDistance then
                 closestBlock = inst
@@ -207,32 +251,32 @@ end
 
 local function pickupBlock(player, inputData)
     if heldBlocksByPlayer[player] then
-        player:SetAttribute("LastBlockAction", "PickupFailed:AlreadyHolding")
+        player:SetAttribute("LastActionResult", "PickupFailed:AlreadyHolding")
         return
     end
 
     if not inputData or not inputData.position then
-        player:SetAttribute("LastBlockAction", "PickupFailed:MissingPosition")
+        player:SetAttribute("LastActionResult", "PickupFailed:MissingPosition")
         return
     end
 
     local pos = inputData.position
     local targetPosition = Vector3.new(pos[1], pos[2], pos[3])
     if not canReach(player, targetPosition, PICKUP_RANGE) then
-        player:SetAttribute("LastBlockAction", "PickupFailed:OutOfRange")
+        player:SetAttribute("LastActionResult", "PickupFailed:OutOfRange")
         return
     end
 
     local block = findNearestBlock(targetPosition, 1.5)
     if not block then
-        player:SetAttribute("LastBlockAction", "PickupFailed:NoBlock")
+        player:SetAttribute("LastActionResult", "PickupFailed:NoBlock")
         return
     end
 
     heldBlocksByPlayer[player] = block
     block.CanCollide = false
     setPlayerBlockState(player, block)
-    player:SetAttribute("LastBlockAction", "PickupSuccess")
+    player:SetAttribute("LastActionResult", "PickupSuccess")
 end
 
 local function positionOccupied(player, targetPosition)
@@ -258,24 +302,24 @@ end
 local function placeBlock(player, inputData)
     local block = heldBlocksByPlayer[player]
     if not block then
-        player:SetAttribute("LastBlockAction", "PlaceFailed:EmptyHands")
+        player:SetAttribute("LastActionResult", "PlaceFailed:EmptyHands")
         return
     end
 
     if not inputData or not inputData.position then
-        player:SetAttribute("LastBlockAction", "PlaceFailed:MissingPosition")
+        player:SetAttribute("LastActionResult", "PlaceFailed:MissingPosition")
         return
     end
 
     local pos = inputData.position
     local targetPosition = Vector3.new(pos[1], pos[2], pos[3])
     if not canReach(player, targetPosition, PLACE_RANGE) then
-        player:SetAttribute("LastBlockAction", "PlaceFailed:OutOfRange")
+        player:SetAttribute("LastActionResult", "PlaceFailed:OutOfRange")
         return
     end
 
     if positionOccupied(player, targetPosition) then
-        player:SetAttribute("LastBlockAction", "PlaceFailed:Occupied")
+        player:SetAttribute("LastActionResult", "PlaceFailed:Occupied")
         return
     end
 
@@ -293,7 +337,7 @@ local function placeBlock(player, inputData)
         duration = 0.3,
     })
 
-    player:SetAttribute("LastBlockAction", "PlaceSuccess")
+    player:SetAttribute("LastActionResult", "PlaceSuccess")
 end
 
 if AgentInputService then
@@ -321,6 +365,13 @@ end
 --------------------------------------------------------------------------------
 
 RunService.Heartbeat:Connect(function(dt)
+    for _, player in ipairs(Players:GetPlayers()) do
+        local hrp = getHumanoidRootPart(player)
+        if hrp and hrp.Position.Y < OUT_OF_BOUNDS_Y then
+            resetPlayerToSpawn(player)
+        end
+    end
+
     -- Update held blocks
     for player, heldBlock in pairs(heldBlocksByPlayer) do
         local hrp = getHumanoidRootPart(player)
@@ -342,10 +393,18 @@ RunService.Heartbeat:Connect(function(dt)
         if alpha >= 1 then
             p.block.Anchored = false
             p.block.CanCollide = true
-            setBlockMetadata(p.block, p.block:GetAttribute("BlockColorName"))
+            setBlockMetadata(p.block, p.block:GetAttribute("ItemColorName"))
             table.remove(placingBlocks, i)
         else
             i = i + 1
+        end
+    end
+
+    for block, _ in pairs(trackedBlocks) do
+        if not block.Parent then
+            trackedBlocks[block] = nil
+        elseif block.Position.Y < OUT_OF_BOUNDS_Y then
+            destroyBlock(block)
         end
     end
 end)
