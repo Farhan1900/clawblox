@@ -114,6 +114,67 @@ function createEntityVisual(entity) {
     return group
   }
 
+  if (role === 'Fire') {
+    const group = new THREE.Group()
+    group.userData.isFire = true
+    group.userData.fireTime = 0
+
+    const flameHeight = 1.2
+    const flameWidth = 0.6
+
+    // Flame body: 3 intersecting planes in a star pattern
+    const flameMat = new THREE.MeshBasicMaterial({
+      color: 0xff6600,
+      transparent: true,
+      opacity: 0.85,
+      side: THREE.DoubleSide,
+      blending: THREE.AdditiveBlending,
+      depthWrite: false,
+    })
+
+    const flamePlaneGeo = new THREE.PlaneGeometry(flameWidth, flameHeight)
+    const flameAngles = [0, Math.PI / 3, (2 * Math.PI) / 3]
+    const flamePlanes = []
+    for (const angle of flameAngles) {
+      const plane = new THREE.Mesh(flamePlaneGeo, flameMat.clone())
+      plane.rotation.y = angle
+      plane.position.y = flameHeight * 0.3
+      plane.userData.baseAngle = angle
+      flamePlanes.push(plane)
+      group.add(plane)
+    }
+    group.userData.flamePlanes = flamePlanes
+
+    // Hot core: 2 inner planes
+    const coreMat = new THREE.MeshBasicMaterial({
+      color: 0xffcc00,
+      transparent: true,
+      opacity: 0.9,
+      side: THREE.DoubleSide,
+      blending: THREE.AdditiveBlending,
+      depthWrite: false,
+    })
+
+    const corePlaneGeo = new THREE.PlaneGeometry(flameWidth * 0.4, flameHeight * 0.6)
+    const corePlanes = []
+    for (let ci = 0; ci < 2; ci++) {
+      const core = new THREE.Mesh(corePlaneGeo, coreMat.clone())
+      core.rotation.y = ci * (Math.PI / 2)
+      core.position.y = flameHeight * 0.25
+      corePlanes.push(core)
+      group.add(core)
+    }
+    group.userData.corePlanes = corePlanes
+
+    // PointLight for dynamic illumination
+    const fireLight = new THREE.PointLight(0xff8833, 2, 8)
+    fireLight.position.y = flameHeight * 0.5
+    group.add(fireLight)
+    group.userData.fireLight = fireLight
+
+    return group
+  }
+
   if (role === 'Mesa') {
     const group = new THREE.Group()
     const w = size[0], h = size[1], d = size[2]
@@ -256,6 +317,36 @@ export function createRenderer(ctx) {
       obj.position.set(entity.position[0], entity.position[1], entity.position[2])
       if (entity.rotation) obj.quaternion.copy(rotationToQuaternion(entity.rotation))
       obj.visible = !(entity.render && entity.render.visible === false)
+
+      // Animate fire entities
+      if (obj.userData.isFire) {
+        obj.userData.fireTime += dt
+        const t = obj.userData.fireTime
+
+        if (obj.userData.flamePlanes) {
+          for (let fi = 0; fi < obj.userData.flamePlanes.length; fi++) {
+            const plane = obj.userData.flamePlanes[fi]
+            const phase = fi * 2.1
+            plane.scale.y = 0.8 + 0.3 * Math.sin(t * 5.0 + phase)
+            plane.scale.x = 0.9 + 0.15 * Math.sin(t * 4.0 + phase + 1.0)
+            plane.rotation.y = plane.userData.baseAngle + 0.08 * Math.sin(t * 3.0 + phase)
+            plane.material.opacity = 0.6 + 0.3 * Math.sin(t * 6.0 + phase + 0.5)
+          }
+        }
+
+        if (obj.userData.corePlanes) {
+          for (let ci = 0; ci < obj.userData.corePlanes.length; ci++) {
+            const core = obj.userData.corePlanes[ci]
+            const cPhase = ci * 1.7
+            core.scale.y = 0.85 + 0.2 * Math.sin(t * 7.0 + cPhase)
+            core.material.opacity = 0.7 + 0.25 * Math.sin(t * 8.0 + cPhase)
+          }
+        }
+
+        if (obj.userData.fireLight) {
+          obj.userData.fireLight.intensity = 1.5 + 0.8 * Math.sin(t * 5.5) + 0.3 * Math.sin(t * 13.0)
+        }
+      }
 
       const prev = obj.userData.prevPos
       let speed = 0

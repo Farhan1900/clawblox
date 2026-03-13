@@ -13,9 +13,15 @@ local PLACE_RANGE = 7
 local PLAYER_SPAWN_POSITION = Vector3.new(0, 5, 0)
 local OUT_OF_BOUNDS_Y = -200
 
+-- Bonfire easter egg
+local BONFIRE_SEARCH_RADIUS = 1.5 * BLOCK_SIZE
+local BONFIRE_MIN_SLATE = 3
+local BONFIRE_Y_TOLERANCE = 0.5 * BLOCK_SIZE
+
 local heldBlocksByPlayer = {}
 local placingBlocks = {} -- { block, startPos, targetPos, elapsed, duration }
 local trackedBlocks = {}
+local activeBonfires = {} -- { centerBlock, firePart, memberBlocks }
 
 local blockColors = {
     Sand = Color3.fromRGB(214, 186, 128),
@@ -213,6 +219,123 @@ local function destroyBlock(block)
 end
 
 --------------------------------------------------------------------------------
+-- BONFIRE EASTER EGG
+--------------------------------------------------------------------------------
+
+local function isBlockSettled(block)
+    if not block.Parent then return false end
+    for _, held in pairs(heldBlocksByPlayer) do
+        if held == block then return false end
+    end
+    for _, p in ipairs(placingBlocks) do
+        if p.block == block then return false end
+    end
+    return true
+end
+
+local function isBlockInActiveBonfire(block)
+    for _, bonfire in ipairs(activeBonfires) do
+        if bonfire.centerBlock == block then return true end
+        for _, member in ipairs(bonfire.memberBlocks) do
+            if member == block then return true end
+        end
+    end
+    return false
+end
+
+local function checkForBonfire(sandBlock)
+    if not isBlockSettled(sandBlock) then return nil end
+    if isBlockInActiveBonfire(sandBlock) then return nil end
+    if sandBlock:GetAttribute("ItemColorName") ~= "Sand" then return nil end
+
+    local centerPos = sandBlock.Position
+    local slateBlocks = {}
+
+    for block, _ in pairs(trackedBlocks) do
+        if block ~= sandBlock
+            and block:GetAttribute("ItemColorName") == "Slate"
+            and isBlockSettled(block)
+            and not isBlockInActiveBonfire(block)
+        then
+            local dx = block.Position.X - centerPos.X
+            local dy = block.Position.Y - centerPos.Y
+            local dz = block.Position.Z - centerPos.Z
+            local horizontalDist = math.sqrt(dx * dx + dz * dz)
+            if horizontalDist <= BONFIRE_SEARCH_RADIUS and math.abs(dy) <= BONFIRE_Y_TOLERANCE then
+                table.insert(slateBlocks, block)
+            end
+        end
+    end
+
+    if #slateBlocks >= BONFIRE_MIN_SLATE then
+        return slateBlocks
+    end
+    return nil
+end
+
+local function createBonfire(sandBlock, slateBlocks)
+    local firePos = sandBlock.Position + Vector3.new(0, BLOCK_SIZE, 0)
+
+    local firePart = Instance.new("Part")
+    firePart.Name = "BonfireFire"
+    firePart.Size = Vector3.new(BLOCK_SIZE, BLOCK_SIZE * 2, BLOCK_SIZE)
+    firePart.Position = firePos
+    firePart.Anchored = true
+    firePart.CanCollide = false
+    firePart.Transparency = 1
+    firePart:SetAttribute("RenderRole", "Fire")
+    firePart:SetAttribute("RenderVisible", true)
+    firePart:SetAttribute("FireIntensity", 1.0)
+    firePart.Parent = Workspace
+
+    -- Anchor member blocks so physics can't scatter them
+    sandBlock.Anchored = true
+    for _, slate in ipairs(slateBlocks) do
+        slate.Anchored = true
+    end
+
+    local members = { sandBlock }
+    for _, slate in ipairs(slateBlocks) do
+        table.insert(members, slate)
+    end
+
+    table.insert(activeBonfires, {
+        centerBlock = sandBlock,
+        firePart = firePart,
+        memberBlocks = members,
+    })
+
+    print(string.format("Bonfire lit at (%.1f, %.1f, %.1f)", firePos.X, firePos.Y, firePos.Z))
+end
+
+local function tryCreateBonfire(placedBlock)
+    local colorName = placedBlock:GetAttribute("ItemColorName")
+    if colorName == "Sand" then
+        local slates = checkForBonfire(placedBlock)
+        if slates then
+            createBonfire(placedBlock, slates)
+        end
+    elseif colorName == "Slate" then
+        -- Check nearby Sand blocks to see if the ring is now complete
+        for block, _ in pairs(trackedBlocks) do
+            if block:GetAttribute("ItemColorName") == "Sand" and isBlockSettled(block) then
+                local dx = block.Position.X - placedBlock.Position.X
+                local dy = block.Position.Y - placedBlock.Position.Y
+                local dz = block.Position.Z - placedBlock.Position.Z
+                local horizontalDist = math.sqrt(dx * dx + dz * dz)
+                if horizontalDist <= BONFIRE_SEARCH_RADIUS and math.abs(dy) <= BONFIRE_Y_TOLERANCE then
+                    local slates = checkForBonfire(block)
+                    if slates then
+                        createBonfire(block, slates)
+                        break
+                    end
+                end
+            end
+        end
+    end
+end
+
+--------------------------------------------------------------------------------
 -- INPUT HANDLING
 --------------------------------------------------------------------------------
 
@@ -394,6 +517,7 @@ RunService.Heartbeat:Connect(function(dt)
             p.block.Anchored = false
             p.block.CanCollide = true
             setBlockMetadata(p.block, p.block:GetAttribute("ItemColorName"))
+            tryCreateBonfire(p.block)
             table.remove(placingBlocks, i)
         else
             i = i + 1
@@ -405,6 +529,20 @@ RunService.Heartbeat:Connect(function(dt)
             trackedBlocks[block] = nil
         elseif block.Position.Y < OUT_OF_BOUNDS_Y then
             destroyBlock(block)
+        end
+    end
+
+    -- Cleanup bonfires whose center block was destroyed
+    local j = 1
+    while j <= #activeBonfires do
+        local bonfire = activeBonfires[j]
+        if not bonfire.centerBlock.Parent then
+            if bonfire.firePart.Parent then
+                bonfire.firePart:Destroy()
+            end
+            table.remove(activeBonfires, j)
+        else
+            j = j + 1
         end
     end
 end)
