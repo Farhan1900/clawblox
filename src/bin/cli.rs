@@ -1800,7 +1800,9 @@ fn run_game(
             .with_state(state)
             .layer(cors);
 
-        let addr = SocketAddr::from(([0, 0, 0, 0], port));
+        // Bind to IPv6 wildcard — on macOS this accepts both IPv4 and IPv6,
+        // so `localhost` works whether it resolves to 127.0.0.1 or ::1.
+        let addr = SocketAddr::from((std::net::Ipv6Addr::UNSPECIFIED, port));
         println!();
         println!("Server running on http://localhost:{}", port);
         println!("Local frontend: http://localhost:{}/", port);
@@ -1971,7 +1973,9 @@ fn run_replay(
             .with_state(replay_state)
             .layer(cors);
 
-        let addr = SocketAddr::from(([0, 0, 0, 0], port));
+        // Bind to IPv6 wildcard — on macOS this accepts both IPv4 and IPv6,
+        // so `localhost` works whether it resolves to 127.0.0.1 or ::1.
+        let addr = SocketAddr::from((std::net::Ipv6Addr::UNSPECIFIED, port));
         println!("Replay server: http://localhost:{}", port);
 
         let listener = tokio::net::TcpListener::bind(addr).await.unwrap_or_else(|e| {
@@ -2196,7 +2200,9 @@ fn run_external_runtime(path: PathBuf, port: u16, daemon: bool, config: &clawblo
             .with_state(state)
             .layer(cors);
 
-        let addr = SocketAddr::from(([0, 0, 0, 0], port));
+        // Bind to IPv6 wildcard — on macOS this accepts both IPv4 and IPv6,
+        // so `localhost` works whether it resolves to 127.0.0.1 or ::1.
+        let addr = SocketAddr::from((std::net::Ipv6Addr::UNSPECIFIED, port));
         println!();
         println!("Server running on http://localhost:{}", port);
         println!("Local frontend: http://localhost:{}/", port);
