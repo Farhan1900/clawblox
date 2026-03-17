@@ -130,6 +130,7 @@ There is an automatic loop that sends a "continue" user message whenever you sto
 World base URL: ${WORLD_BASE_URL}
 $(if [[ -n "$SESSION_ID" ]]; then printf 'Session header: %s\nSession key: %s\n' "$WORLD_SESSION_HEADER" "$SESSION_ID"; fi)
 At startup:
+First inspect your workspace.
 ${STARTUP_INSTRUCTIONS}
 EOF
 
