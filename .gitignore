@@ -25,8 +25,10 @@ recordings/
 minecraft-adapter/
 worlds/minecraft/monitor/
 worlds/minecraft/monitor-old/
+worlds/mesa-opaque-actions-world/live_observation_pretty.json
 
 *.egg-info/
+**/.build.lock
 
 # Piper TTS binary (download separately, not versioned)
 agent/piper/
