@@ -99,6 +99,9 @@ enum Commands {
         /// Port to run the server on
         #[arg(short, long, default_value = "8080")]
         port: u16,
+        /// URL base path to mount the runtime under
+        #[arg(long, default_value = "/")]
+        base_path: String,
         /// Run as daemon (internal use only)
         #[arg(long, hide = true)]
         daemon: bool,
@@ -122,6 +125,9 @@ enum Commands {
         /// Port to run the replay server on
         #[arg(short, long, default_value = "8080")]
         port: u16,
+        /// URL base path to mount the replay runtime under
+        #[arg(long, default_value = "/")]
+        base_path: String,
         /// Override the world directory (for serving assets)
         #[arg(long)]
         world_dir: Option<PathBuf>,
@@ -137,6 +143,9 @@ enum Commands {
         /// Port to run the server on
         #[arg(short, long, default_value = "8080")]
         port: u16,
+        /// URL base path to mount the runtime under
+        #[arg(long, default_value = "/")]
+        base_path: String,
         /// Datastore backend for local DataStoreService
         #[arg(long, value_enum, default_value_t = LocalDatastore::Sqlite)]
         datastore: LocalDatastore,
@@ -192,23 +201,26 @@ fn main() {
         Commands::Run {
             path,
             port,
+            base_path,
             daemon,
             datastore,
             record,
             record_dir,
-        } => run_game(path, port, daemon, datastore, record, record_dir),
+        } => run_game(path, port, &base_path, daemon, datastore, record, record_dir),
         Commands::Replay {
             file,
             speed,
             port,
+            base_path,
             world_dir,
             agent,
-        } => run_replay(file, speed, port, world_dir, agent),
+        } => run_replay(file, speed, port, &base_path, world_dir, agent),
         Commands::Start {
             path,
             port,
+            base_path,
             datastore,
-        } => start_game(path, port, datastore),
+        } => start_game(path, port, &base_path, datastore),
         Commands::Stop { port } => stop_game(port),
         Commands::Login {
             name,
@@ -1250,6 +1262,52 @@ fn default_renderer_manifest() -> LocalRendererManifest {
     }
 }
 
+fn normalize_base_path(base_path: &str) -> String {
+    let trimmed = base_path.trim();
+    if trimmed.is_empty() || trimmed == "/" {
+        return "/".to_string();
+    }
+
+    let with_leading = if trimmed.starts_with('/') {
+        trimmed.to_string()
+    } else {
+        format!("/{}", trimmed)
+    };
+
+    let normalized = with_leading.trim_end_matches('/');
+    if normalized.is_empty() {
+        "/".to_string()
+    } else {
+        normalized.to_string()
+    }
+}
+
+fn join_base_path(base_path: &str, route: &str) -> String {
+    let normalized = normalize_base_path(base_path);
+    let route = if route.starts_with('/') {
+        route.to_string()
+    } else {
+        format!("/{}", route)
+    };
+    if normalized == "/" {
+        route
+    } else {
+        format!("{}{}", normalized, route)
+    }
+}
+
+fn mount_router_at_base_path<S>(router: Router<S>, base_path: &str) -> Router<S>
+where
+    S: Clone + Send + Sync + 'static,
+{
+    let normalized = normalize_base_path(base_path);
+    if normalized == "/" {
+        router
+    } else {
+        Router::new().nest(&normalized, router)
+    }
+}
+
 #[derive(Debug, Deserialize)]
 struct RendererPackageJson {
     #[serde(default)]
@@ -1418,6 +1476,7 @@ fn bundle_renderer_package_with_esbuild(
 fn maybe_build_renderer_package(
     game_dir: &Path,
     config: &clawblox::config::RendererConfig,
+    base_path: &str,
 ) -> Result<LocalRendererManifest, String> {
     let Some(package) = read_renderer_package(game_dir)? else {
         return Err(
@@ -1521,7 +1580,7 @@ fn maybe_build_renderer_package(
         api_version,
         name,
         mode: "module".to_string(),
-        entry_url: Some(format!("/renderer-files/{}", out_rel)),
+        entry_url: Some(join_base_path(base_path, &format!("/renderer-files/{}", out_rel))),
         capabilities,
     })
 }
@@ -1529,11 +1588,13 @@ fn maybe_build_renderer_package(
 fn run_game(
     path: PathBuf,
     port: u16,
+    base_path: &str,
     daemon: bool,
     datastore: LocalDatastore,
     record: bool,
     record_dir: Option<PathBuf>,
 ) {
+    let base_path = normalize_base_path(base_path);
     let path = std::fs::canonicalize(&path).unwrap_or_else(|_| {
         eprintln!("Error: Path '{}' does not exist", path.display());
         std::process::exit(1);
@@ -1550,6 +1611,12 @@ fn run_game(
 
     if !skip_run_command {
         if let Some(command) = world_cfg.run.command.as_ref() {
+            if base_path != "/" {
+                eprintln!(
+                    "Error: --base-path is not supported when world.toml [run].command is configured."
+                );
+                std::process::exit(1);
+            }
             if daemon {
                 eprintln!(
                     "Error: world.toml [run].command is not compatible with daemon mode (`clawblox start`). Use `clawblox run` instead."
@@ -1566,7 +1633,7 @@ fn run_game(
     }
 
     if world_cfg.runtime.mode == "external" {
-        run_external_runtime(path, port, daemon, &world_cfg);
+        run_external_runtime(path, port, &base_path, daemon, &world_cfg);
         return;
     }
 
@@ -1587,7 +1654,7 @@ fn run_game(
         .skill
         .as_ref()
         .and_then(|skill_file| std::fs::read_to_string(path.join(skill_file)).ok());
-    let renderer_manifest = maybe_build_renderer_package(&path, &config.renderer).unwrap_or_else(|e| {
+    let renderer_manifest = maybe_build_renderer_package(&path, &config.renderer, &base_path).unwrap_or_else(|e| {
         eprintln!("Error: {}", e);
         std::process::exit(1);
     });
@@ -1716,6 +1783,7 @@ fn run_game(
             instance_id,
             game_handle,
             started_at: Instant::now(),
+            base_path: base_path.clone(),
             skill_md,
             renderer_manifest,
             sessions: Arc::new(DashMap::new()),
@@ -1742,6 +1810,7 @@ fn run_game(
             let writer = writer.clone();
             let game_handle = state.game_handle.clone();
             let instance_id = state.instance_id;
+            let recording_base_path = state.base_path.clone();
             let (shutdown_tx, mut shutdown_rx) = watch::channel(false);
             recording_shutdown_tx = Some(shutdown_tx);
             recording_task = Some(tokio::spawn(async move {
@@ -1760,7 +1829,7 @@ fn run_game(
                             match obs {
                                 Ok(mut obs) => {
                                     if obs.tick != last_tick {
-                                        resolve_local_spectator_assets(&mut obs);
+                                        resolve_local_spectator_assets(&mut obs, &recording_base_path);
                                         let time_ms = start.elapsed().as_millis() as u64;
                                         let mut w = writer.lock().await;
                                         w.record_tick(obs.tick, time_ms, &obs).await;
@@ -1780,7 +1849,7 @@ fn run_game(
             .allow_methods(Any)
             .allow_headers(Any);
 
-        let app = Router::new()
+        let app = mount_router_at_base_path(Router::new()
             .route("/", get(local_ui_index))
             .route("/ui", get(local_ui_index))
             .route("/ui/{*path}", get(local_ui_file))
@@ -1798,12 +1867,12 @@ fn run_game(
             .nest_service("/assets", ServeDir::new(path.join("assets")))
             .nest_service("/static", ServeDir::new(path.join("static")))
             .with_state(state)
-            .layer(cors);
+            .layer(cors), &base_path);
 
         let addr = SocketAddr::from(([0, 0, 0, 0], port));
         println!();
         println!("Server running on http://localhost:{}", port);
-        println!("Local frontend: http://localhost:{}/", port);
+        println!("Local frontend: http://localhost:{}{}", port, join_base_path(&base_path, "/"));
         if !daemon {
             println!("Mode: foreground (press Ctrl+C to stop)");
         }
@@ -1862,9 +1931,11 @@ fn run_replay(
     file: PathBuf,
     speed: f32,
     port: u16,
+    base_path: &str,
     world_dir_override: Option<PathBuf>,
     agent_log_file: Option<PathBuf>,
 ) {
+    let base_path = normalize_base_path(base_path);
     let rt = tokio::runtime::Runtime::new().unwrap();
     rt.block_on(async {
         let reader = recording::RecordingReader::open(&file).await.unwrap_or_else(|e| {
@@ -1913,7 +1984,7 @@ fn run_replay(
             let world_toml_path = world_dir.join("world.toml");
             if world_toml_path.exists() {
                 let cfg = clawblox::config::WorldConfig::from_game_dir(&world_dir).ok();
-                cfg.map(|c| maybe_build_renderer_package(&world_dir, &c.renderer).ok())
+                cfg.map(|c| maybe_build_renderer_package(&world_dir, &c.renderer, &base_path).ok())
                     .flatten()
                     .unwrap_or_else(default_renderer_manifest)
             } else {
@@ -1944,6 +2015,7 @@ fn run_replay(
         let replay_state = ReplayState {
             reader: reader.clone(),
             playback: playback.clone(),
+            base_path: base_path.clone(),
             renderer_manifest,
             agent_timeline,
         };
@@ -1953,9 +2025,9 @@ fn run_replay(
             .allow_methods(Any)
             .allow_headers(Any);
 
-        let app = Router::new()
-            .route("/", get(local_ui_index))
-            .route("/ui", get(local_ui_index))
+        let app = mount_router_at_base_path(Router::new()
+            .route("/", get(replay_ui_index))
+            .route("/ui", get(replay_ui_index))
             .route("/ui/{*path}", get(local_ui_file))
             .route("/spectate/ws", get(replay_spectate_ws))
             .route("/renderer/manifest", get(replay_renderer_manifest))
@@ -1970,10 +2042,10 @@ fn run_replay(
             .nest_service("/assets", ServeDir::new(world_dir.join("assets")))
             .nest_service("/static", ServeDir::new(world_dir.join("static")))
             .with_state(replay_state)
-            .layer(cors);
+            .layer(cors), &base_path);
 
         let addr = SocketAddr::from(([0, 0, 0, 0], port));
-        println!("Replay server: http://localhost:{}", port);
+        println!("Replay server: http://localhost:{}{}", port, join_base_path(&base_path, "/"));
 
         let listener = tokio::net::TcpListener::bind(addr).await.unwrap_or_else(|e| {
             eprintln!("Error: Port {} is already in use. Try --port <PORT>", port);
@@ -1997,6 +2069,7 @@ fn run_replay(
 struct ReplayState {
     reader: Arc<recording::RecordingReader>,
     playback: Arc<tokio::sync::Mutex<replay::ReplayPlayback>>,
+    base_path: String,
     renderer_manifest: LocalRendererManifest,
     agent_timeline: Option<Arc<ReplayAgentTimeline>>,
 }
@@ -2175,7 +2248,14 @@ async fn replay_play(State(state): State<ReplayState>) -> axum::http::StatusCode
     axum::http::StatusCode::OK
 }
 
-fn run_external_runtime(path: PathBuf, port: u16, daemon: bool, config: &clawblox::config::WorldConfig) {
+fn run_external_runtime(
+    path: PathBuf,
+    port: u16,
+    base_path: &str,
+    daemon: bool,
+    config: &clawblox::config::WorldConfig,
+) {
+    let base_path = normalize_base_path(base_path);
     if daemon {
         let pid_file = pid_path(port);
         write_pid_file_for(&pid_file, std::process::id());
@@ -2186,7 +2266,7 @@ fn run_external_runtime(path: PathBuf, port: u16, daemon: bool, config: &clawblo
         .skill
         .as_ref()
         .and_then(|skill_file| std::fs::read_to_string(path.join(skill_file)).ok());
-    let renderer_manifest = maybe_build_renderer_package(&path, &config.renderer).unwrap_or_else(|e| {
+    let renderer_manifest = maybe_build_renderer_package(&path, &config.renderer, &base_path).unwrap_or_else(|e| {
         eprintln!("Error: {}", e);
         std::process::exit(1);
     });
@@ -2197,6 +2277,7 @@ fn run_external_runtime(path: PathBuf, port: u16, daemon: bool, config: &clawblo
     let rt = tokio::runtime::Runtime::new().unwrap();
     rt.block_on(async {
         let state = ExternalLocalState {
+            base_path: base_path.clone(),
             renderer_manifest,
             skill_md,
             started_at: Instant::now(),
@@ -2207,9 +2288,9 @@ fn run_external_runtime(path: PathBuf, port: u16, daemon: bool, config: &clawblo
             .allow_methods(Any)
             .allow_headers(Any);
 
-        let app = Router::new()
-            .route("/", get(local_ui_index))
-            .route("/ui", get(local_ui_index))
+        let app = mount_router_at_base_path(Router::new()
+            .route("/", get(external_ui_index))
+            .route("/ui", get(external_ui_index))
             .route("/ui/{*path}", get(local_ui_file))
             .route("/renderer/manifest", get(external_renderer_manifest))
             .route("/spectate", get(external_spectate))
@@ -2219,12 +2300,12 @@ fn run_external_runtime(path: PathBuf, port: u16, daemon: bool, config: &clawblo
             .nest_service("/assets", ServeDir::new(path.join("assets")))
             .nest_service("/static", ServeDir::new(path.join("static")))
             .with_state(state)
-            .layer(cors);
+            .layer(cors), &base_path);
 
         let addr = SocketAddr::from(([0, 0, 0, 0], port));
         println!();
         println!("Server running on http://localhost:{}", port);
-        println!("Local frontend: http://localhost:{}/", port);
+        println!("Local frontend: http://localhost:{}{}", port, join_base_path(&base_path, "/"));
         if !daemon {
             println!("Mode: foreground (press Ctrl+C to stop)");
         }
@@ -2296,7 +2377,8 @@ fn run_external_world_command(path: &Path, command: &[String], port: u16) {
     }
 }
 
-fn start_game(path: PathBuf, port: u16, datastore: LocalDatastore) {
+fn start_game(path: PathBuf, port: u16, base_path: &str, datastore: LocalDatastore) {
+    let base_path = normalize_base_path(base_path);
     let path = std::fs::canonicalize(&path).unwrap_or_else(|_| {
         eprintln!("Error: Path '{}' does not exist", path.display());
         std::process::exit(1);
@@ -2332,6 +2414,8 @@ fn start_game(path: PathBuf, port: u16, datastore: LocalDatastore) {
             &path.to_string_lossy(),
             "--port",
             &port.to_string(),
+            "--base-path",
+            &base_path,
             "--datastore",
             datastore.as_arg(),
             "--daemon",
@@ -2349,7 +2433,11 @@ fn start_game(path: PathBuf, port: u16, datastore: LocalDatastore) {
     let pid_file = pid_path(port);
     write_pid_file_for(&pid_file, child.id());
 
-    println!("Server starting in background on http://localhost:{}", port);
+    println!(
+        "Server starting in background on http://localhost:{}{}",
+        port,
+        join_base_path(&base_path, "/")
+    );
     println!("Logs: {}", log_file_path.display());
 }
 
@@ -2529,6 +2617,7 @@ struct LocalState {
     instance_id: Uuid,
     game_handle: GameManagerHandle,
     started_at: Instant,
+    base_path: String,
     skill_md: Option<String>,
     renderer_manifest: LocalRendererManifest,
     sessions: Arc<DashMap<String, (Uuid, String)>>, // token -> (agent_id, name)
@@ -2554,6 +2643,7 @@ struct LocalState {
 
 #[derive(Clone)]
 struct ExternalLocalState {
+    base_path: String,
     renderer_manifest: LocalRendererManifest,
     skill_md: Option<String>,
     started_at: Instant,
@@ -2810,7 +2900,7 @@ fn content_type_for_path(path: &str) -> &'static str {
     }
 }
 
-fn embedded_ui_file_response(path: &str) -> impl IntoResponse {
+fn embedded_ui_file_response(path: &str) -> axum::response::Response {
     if let Some(file) = LOCAL_RUNTIME_UI_DIR.get_file(path) {
         let content_type = content_type_for_path(path);
         return (
@@ -2828,8 +2918,32 @@ fn embedded_ui_file_response(path: &str) -> impl IntoResponse {
         .into_response()
 }
 
-async fn local_ui_index() -> impl IntoResponse {
-    embedded_ui_file_response("index.html")
+fn embedded_ui_index_response(base_path: &str) -> axum::response::Response {
+    let Some(file) = LOCAL_RUNTIME_UI_DIR.get_file("index.html") else {
+        return embedded_ui_file_response("index.html");
+    };
+    let mut html = String::from_utf8_lossy(file.contents()).into_owned();
+    let base_href = format!("{}/", normalize_base_path(base_path).trim_end_matches('/'));
+    let base_href = if base_href == "/" { "/".to_string() } else { base_href };
+    html = html.replacen("<head>", &format!("<head>\n    <base href=\"{}\" />", base_href), 1);
+    (
+        axum::http::StatusCode::OK,
+        [("content-type", "text/html; charset=utf-8")],
+        html,
+    )
+        .into_response()
+}
+
+async fn local_ui_index(State(state): State<LocalState>) -> impl IntoResponse {
+    embedded_ui_index_response(&state.base_path)
+}
+
+async fn replay_ui_index(State(state): State<ReplayState>) -> impl IntoResponse {
+    embedded_ui_index_response(&state.base_path)
+}
+
+async fn external_ui_index(State(state): State<ExternalLocalState>) -> impl IntoResponse {
+    embedded_ui_index_response(&state.base_path)
 }
 
 fn external_snapshot(state: &ExternalLocalState) -> serde_json::Value {
@@ -3208,7 +3322,7 @@ async fn local_input(
     // Return observation
     let mut observation = game::get_observation(&state.game_handle, state.game_id, agent_id)
         .map_err(|e| (axum::http::StatusCode::BAD_REQUEST, e))?;
-    resolve_local_player_assets(&mut observation);
+    resolve_local_player_assets(&mut observation, &state.base_path);
     maybe_publish_authoritative_speech_events(&state, &observation.recent_events);
 
     if let Some(writer) = &state.recording_writer {
@@ -3323,40 +3437,43 @@ async fn local_observe(
 
     let mut observation = game::get_observation(&state.game_handle, state.game_id, agent_id)
         .map_err(|e| (axum::http::StatusCode::BAD_REQUEST, e))?;
-    resolve_local_player_assets(&mut observation);
+    resolve_local_player_assets(&mut observation, &state.base_path);
     maybe_publish_authoritative_speech_events(&state, &observation.recent_events);
 
     Ok(Json(observation))
 }
 
-fn resolve_local_asset_url(url: &mut String) {
+fn resolve_local_asset_url(url: &mut String, base_path: &str) {
     if let Some(path) = url.strip_prefix("asset://") {
-        *url = format!("/assets/{}", path);
+        *url = join_base_path(base_path, &format!("/assets/{}", path));
     }
 }
 
-fn resolve_local_model_url_attr(attrs: &mut std::collections::HashMap<String, serde_json::Value>) {
+fn resolve_local_model_url_attr(
+    attrs: &mut std::collections::HashMap<String, serde_json::Value>,
+    base_path: &str,
+) {
     if let Some(value) = attrs.get_mut("ModelUrl") {
         if let Some(path) = value.as_str().and_then(|url| url.strip_prefix("asset://")) {
-            *value = serde_json::Value::String(format!("/assets/{}", path));
+            *value = serde_json::Value::String(join_base_path(base_path, &format!("/assets/{}", path)));
         }
     }
 }
 
 /// Resolve asset:// URLs to local /assets/ paths for local spectator observations.
-fn resolve_local_spectator_assets(obs: &mut SpectatorObservation) {
+fn resolve_local_spectator_assets(obs: &mut SpectatorObservation, base_path: &str) {
     for entity in &mut obs.entities {
         if let Some(ref mut url) = entity.model_url {
-            resolve_local_asset_url(url);
+            resolve_local_asset_url(url, base_path);
         }
     }
 }
 
 /// Resolve asset:// URLs to local /assets/ paths for local player observations.
-fn resolve_local_player_assets(obs: &mut PlayerObservation) {
+fn resolve_local_player_assets(obs: &mut PlayerObservation, base_path: &str) {
     for entity in &mut obs.world.entities {
         if let Some(attrs) = entity.attributes.as_mut() {
-            resolve_local_model_url_attr(attrs);
+            resolve_local_model_url_attr(attrs, base_path);
         }
     }
 }
@@ -3372,7 +3489,7 @@ async fn local_spectate(
         game::get_spectator_observation_for_instance(&state.game_handle, state.instance_id)
             .map_err(|e| (axum::http::StatusCode::NOT_FOUND, e))?;
 
-    resolve_local_spectator_assets(&mut observation);
+    resolve_local_spectator_assets(&mut observation, &state.base_path);
 
     Ok(Json(observation))
 }
@@ -3538,7 +3655,7 @@ async fn handle_spectate_ws(socket: WebSocket, state: LocalState, role: Spectate
                 match observation {
                     Ok(obs) => {
                         let mut obs = obs;
-                        resolve_local_spectator_assets(&mut obs);
+                        resolve_local_spectator_assets(&mut obs, &state.base_path);
                         maybe_publish_authoritative_speech_events(&state, &obs.recent_events);
 
                         if obs.tick != last_tick {

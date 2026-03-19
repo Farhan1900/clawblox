@@ -1,7 +1,24 @@
-import * as threeSdk from "/ui/sdk/three.js"
-import * as inputSdk from "/ui/sdk/input.js"
+import * as threeSdk from "./sdk/three.js"
+import * as inputSdk from "./sdk/input.js"
 
 const API_VERSION = 1
+const BASE_PATH = (() => {
+  try {
+    const url = new URL('..', import.meta.url)
+    const path = url.pathname.replace(/\/$/, '')
+    return path || ''
+  } catch (_) {
+    return ''
+  }
+})()
+
+function withBasePath(path) {
+  const value = String(path || '')
+  if (!value) return BASE_PATH || '/'
+  if (/^https?:\/\//i.test(value) || /^wss?:\/\//i.test(value)) return value
+  if (!value.startsWith('/')) return value
+  return `${BASE_PATH}${value}` || value
+}
 
 const statusEl = document.getElementById('status')
 const metaEl = document.getElementById('meta')
@@ -301,13 +318,13 @@ function renderAgentLogMessages(currentTick, payload = null) {
 }
 
 async function fetchReplayInfo() {
-  const resp = await fetch('/replay/info', { cache: 'no-store' })
+  const resp = await fetch(withBasePath('/replay/info'), { cache: 'no-store' })
   if (!resp.ok) throw new Error(`replay info HTTP ${resp.status}`)
   return resp.json()
 }
 
 async function fetchReplayAgentMessages() {
-  const resp = await fetch('/replay/agent', { cache: 'no-store' })
+  const resp = await fetch(withBasePath('/replay/agent'), { cache: 'no-store' })
   if (!resp.ok) throw new Error(`replay agent HTTP ${resp.status}`)
   return resp.json()
 }
@@ -326,7 +343,7 @@ async function probeReplayMode() {
 }
 
 async function postReplay(path) {
-  const resp = await fetch(path, { method: 'POST' })
+  const resp = await fetch(withBasePath(path), { method: 'POST' })
   if (!resp.ok) throw new Error(`${path} HTTP ${resp.status}`)
 }
 
@@ -539,7 +556,7 @@ async function ensureChatSession() {
   if (chatState.sessionToken) return
   const playerName = chatState.playerName || makeLocalPlayerName()
   chatState.playerName = playerName
-  const resp = await fetch(`/join?name=${encodeURIComponent(playerName)}`, { method: 'POST' })
+  const resp = await fetch(withBasePath(`/join?name=${encodeURIComponent(playerName)}`), { method: 'POST' })
   if (!resp.ok) throw new Error(`join failed: HTTP ${resp.status}`)
   const data = await resp.json()
   chatState.sessionToken = data.session || null
@@ -613,7 +630,7 @@ function renderChatFeed() {
 async function loadChatHistory() {
   if (replayState.enabled) return
   try {
-    const resp = await fetch('/chat/messages?limit=50')
+    const resp = await fetch(withBasePath('/chat/messages?limit=50'))
     if (!resp.ok) throw new Error(`history HTTP ${resp.status}`)
     const data = await resp.json()
     const messages = Array.isArray(data?.messages) ? data.messages : []
@@ -633,7 +650,7 @@ async function sendChatMessage(text) {
   updateChatSendUi()
   try {
     await ensureChatSession()
-    const resp = await fetch('/chat', {
+    const resp = await fetch(withBasePath('/chat'), {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -973,13 +990,13 @@ function createRuntimeKit() {
 }
 
 async function loadManifest() {
-  const resp = await fetch('/renderer/manifest')
+  const resp = await fetch(withBasePath('/renderer/manifest'))
   if (!resp.ok) throw new Error(`manifest HTTP ${resp.status}`)
   return resp.json()
 }
 
 async function loadRendererModule(manifest) {
-  const target = manifest?.entry_url || '/ui/renderers/default.js'
+  const target = manifest?.entry_url || withBasePath('/ui/renderers/default.js')
   const mod = await import(/* @vite-ignore */ target)
   const createRenderer = mod?.createRenderer || mod?.default?.createRenderer
   if (typeof createRenderer !== 'function') {
@@ -1216,9 +1233,9 @@ async function bootstrap() {
       return
     }
     setStatus('No custom renderer configured; using default', 'warn')
-    const fallback = await import('/ui/renderers/default.js')
+    const fallback = await import('./renderers/default.js')
     rendererFactory = fallback.createRenderer
-    rendererTarget = '/ui/renderers/default.js'
+    rendererTarget = withBasePath('/ui/renderers/default.js')
   }
 
   const runtimeKit = createRuntimeKit()
@@ -1247,7 +1264,7 @@ async function bootstrap() {
 
   const wsStats = { frames: 0, lastTick: 0 }
   const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
-  const ws = new WebSocket(`${protocol}//${window.location.host}/spectate/ws`)
+  const ws = new WebSocket(`${protocol}//${window.location.host}${withBasePath('/spectate/ws')}`)
   ws.binaryType = 'arraybuffer'
   spectateWs = ws
 
