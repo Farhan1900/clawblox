@@ -161,6 +161,9 @@ function createEntityVisual(entity) {
 
 export function createRenderer(ctx) {
   const scene = new THREE.Scene()
+  const captureConfig = globalThis.__mesaCaptureConfig && typeof globalThis.__mesaCaptureConfig === 'object'
+    ? globalThis.__mesaCaptureConfig
+    : {}
 
   const camera = new THREE.PerspectiveCamera(60, 1, 0.1, 3000)
 
@@ -193,15 +196,34 @@ export function createRenderer(ctx) {
   buildSky(scene)
   const clouds = buildClouds(scene)
 
-  const stateBuffer = ctx.runtime.state.createSnapshotBuffer({ maxSnapshots: 8, interpolationDelayMs: 100 })
+  const interpolationDelayMs = Number.isFinite(captureConfig.interpolationDelayMs)
+    ? Math.max(0, Number(captureConfig.interpolationDelayMs))
+    : 100
+  const followPositionSmoothing = Number.isFinite(captureConfig.followPositionSmoothing)
+    ? Math.max(0, Number(captureConfig.followPositionSmoothing))
+    : 10
+  const followRotationSmoothing = Number.isFinite(captureConfig.followRotationSmoothing)
+    ? Math.max(0, Number(captureConfig.followRotationSmoothing))
+    : 14
+
+  const stateBuffer = ctx.runtime.state.createSnapshotBuffer({ maxSnapshots: 8, interpolationDelayMs })
   const cameraModes = ctx.runtime.three.createCameraModeController(THREE, camera, {
     canvas: ctx.canvas,
     stateBuffer,
     debugCamera: false,
-    follow: { followDistance: 20, followHeight: 6, shoulderOffset: 0 },
+    follow: {
+      followDistance: 20,
+      followHeight: 6,
+      shoulderOffset: 0,
+      positionSmoothing: followPositionSmoothing,
+      rotationSmoothing: followRotationSmoothing,
+    },
     spectatorOffset: new THREE.Vector3(0, 18, -18),
     spectatorBoundsPadding: 8,
   })
+  if (cameraModes?.api && ctx.runtime?.internal?.expose) {
+    ctx.runtime.internal.expose('camera', cameraModes.api)
+  }
   const entityObjects = new Map()
   const modelController = ctx.runtime.three.createModelEntityController(THREE, {
     onError(err, meta) {
@@ -324,15 +346,33 @@ export function createRenderer(ctx) {
     },
 
     onState(state) {
-      stateBuffer.push(state)
-      const obs = stateBuffer.interpolated() || state
-      const dt = Math.min(clock.getDelta(), 0.05)
+      const captureMeta = state && typeof state === 'object' && state.__mesaCaptureMeta && typeof state.__mesaCaptureMeta === 'object'
+        ? state.__mesaCaptureMeta
+        : null
+      const obsState = captureMeta ? { ...state } : state
+      if (captureMeta) delete obsState.__mesaCaptureMeta
+
+      if (captureMeta?.resetBuffer) stateBuffer.clear()
+      if (captureMeta?.push !== false) {
+        const pushNowMs = Number.isFinite(captureMeta?.pushNowMs)
+          ? Number(captureMeta.pushNowMs)
+          : undefined
+        stateBuffer.push(obsState, pushNowMs)
+      }
+      const renderNowMs = Number.isFinite(captureMeta?.renderNowMs)
+        ? Number(captureMeta.renderNowMs)
+        : undefined
+      const obs = stateBuffer.interpolated(renderNowMs) || obsState
+      const dt = Number.isFinite(captureMeta?.dt)
+        ? Math.max(0, Number(captureMeta.dt))
+        : Math.min(clock.getDelta(), 0.05)
       updateClouds(clouds, dt)
       updateScene(obs, dt)
       renderer.render(scene, camera)
     },
 
     unmount() {
+      if (ctx.runtime?.internal?.remove) ctx.runtime.internal.remove('camera')
       if (cameraModes?.dispose) cameraModes.dispose()
       for (const obj of entityObjects.values()) scene.remove(obj)
       entityObjects.clear()

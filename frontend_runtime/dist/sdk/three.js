@@ -280,6 +280,7 @@ export function createCameraModeController(THREE, camera, options = {}) {
   const debugCamera = options.debugCamera ?? true
   const controlsState = {
     mode: 'follow',
+    modeOverride: null,
     attached: false,
     disposed: false,
     pan: new THREE.Vector3(0, 0, 0),
@@ -376,6 +377,102 @@ export function createCameraModeController(THREE, camera, options = {}) {
       return computeBoundsFromState(stateBuffer.latest(), overviewCfg.boundsPadding)
     }
     return null
+  }
+
+  function getModeOverride() {
+    return controlsState.modeOverride
+  }
+
+  function toPlainVec3(v) {
+    return { x: Number(v?.x) || 0, y: Number(v?.y) || 0, z: Number(v?.z) || 0 }
+  }
+
+  function toPlainQuat(q) {
+    return { x: Number(q?.x) || 0, y: Number(q?.y) || 0, z: Number(q?.z) || 0, w: Number(q?.w) || 1 }
+  }
+
+  function normalizeMode(mode) {
+    if (mode == null || mode === '' || mode === 'default') return null
+    const value = String(mode)
+    if (value === 'follow' || value === 'spectator' || value === 'first_person') return value
+    throw new Error(`Unsupported camera mode: ${mode}`)
+  }
+
+  function getCameraPose() {
+    return {
+      position: toPlainVec3(camera.position),
+      quaternion: toPlainQuat(camera.quaternion),
+    }
+  }
+
+  function getState() {
+    const bounds = getSpectatorBounds()
+    return {
+      mode: controlsState.mode,
+      modeOverride: getModeOverride(),
+      camera: getCameraPose(),
+      spectator: {
+        pan: toPlainVec3(controlsState.pan),
+        zoom: controlsState.zoom,
+        orbitYaw: controlsState.orbitYaw,
+        orbitPitch: controlsState.orbitPitch,
+        seeded: controlsState.seeded,
+        orbitSeeded: controlsState.orbitSeeded,
+        bounds: bounds ? { ...bounds } : null,
+      },
+    }
+  }
+
+  function setModeOverride(mode = null) {
+    controlsState.modeOverride = normalizeMode(mode)
+    return getState()
+  }
+
+  function setSpectatorPose(next = {}) {
+    if (!next || typeof next !== 'object') return getState()
+    const pan = next.pan
+    if (pan && Number.isFinite(pan.x) && Number.isFinite(pan.z)) {
+      controlsState.pan.set(
+        Number(pan.x),
+        Number.isFinite(pan.y) ? Number(pan.y) : controlsState.pan.y,
+        Number(pan.z),
+      )
+      controlsState.seeded = true
+    }
+    if (Number.isFinite(next.zoom)) {
+      controlsState.zoom = THREE.MathUtils.clamp(Number(next.zoom), overviewCfg.minZoom, overviewCfg.maxZoom)
+    }
+    if (Number.isFinite(next.orbitYaw)) {
+      controlsState.orbitYaw = Number(next.orbitYaw)
+      controlsState.orbitSeeded = true
+    }
+    if (Number.isFinite(next.orbitPitch)) {
+      controlsState.orbitPitch = THREE.MathUtils.clamp(
+        Number(next.orbitPitch),
+        overviewCfg.minPitch,
+        overviewCfg.maxPitch
+      )
+      controlsState.orbitSeeded = true
+    }
+    if (typeof next.seeded === 'boolean') controlsState.seeded = next.seeded
+    clampPanToBounds()
+    return getState()
+  }
+
+  function resetSpectator(targetPosition = null) {
+    if (targetPosition && Number.isFinite(targetPosition.x) && Number.isFinite(targetPosition.z)) {
+      controlsState.pan.set(
+        Number(targetPosition.x),
+        Number.isFinite(targetPosition.y) ? Number(targetPosition.y) : controlsState.pan.y,
+        Number(targetPosition.z)
+      )
+    }
+    controlsState.zoom = 1
+    controlsState.orbitSeeded = false
+    seedOrbitFromOffset()
+    controlsState.seeded = !!targetPosition
+    clampPanToBounds()
+    return getState()
   }
 
   function clampPanToBounds() {
@@ -635,12 +732,13 @@ export function createCameraModeController(THREE, camera, options = {}) {
 
   function update({ mode = 'follow', targetPosition, targetForward, dt = 1 / 60, collisionAdjust = null }) {
     if (!targetPosition) return
-    controlsState.mode = mode
+    const effectiveMode = controlsState.modeOverride || mode
+    controlsState.mode = effectiveMode
     if (debugCamera) {
       controlsState.debugTickCount += 1
       if (controlsState.debugTickCount <= 10 || controlsState.debugTickCount % 60 === 0) {
         dbg('update', {
-          mode,
+          mode: effectiveMode,
           dt,
           targetPosition: { x: targetPosition.x, y: targetPosition.y, z: targetPosition.z },
           pan: { x: controlsState.pan.x, y: controlsState.pan.y, z: controlsState.pan.z },
@@ -651,11 +749,11 @@ export function createCameraModeController(THREE, camera, options = {}) {
       }
     }
 
-    if (mode === 'spectator' && controlsCanvas) {
+    if (effectiveMode === 'spectator' && controlsCanvas) {
       attachSpectatorControls()
     }
 
-    if (mode === 'first_person') {
+    if (effectiveMode === 'first_person') {
       const pos = targetPosition.clone()
       pos.y += options.firstPersonHeight ?? 1.6
       camera.position.copy(pos)
@@ -665,7 +763,7 @@ export function createCameraModeController(THREE, camera, options = {}) {
       return
     }
 
-    if (mode === 'spectator') {
+    if (effectiveMode === 'spectator') {
       const dtSafe = Math.max(1 / 240, Math.min(0.1, dt || 1 / 60))
       if (!controlsState.seeded) {
         controlsState.pan.set(targetPosition.x, targetPosition.y, targetPosition.z)
@@ -748,6 +846,18 @@ export function createCameraModeController(THREE, camera, options = {}) {
   return {
     update,
     follow: followCtl,
+    api: {
+      getState,
+      getCameraPose,
+      setMode(mode) {
+        return setModeOverride(mode)
+      },
+      clearModeOverride() {
+        return setModeOverride(null)
+      },
+      setSpectatorPose,
+      resetSpectator,
+    },
     dispose() {
       if (typeof controlsState.dispose === 'function') controlsState.dispose()
       controlsState.disposed = true
@@ -755,11 +865,7 @@ export function createCameraModeController(THREE, camera, options = {}) {
     spectator: {
       state: controlsState,
       reset(targetPosition = null) {
-        if (targetPosition) controlsState.pan.copy(targetPosition)
-        controlsState.zoom = 1
-        controlsState.orbitSeeded = false
-        seedOrbitFromOffset()
-        controlsState.seeded = !!targetPosition
+        return resetSpectator(targetPosition)
       },
     },
   }

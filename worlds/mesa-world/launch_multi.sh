@@ -138,6 +138,10 @@ finalize_recording_db() {
   local recording_file="$1"
   local wal_file="${recording_file}-wal"
   local shm_file="${recording_file}-shm"
+  local max_tick
+  local max_ms
+  local current_total_ticks
+  local current_duration_ms
 
   if [[ ! -f "$recording_file" ]]; then
     return 0
@@ -157,6 +161,18 @@ finalize_recording_db() {
     fi
   else
     echo "Warning: failed to checkpoint recording '$recording_file'."
+  fi
+
+  max_tick="$(sqlite3 "$recording_file" "SELECT COALESCE(MAX(tick),0) FROM (SELECT tick FROM checkpoints UNION ALL SELECT tick FROM deltas);")"
+  max_ms="$(sqlite3 "$recording_file" "SELECT COALESCE(MAX(time_ms),0) FROM (SELECT time_ms FROM checkpoints UNION ALL SELECT time_ms FROM deltas);")"
+  current_total_ticks="$(sqlite3 "$recording_file" "SELECT value FROM meta WHERE key='total_ticks' LIMIT 1;")"
+  current_duration_ms="$(sqlite3 "$recording_file" "SELECT value FROM meta WHERE key='duration_ms' LIMIT 1;")"
+
+  if [[ -z "$current_total_ticks" || "$current_total_ticks" -eq 0 ]]; then
+    sqlite3 "$recording_file" "INSERT OR REPLACE INTO meta(key,value) VALUES('total_ticks','$max_tick');" >/dev/null 2>&1 || true
+  fi
+  if [[ -z "$current_duration_ms" || "$current_duration_ms" -eq 0 ]]; then
+    sqlite3 "$recording_file" "INSERT OR REPLACE INTO meta(key,value) VALUES('duration_ms','$max_ms');" >/dev/null 2>&1 || true
   fi
 }
 

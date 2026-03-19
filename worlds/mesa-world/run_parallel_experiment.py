@@ -192,6 +192,35 @@ def finalize_recording_db(recording: Path) -> None:
     try:
         with sqlite3.connect(str(recording)) as conn:
             conn.execute("PRAGMA wal_checkpoint(TRUNCATE);")
+            max_tick_row = conn.execute(
+                "SELECT COALESCE(MAX(tick),0) FROM (SELECT tick FROM checkpoints UNION ALL SELECT tick FROM deltas)"
+            ).fetchone()
+            max_ms_row = conn.execute(
+                "SELECT COALESCE(MAX(time_ms),0) FROM (SELECT time_ms FROM checkpoints UNION ALL SELECT time_ms FROM deltas)"
+            ).fetchone()
+            current_total_ticks_row = conn.execute(
+                "SELECT value FROM meta WHERE key='total_ticks' LIMIT 1"
+            ).fetchone()
+            current_duration_ms_row = conn.execute(
+                "SELECT value FROM meta WHERE key='duration_ms' LIMIT 1"
+            ).fetchone()
+
+            max_tick = int(max_tick_row[0] if max_tick_row else 0)
+            max_ms = int(max_ms_row[0] if max_ms_row else 0)
+            current_total_ticks = int(current_total_ticks_row[0]) if current_total_ticks_row and current_total_ticks_row[0] else 0
+            current_duration_ms = int(current_duration_ms_row[0]) if current_duration_ms_row and current_duration_ms_row[0] else 0
+
+            if current_total_ticks == 0:
+                conn.execute(
+                    "INSERT OR REPLACE INTO meta(key,value) VALUES('total_ticks', ?)",
+                    (str(max_tick),),
+                )
+            if current_duration_ms == 0:
+                conn.execute(
+                    "INSERT OR REPLACE INTO meta(key,value) VALUES('duration_ms', ?)",
+                    (str(max_ms),),
+                )
+            conn.commit()
     except sqlite3.Error:
         return
     if wal_file.exists() and wal_file.stat().st_size == 0:

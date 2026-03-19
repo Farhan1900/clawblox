@@ -1960,6 +1960,7 @@ fn run_replay(
             .route("/spectate/ws", get(replay_spectate_ws))
             .route("/renderer/manifest", get(replay_renderer_manifest))
             .route("/replay/info", get(replay_info))
+            .route("/replay/state", get(replay_state_at))
             .route("/replay/agent", get(replay_agent_messages))
             .route("/replay/seek", post(replay_seek))
             .route("/replay/speed", post(replay_speed))
@@ -2062,6 +2063,30 @@ async fn replay_renderer_manifest(State(state): State<ReplayState>) -> Json<Loca
 async fn replay_info(State(state): State<ReplayState>) -> Json<replay::ReplayInfo> {
     let pb = state.playback.lock().await;
     Json(pb.info())
+}
+
+#[derive(Deserialize)]
+struct ReplayStateQuery {
+    tick: Option<u64>,
+}
+
+async fn replay_state_at(
+    State(state): State<ReplayState>,
+    Query(query): Query<ReplayStateQuery>,
+) -> Result<Json<SpectatorObservation>, (axum::http::StatusCode, String)> {
+    let tick = if let Some(tick) = query.tick {
+        tick
+    } else {
+        let pb = state.playback.lock().await;
+        pb.current_tick()
+    };
+    match state.reader.get_state_at(tick).await {
+        Ok(obs) => Ok(Json(obs)),
+        Err(err) => Err((
+            axum::http::StatusCode::BAD_REQUEST,
+            format!("Failed to load replay state at tick {}: {}", tick, err),
+        )),
+    }
 }
 
 #[derive(Deserialize)]
