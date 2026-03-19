@@ -57,6 +57,15 @@ def parse_args() -> argparse.Namespace:
         help="Truncate plot at this time in minutes (default: 60).",
     )
     parser.add_argument(
+        "--scatter-output",
+        type=Path,
+        default=None,
+        help=(
+            "Output PNG path for generation-vs-final-height scatter plot "
+            "(default: <output_stem>_final_vs_generation.png)."
+        ),
+    )
+    parser.add_argument(
         "--reanalyze",
         action="store_true",
         help="Re-run analyze_recording.py for each run before plotting.",
@@ -72,6 +81,20 @@ def parse_args() -> argparse.Namespace:
 
 def discover_run_dirs(results_dir: Path) -> list[Path]:
     return sorted(p for p in results_dir.glob("*_run*") if p.is_dir())
+
+
+def infer_default_output_dir(run_dirs: list[Path], results_dir: Path, fallback_dir: Path) -> Path:
+    # For generation experiments laid out as <experiment>/runs/<run-dir>, write figures
+    # into <experiment> by default.
+    if run_dirs:
+        parents = {p.parent for p in run_dirs}
+        if len(parents) == 1:
+            parent = next(iter(parents))
+            if parent.name == "runs":
+                return parent.parent
+    if results_dir.name == "runs":
+        return results_dir.parent
+    return fallback_dir
 
 
 def sustained_csv_for_run(run_dir: Path) -> Path:
@@ -158,6 +181,7 @@ def load_series(csv_path: Path, t0_s: float) -> tuple[pd.Series, pd.Series]:
 def main() -> None:
     args = parse_args()
     script_dir = Path(__file__).resolve().parent
+    resolved_results_dir = args.results_dir.resolve()
     analyzer_script = (
         args.analyzer_script.resolve()
         if args.analyzer_script is not None
@@ -166,18 +190,28 @@ def main() -> None:
     if not analyzer_script.exists():
         raise FileNotFoundError(f"Analyzer script not found: {analyzer_script}")
 
-    output_path = (
-        args.output.resolve()
-        if args.output is not None
-        else script_dir / "results" / "max_y_sustained_compare.png"
-    )
-
     run_dirs = [p.resolve() for p in args.run_dirs] if args.run_dirs else []
     if not run_dirs:
-        run_dirs = [p.resolve() for p in discover_run_dirs(args.results_dir.resolve())]
+        run_dirs = [p.resolve() for p in discover_run_dirs(resolved_results_dir)]
 
     if not run_dirs:
         raise RuntimeError("No run directories found. Provide them explicitly or check --results-dir.")
+
+    default_output_dir = infer_default_output_dir(
+        run_dirs=run_dirs,
+        results_dir=resolved_results_dir,
+        fallback_dir=script_dir / "results",
+    )
+    output_path = (
+        args.output.resolve()
+        if args.output is not None
+        else default_output_dir / "max_y_sustained_compare.png"
+    )
+    scatter_output_path = (
+        args.scatter_output.resolve()
+        if args.scatter_output is not None
+        else output_path.with_name(f"{output_path.stem}_final_vs_generation.png")
+    )
 
     sns.set_theme(style="white", context="paper")
     plt.figure(figsize=tuple(args.figsize))
@@ -276,7 +310,23 @@ def main() -> None:
     plt.savefig(output_path, dpi=160)
     plt.close()
 
+    plt.figure(figsize=tuple(args.figsize))
+    generations = list(range(1, len(run_series) + 1))
+    final_sustained_values = [series["final_sustained"] for series in run_series]
+    scatter_color = cmap(0.68)
+    plt.scatter(generations, final_sustained_values, s=42, color=scatter_color, edgecolors="none")
+    plt.plot(generations, final_sustained_values, linewidth=1.1, color=scatter_color)
+    plt.xlabel("Generation")
+    plt.ylabel("Final sustained max height")
+    ax = plt.gca()
+    sns.despine(ax=ax, top=True, right=True)
+    ax.set_xticks(generations)
+    plt.tight_layout()
+    plt.savefig(scatter_output_path, dpi=160)
+    plt.close()
+
     print(f"[done] Wrote figure: {output_path}")
+    print(f"[done] Wrote figure: {scatter_output_path}")
 
 
 if __name__ == "__main__":

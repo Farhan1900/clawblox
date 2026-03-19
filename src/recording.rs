@@ -161,6 +161,9 @@ impl RecordingWriter {
     }
 
     pub async fn record_tick(&mut self, tick: u64, time_ms: u64, obs: &SpectatorObservation) {
+        self.latest_tick = self.latest_tick.max(tick);
+        self.latest_time_ms = self.latest_time_ms.max(time_ms);
+
         let is_checkpoint = tick == 0 || tick % self.checkpoint_interval == 0;
 
         if is_checkpoint {
@@ -169,6 +172,16 @@ impl RecordingWriter {
             }
             self.last_checkpoint_obs = Some(obs.clone());
             self.last_checkpoint_tick = tick;
+            // Persist progress periodically so replay remains valid after abrupt shutdown.
+            if let Err(e) = self
+                .upsert_progress_meta(self.latest_tick, self.latest_time_ms)
+                .await
+            {
+                eprintln!(
+                    "Warning: failed to upsert recording progress at tick {}: {}",
+                    tick, e
+                );
+            }
         } else if let Some(ref base) = self.last_checkpoint_obs {
             let delta = compute_delta(base, obs);
             if let Err(e) = self.write_delta(tick, time_ms, &delta).await {
@@ -183,9 +196,6 @@ impl RecordingWriter {
                 .await;
             self.last_wal_checkpoint = Instant::now();
         }
-
-        self.latest_tick = self.latest_tick.max(tick);
-        self.latest_time_ms = self.latest_time_ms.max(time_ms);
     }
 
     pub async fn record_input(
@@ -215,20 +225,25 @@ impl RecordingWriter {
     pub async fn close(&mut self, total_ticks: u64, duration_ms: u64) {
         let final_ticks = total_ticks.max(self.latest_tick);
         let final_duration_ms = duration_ms.max(self.latest_time_ms);
-        for (k, v) in [
-            ("total_ticks", final_ticks.to_string()),
-            ("duration_ms", final_duration_ms.to_string()),
-        ] {
-            let _ = sqlx::query("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)")
-                .bind(k)
-                .bind(&v)
-                .execute(&self.pool)
-                .await;
-        }
+        let _ = self.upsert_progress_meta(final_ticks, final_duration_ms).await;
         let _ = sqlx::query("PRAGMA wal_checkpoint(TRUNCATE)")
             .execute(&self.pool)
             .await;
         self.pool.close().await;
+    }
+
+    async fn upsert_progress_meta(&self, total_ticks: u64, duration_ms: u64) -> Result<(), sqlx::Error> {
+        for (k, v) in [
+            ("total_ticks", total_ticks.to_string()),
+            ("duration_ms", duration_ms.to_string()),
+        ] {
+            sqlx::query("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)")
+                .bind(k)
+                .bind(&v)
+                .execute(&self.pool)
+                .await?;
+        }
+        Ok(())
     }
 
     async fn write_checkpoint(
@@ -412,22 +427,47 @@ impl RecordingReader {
             .map(|r| (r.get::<String, _>("key"), r.get::<String, _>("value")))
             .collect();
 
+        let tick_rate = map
+            .get("tick_rate")
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(60);
+        let mut total_ticks = map
+            .get("total_ticks")
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(0);
+        let mut duration_ms = map
+            .get("duration_ms")
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(0);
+
+        let row = sqlx::query(
+            "SELECT
+                COALESCE(MAX(tick), 0) AS max_tick,
+                COALESCE(MAX(time_ms), 0) AS max_time_ms
+             FROM (
+               SELECT tick, time_ms FROM checkpoints
+               UNION ALL
+               SELECT tick, time_ms FROM deltas
+             )",
+        )
+        .fetch_one(&self.pool)
+        .await?;
+        let max_tick = row.get::<i64, _>("max_tick").max(0) as u64;
+        let max_time_ms = row.get::<i64, _>("max_time_ms").max(0) as u64;
+
+        total_ticks = total_ticks.max(max_tick);
+        duration_ms = duration_ms.max(max_time_ms);
+        if duration_ms == 0 && total_ticks > 0 {
+            duration_ms = total_ticks.saturating_mul(1000) / tick_rate as u64;
+        }
+
         Ok(RecordingMeta {
             world_name: map.get("world_name").cloned().unwrap_or_default(),
             world_dir: map.get("world_dir").cloned().unwrap_or_default(),
             created_at: map.get("created_at").cloned().unwrap_or_default(),
-            tick_rate: map
-                .get("tick_rate")
-                .and_then(|v| v.parse().ok())
-                .unwrap_or(60),
-            total_ticks: map
-                .get("total_ticks")
-                .and_then(|v| v.parse().ok())
-                .unwrap_or(0),
-            duration_ms: map
-                .get("duration_ms")
-                .and_then(|v| v.parse().ok())
-                .unwrap_or(0),
+            tick_rate,
+            total_ticks,
+            duration_ms,
         })
     }
 

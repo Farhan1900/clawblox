@@ -51,6 +51,52 @@ const replayState = {
   agentMessages: [],
   agentPanelOpen: readStoredBool('clawblox_agent_log_open', true),
 }
+const internalApiRegistry = new Map()
+
+function normalizeInternalApiName(name) {
+  const value = String(name || '').trim()
+  return value || null
+}
+
+function installInternalApiFacade() {
+  Object.defineProperty(window, '__clawbloxInternal', {
+    value: {
+      get(name) {
+        const key = normalizeInternalApiName(name)
+        return key ? (internalApiRegistry.get(key) || null) : null
+      },
+      has(name) {
+        const key = normalizeInternalApiName(name)
+        return !!(key && internalApiRegistry.has(key))
+      },
+      keys() {
+        return [...internalApiRegistry.keys()]
+      },
+    },
+    configurable: true,
+    enumerable: false,
+    writable: false,
+  })
+}
+
+function setInternalApi(name, api) {
+  const key = normalizeInternalApiName(name)
+  if (!key) throw new Error('internal api name required')
+  if (api == null) {
+    internalApiRegistry.delete(key)
+    return null
+  }
+  internalApiRegistry.set(key, api)
+  return api
+}
+
+function removeInternalApi(name) {
+  const key = normalizeInternalApiName(name)
+  if (!key) return false
+  return internalApiRegistry.delete(key)
+}
+
+installInternalApiFacade()
 
 function readStoredBool(key, fallback) {
   try {
@@ -340,12 +386,7 @@ function renderPlayerList(players) {
       row.setAttribute('aria-pressed', 'false')
     }
     const applySelection = () => {
-      selectedSpectatorPlayerId = playerId && playerId === selectedSpectatorPlayerId ? null : (playerId || null)
-      renderPlayerList(players)
-      if (latestSpectatorState && window.__renderer?.onState) {
-        const nextState = prioritizeSelectedPlayer(latestSpectatorState)
-        window.__renderer.onState(nextState)
-      }
+      setSelectedSpectatorPlayer(playerId, { toggle: true })
     }
     row.addEventListener('pointerdown', (ev) => {
       ev.preventDefault()
@@ -388,6 +429,83 @@ function prioritizeSelectedPlayer(state) {
   players.unshift(selected)
   return { ...state, players, selected_player_id: selectedSpectatorPlayerId }
 }
+
+function rerenderSpectatorState(options = null) {
+  if (!latestSpectatorState || !window.__renderer?.onState) return
+  const nextState = prioritizeSelectedPlayer(latestSpectatorState)
+  if (options && typeof options === 'object' && Object.keys(options).length) {
+    window.__renderer.onState({ ...nextState, __mesaCaptureMeta: options })
+    return
+  }
+  window.__renderer.onState(nextState)
+}
+
+function renderInjectedSpectatorState(state, info = null, options = null) {
+  latestSpectatorState = state || null
+  if (info && typeof info === 'object') {
+    renderReplayInfo(info)
+  }
+  renderPlayerList(state?.players)
+  rerenderSpectatorState(options)
+  return true
+}
+
+function resolveSpectatorPlayerId(target) {
+  if (target == null || target === '') return null
+  const players = Array.isArray(latestSpectatorState?.players) ? latestSpectatorState.players : []
+  const raw = String(target)
+  const byId = players.find((player) => String(player?.id || '') === raw)
+  if (byId?.id != null) return String(byId.id)
+  const byName = players.find((player) => String(player?.name || '') === raw)
+  if (byName?.id != null) return String(byName.id)
+  return raw
+}
+
+function setSelectedSpectatorPlayer(playerId, { toggle = false } = {}) {
+  const normalized = resolveSpectatorPlayerId(playerId)
+  selectedSpectatorPlayerId = toggle && normalized && normalized === selectedSpectatorPlayerId
+    ? null
+    : normalized
+  if (Array.isArray(latestSpectatorState?.players)) {
+    renderPlayerList(latestSpectatorState.players)
+  }
+  rerenderSpectatorState()
+  return selectedSpectatorPlayerId
+}
+
+setInternalApi('replay', {
+  isEnabled() {
+    return !!replayState.enabled
+  },
+  getInfo() {
+    return replayState.info ? { ...replayState.info } : null
+  },
+  listPlayers() {
+    return Array.isArray(latestSpectatorState?.players)
+      ? latestSpectatorState.players.map((player) => ({
+          id: player?.id == null ? null : String(player.id),
+          name: String(player?.name || ''),
+          health: Number.isFinite(Number(player?.health)) ? Number(player.health) : null,
+        }))
+      : []
+  },
+  getSelectedPlayerId() {
+    return selectedSpectatorPlayerId
+  },
+  selectPlayer(playerId) {
+    return setSelectedSpectatorPlayer(playerId)
+  },
+  clearSelectedPlayer() {
+    return setSelectedSpectatorPlayer(null)
+  },
+  rerender() {
+    rerenderSpectatorState()
+    return true
+  },
+  renderState(state, info = null, options = null) {
+    return renderInjectedSpectatorState(state, info, options)
+  },
+})
 
 function setChatLocalStatus(text) {
   if (chatLocalStatusEl) chatLocalStatusEl.textContent = text
@@ -632,9 +750,20 @@ function createSnapshotBuffer(options = {}) {
   const interpolationDelayMs = Number.isFinite(options.interpolationDelayMs)
     ? Math.max(0, options.interpolationDelayMs)
     : 100
+  const maxTickGap = Number.isFinite(options.maxTickGap) ? Math.max(1, options.maxTickGap) : 120
   const snapshots = []
 
   function push(state, nowMs = performance.now()) {
+    const last = snapshots.length ? snapshots[snapshots.length - 1].state : null
+    const lastTick = Number(last?.tick)
+    const nextTick = Number(state?.tick)
+    if (
+      Number.isFinite(lastTick) &&
+      Number.isFinite(nextTick) &&
+      Math.abs(nextTick - lastTick) > maxTickGap
+    ) {
+      snapshots.length = 0
+    }
     snapshots.push({ state, nowMs })
     while (snapshots.length > maxSnapshots) snapshots.shift()
   }
@@ -705,12 +834,17 @@ function createSnapshotBuffer(options = {}) {
     for (let i = snapshots.length - 1; i >= 0; i--) fn(snapshots[i].state, i)
   }
 
+  function clear() {
+    snapshots.length = 0
+  }
+
   return {
     push,
     latest,
     previous,
     interpolated,
     forEachRecent,
+    clear,
     size() {
       return snapshots.length
     },
@@ -797,6 +931,7 @@ function createPresetRegistry(initialPresets = {}) {
 }
 
 function createRuntimeKit() {
+  const ownedInternalApis = new Set()
   return {
     math: { lerp, lerpVec3 },
     state: {
@@ -809,6 +944,31 @@ function createRuntimeKit() {
     },
     three: threeSdk,
     input: inputSdk,
+    internal: {
+      expose(name, api) {
+        const key = normalizeInternalApiName(name)
+        if (!key) throw new Error('internal api name required')
+        ownedInternalApis.add(key)
+        return setInternalApi(key, api)
+      },
+      remove(name) {
+        const key = normalizeInternalApiName(name)
+        if (!key) return false
+        ownedInternalApis.delete(key)
+        return removeInternalApi(key)
+      },
+      get(name) {
+        const key = normalizeInternalApiName(name)
+        return key ? (internalApiRegistry.get(key) || null) : null
+      },
+      keys() {
+        return [...ownedInternalApis]
+      },
+      dispose() {
+        for (const key of ownedInternalApis) removeInternalApi(key)
+        ownedInternalApis.clear()
+      },
+    },
   }
 }
 
@@ -1061,11 +1221,15 @@ async function bootstrap() {
     rendererTarget = '/ui/renderers/default.js'
   }
 
+  const runtimeKit = createRuntimeKit()
   const hostContext = {
     apiVersion: API_VERSION,
     manifest,
     canvas,
-    runtime: createRuntimeKit(),
+    runtime: runtimeKit,
+    exposeInternal(name, api) {
+      return runtimeKit.internal.expose(name, api)
+    },
     log(level, message, data) {
       const fn = level === 'error' ? console.error : level === 'warn' ? console.warn : console.log
       fn(`[renderer] ${message}`, data ?? '')
@@ -1149,6 +1313,7 @@ async function bootstrap() {
   }
 
   window.addEventListener('beforeunload', () => {
+    runtimeKit.internal.dispose()
     if (renderer.unmount) renderer.unmount()
     if (replayState.pollTimer) clearInterval(replayState.pollTimer)
     ws.close()
