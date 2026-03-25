@@ -27,6 +27,7 @@ AGENT_CHECKPOINT_AT_EPOCH="${AGENT_CHECKPOINT_AT_EPOCH:-}"
 AGENT_CHECKPOINT_PROMPT="${AGENT_CHECKPOINT_PROMPT:-}"
 AGENT_CHECKPOINT_TRIGGER_TURN="${AGENT_CHECKPOINT_TRIGGER_TURN:-1}"
 AGENT_CHECKPOINT_DISABLE_AUTO_LOOP="${AGENT_CHECKPOINT_DISABLE_AUTO_LOOP:-0}"
+declare -a AGENT_TEMPLATE_DIRS=()
 
 AGENT_SCRIPT="$ROOT_DIR/agent/run_agent.sh"
 if [[ ! -f "$AGENT_SCRIPT" ]]; then
@@ -61,6 +62,7 @@ Options:
   --port-wait-seconds N        Wait up to N seconds for target ports to free before failing
   --goal TEXT                  Custom startup objective passed to agents
   --template PATH              Agent template directory (relative to project root or absolute)
+  --agent-template PATH        Per-agent template directory; repeat in agent index order
   --results-root PATH          Results root directory (default: <world-dir>/results)
   --clawblox-bin PATH          Path or command name for clawblox binary
 
@@ -310,6 +312,11 @@ while [[ $# -gt 0 ]]; do
       TEMPLATE_DIR="$2"
       shift 2
       ;;
+    --agent-template)
+      require_value "$1" "${2:-}"
+      AGENT_TEMPLATE_DIRS+=("$2")
+      shift 2
+      ;;
     --results-root)
       require_value "$1" "${2:-}"
       RESULTS_ROOT="$2"
@@ -409,6 +416,26 @@ if [[ -n "$TEMPLATE_DIR" ]]; then
     echo "Error: template directory not found at $TEMPLATE_ABS_DIR"
     exit 1
   fi
+fi
+
+if ((${#AGENT_TEMPLATE_DIRS[@]} > AGENTS_PER_WORLD)); then
+  echo "Error: received ${#AGENT_TEMPLATE_DIRS[@]} --agent-template values for only $AGENTS_PER_WORLD agents."
+  exit 1
+fi
+
+declare -a AGENT_TEMPLATE_ABS_DIRS=()
+if ((${#AGENT_TEMPLATE_DIRS[@]} > 0)); then
+  for template_dir in "${AGENT_TEMPLATE_DIRS[@]}"; do
+    template_abs_dir="$template_dir"
+    if [[ "$template_abs_dir" != /* ]]; then
+      template_abs_dir="$ROOT_DIR/$template_abs_dir"
+    fi
+    if [[ ! -d "$template_abs_dir" ]]; then
+      echo "Error: agent template directory not found at $template_abs_dir"
+      exit 1
+    fi
+    AGENT_TEMPLATE_ABS_DIRS+=("$template_abs_dir")
+  done
 fi
 
 RUN_SAFE_ID="$(sanitize_name "$RUN_ID")"
@@ -574,11 +601,6 @@ fi
 
 echo "Launching $AGENTS_PER_WORLD agents per world..."
 
-TEMPLATE_ENV_PREFIX=""
-if [[ -n "$TEMPLATE_ABS_DIR" ]]; then
-  TEMPLATE_ENV_PREFIX="TEMPLATE_DIR=$(printf '%q' "$TEMPLATE_ABS_DIR") "
-fi
-
 CHECKPOINT_ENV_PREFIX=""
 if [[ -n "$AGENT_CHECKPOINT_AT_EPOCH" ]]; then
   CHECKPOINT_ENV_PREFIX+="AGENT_CHECKPOINT_AT_EPOCH=$(printf '%q' "$AGENT_CHECKPOINT_AT_EPOCH") "
@@ -619,6 +641,16 @@ EOF
     agent_log_file="$agent_log_dir/agent.log"
 
     mkdir -p "$agent_log_dir" "$agent_workspace" "$agent_session"
+
+    agent_template_abs_dir="$TEMPLATE_ABS_DIR"
+    if ((j < ${#AGENT_TEMPLATE_ABS_DIRS[@]})); then
+      agent_template_abs_dir="${AGENT_TEMPLATE_ABS_DIRS[$j]}"
+    fi
+
+    TEMPLATE_ENV_PREFIX=""
+    if [[ -n "$agent_template_abs_dir" ]]; then
+      TEMPLATE_ENV_PREFIX="TEMPLATE_DIR=$(printf '%q' "$agent_template_abs_dir") "
+    fi
 
     if [[ -n "$startup_instructions" ]]; then
       startup_instructions_q="$(printf '%q' "$startup_instructions")"

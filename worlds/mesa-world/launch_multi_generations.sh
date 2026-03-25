@@ -15,6 +15,7 @@ RUN_PREFIX_EXPLICIT=0
 TMUX_PREFIX_EXPLICIT=0
 WORLD_DIR="${WORLD_DIR:-worlds/mesa-world}"
 BASE_PORT="${BASE_PORT:-8085}"
+AGENTS_PER_WORLD="${AGENTS_PER_WORLD:-1}"
 RECORD="${RECORD:-true}"
 HEALTH_TIMEOUT="${HEALTH_TIMEOUT:-30}"
 STOP_GRACE_SECONDS="${STOP_GRACE_SECONDS:-5}"
@@ -30,6 +31,7 @@ AGENT_NAME_PREFIX="${AGENT_NAME_PREFIX:-mesa}"
 GOAL="${GOAL:-}"
 INITIAL_TEMPLATE="${INITIAL_TEMPLATE:-}"
 CLAWBLOX_BIN="${CLAWBLOX_BIN:-}"
+declare -a CURRENT_TEMPLATES=()
 
 sanitize_name() {
   printf '%s' "$1" | tr -c 'A-Za-z0-9._-' '_'
@@ -119,6 +121,14 @@ sleep_until_deadline() {
   done
 }
 
+set_all_current_templates() {
+  local template_path="$1"
+  CURRENT_TEMPLATES=()
+  for ((idx = 0; idx < AGENTS_PER_WORLD; idx++)); do
+    CURRENT_TEMPLATES[$idx]="$template_path"
+  done
+}
+
 schedule_stop_watchdog() {
   local tmux_session="$1"
   local expected_session_created="$2"
@@ -146,8 +156,8 @@ usage() {
   cat <<EOF
 Usage: $(basename "$0") [options]
 
-Run a single-agent generation chain where each generation uses the previous
-generation workspace as --template for launch_multi.sh.
+Run a generation chain where each agent keeps its own workspace lineage
+across sessions.
 
 Options:
   --generations N               Target generation count (default: 5)
@@ -157,6 +167,7 @@ Options:
   --tmux-prefix PREFIX          Prefix for per-generation tmux sessions (default: clawblox-gen)
   --world-dir PATH              World directory (relative to project root or absolute)
   --base-port PORT              World server port for each generation (default: 8085)
+  --agents-per-world N          Agents per generation/session (default: 1)
   --record true|false           Recording toggle forwarded to launch_multi.sh
   --health-timeout SECONDS      Health timeout forwarded to launch_multi.sh
   --stop-grace-seconds N        Graceful stop wait forwarded to launch_multi.sh
@@ -173,8 +184,9 @@ Options:
 
 Environment overrides:
   GENERATIONS, GENERATION_DURATION, EXPERIMENT_ID, RUN_PREFIX, TMUX_PREFIX,
-  WORLD_DIR, BASE_PORT, RECORD, HEALTH_TIMEOUT, STOP_GRACE_SECONDS, PORT_WAIT_SECONDS,
-  SAVE_GRACE_SECONDS, SAVE_PROMPT, AGENT_NAME_PREFIX, GOAL, INITIAL_TEMPLATE, CLAWBLOX_BIN
+  WORLD_DIR, BASE_PORT, AGENTS_PER_WORLD, RECORD, HEALTH_TIMEOUT, STOP_GRACE_SECONDS,
+  PORT_WAIT_SECONDS, SAVE_GRACE_SECONDS, SAVE_PROMPT, AGENT_NAME_PREFIX, GOAL,
+  INITIAL_TEMPLATE, CLAWBLOX_BIN
 EOF
 }
 
@@ -224,6 +236,11 @@ while [[ $# -gt 0 ]]; do
     --base-port)
       require_value "$1" "${2:-}"
       BASE_PORT="$2"
+      shift 2
+      ;;
+    --agents-per-world)
+      require_value "$1" "${2:-}"
+      AGENTS_PER_WORLD="$2"
       shift 2
       ;;
     --record)
@@ -305,6 +322,10 @@ if ! is_positive_int "$BASE_PORT" || ((BASE_PORT > 65535)); then
   echo "Error: --base-port must be an integer in [1, 65535] (got '$BASE_PORT')."
   exit 1
 fi
+if ! is_positive_int "$AGENTS_PER_WORLD"; then
+  echo "Error: --agents-per-world must be a positive integer (got '$AGENTS_PER_WORLD')."
+  exit 1
+fi
 if ! is_positive_int "$HEALTH_TIMEOUT"; then
   echo "Error: --health-timeout must be a positive integer (got '$HEALTH_TIMEOUT')."
   exit 1
@@ -338,13 +359,13 @@ if [[ ! -d "$WORLD_ABS_DIR" ]]; then
   exit 1
 fi
 
-CURRENT_TEMPLATE=""
 if [[ -n "$INITIAL_TEMPLATE" ]]; then
-  CURRENT_TEMPLATE="$(to_root_abs_path "$INITIAL_TEMPLATE")"
-  if [[ ! -d "$CURRENT_TEMPLATE" ]]; then
-    echo "Error: initial template directory not found at $CURRENT_TEMPLATE"
+  initial_template_abs="$(to_root_abs_path "$INITIAL_TEMPLATE")"
+  if [[ ! -d "$initial_template_abs" ]]; then
+    echo "Error: initial template directory not found at $initial_template_abs"
     exit 1
   fi
+  set_all_current_templates "$initial_template_abs"
 fi
 
 EXPERIMENT_SAFE_ID="$(sanitize_name "$EXPERIMENT_ID")"
@@ -368,42 +389,91 @@ if ((RESUME_MODE == 1)); then
     exit 1
   fi
 
+  csv_header="$(head -n 1 "$CHAIN_CSV" || true)"
+  if [[ "$csv_header" == "generation,run_id,tmux_session,template_in,workspace_out,start_utc,end_utc,duration_seconds" ]]; then
+    echo "Error: $CHAIN_CSV uses the legacy single-agent metadata format."
+    echo "Start a new experiment id for multi-agent lineage tracking."
+    exit 1
+  fi
+  if [[ "$csv_header" != "generation,agent_index,agent_name,run_id,tmux_session,template_in,workspace_out,start_utc,end_utc,duration_seconds" ]]; then
+    echo "Error: unrecognized metadata CSV header in $CHAIN_CSV"
+    exit 1
+  fi
+
   mapfile -t chain_rows < <(tail -n +2 "$CHAIN_CSV" | sed '/^[[:space:]]*$/d')
-  COMPLETED_GENERATIONS="${#chain_rows[@]}"
+  if ((${#chain_rows[@]} > 0)); then
+    declare -A latest_workspaces=()
+    max_generation=0
+    last_run_id=""
+    last_tmux_session=""
+    inferred_agents_per_world=0
 
-  if ((COMPLETED_GENERATIONS > 0)); then
-    last_row="${chain_rows[$((COMPLETED_GENERATIONS - 1))]}"
-    IFS=',' read -r last_gen_raw last_run_id_raw last_tmux_raw _ last_workspace_raw _ _ _ <<<"$last_row"
+    for row in "${chain_rows[@]}"; do
+      IFS=',' read -r gen_raw agent_index_raw _ run_id_raw tmux_raw _ workspace_raw _ _ _ <<<"$row"
 
-    if [[ -z "${last_workspace_raw:-}" || -z "${last_tmux_raw:-}" || -z "${last_run_id_raw:-}" || -z "${last_gen_raw:-}" ]]; then
-      echo "Error: failed to parse last CSV row in $CHAIN_CSV"
+      if [[ -z "${workspace_raw:-}" || -z "${tmux_raw:-}" || -z "${run_id_raw:-}" || -z "${agent_index_raw:-}" || -z "${gen_raw:-}" ]]; then
+        echo "Error: failed to parse metadata row in $CHAIN_CSV"
+        exit 1
+      fi
+
+      generation_value="$(csv_unquote "$gen_raw")"
+      agent_index_value="$(csv_unquote "$agent_index_raw")"
+      if [[ ! "$generation_value" =~ ^[0-9]+$ ]]; then
+        echo "Error: invalid generation value in CSV: '$generation_value'"
+        exit 1
+      fi
+      if [[ ! "$agent_index_value" =~ ^[0-9]+$ ]]; then
+        echo "Error: invalid agent_index value in CSV: '$agent_index_value'"
+        exit 1
+      fi
+
+      if ((generation_value > max_generation)); then
+        max_generation="$generation_value"
+        latest_workspaces=()
+        last_run_id="$(csv_unquote "$run_id_raw")"
+        last_tmux_session="$(csv_unquote "$tmux_raw")"
+        inferred_agents_per_world=0
+      fi
+
+      if ((generation_value == max_generation)); then
+        workspace_value="$(csv_unquote "$workspace_raw")"
+        latest_workspaces[$agent_index_value]="$workspace_value"
+        last_run_id="$(csv_unquote "$run_id_raw")"
+        last_tmux_session="$(csv_unquote "$tmux_raw")"
+        if ((inferred_agents_per_world < agent_index_value + 1)); then
+          inferred_agents_per_world=$((agent_index_value + 1))
+        fi
+      fi
+    done
+
+    if ((inferred_agents_per_world != AGENTS_PER_WORLD)); then
+      echo "Error: resume metadata expects $inferred_agents_per_world agents per generation, but --agents-per-world is $AGENTS_PER_WORLD."
       exit 1
     fi
 
-    last_generation="$(csv_unquote "$last_gen_raw")"
-    if [[ ! "$last_generation" =~ ^[0-9]+$ ]]; then
-      echo "Error: invalid generation value in CSV: '$last_generation'"
-      exit 1
-    fi
-    COMPLETED_GENERATIONS="$last_generation"
+    COMPLETED_GENERATIONS="$max_generation"
     START_GENERATION=$((COMPLETED_GENERATIONS + 1))
-
-    last_workspace="$(csv_unquote "$last_workspace_raw")"
-    if [[ ! -d "$last_workspace" ]]; then
-      echo "Error: last workspace in CSV does not exist: $last_workspace"
-      exit 1
-    fi
-    CURRENT_TEMPLATE="$last_workspace"
+    CURRENT_TEMPLATES=()
+    for ((idx = 0; idx < AGENTS_PER_WORLD; idx++)); do
+      workspace_value="${latest_workspaces[$idx]:-}"
+      if [[ -z "$workspace_value" ]]; then
+        echo "Error: missing workspace lineage for agent index $idx in generation $COMPLETED_GENERATIONS."
+        exit 1
+      fi
+      if [[ ! -d "$workspace_value" ]]; then
+        echo "Error: recorded workspace for agent index $idx does not exist: $workspace_value"
+        exit 1
+      fi
+      CURRENT_TEMPLATES[$idx]="$workspace_value"
+    done
 
     if ((RUN_PREFIX_EXPLICIT == 0)); then
-      last_run_id="$(csv_unquote "$last_run_id_raw")"
       inferred_run_prefix="$(printf '%s' "$last_run_id" | sed -E 's/-g[0-9]{3}$//')"
       if [[ "$inferred_run_prefix" != "$last_run_id" && -n "$inferred_run_prefix" ]]; then
         RUN_PREFIX="$inferred_run_prefix"
       fi
     fi
     if ((TMUX_PREFIX_EXPLICIT == 0)); then
-      last_tmux_session="$(csv_unquote "$last_tmux_raw")"
       inferred_tmux_prefix="$(printf '%s' "$last_tmux_session" | sed -E 's/-g[0-9]{3}$//')"
       if [[ "$inferred_tmux_prefix" != "$last_tmux_session" && -n "$inferred_tmux_prefix" ]]; then
         TMUX_PREFIX="$inferred_tmux_prefix"
@@ -422,7 +492,7 @@ else
   fi
   mkdir -p "$EXPERIMENT_DIR"
   mkdir -p "$EXPERIMENT_RUNS_DIR"
-  printf 'generation,run_id,tmux_session,template_in,workspace_out,start_utc,end_utc,duration_seconds\n' >"$CHAIN_CSV"
+  printf 'generation,agent_index,agent_name,run_id,tmux_session,template_in,workspace_out,start_utc,end_utc,duration_seconds\n' >"$CHAIN_CSV"
 fi
 
 CURRENT_SESSION=""
@@ -452,6 +522,7 @@ trap cleanup_active_session EXIT
 
 echo "Starting generation chain"
 echo "  Generations: $GENERATIONS"
+echo "  Agents/session: $AGENTS_PER_WORLD"
 echo "  Duration each: ${GENERATION_DURATION_SECONDS}s"
 echo "  Save grace: ${SAVE_GRACE_SECONDS}s"
 echo "  Resume: $([[ "$RESUME_MODE" -eq 1 ]] && echo "true" || echo "false")"
@@ -472,17 +543,20 @@ for ((gen = START_GENERATION; gen <= GENERATIONS; gen++)); do
   gen_tag="$(printf 'g%03d' "$gen")"
   run_id="$(sanitize_name "${RUN_PREFIX}-${gen_tag}")"
   tmux_session="$(sanitize_name "${TMUX_PREFIX}-${gen_tag}")"
-  template_in="$CURRENT_TEMPLATE"
+  template_inputs=("${CURRENT_TEMPLATES[@]}")
   start_utc="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
   echo "=== Generation $gen/$GENERATIONS ==="
   echo "  run_id: $run_id"
   echo "  tmux_session: $tmux_session"
-  if [[ -n "$template_in" ]]; then
-    echo "  template_in: $template_in"
-  else
-    echo "  template_in: (none)"
-  fi
+  for ((idx = 0; idx < AGENTS_PER_WORLD; idx++)); do
+    template_in="${template_inputs[$idx]:-}"
+    if [[ -n "$template_in" ]]; then
+      echo "  template_in[a${idx}]: $template_in"
+    else
+      echo "  template_in[a${idx}]: (default agent template)"
+    fi
+  done
 
   run_dir="$EXPERIMENT_RUNS_DIR/$run_id"
   if [[ -e "$run_dir" ]]; then
@@ -504,7 +578,7 @@ for ((gen = START_GENERATION; gen <= GENERATIONS; gen++)); do
     --run-id "$run_id"
     --tmux-session "$tmux_session"
     --num-worlds 1
-    --agents-per-world 1
+    --agents-per-world "$AGENTS_PER_WORLD"
     --base-port "$BASE_PORT"
     --record "$RECORD"
     --world-dir "$WORLD_DIR"
@@ -520,9 +594,12 @@ for ((gen = START_GENERATION; gen <= GENERATIONS; gen++)); do
   if [[ -n "$CLAWBLOX_BIN" ]]; then
     launch_cmd+=(--clawblox-bin "$CLAWBLOX_BIN")
   fi
-  if [[ -n "$template_in" ]]; then
-    launch_cmd+=(--template "$template_in")
-  fi
+  for ((idx = 0; idx < AGENTS_PER_WORLD; idx++)); do
+    template_in="${template_inputs[$idx]:-}"
+    if [[ -n "$template_in" ]]; then
+      launch_cmd+=(--agent-template "$template_in")
+    fi
+  done
 
   effective_save_grace="$SAVE_GRACE_SECONDS"
   if ((effective_save_grace > GENERATION_DURATION_SECONDS)); then
@@ -577,25 +654,57 @@ for ((gen = START_GENERATION; gen <= GENERATIONS; gen++)); do
     echo "Error: no workspace directory found under $agents_root"
     exit 1
   fi
-  if ((${#workspaces[@]} > 1)); then
-    echo "Error: expected exactly 1 workspace, found ${#workspaces[@]} under $agents_root"
-    exit 1
-  fi
-  workspace_out="${workspaces[0]}"
-  CURRENT_TEMPLATE="$workspace_out"
+  declare -A next_templates=()
+  declare -A next_agent_names=()
+  for workspace_out in "${workspaces[@]}"; do
+    agent_name="$(basename "$(dirname "$workspace_out")")"
+    if [[ ! "$agent_name" =~ -a([0-9]+)$ ]]; then
+      echo "Error: could not infer agent index from agent directory '$agent_name'"
+      exit 1
+    fi
+    agent_index="${BASH_REMATCH[1]}"
+    if ((agent_index >= AGENTS_PER_WORLD)); then
+      echo "Error: found workspace for unexpected agent index $agent_index under $agents_root"
+      exit 1
+    fi
+    if [[ -n "${next_templates[$agent_index]:-}" ]]; then
+      echo "Error: duplicate workspace discovered for agent index $agent_index under $agents_root"
+      exit 1
+    fi
+    next_templates[$agent_index]="$workspace_out"
+    next_agent_names[$agent_index]="$agent_name"
+  done
+
+  for ((idx = 0; idx < AGENTS_PER_WORLD; idx++)); do
+    if [[ -z "${next_templates[$idx]:-}" ]]; then
+      echo "Error: missing workspace for agent index $idx under $agents_root"
+      exit 1
+    fi
+  done
+
   end_utc="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
-  printf '"%s","%s","%s","%s","%s","%s","%s","%s"\n' \
-    "$(csv_escape "$gen")" \
-    "$(csv_escape "$run_id")" \
-    "$(csv_escape "$tmux_session")" \
-    "$(csv_escape "$template_in")" \
-    "$(csv_escape "$workspace_out")" \
-    "$(csv_escape "$start_utc")" \
-    "$(csv_escape "$end_utc")" \
-    "$(csv_escape "$GENERATION_DURATION_SECONDS")" >>"$CHAIN_CSV"
+  CURRENT_TEMPLATES=()
+  for ((idx = 0; idx < AGENTS_PER_WORLD; idx++)); do
+    template_in="${template_inputs[$idx]:-}"
+    workspace_out="${next_templates[$idx]}"
+    agent_name="${next_agent_names[$idx]}"
+    CURRENT_TEMPLATES[$idx]="$workspace_out"
 
-  echo "  workspace_out: $workspace_out"
+    printf '"%s","%s","%s","%s","%s","%s","%s","%s","%s","%s"\n' \
+      "$(csv_escape "$gen")" \
+      "$(csv_escape "$idx")" \
+      "$(csv_escape "$agent_name")" \
+      "$(csv_escape "$run_id")" \
+      "$(csv_escape "$tmux_session")" \
+      "$(csv_escape "$template_in")" \
+      "$(csv_escape "$workspace_out")" \
+      "$(csv_escape "$start_utc")" \
+      "$(csv_escape "$end_utc")" \
+      "$(csv_escape "$GENERATION_DURATION_SECONDS")" >>"$CHAIN_CSV"
+
+    echo "  workspace_out[a${idx}]: $workspace_out"
+  done
   echo
 done
 
