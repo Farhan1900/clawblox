@@ -66,7 +66,7 @@ function buildClouds(scene) {
       p.scale.y = 0.6
       cg.add(p)
     }
-    cg.position.set(Math.random() * 500 - 250, 100 + Math.random() * 80, Math.random() * 300 - 150)
+    cg.position.set(Math.random() * 500 - 250, 50 + Math.random() * 50, Math.random() * 300 - 150)
     scene.add(cg)
     cloudList.push({ mesh: cg, speed: 0.5 + Math.random() * 1.5 })
   }
@@ -104,15 +104,16 @@ function createEntityVisual(entity) {
 
   if (role === 'Ocean') {
     const mesh = new THREE.Mesh(
-      new THREE.BoxGeometry(size[0], size[1], size[2]),
+      new THREE.PlaneGeometry(size[0], size[2]),
       new THREE.MeshStandardMaterial({
-        color: 0x1e5a8c,
+        color: 0x3da8d4,
         transparent: true,
-        opacity: 0.55,
-        roughness: 0.15,
-        metalness: 0.3,
+        opacity: 0.65,
+        roughness: 0.1,
+        metalness: 0.4,
       }),
     )
+    mesh.rotation.x = -Math.PI / 2
     mesh.receiveShadow = true
     return mesh
   }
@@ -153,6 +154,23 @@ function createEntityVisual(entity) {
     }
 
     return group
+  }
+
+  if (role === 'Rock') {
+    // Dodecahedron with flat shading, earthy tones derived from entity color
+    const r = Math.max(size[0], size[1], size[2]) / 2
+    const geo = new THREE.DodecahedronGeometry(r, 0)
+    const color = entity.render && entity.render.color
+      ? new THREE.Color(entity.render.color[0], entity.render.color[1], entity.render.color[2])
+      : new THREE.Color().setHSL(0.1, 0.2, 0.18)
+    const mesh = new THREE.Mesh(geo, new THREE.MeshStandardMaterial({
+      color,
+      roughness: 0.95,
+      flatShading: true,
+    }))
+    mesh.castShadow = true
+    mesh.receiveShadow = true
+    return mesh
   }
 
   if (role === 'Fauna') {
@@ -399,7 +417,8 @@ export function createRenderer(ctx) {
   dirLight.shadow.camera.bottom = -180
   dirLight.shadow.camera.near = 1
   dirLight.shadow.camera.far = 400
-  dirLight.shadow.bias = -0.001
+  dirLight.shadow.bias = -0.00005
+  dirLight.shadow.normalBias = 0.01
   scene.add(dirLight)
   scene.add(dirLight.target)
 

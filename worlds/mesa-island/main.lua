@@ -20,6 +20,10 @@ local trackedBlocks = {}
 local blockColors = {
     Sand = Color3.fromRGB(214, 186, 128),
     Slate = Color3.fromRGB(148, 136, 124),
+    Coral = Color3.fromRGB(205, 120, 100),
+    Moss = Color3.fromRGB(95, 160, 110),
+    Obsidian = Color3.fromRGB(55, 50, 60),
+    Clay = Color3.fromRGB(180, 140, 105),
 }
 
 local blockPhysics = PhysicalProperties.new(
@@ -105,8 +109,76 @@ for _, m in ipairs(mesas) do
 end
 
 --------------------------------------------------------------------------------
+-- ROCKS (decorative, with collision)
+--------------------------------------------------------------------------------
+
+-- Rock clusters on open ground, away from mesa footprints
+-- Each cluster has 2-4 rocks of varying size grouped tightly
+local _rockSeed = 9999
+local function rockRandom()
+    _rockSeed = (_rockSeed * 16807) % 2147483647
+    return (_rockSeed - 1) / 2147483646
+end
+
+local rockClusters = {
+    -- South-east open plain
+    { cx = 40, cz = -60, n = 3 },
+    -- West lowland
+    { cx = -35, cz = 15, n = 3 },
+    -- North open area
+    { cx = 15, cz = 95, n = 2 },
+    -- East peninsula tip
+    { cx = 130, cz = 35, n = 2 },
+    -- South cove
+    { cx = 30, cz = -105, n = 3 },
+}
+
+local rockIndex = 0
+for _, cluster in ipairs(rockClusters) do
+    for j = 1, cluster.n do
+        rockIndex = rockIndex + 1
+        local ox = (rockRandom() - 0.5) * 8
+        local oz = (rockRandom() - 0.5) * 8
+
+        local radius = 1.2 + rockRandom() * 1.2
+        local sx = radius * 2 * (1.0 + rockRandom() * 0.5)
+        local sy = radius * 2 * (0.5 + rockRandom() * 0.5)
+        local sz = radius * 2 * (1.0 + rockRandom() * 0.5)
+
+        local lightness = math.floor(38 + rockRandom() * 25)
+        local rock = Instance.new("Part")
+        rock.Name = "Rock_" .. rockIndex
+        rock.Size = Vector3.new(sx, sy, sz)
+        rock.Position = Vector3.new(cluster.cx + ox, sy / 2 + 0.5, cluster.cz + oz)
+        rock.Anchored = false
+        rock.Color = Color3.fromRGB(lightness, lightness - 3, lightness - 8)
+        rock.CustomPhysicalProperties = PhysicalProperties.new(
+            8.0,  -- density (very heavy, needs multiple players to push)
+            0.9,  -- friction (high, won't slide easily)
+            0.0,  -- elasticity (no bounce)
+            1.0,
+            1.0
+        )
+        rock:SetAttribute("RenderRole", "Rock")
+        rock.Parent = Workspace
+    end
+end
+
+--------------------------------------------------------------------------------
 -- HELPERS (needed by flora + input handling)
 --------------------------------------------------------------------------------
+
+-- Check if a point (x, z) is over land (inside any ground part's XZ footprint)
+local function isOverLand(x, z)
+    for _, g in ipairs(groundParts) do
+        local gx, gz = g.pos[1], g.pos[3]
+        local hw, hd = g.size[1] / 2, g.size[3] / 2
+        if x >= gx - hw and x <= gx + hw and z >= gz - hd and z <= gz + hd then
+            return true
+        end
+    end
+    return false
+end
 
 local function getHumanoidRootPart(player)
     local character = player.Character
@@ -158,24 +230,24 @@ local function createGlowBulb(name, position)
     return bulb
 end
 
--- GlowBulbs cluster at the base of mesas (shade-loving)
+-- GlowBulbs cluster just outside mesa edges (shade-loving, at ground level)
 -- Each cluster is 2-3 bulbs with small random offsets
 local glowBulbClusters = {
-    -- At CenterHill base
-    { cx = 12, cz = 14, n = 3 },
-    { cx = -10, cz = -8, n = 2 },
-    -- At NE cluster base
-    { cx = 50, cz = 48, n = 3 },
-    { cx = 68, cz = 60, n = 2 },
-    -- At SW cluster base
-    { cx = -58, cz = -48, n = 2 },
-    { cx = -70, cz = -62, n = 3 },
-    -- At East ridge base
-    { cx = 92, cz = -10, n = 2 },
-    { cx = 95, cz = 30, n = 2 },
-    -- At NW stones
-    { cx = -48, cz = 65, n = 2 },
-    { cx = -62, cz = 80, n = 3 },
+    -- Outside CenterHill (edges at x=±15, z=±15)
+    { cx = 18, cz = 5, n = 3 },     -- east edge
+    { cx = -18, cz = -5, n = 2 },   -- west edge
+    -- Outside NELedge (edges at x=42..78, z=42..68)
+    { cx = 40, cz = 55, n = 3 },    -- west edge
+    { cx = 65, cz = 70, n = 2 },    -- north edge
+    -- Outside SWPlateau (edges at x=-80..-50, z=-68..-42)
+    { cx = -48, cz = -55, n = 2 },  -- east edge
+    { cx = -65, cz = -40, n = 3 },  -- north edge
+    -- Outside EastRidge (edges at x=92..108, z=-20..40)
+    { cx = 90, cz = -25, n = 2 },   -- south-west corner
+    { cx = 90, cz = 45, n = 2 },    -- north-west corner
+    -- Outside NW stones (NWStone1 edges at x=-57..-43, z=64..76)
+    { cx = -40, cz = 70, n = 2 },   -- east edge
+    { cx = -58, cz = 78, n = 3 },   -- north edge
 }
 
 local glowBulbIndex = 0
@@ -407,12 +479,17 @@ local function updateCreatures(dt)
                 moveDir = -homeOffset.Unit
             end
 
-            -- Apply movement
+            -- Apply movement (only if staying on land)
             if moveDir.Magnitude > 0.01 then
                 local delta = moveDir.Unit * moveSpeed * dt
                 local newX = pos.X + delta.X
                 local newZ = pos.Z + delta.Z
-                part.Position = Vector3.new(newX, creatureGroundY(def), newZ)
+                if isOverLand(newX, newZ) then
+                    part.Position = Vector3.new(newX, creatureGroundY(def), newZ)
+                else
+                    -- Hit water edge, reverse wander direction
+                    c.wanderDir = -c.wanderDir
+                end
             end
         end
     end
@@ -468,24 +545,50 @@ local function createBlock(name, position, colorName)
     return block
 end
 
--- Block pile at the base of CenterHill (building materials)
-local blockPile = {
-    { pos = Vector3.new(-12.5, 6.5, -6),  color = "Sand" },
-    { pos = Vector3.new(-11.8, 6.9, -5.4), color = "Slate" },
-    { pos = Vector3.new(-11.2, 7.3, -5.9), color = "Sand" },
-    { pos = Vector3.new(-12.2, 7.8, -4.9), color = "Slate" },
-    { pos = Vector3.new(-11.5, 8.2, -5.2), color = "Slate" },
-    { pos = Vector3.new(-12.0, 8.7, -5.7), color = "Sand" },
-    { pos = Vector3.new(-12.3, 9.1, -5.1), color = "Slate" },
-    { pos = Vector3.new(-11.4, 9.6, -5.6), color = "Sand" },
-    { pos = Vector3.new(-11.9, 10.0, -4.8), color = "Slate" },
-    { pos = Vector3.new(-11.7, 10.5, -5.3), color = "Sand" },
-    { pos = Vector3.new(-12.1, 11.0, -5.8), color = "Slate" },
-    { pos = Vector3.new(-11.6, 11.4, -5.0), color = "Sand" },
+-- Block clusters scattered across the island, each themed by dominant color
+local blockClusters = {
+    -- === Sand deposits (warm, near center & south) ===
+    { cx = -12, cz = -6, baseY = 6, colors = {"Sand", "Sand", "Sand", "Clay", "Sand"} },
+    { cx = 35, cz = -95, baseY = 6, colors = {"Sand", "Sand", "Clay", "Sand"} },
+    { cx = 25, cz = -40, baseY = 6, colors = {"Sand", "Clay", "Sand"} },
+
+    -- === Slate quarries (grey, near ridges & highlands) ===
+    { cx = 92, cz = -20, baseY = 6, colors = {"Slate", "Slate", "Obsidian", "Slate", "Slate"} },
+    { cx = -58, cz = -48, baseY = 6, colors = {"Slate", "Slate", "Slate", "Obsidian"} },
+    { cx = 90, cz = 45, baseY = 6, colors = {"Slate", "Obsidian", "Slate"} },
+
+    -- === Coral fragments (warm pink, near coast) ===
+    { cx = 115, cz = 25, baseY = 6, colors = {"Coral", "Coral", "Coral", "Sand", "Coral"} },
+    { cx = 40, cz = -100, baseY = 6, colors = {"Coral", "Coral", "Sand"} },
+    { cx = -100, cz = -15, baseY = 6, colors = {"Coral", "Coral", "Coral"} },
+
+    -- === Moss stones (green, near vegetation) ===
+    { cx = -45, cz = 65, baseY = 6, colors = {"Moss", "Moss", "Moss", "Slate", "Moss"} },
+    { cx = 52, cz = 48, baseY = 6, colors = {"Moss", "Moss", "Moss"} },
+    { cx = -15, cz = 110, baseY = 6, colors = {"Moss", "Moss", "Clay", "Moss"} },
+
+    -- === Obsidian shards (dark, rare, near SW spire) ===
+    { cx = -80, cz = -72, baseY = 6, colors = {"Obsidian", "Obsidian", "Obsidian"} },
+    { cx = 80, cz = 85, baseY = 6, colors = {"Obsidian", "Obsidian"} },
+
+    -- === Clay deposits (earthy, scattered) ===
+    { cx = -30, cz = 30, baseY = 6, colors = {"Clay", "Clay", "Sand", "Clay"} },
+    { cx = 60, cz = -30, baseY = 6, colors = {"Clay", "Clay", "Clay"} },
 }
 
-for index, blockDef in ipairs(blockPile) do
-    createBlock("Block_" .. index, blockDef.pos, blockDef.color)
+local blockIndex = 0
+for _, cluster in ipairs(blockClusters) do
+    for j, color in ipairs(cluster.colors) do
+        blockIndex = blockIndex + 1
+        local ox = (j - 1) * 0.7 - (#cluster.colors - 1) * 0.35
+        local oz = ((j % 2) - 0.5) * 0.6
+        local oy = (j - 1) * 0.5
+        createBlock(
+            "Block_" .. blockIndex,
+            Vector3.new(cluster.cx + ox, cluster.baseY + oy, cluster.cz + oz),
+            color
+        )
+    end
 end
 
 --------------------------------------------------------------------------------
