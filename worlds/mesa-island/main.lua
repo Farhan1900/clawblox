@@ -224,6 +224,10 @@ end
 
 local CONSUME_RANGE = 3
 local GLOWBULB_REGROW_SECONDS = 180
+local GLOWBULB_EFFECT_DELAY = 120   -- 2 minutes before immobilization kicks in
+local GLOWBULB_EFFECT_DURATION = 300 -- 5 minutes immobilized
+
+local playerEffects = {} -- player -> { timer, duration, active }
 local GLOWBULB_COLOR = Color3.fromRGB(0, 220, 200)
 
 local flora = {} -- { part = { species, age, harvested, regrowTimer } }
@@ -327,6 +331,14 @@ local function consumeFlora(player, inputData)
 
     local species = data.species
     player:SetAttribute("LastActionResult", "ConsumeSuccess:" .. species)
+
+    if species == "GlowBulb" then
+        playerEffects[player] = {
+            timer = GLOWBULB_EFFECT_DELAY,
+            duration = GLOWBULB_EFFECT_DURATION,
+            active = false,
+        }
+    end
 end
 
 --------------------------------------------------------------------------------
@@ -596,6 +608,31 @@ local blockClusters = {
     -- === Clay deposits (earthy, scattered) ===
     { cx = -30, cz = 30, baseY = 6, colors = {"Clay", "Clay", "Sand", "Clay"} },
     { cx = 60, cz = -30, baseY = 6, colors = {"Clay", "Clay", "Clay"} },
+
+    -- === Second wave: more deposits across the island ===
+    -- Sand
+    { cx = 10, cz = -70, baseY = 6, colors = {"Sand", "Sand", "Sand", "Sand"} },
+    { cx = -80, cz = 15, baseY = 6, colors = {"Sand", "Clay", "Sand", "Sand"} },
+    { cx = 70, cz = -60, baseY = 6, colors = {"Sand", "Sand", "Slate"} },
+    -- Slate
+    { cx = -40, cz = -80, baseY = 6, colors = {"Slate", "Slate", "Slate", "Slate"} },
+    { cx = 50, cz = -10, baseY = 6, colors = {"Slate", "Obsidian", "Slate", "Slate"} },
+    { cx = -90, cz = 50, baseY = 6, colors = {"Slate", "Slate", "Slate"} },
+    -- Coral
+    { cx = -70, cz = -90, baseY = 6, colors = {"Coral", "Coral", "Coral", "Coral"} },
+    { cx = 100, cz = -50, baseY = 6, colors = {"Coral", "Sand", "Coral"} },
+    { cx = -20, cz = -110, baseY = 6, colors = {"Coral", "Coral", "Coral"} },
+    -- Moss
+    { cx = 30, cz = 60, baseY = 6, colors = {"Moss", "Moss", "Moss"} },
+    { cx = -60, cz = 30, baseY = 6, colors = {"Moss", "Clay", "Moss", "Moss"} },
+    { cx = 70, cz = 70, baseY = 6, colors = {"Moss", "Moss", "Slate"} },
+    -- Obsidian
+    { cx = -50, cz = -100, baseY = 6, colors = {"Obsidian", "Obsidian", "Obsidian"} },
+    { cx = 120, cz = -10, baseY = 6, colors = {"Obsidian", "Obsidian"} },
+    -- Clay
+    { cx = -110, cz = -40, baseY = 6, colors = {"Clay", "Clay", "Clay", "Clay"} },
+    { cx = 20, cz = 110, baseY = 6, colors = {"Clay", "Sand", "Clay"} },
+    { cx = 80, cz = 30, baseY = 6, colors = {"Clay", "Clay", "Coral"} },
 }
 
 local blockIndex = 0
@@ -881,6 +918,36 @@ RunService.Heartbeat:Connect(function(dt)
             table.remove(placingBlocks, i)
         else
             i = i + 1
+        end
+    end
+
+    -- Update player effects (delayed immobilization)
+    for player, effect in pairs(playerEffects) do
+        local humanoid = nil
+        local character = player.Character
+        if character then
+            humanoid = character:FindFirstChild("Humanoid")
+        end
+        if not humanoid then
+            playerEffects[player] = nil
+        else
+            effect.timer = effect.timer - dt
+            if effect.timer <= 0 and not effect.active then
+                -- Immobilize
+                effect.active = true
+                humanoid.WalkSpeed = 0
+                humanoid.JumpPower = 0
+                humanoid:CancelMoveTo()
+            end
+            if effect.active then
+                effect.duration = effect.duration - dt
+                if effect.duration <= 0 then
+                    -- Restore
+                    humanoid.WalkSpeed = 16
+                    humanoid.JumpPower = 50
+                    playerEffects[player] = nil
+                end
+            end
         end
     end
 
