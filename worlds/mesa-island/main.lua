@@ -10,18 +10,18 @@ Workspace.Gravity = 10
 local BLOCK_SIZE = 0.75
 local PICKUP_RANGE = 6
 local PLACE_RANGE = 7
--- Spawn points spread across the island (on open ground)
+-- Spawn points on open ground, verified clear of all mesa/rock footprints
 local SPAWN_POINTS = {
-    Vector3.new(0, 5, 0),        -- center hill
+    Vector3.new(25, 2, -20),     -- south of center hill
     Vector3.new(40, 2, -55),     -- south-east plain
     Vector3.new(-30, 2, 25),     -- west lowland
-    Vector3.new(55, 2, 45),      -- near NE ledge
-    Vector3.new(-50, 2, -45),    -- near SW plateau
-    Vector3.new(85, 2, -15),     -- east ridge area
-    Vector3.new(-40, 2, 65),     -- NW stones area
+    Vector3.new(38, 2, 50),      -- east of NE ledge
+    Vector3.new(-45, 2, -35),    -- north of SW plateau
+    Vector3.new(80, 2, -25),     -- south of east ridge
+    Vector3.new(-35, 2, 55),     -- south of NW stones
     Vector3.new(20, 2, 85),      -- north
     Vector3.new(25, 2, -90),     -- south cove
-    Vector3.new(110, 2, 30),     -- east peninsula
+    Vector3.new(130, 2, 25),     -- east peninsula tip
 }
 local nextSpawnIndex = 0
 

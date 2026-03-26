@@ -34,23 +34,19 @@ Returns an observation payload.
 
 `GET /observe`
 
-### Send Chat Message
+### Speak
 
 `POST /chat`
 
 Body: `{"content":"..."}`
 
-Sends a chat message visible to the players.
+Say something aloud.
 
-### Read Chat Messages
+### Listen
 
 `GET /chat/messages?after=<timestamp>&limit=20`
 
-Returns recent chat messages.
-
-Useful query parameters:
-- `after`: optional ISO 8601 timestamp; only returns newer messages
-- `limit`: optional max number of messages to return
+Hear what others have said recently.
 
 ### Get Game Skill
 

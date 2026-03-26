@@ -29,9 +29,9 @@ AGENT_CHECKPOINT_TRIGGER_TURN="${AGENT_CHECKPOINT_TRIGGER_TURN:-1}"
 AGENT_CHECKPOINT_DISABLE_AUTO_LOOP="${AGENT_CHECKPOINT_DISABLE_AUTO_LOOP:-0}"
 declare -a AGENT_TEMPLATE_DIRS=()
 
-AGENT_SCRIPT="$ROOT_DIR/agent/run_agent.sh"
+AGENT_SCRIPT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/run_agent.sh"
 if [[ ! -f "$AGENT_SCRIPT" ]]; then
-  echo "Error: agent/run_agent.sh not found at $AGENT_SCRIPT"
+  echo "Error: run_agent.sh not found at $AGENT_SCRIPT"
   exit 1
 fi
 
@@ -632,7 +632,14 @@ EOF
       tmux select-layout -t "${TMUX_SESSION}:agents-$i" tiled
     fi
 
-    agent_name="$(sanitize_name "${AGENT_NAME_PREFIX}-r${RUN_SAFE_ID}-w${i}-a${j}")"
+    # Creature names for mesa-island agents
+    _creature_names=(Eko Moa Rua Tavi Oni Zev Ika Pala Sori Nyx)
+    if ((j < ${#_creature_names[@]})); then
+      agent_display_name="${_creature_names[$j]}"
+    else
+      agent_display_name="${AGENT_NAME_PREFIX}-a${j}"
+    fi
+    agent_name="$(sanitize_name "${agent_display_name}-r${RUN_SAFE_ID}-w${i}-a${j}")"
     world_agents_dir="$WORLDS_ROOT/world-$i/agents"
     agent_dir="$world_agents_dir/$agent_name"
     agent_log_dir="$agent_dir/logs"
@@ -655,10 +662,10 @@ EOF
     if [[ -n "$startup_instructions" ]]; then
       startup_instructions_q="$(printf '%q' "$startup_instructions")"
       tmux send-keys -t "${TMUX_SESSION}:agents-$i" \
-        "cd '$ROOT_DIR' && WORLD_BASE_URL='$url' WORLD_AGENT_NAME='$agent_name' WORKSPACE_DIR='$agent_workspace' SESSION_DIR='$agent_session' ${TEMPLATE_ENV_PREFIX}${CHECKPOINT_ENV_PREFIX}WORLD_STARTUP_INSTRUCTIONS=${startup_instructions_q} bash '$AGENT_SCRIPT' 2>&1 | tee -a '$agent_log_file'" Enter
+        "cd '$ROOT_DIR' && WORLD_BASE_URL='$url' WORLD_AGENT_NAME='$agent_display_name' WORKSPACE_DIR='$agent_workspace' SESSION_DIR='$agent_session' ${TEMPLATE_ENV_PREFIX}${CHECKPOINT_ENV_PREFIX}WORLD_STARTUP_INSTRUCTIONS=${startup_instructions_q} bash '$AGENT_SCRIPT' 2>&1 | tee -a '$agent_log_file'" Enter
     else
       tmux send-keys -t "${TMUX_SESSION}:agents-$i" \
-        "cd '$ROOT_DIR' && WORLD_BASE_URL='$url' WORLD_AGENT_NAME='$agent_name' WORKSPACE_DIR='$agent_workspace' SESSION_DIR='$agent_session' ${TEMPLATE_ENV_PREFIX}${CHECKPOINT_ENV_PREFIX}bash '$AGENT_SCRIPT' 2>&1 | tee -a '$agent_log_file'" Enter
+        "cd '$ROOT_DIR' && WORLD_BASE_URL='$url' WORLD_AGENT_NAME='$agent_display_name' WORKSPACE_DIR='$agent_workspace' SESSION_DIR='$agent_session' ${TEMPLATE_ENV_PREFIX}${CHECKPOINT_ENV_PREFIX}bash '$AGENT_SCRIPT' 2>&1 | tee -a '$agent_log_file'" Enter
     fi
   done
 done
