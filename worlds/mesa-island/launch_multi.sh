@@ -154,14 +154,17 @@ do_stop() {
   if tmux has-session -t "$TMUX_SESSION" 2>/dev/null; then
     mapfile -t recordings < <(collect_session_recordings)
 
-    echo "Sending Ctrl+C to panes in tmux session '$TMUX_SESSION'..."
-    while IFS= read -r pane_target; do
-      tmux send-keys -t "$pane_target" C-c
-    done < <(tmux list-panes -t "$TMUX_SESSION" -F "#{session_name}:#{window_name}.#{pane_index}")
+    # Stop server windows first (world-*) so recordings finalize cleanly
+    echo "Stopping world servers..."
+    while IFS= read -r window_name; do
+      [[ "$window_name" == world-* ]] || continue
+      tmux send-keys -t "${TMUX_SESSION}:${window_name}" C-c 2>/dev/null || true
+    done < <(tmux list-windows -t "$TMUX_SESSION" -F "#{window_name}" 2>/dev/null)
 
-    echo "Waiting ${STOP_GRACE_SECONDS}s for graceful shutdown..."
+    echo "Waiting ${STOP_GRACE_SECONDS}s for server shutdown..."
     sleep "$STOP_GRACE_SECONDS"
 
+    # Now kill the entire session (agents + any remaining processes)
     if tmux has-session -t "$TMUX_SESSION" 2>/dev/null; then
       echo "Killing tmux session '$TMUX_SESSION'..."
       tmux kill-session -t "$TMUX_SESSION" 2>/dev/null || true
