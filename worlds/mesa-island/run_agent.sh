@@ -88,6 +88,7 @@ if [[ -n "$WORLD_JOIN_PATH" ]]; then
     exit 1
   fi
 fi
+export WORLD_SESSION_ID="${SESSION_ID:-}"
 
 PROMPT_FILE="$(mktemp -t pi-agent-prompt.XXXXXX.md)"
 cleanup() {

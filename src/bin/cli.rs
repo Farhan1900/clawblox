@@ -37,6 +37,7 @@ use include_dir::{include_dir, Dir};
 use tower_http::services::ServeDir;
 
 use clawblox::{
+    config::{SpeechConfig, SpeechMode},
     db,
     recording, replay,
     replay_agent_log::{load_agent_timeline, ReplayAgentMessage, ReplayAgentTimeline},
@@ -1799,6 +1800,7 @@ fn run_game(
             renderer_manifest,
             sessions: Arc::new(DashMap::new()),
             log_file: path.join(format!(".clawblox-{}.log", port)),
+            speech_config: config.speech.clone(),
             audio_tx,
             speech_tx,
             speech_progress_tx,
@@ -1866,6 +1868,7 @@ fn run_game(
             .route("/ui/{*path}", get(local_ui_file))
             .route("/spectate", get(local_spectate))
             .route("/spectate/ws", get(local_spectate_ws))
+            .route("/spectate/chat/messages", get(local_spectate_chat_messages))
             .route("/renderer/manifest", get(local_renderer_manifest))
             .route("/join", post(local_join))
             .route("/input", post(local_input))
@@ -2127,7 +2130,11 @@ async fn handle_replay_ws(socket: WebSocket, state: ReplayState) {
                                 "agent_name": chat.agent_name,
                                 "message_type": "text",
                                 "content": chat.content,
-                                "created_at": "",
+                                "created_at": chat.created_at,
+                                "delivery_mode": chat.delivery_mode,
+                                "hearing_radius": chat.hearing_radius,
+                                "heard_by": chat.heard_by,
+                                "audibility": chat.audibility,
                             });
                             if sender.send(Message::Text(payload.to_string().into())).await.is_err() {
                                 break;
@@ -2593,6 +2600,15 @@ const LOCAL_CHAT_MAX_MESSAGES: usize = 1000;
 const LOCAL_CHAT_DEFAULT_LIMIT: usize = 50;
 const LOCAL_CHAT_MAX_LIMIT: usize = 100;
 
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct ChatAudibilityEntry {
+    agent_id: Uuid,
+    agent_name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    distance: Option<f32>,
+    heard: bool,
+}
+
 #[derive(Clone, Debug, Serialize)]
 struct LocalChatMessage {
     id: String,
@@ -2602,6 +2618,11 @@ struct LocalChatMessage {
     message_type: String,
     content: String,
     created_at: String,
+    delivery_mode: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    hearing_radius: Option<f32>,
+    heard_by: Vec<Uuid>,
+    audibility: Vec<ChatAudibilityEntry>,
 }
 
 #[derive(Debug, Default)]
@@ -2611,7 +2632,17 @@ struct LocalChatState {
 }
 
 impl LocalChatState {
-    fn push(&mut self, instance_id: Uuid, agent_id: Uuid, agent_name: String, content: String) -> LocalChatMessage {
+    fn push(
+        &mut self,
+        instance_id: Uuid,
+        agent_id: Uuid,
+        agent_name: String,
+        content: String,
+        delivery_mode: String,
+        hearing_radius: Option<f32>,
+        heard_by: Vec<Uuid>,
+        audibility: Vec<ChatAudibilityEntry>,
+    ) -> LocalChatMessage {
         self.next_seq = self.next_seq.saturating_add(1);
         let msg = LocalChatMessage {
             id: format!("local_{}", self.next_seq),
@@ -2621,6 +2652,10 @@ impl LocalChatState {
             message_type: "text".to_string(),
             content,
             created_at: Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true),
+            delivery_mode,
+            hearing_radius,
+            heard_by,
+            audibility,
         };
         self.messages.push_back(msg.clone());
         while self.messages.len() > LOCAL_CHAT_MAX_MESSAGES {
@@ -2655,6 +2690,7 @@ struct LocalState {
     renderer_manifest: LocalRendererManifest,
     sessions: Arc<DashMap<String, (Uuid, String)>>, // token -> (agent_id, name)
     log_file: PathBuf,
+    speech_config: SpeechConfig,
     audio_tx: broadcast::Sender<AudioChunk>,
     speech_tx: broadcast::Sender<SpeechEvent>,
     speech_progress_tx: broadcast::Sender<SpeechProgressEvent>,
@@ -2911,6 +2947,88 @@ fn check_halted(state: &LocalState) -> Option<String> {
             state.log_file.display()
         )
     })
+}
+
+fn speech_mode_name(mode: SpeechMode) -> &'static str {
+    match mode {
+        SpeechMode::Global => "global",
+        SpeechMode::Proximity => "proximity",
+    }
+}
+
+fn round_chat_distance(value: f32) -> f32 {
+    (value * 100.0).round() / 100.0
+}
+
+fn listener_can_receive_message(listener_agent_id: Uuid, message: &LocalChatMessage) -> bool {
+    listener_agent_id == message.agent_id || message.heard_by.contains(&listener_agent_id)
+}
+
+fn build_chat_audibility(
+    state: &LocalState,
+    speaker_agent_id: Uuid,
+    speaker_name: &str,
+) -> Result<(String, Option<f32>, Vec<Uuid>, Vec<ChatAudibilityEntry>), String> {
+    let observation =
+        game::get_spectator_observation_for_instance(&state.game_handle, state.instance_id)?;
+    let speaker_position = observation
+        .players
+        .iter()
+        .find(|player| player.id == speaker_agent_id)
+        .map(|player| player.position);
+
+    let mut heard_by = Vec::new();
+    let mut audibility = Vec::new();
+
+    for player in &observation.players {
+        let distance = speaker_position.map(|speaker_pos| {
+            let dx = player.position[0] - speaker_pos[0];
+            let dy = player.position[1] - speaker_pos[1];
+            let dz = player.position[2] - speaker_pos[2];
+            round_chat_distance((dx * dx + dy * dy + dz * dz).sqrt())
+        });
+
+        let heard = match state.speech_config.mode {
+            SpeechMode::Global => true,
+            SpeechMode::Proximity => {
+                player.id == speaker_agent_id
+                    || distance
+                        .map(|value| value <= state.speech_config.hearing_radius)
+                        .unwrap_or(false)
+            }
+        };
+
+        if heard {
+            heard_by.push(player.id);
+        }
+
+        audibility.push(ChatAudibilityEntry {
+            agent_id: player.id,
+            agent_name: player.name.clone(),
+            distance,
+            heard,
+        });
+    }
+
+    if !audibility.iter().any(|entry| entry.agent_id == speaker_agent_id) {
+        heard_by.push(speaker_agent_id);
+        audibility.push(ChatAudibilityEntry {
+            agent_id: speaker_agent_id,
+            agent_name: speaker_name.to_string(),
+            distance: Some(0.0),
+            heard: true,
+        });
+    }
+
+    Ok((
+        speech_mode_name(state.speech_config.mode).to_string(),
+        match state.speech_config.mode {
+            SpeechMode::Global => None,
+            SpeechMode::Proximity => Some(state.speech_config.hearing_radius),
+        },
+        heard_by,
+        audibility,
+    ))
 }
 
 fn content_type_for_path(path: &str) -> &'static str {
@@ -3298,9 +3416,22 @@ async fn local_chat(
         ));
     }
 
+    let (delivery_mode, hearing_radius, heard_by, audibility) =
+        build_chat_audibility(&state, agent_id, &agent_name)
+            .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e))?;
+
     let msg = {
         let mut chat = state.chat_state.lock().unwrap();
-        chat.push(state.instance_id, agent_id, agent_name, content.to_string())
+        chat.push(
+            state.instance_id,
+            agent_id,
+            agent_name,
+            content.to_string(),
+            delivery_mode,
+            hearing_radius,
+            heard_by,
+            audibility,
+        )
     };
 
     let _ = state.chat_tx.send(msg.clone());
@@ -3318,6 +3449,20 @@ async fn local_chat(
         let msg_id = msg.id.clone();
         let agent_name_clone = msg.agent_name.clone();
         let content_clone = msg.content.clone();
+        let created_at = msg.created_at.clone();
+        let delivery_mode = msg.delivery_mode.clone();
+        let hearing_radius = msg.hearing_radius;
+        let heard_by = msg.heard_by.iter().map(ToString::to_string).collect::<Vec<_>>();
+        let audibility = msg
+            .audibility
+            .iter()
+            .map(|entry| recording::RecordedChatAudibilityEntry {
+                agent_id: entry.agent_id.to_string(),
+                agent_name: entry.agent_name.clone(),
+                distance: entry.distance,
+                heard: entry.heard,
+            })
+            .collect::<Vec<_>>();
         tokio::spawn(async move {
             let w = writer.lock().await;
             w.record_chat(
@@ -3327,6 +3472,11 @@ async fn local_chat(
                 &agent_id,
                 &agent_name_clone,
                 &content_clone,
+                &created_at,
+                &delivery_mode,
+                hearing_radius,
+                &heard_by,
+                &audibility,
             )
             .await;
         });
@@ -3340,12 +3490,14 @@ async fn local_chat(
 
 async fn local_chat_messages(
     State(state): State<LocalState>,
+    headers: axum::http::HeaderMap,
     Query(query): Query<ChatMessagesQuery>,
 ) -> Result<Json<ChatMessagesResponse>, (axum::http::StatusCode, String)> {
     if let Some(err) = check_halted(&state) {
         return Err((axum::http::StatusCode::SERVICE_UNAVAILABLE, err));
     }
 
+    let listener_agent_id = get_session(&state, &headers).map(|(agent_id, _)| agent_id)?;
     let instance_id = query.instance_id.unwrap_or(state.instance_id);
     let limit = query
         .limit
@@ -3355,7 +3507,15 @@ async fn local_chat_messages(
 
     let messages = {
         let chat = state.chat_state.lock().unwrap();
-        chat.list(instance_id, after, limit)
+        chat.list(instance_id, after, LOCAL_CHAT_MAX_MESSAGES)
+            .into_iter()
+            .filter(|message| listener_can_receive_message(listener_agent_id, message))
+            .rev()
+            .take(limit)
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .collect()
     };
 
     Ok(Json(ChatMessagesResponse { messages }))
@@ -3568,6 +3728,29 @@ async fn local_spectate(
     Ok(Json(observation))
 }
 
+async fn local_spectate_chat_messages(
+    State(state): State<LocalState>,
+    Query(query): Query<ChatMessagesQuery>,
+) -> Result<Json<ChatMessagesResponse>, (axum::http::StatusCode, String)> {
+    if let Some(err) = check_halted(&state) {
+        return Err((axum::http::StatusCode::SERVICE_UNAVAILABLE, err));
+    }
+
+    let instance_id = query.instance_id.unwrap_or(state.instance_id);
+    let limit = query
+        .limit
+        .unwrap_or(LOCAL_CHAT_DEFAULT_LIMIT)
+        .clamp(1, LOCAL_CHAT_MAX_LIMIT);
+    let after = query.after.as_deref().map(str::trim).filter(|s| !s.is_empty());
+
+    let messages = {
+        let chat = state.chat_state.lock().unwrap();
+        chat.list(instance_id, after, limit)
+    };
+
+    Ok(Json(ChatMessagesResponse { messages }))
+}
+
 async fn local_skill(State(state): State<LocalState>) -> impl IntoResponse {
     match state.skill_md {
         Some(content) => (
@@ -3715,6 +3898,10 @@ async fn handle_spectate_ws(socket: WebSocket, state: LocalState, role: Spectate
                         "message_type": chat.message_type,
                         "content": chat.content,
                         "created_at": chat.created_at,
+                        "delivery_mode": chat.delivery_mode,
+                        "hearing_radius": chat.hearing_radius,
+                        "heard_by": chat.heard_by,
+                        "audibility": chat.audibility,
                     })).unwrap_or_default();
                     if sender.send(Message::Text(json.into())).await.is_err() {
                         break;

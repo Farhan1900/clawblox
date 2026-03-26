@@ -586,6 +586,19 @@ function appendChatMessage(msg) {
   renderChatFeed()
 }
 
+function formatChatAudibility(msg) {
+  const audibility = Array.isArray(msg?.audibility) ? msg.audibility : []
+  if (!audibility.length) return ''
+  const heard = audibility.filter((entry) => entry && entry.heard)
+  if (!heard.length) return 'heard by nobody'
+  const names = heard
+    .map((entry) => String(entry.agent_name || '').trim())
+    .filter(Boolean)
+  if (!names.length) return `heard by ${heard.length}`
+  if (names.length <= 4) return `heard by ${names.join(', ')}`
+  return `heard by ${names.slice(0, 4).join(', ')} +${names.length - 4}`
+}
+
 function renderChatFeed() {
   if (!chatFeedEl) return
   const shouldStick = userAtBottom(chatFeedEl)
@@ -619,7 +632,15 @@ function renderChatFeed() {
       body.textContent = String(msg.content || '')
 
       meta.append(name, time)
-      row.append(meta, body)
+      const heard = formatChatAudibility(msg)
+      if (heard) {
+        const delivery = document.createElement('div')
+        delivery.className = 'chat-message__time'
+        delivery.textContent = heard
+        row.append(meta, body, delivery)
+      } else {
+        row.append(meta, body)
+      }
       chatFeedEl.appendChild(row)
     }
   }
@@ -629,7 +650,7 @@ function renderChatFeed() {
 async function loadChatHistory() {
   if (replayState.enabled) return  // In replay mode, chat comes via WebSocket
   try {
-    const resp = await fetch(withBasePath('/chat/messages?limit=50'))
+    const resp = await fetch(withBasePath('/spectate/chat/messages?limit=50'))
     if (!resp.ok) throw new Error(`history HTTP ${resp.status}`)
     const data = await resp.json()
     const messages = Array.isArray(data?.messages) ? data.messages : []

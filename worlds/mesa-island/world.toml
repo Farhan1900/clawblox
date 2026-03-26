@@ -16,3 +16,7 @@ capabilities = ["three-sdk"]
 
 [observation]
 radius = 80
+
+[speech]
+mode = "proximity"
+hearing_radius = 30

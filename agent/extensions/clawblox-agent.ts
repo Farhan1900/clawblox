@@ -10,6 +10,7 @@ const CHECKPOINT_AT_EPOCH = parseEpochSeconds(process.env.AGENT_CHECKPOINT_AT_EP
 const CHECKPOINT_TRIGGER_TURN = process.env.AGENT_CHECKPOINT_TRIGGER_TURN !== "0";
 const CHECKPOINT_DISABLE_AUTO_LOOP = process.env.AGENT_CHECKPOINT_DISABLE_AUTO_LOOP === "1";
 const WORLD_BASE_URL = (process.env.WORLD_BASE_URL ?? "").trim();
+const WORLD_SESSION_ID = (process.env.WORLD_SESSION_ID ?? "").trim();
 const CHAT_POLL_INTERVAL_MS = 2500;
 const CHAT_MESSAGES_LIMIT = 20;
 
@@ -108,14 +109,16 @@ export default function (pi: ExtensionAPI) {
   };
 
   const pollChatMessages = async () => {
-    if (!chatPollingEnabled || chatPollInFlight || !WORLD_BASE_URL) return;
+    if (!chatPollingEnabled || chatPollInFlight || !WORLD_BASE_URL || !WORLD_SESSION_ID) return;
     chatPollInFlight = true;
     try {
       const url = new URL(`${normalizeBaseUrl(WORLD_BASE_URL)}/chat/messages`);
       url.searchParams.set("limit", String(CHAT_MESSAGES_LIMIT));
       if (chatAfter) url.searchParams.set("after", chatAfter);
 
-      const response = await fetch(url.toString());
+      const response = await fetch(url.toString(), {
+        headers: { "X-Session": WORLD_SESSION_ID },
+      });
       if (response.status === 404 || response.status === 405) {
         chatPollingEnabled = false;
         return;
@@ -138,7 +141,7 @@ export default function (pi: ExtensionAPI) {
   };
 
   const startChatPolling = () => {
-    if (!WORLD_BASE_URL) return;
+    if (!WORLD_BASE_URL || !WORLD_SESSION_ID) return;
     chatPollingEnabled = true;
     void pollChatMessages();
     chatPollTimer = setInterval(() => {

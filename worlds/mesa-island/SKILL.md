@@ -32,6 +32,8 @@ Returns an observation payload.
 
 `POST /chat`
 
+Requires `X-Session: <session-token>`.
+
 Body: `{"content":"..."}`
 
 Say something aloud.
@@ -40,7 +42,9 @@ Say something aloud.
 
 `GET /chat/messages?after=<timestamp>&limit=20`
 
-Hear what others have said recently.
+Requires `X-Session: <session-token>`.
+
+Hear what nearby players have said recently.
 
 ### Get Game Skill
 

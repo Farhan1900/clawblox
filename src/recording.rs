@@ -10,6 +10,15 @@ use uuid::Uuid;
 const CHECKPOINT_INTERVAL: u64 = 60;
 const WAL_CHECKPOINT_SECS: u64 = 300;
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RecordedChatAudibilityEntry {
+    pub agent_id: String,
+    pub agent_name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub distance: Option<f32>,
+    pub heard: bool,
+}
+
 // --- Delta format ---
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -140,11 +149,22 @@ impl RecordingWriter {
                 message_id TEXT NOT NULL,
                 agent_id TEXT NOT NULL,
                 agent_name TEXT NOT NULL,
-                content TEXT NOT NULL
+                content TEXT NOT NULL,
+                created_at TEXT NOT NULL DEFAULT '',
+                delivery_mode TEXT NOT NULL DEFAULT 'global',
+                hearing_radius REAL,
+                heard_by TEXT NOT NULL DEFAULT '[]',
+                audibility TEXT NOT NULL DEFAULT '[]'
             )",
         )
         .execute(&pool)
         .await?;
+
+        ensure_chat_messages_column(&pool, "created_at TEXT NOT NULL DEFAULT ''").await?;
+        ensure_chat_messages_column(&pool, "delivery_mode TEXT NOT NULL DEFAULT 'global'").await?;
+        ensure_chat_messages_column(&pool, "hearing_radius REAL").await?;
+        ensure_chat_messages_column(&pool, "heard_by TEXT NOT NULL DEFAULT '[]'").await?;
+        ensure_chat_messages_column(&pool, "audibility TEXT NOT NULL DEFAULT '[]'").await?;
 
         sqlx::query("CREATE INDEX IF NOT EXISTS idx_chat_messages_tick ON chat_messages(tick)")
             .execute(&pool)
@@ -156,7 +176,7 @@ impl RecordingWriter {
             ("world_dir", world_dir),
             ("created_at", &now),
             ("tick_rate", &tick_rate.to_string()),
-            ("version", "1"),
+            ("version", "2"),
         ] {
             sqlx::query("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)")
                 .bind(k)
@@ -247,9 +267,20 @@ impl RecordingWriter {
         agent_id: &Uuid,
         agent_name: &str,
         content: &str,
+        created_at: &str,
+        delivery_mode: &str,
+        hearing_radius: Option<f32>,
+        heard_by: &[String],
+        audibility: &[RecordedChatAudibilityEntry],
     ) {
+        let heard_by_json = serde_json::to_string(heard_by).unwrap_or_else(|_| "[]".to_string());
+        let audibility_json =
+            serde_json::to_string(audibility).unwrap_or_else(|_| "[]".to_string());
         if let Err(e) = sqlx::query(
-            "INSERT INTO chat_messages (tick, time_ms, message_id, agent_id, agent_name, content) VALUES (?, ?, ?, ?, ?, ?)",
+            "INSERT INTO chat_messages (
+                tick, time_ms, message_id, agent_id, agent_name, content,
+                created_at, delivery_mode, hearing_radius, heard_by, audibility
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(tick as i64)
         .bind(time_ms as i64)
@@ -257,6 +288,11 @@ impl RecordingWriter {
         .bind(agent_id.to_string())
         .bind(agent_name)
         .bind(content)
+        .bind(created_at)
+        .bind(delivery_mode)
+        .bind(hearing_radius.map(f64::from))
+        .bind(heard_by_json)
+        .bind(audibility_json)
         .execute(&self.pool)
         .await
         {
@@ -576,12 +612,38 @@ impl RecordingReader {
         start_tick: u64,
         end_tick: u64,
     ) -> Result<Vec<RecordedChatMessage>, sqlx::Error> {
-        let rows = sqlx::query(
-            "SELECT tick, time_ms, message_id, agent_id, agent_name, content
+        let has_created_at = self.chat_messages_has_column("created_at").await?;
+        let has_delivery_mode = self.chat_messages_has_column("delivery_mode").await?;
+        let has_hearing_radius = self.chat_messages_has_column("hearing_radius").await?;
+        let has_heard_by = self.chat_messages_has_column("heard_by").await?;
+        let has_audibility = self.chat_messages_has_column("audibility").await?;
+
+        let mut select_fields =
+            vec!["tick", "time_ms", "message_id", "agent_id", "agent_name", "content"];
+        if has_created_at {
+            select_fields.push("created_at");
+        }
+        if has_delivery_mode {
+            select_fields.push("delivery_mode");
+        }
+        if has_hearing_radius {
+            select_fields.push("hearing_radius");
+        }
+        if has_heard_by {
+            select_fields.push("heard_by");
+        }
+        if has_audibility {
+            select_fields.push("audibility");
+        }
+
+        let query = format!(
+            "SELECT {}
              FROM chat_messages
              WHERE tick >= ? AND tick <= ?
              ORDER BY tick, time_ms",
-        )
+            select_fields.join(", ")
+        );
+        let rows = sqlx::query(&query)
         .bind(start_tick as i64)
         .bind(end_tick as i64)
         .fetch_all(&self.pool)
@@ -596,8 +658,42 @@ impl RecordingReader {
                 agent_id: r.get::<String, _>("agent_id"),
                 agent_name: r.get::<String, _>("agent_name"),
                 content: r.get::<String, _>("content"),
+                created_at: if has_created_at {
+                    r.get::<String, _>("created_at")
+                } else {
+                    String::new()
+                },
+                delivery_mode: if has_delivery_mode {
+                    r.get::<String, _>("delivery_mode")
+                } else {
+                    "global".to_string()
+                },
+                hearing_radius: if has_hearing_radius {
+                    r.get::<Option<f64>, _>("hearing_radius").map(|v| v as f32)
+                } else {
+                    None
+                },
+                heard_by: if has_heard_by {
+                    serde_json::from_str(&r.get::<String, _>("heard_by")).unwrap_or_default()
+                } else {
+                    Vec::new()
+                },
+                audibility: if has_audibility {
+                    serde_json::from_str(&r.get::<String, _>("audibility")).unwrap_or_default()
+                } else {
+                    Vec::new()
+                },
             })
             .collect())
+    }
+
+    async fn chat_messages_has_column(&self, name: &str) -> Result<bool, sqlx::Error> {
+        let rows = sqlx::query("PRAGMA table_info(chat_messages)")
+            .fetch_all(&self.pool)
+            .await?;
+        Ok(rows
+            .iter()
+            .any(|row| row.get::<String, _>("name") == name))
     }
 }
 
@@ -608,6 +704,24 @@ pub struct RecordedChatMessage {
     pub agent_id: String,
     pub agent_name: String,
     pub content: String,
+    pub created_at: String,
+    pub delivery_mode: String,
+    pub hearing_radius: Option<f32>,
+    pub heard_by: Vec<String>,
+    pub audibility: Vec<RecordedChatAudibilityEntry>,
+}
+
+async fn ensure_chat_messages_column(pool: &SqlitePool, column_def: &str) -> Result<(), sqlx::Error> {
+    let query = format!("ALTER TABLE chat_messages ADD COLUMN {}", column_def);
+    match sqlx::query(&query).execute(pool).await {
+        Ok(_) => Ok(()),
+        Err(sqlx::Error::Database(db_err))
+            if db_err.message().contains("duplicate column name") =>
+        {
+            Ok(())
+        }
+        Err(err) => Err(err),
+    }
 }
 
 fn apply_delta(obs: &mut SpectatorObservation, delta: &FrameDelta) {

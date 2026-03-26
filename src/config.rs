@@ -111,6 +111,40 @@ impl Default for ObservationConfig {
     }
 }
 
+/// Speech delivery mode.
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum SpeechMode {
+    Global,
+    Proximity,
+}
+
+impl Default for SpeechMode {
+    fn default() -> Self {
+        Self::Global
+    }
+}
+
+/// Speech configuration section.
+#[derive(Debug, Clone, Deserialize)]
+pub struct SpeechConfig {
+    /// How spoken messages are delivered.
+    #[serde(default)]
+    pub mode: SpeechMode,
+    /// Maximum hearing distance for proximity speech.
+    #[serde(default = "default_speech_hearing_radius")]
+    pub hearing_radius: f32,
+}
+
+impl Default for SpeechConfig {
+    fn default() -> Self {
+        Self {
+            mode: SpeechMode::default(),
+            hearing_radius: default_speech_hearing_radius(),
+        }
+    }
+}
+
 /// World configuration from world.toml
 #[derive(Debug, Clone, Deserialize)]
 pub struct WorldConfig {
@@ -134,6 +168,9 @@ pub struct WorldConfig {
     /// Observation configuration
     #[serde(default)]
     pub observation: ObservationConfig,
+    /// Speech configuration
+    #[serde(default)]
+    pub speech: SpeechConfig,
     /// AFK timeout in seconds (0 = disabled). Players idle longer than this are kicked.
     #[serde(default = "default_afk_timeout")]
     pub afk_timeout: u64,
@@ -166,6 +203,10 @@ fn default_observation_radius() -> f32 {
     100.0
 }
 
+fn default_speech_hearing_radius() -> f32 {
+    30.0
+}
+
 fn default_runtime_mode() -> String {
     "clawblox".to_string()
 }
@@ -194,6 +235,12 @@ impl WorldConfig {
             return Err(WorldConfigError::ValidationError(
                 path.to_path_buf(),
                 "observation.radius must be a finite number > 0".to_string(),
+            ));
+        }
+        if !self.speech.hearing_radius.is_finite() || self.speech.hearing_radius <= 0.0 {
+            return Err(WorldConfigError::ValidationError(
+                path.to_path_buf(),
+                "speech.hearing_radius must be a finite number > 0".to_string(),
             ));
         }
         if let Some(cmd) = self.run.command.as_ref() {
@@ -254,6 +301,8 @@ mod tests {
         assert_eq!(config.max_players, 8);
         assert_eq!(config.runtime.mode, "clawblox");
         assert_eq!(config.observation.radius, 100.0);
+        assert_eq!(config.speech.mode, SpeechMode::Global);
+        assert_eq!(config.speech.hearing_radius, 30.0);
     }
 
     #[test]
@@ -281,6 +330,10 @@ mod tests {
             [observation]
             radius = 64
 
+            [speech]
+            mode = "proximity"
+            hearing_radius = 24
+
             [run]
             command = ["custom-runner", "--flag"]
         "#;
@@ -296,6 +349,8 @@ mod tests {
         assert_eq!(config.renderer.source.as_deref(), Some("src/index.ts"));
         assert_eq!(config.renderer.api_version, 1);
         assert_eq!(config.observation.radius, 64.0);
+        assert_eq!(config.speech.mode, SpeechMode::Proximity);
+        assert_eq!(config.speech.hearing_radius, 24.0);
         assert_eq!(
             config.run.command.as_ref().map(|c| c.as_slice()),
             Some(["custom-runner", "--flag"].as_slice())
@@ -316,5 +371,21 @@ mod tests {
             .validate(std::path::Path::new("world.toml"))
             .unwrap_err();
         assert!(format!("{}", err).contains("observation.radius"));
+    }
+
+    #[test]
+    fn test_invalid_speech_hearing_radius_fails_validation() {
+        let toml = r#"
+            name = "Bad Config"
+
+            [speech]
+            hearing_radius = 0
+        "#;
+
+        let config: WorldConfig = toml::from_str(toml).unwrap();
+        let err = config
+            .validate(std::path::Path::new("world.toml"))
+            .unwrap_err();
+        assert!(format!("{}", err).contains("speech.hearing_radius"));
     }
 }
