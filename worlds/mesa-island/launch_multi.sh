@@ -191,21 +191,42 @@ do_stop() {
       tmux send-keys -t "$pane_target" C-c
     done < <(tmux list-panes -t "$TMUX_SESSION" -F "#{session_name}:#{window_name}.#{pane_index}")
 
-    echo "Waiting ${STOP_GRACE_SECONDS}s for graceful shutdown..."
-    sleep "$STOP_GRACE_SECONDS"
+    # Wait for clawblox server to close recording DBs (WAL files become empty)
+    local waited=0
+    echo "Waiting for server shutdown (up to ${STOP_GRACE_SECONDS}s)..."
+    while ((waited < STOP_GRACE_SECONDS)); do
+      local wal_busy=0
+      for recording_file in "${recordings[@]}"; do
+        local wal_file="${recording_file}-wal"
+        if [[ -f "$wal_file" && -s "$wal_file" ]]; then
+          wal_busy=1
+          break
+        fi
+      done
+      if ((wal_busy == 0)); then
+        echo "Server shut down cleanly after ${waited}s."
+        break
+      fi
+      sleep 1
+      ((waited++))
+    done
+    if ((waited >= STOP_GRACE_SECONDS)); then
+      echo "Warning: server did not shut down within ${STOP_GRACE_SECONDS}s."
+    fi
+
+    # Finalize recordings BEFORE killing tmux
+    if ((${#recordings[@]} > 0)); then
+      echo "Finalizing recording databases..."
+      for recording_file in "${recordings[@]}"; do
+        finalize_recording_db "$recording_file"
+      done
+    fi
 
     if tmux has-session -t "$TMUX_SESSION" 2>/dev/null; then
       echo "Killing tmux session '$TMUX_SESSION'..."
       tmux kill-session -t "$TMUX_SESSION" 2>/dev/null || true
     else
       echo "Tmux session '$TMUX_SESSION' already exited."
-    fi
-
-    if ((${#recordings[@]} > 0)); then
-      echo "Finalizing recording databases..."
-      for recording_file in "${recordings[@]}"; do
-        finalize_recording_db "$recording_file"
-      done
     fi
 
     echo "Stopped."
