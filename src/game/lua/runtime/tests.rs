@@ -1617,6 +1617,42 @@ fn test_replicated_storage_and_remote_event_fire_all_clients() {
 }
 
 #[test]
+fn test_server_storage_service_exists_and_is_distinct() {
+    let mut runtime = test_runtime();
+    runtime
+        .load_script(
+            r#"
+            local serverStorage = game:GetService("ServerStorage")
+            local replicatedStorage = game:GetService("ReplicatedStorage")
+
+            assert(serverStorage ~= nil, "ServerStorage should exist")
+            assert(replicatedStorage ~= nil, "ReplicatedStorage should exist")
+
+            local hidden = Instance.new("Folder")
+            hidden.Name = "HiddenState"
+            hidden.Parent = serverStorage
+
+            _G.serverStorageName = serverStorage.Name
+            _G.replicatedStorageName = replicatedStorage.Name
+            _G.hiddenParentName = hidden.Parent.Name
+            _G.sharedVisibleFromReplicated = replicatedStorage:FindFirstChild("HiddenState") ~= nil
+        "#,
+        )
+        .expect("Failed to run script");
+
+    let globals = runtime.lua().globals().get::<mlua::Table>("_G").unwrap();
+    let server_storage_name: String = globals.get("serverStorageName").unwrap();
+    let replicated_storage_name: String = globals.get("replicatedStorageName").unwrap();
+    let hidden_parent_name: String = globals.get("hiddenParentName").unwrap();
+    let shared_visible: bool = globals.get("sharedVisibleFromReplicated").unwrap();
+
+    assert_eq!(server_storage_name, "ServerStorage");
+    assert_eq!(replicated_storage_name, "ReplicatedStorage");
+    assert_eq!(hidden_parent_name, "ServerStorage");
+    assert!(!shared_visible);
+}
+
+#[test]
 fn test_remote_event_on_server_event_from_agent_input() {
     let mut runtime = test_runtime();
     runtime

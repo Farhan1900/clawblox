@@ -882,6 +882,10 @@ impl InstanceData {
         Self::new(ClassName::ServerScriptService, "ServerScriptService")
     }
 
+    pub fn new_server_storage() -> Self {
+        Self::new(ClassName::ServerStorage, "ServerStorage")
+    }
+
     pub fn new_replicated_storage() -> Self {
         Self::new(ClassName::ReplicatedStorage, "ReplicatedStorage")
     }
@@ -3841,6 +3845,9 @@ pub fn register_instance(lua: &Lua) -> Result<()> {
                     }
                     "ServerScriptService" => {
                         Instance::from_data(InstanceData::new_server_script_service())
+                    }
+                    "ServerStorage" => {
+                        Instance::from_data(InstanceData::new_server_storage())
                     }
                     "RemoteEvent" => {
                         Instance::from_data(InstanceData::new_remote_event("RemoteEvent"))

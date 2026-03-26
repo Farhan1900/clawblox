@@ -75,6 +75,7 @@ pub struct GameDataModel {
     pub physics_service: PhysicsService,
     pub remote_event_service: RemoteEventService,
     pub server_script_service: Instance,
+    pub server_storage: Instance,
     pub replicated_storage: Instance,
     /// Queue of pending kick requests from Lua scripts
     pub kick_requests: Vec<KickRequest>,
@@ -102,6 +103,7 @@ impl GameDataModel {
             physics_service: PhysicsService::new(),
             remote_event_service: RemoteEventService::new(),
             server_script_service: Instance::from_data(InstanceData::new_server_script_service()),
+            server_storage: Instance::from_data(InstanceData::new_server_storage()),
             replicated_storage: Instance::from_data(InstanceData::new_replicated_storage()),
             kick_requests: Vec::new(),
         }
@@ -172,6 +174,10 @@ impl Game {
             .clone()
     }
 
+    pub fn server_storage(&self) -> Instance {
+        self.data_model.lock().unwrap().server_storage.clone()
+    }
+
     pub fn replicated_storage(&self) -> Instance {
         self.data_model.lock().unwrap().replicated_storage.clone()
     }
@@ -219,6 +225,9 @@ impl UserData for Game {
                 "ServerScriptService" => Ok(Value::UserData(
                     lua.create_userdata(dm.server_script_service.clone())?,
                 )),
+                "ServerStorage" => Ok(Value::UserData(
+                    lua.create_userdata(dm.server_storage.clone())?,
+                )),
                 "ReplicatedStorage" => Ok(Value::UserData(
                     lua.create_userdata(dm.replicated_storage.clone())?,
                 )),
@@ -249,6 +258,9 @@ impl UserData for Game {
                 )),
                 "ServerScriptService" => Ok(Value::UserData(
                     lua.create_userdata(dm.server_script_service.clone())?,
+                )),
+                "ServerStorage" => Ok(Value::UserData(
+                    lua.create_userdata(dm.server_storage.clone())?,
                 )),
                 "ReplicatedStorage" => Ok(Value::UserData(
                     lua.create_userdata(dm.replicated_storage.clone())?,
@@ -412,6 +424,9 @@ impl LuaRuntime {
             .set("RemoteEventService", game.remote_event_service())?;
         lua.globals()
             .set("ServerScriptService", game.server_script_service())?;
+        lua.globals().set("ServerStorage", game.server_storage())?;
+        lua.globals()
+            .set("serverStorage", game.server_storage())?;
 
         let print_fn = lua.create_function(|_, args: MultiValue| {
             let msg: Vec<String> = args

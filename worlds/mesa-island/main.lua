@@ -3,6 +3,7 @@
 local RunService = game:GetService("RunService")
 local Players = game:GetService("Players")
 local AgentInputService = game:GetService("AgentInputService")
+local ServerStorage = game:GetService("ServerStorage")
 
 -- Workspace.Gravity = 196.2
 Workspace.Gravity = 10
@@ -10,6 +11,7 @@ Workspace.Gravity = 10
 local BLOCK_SIZE = 0.75
 local PICKUP_RANGE = 6
 local PLACE_RANGE = 7
+local serverGlobals
 -- Spawn points on open ground, verified clear of all mesa/rock footprints
 local SPAWN_POINTS = {
     Vector3.new(25, 2, -20),     -- south of center hill
@@ -23,10 +25,9 @@ local SPAWN_POINTS = {
     Vector3.new(25, 2, -90),     -- south cove
     Vector3.new(130, 2, 25),     -- east peninsula tip
 }
-local nextSpawnIndex = 0
-
 local function getNextSpawnPosition()
-    nextSpawnIndex = nextSpawnIndex + 1
+    local nextSpawnIndex = (serverGlobals:GetAttribute("NextSpawnIndex") or 0) + 1
+    serverGlobals:SetAttribute("NextSpawnIndex", nextSpawnIndex)
     local base = SPAWN_POINTS[((nextSpawnIndex - 1) % #SPAWN_POINTS) + 1]
     -- Add small random offset so players don't stack
     local ox = (math.random() - 0.5) * 8
@@ -35,8 +36,6 @@ local function getNextSpawnPosition()
 end
 local OUT_OF_BOUNDS_Y = -200
 
-local heldBlocksByPlayer = {}
-local placingBlocks = {} -- { block, startPos, targetPos, elapsed, duration }
 local trackedBlocks = {}
 
 local blockColors = {
@@ -55,6 +54,71 @@ local blockPhysics = PhysicalProperties.new(
     1.0, -- friction weight
     1.0 -- elasticity weight
 )
+
+local function getOrCreateChild(parent, className, name)
+    local child = parent:FindFirstChild(name)
+    if child then
+        return child
+    end
+    child = Instance.new(className)
+    child.Name = name
+    child.Parent = parent
+    return child
+end
+
+local serverStateRoot = getOrCreateChild(ServerStorage, "Folder", "MesaIslandState")
+serverGlobals = getOrCreateChild(serverStateRoot, "Folder", "Globals")
+local serverPlayerState = getOrCreateChild(serverStateRoot, "Folder", "Players")
+local serverPlacementState = getOrCreateChild(serverStateRoot, "Folder", "Placements")
+local serverFloraState = getOrCreateChild(serverStateRoot, "Folder", "Flora")
+local serverCreatureState = getOrCreateChild(serverStateRoot, "Folder", "Creatures")
+
+if serverGlobals:GetAttribute("NextSpawnIndex") == nil then
+    serverGlobals:SetAttribute("NextSpawnIndex", 0)
+end
+if serverGlobals:GetAttribute("NextPlacementId") == nil then
+    serverGlobals:SetAttribute("NextPlacementId", 0)
+end
+if serverGlobals:GetAttribute("NextCreatureId") == nil then
+    serverGlobals:SetAttribute("NextCreatureId", 0)
+end
+
+local function nextServerCounter(attrName)
+    local value = (serverGlobals:GetAttribute(attrName) or 0) + 1
+    serverGlobals:SetAttribute(attrName, value)
+    return value
+end
+
+local function playerStateKey(player)
+    return tostring(math.floor(player.UserId))
+end
+
+local function getOrCreatePlayerState(player)
+    local folder = getOrCreateChild(serverPlayerState, "Folder", playerStateKey(player))
+    local heldBlock = folder:FindFirstChild("HeldBlock")
+    if not heldBlock then
+        heldBlock = Instance.new("ObjectValue")
+        heldBlock.Name = "HeldBlock"
+        heldBlock.Parent = folder
+    end
+    return folder, heldBlock
+end
+
+local function getPlayerState(player)
+    return serverPlayerState:FindFirstChild(playerStateKey(player))
+end
+
+local function getHeldBlockForPlayer(player)
+    local folder = getPlayerState(player)
+    if not folder then
+        return nil
+    end
+    local heldBlock = folder:FindFirstChild("HeldBlock")
+    if not heldBlock then
+        return nil
+    end
+    return heldBlock.Value
+end
 
 --------------------------------------------------------------------------------
 -- GROUND
@@ -227,10 +291,7 @@ local GLOWBULB_REGROW_SECONDS = 180
 local GLOWBULB_EFFECT_DELAY = 120   -- 2 minutes before immobilization kicks in
 local GLOWBULB_EFFECT_DURATION = 300 -- 5 minutes immobilized
 
-local playerEffects = {} -- player -> { timer, duration, active }
 local GLOWBULB_COLOR = Color3.fromRGB(0, 220, 200)
-
-local flora = {} -- { part = { species, age, harvested, regrowTimer } }
 
 local function createGlowBulb(name, position)
     local bulb = Instance.new("Part")
@@ -246,13 +307,15 @@ local function createGlowBulb(name, position)
     bulb:SetAttribute("FloraSpecies", "GlowBulb")
     bulb:SetAttribute("IsEdible", true)
     bulb.Parent = Workspace
-    flora[bulb] = {
-        species = "GlowBulb",
-        age = math.random() * 6.28, -- random phase offset for pulsing
-        harvested = false,
-        regrowTimer = 0,
-        spawnPos = position,
-    }
+
+    local floraState = getOrCreateChild(serverFloraState, "Folder", name)
+    local partRef = getOrCreateChild(floraState, "ObjectValue", "Part")
+    partRef.Value = bulb
+    floraState:SetAttribute("Species", "GlowBulb")
+    floraState:SetAttribute("Age", math.random() * 6.28)
+    floraState:SetAttribute("Harvested", false)
+    floraState:SetAttribute("RegrowTimer", 0)
+    floraState:SetAttribute("SpawnPos", position)
     return bulb
 end
 
@@ -292,8 +355,11 @@ end
 local function findNearestEdible(targetPosition, maxDistance)
     local closest = nil
     local closestDist = maxDistance
-    for part, data in pairs(flora) do
-        if not data.harvested and part.Parent and part:GetAttribute("IsEdible") then
+    for _, floraState in ipairs(serverFloraState:GetChildren()) do
+        local partRef = floraState:FindFirstChild("Part")
+        local part = partRef and partRef.Value or nil
+        local harvested = floraState:GetAttribute("Harvested")
+        if part and part.Parent and not harvested and part:GetAttribute("IsEdible") then
             local dist = (part.Position - targetPosition).Magnitude
             if dist <= closestDist then
                 closest = part
@@ -323,21 +389,25 @@ local function consumeFlora(player, inputData)
         return
     end
 
-    local data = flora[plant]
-    data.harvested = true
-    data.regrowTimer = GLOWBULB_REGROW_SECONDS
+    local floraState = serverFloraState:FindFirstChild(plant.Name)
+    if not floraState then
+        player:SetAttribute("LastActionResult", "ConsumeFailed:NothingEdible")
+        return
+    end
+
+    floraState:SetAttribute("Harvested", true)
+    floraState:SetAttribute("RegrowTimer", GLOWBULB_REGROW_SECONDS)
     plant.Transparency = 1
     plant.CanQuery = false
 
-    local species = data.species
+    local species = floraState:GetAttribute("Species") or "Unknown"
     player:SetAttribute("LastActionResult", "ConsumeSuccess:" .. species)
 
     if species == "GlowBulb" then
-        playerEffects[player] = {
-            timer = GLOWBULB_EFFECT_DELAY,
-            duration = GLOWBULB_EFFECT_DURATION,
-            active = false,
-        }
+        local playerState = getOrCreatePlayerState(player)
+        playerState:SetAttribute("ImmobilizeDelayRemaining", GLOWBULB_EFFECT_DELAY)
+        playerState:SetAttribute("ImmobilizeDurationRemaining", GLOWBULB_EFFECT_DURATION)
+        playerState:SetAttribute("ImmobilizeActive", false)
     end
 end
 
@@ -349,8 +419,6 @@ local FAUNA_FLEE_RANGE = 8
 local FAUNA_FLEE_SPEED = 7
 local FAUNA_WANDER_INTERVAL = 3 -- seconds between wander direction changes
 local FAUNA_BOUNDARY = 120 -- keep creatures within this radius of origin
-
-local creatures = {} -- part -> { species, wanderDir, wanderTimer, homePos, speed }
 
 local speciesDefs = {
     Orbweaver = {
@@ -415,14 +483,14 @@ local function createCreature(speciesName, position)
     part:SetAttribute("FaunaSpecies", speciesName)
     part.Parent = Workspace
 
-    creatures[part] = {
-        species = speciesName,
-        def = def,
-        wanderDir = randomWanderDir(),
-        wanderTimer = math.random() * FAUNA_WANDER_INTERVAL,
-        homePos = position,
-        velocity = Vector3.new(0, 0, 0),
-    }
+    local creatureId = nextServerCounter("NextCreatureId")
+    local creatureState = getOrCreateChild(serverCreatureState, "Folder", "Creature_" .. creatureId)
+    local partRef = getOrCreateChild(creatureState, "ObjectValue", "Part")
+    partRef.Value = part
+    creatureState:SetAttribute("Species", speciesName)
+    creatureState:SetAttribute("WanderDir", randomWanderDir())
+    creatureState:SetAttribute("WanderTimer", math.random() * FAUNA_WANDER_INTERVAL)
+    creatureState:SetAttribute("HomePos", position)
     return part
 end
 
@@ -445,9 +513,13 @@ end
 local function nearestFloraPosition(pos, speciesFilter, maxRange)
     local closest = nil
     local closestDist = maxRange
-    for part, data in pairs(flora) do
-        if not data.harvested and part.Parent then
-            if speciesFilter == nil or data.species == speciesFilter then
+    for _, floraState in ipairs(serverFloraState:GetChildren()) do
+        local partRef = floraState:FindFirstChild("Part")
+        local part = partRef and partRef.Value or nil
+        local harvested = floraState:GetAttribute("Harvested")
+        local species = floraState:GetAttribute("Species")
+        if part and part.Parent and not harvested then
+            if speciesFilter == nil or species == speciesFilter then
                 local dist = (part.Position - pos).Magnitude
                 if dist < closestDist then
                     closest = part.Position
@@ -460,69 +532,81 @@ local function nearestFloraPosition(pos, speciesFilter, maxRange)
 end
 
 local function updateCreatures(dt)
-    for part, c in pairs(creatures) do
-        if not part.Parent then
-            creatures[part] = nil
+    for _, creatureState in ipairs(serverCreatureState:GetChildren()) do
+        local partRef = creatureState:FindFirstChild("Part")
+        local part = partRef and partRef.Value or nil
+        if not part or not part.Parent then
+            creatureState:Destroy()
         else
-            local def = c.def
-            local pos = part.Position
-            local flatPos = Vector3.new(pos.X, 0, pos.Z)
-            local moveDir = Vector3.new(0, 0, 0)
-            local moveSpeed = def.speed
-            local fleeing = false
+            local speciesName = creatureState:GetAttribute("Species")
+            local def = speciesDefs[speciesName]
+            if not def then
+                creatureState:Destroy()
+            else
+                local pos = part.Position
+                local flatPos = Vector3.new(pos.X, 0, pos.Z)
+                local moveDir = Vector3.new(0, 0, 0)
+                local moveSpeed = def.speed
+                local fleeing = false
 
-            -- 1. Flee from nearby players
-            if def.fleeRange > 0 then
-                local playerPos, playerDist = nearestPlayerPosition(pos, def.fleeRange)
-                if playerPos then
-                    local away = (flatPos - Vector3.new(playerPos.X, 0, playerPos.Z))
-                    if away.Magnitude > 0.01 then
-                        moveDir = away.Unit
+                -- 1. Flee from nearby players
+                if def.fleeRange > 0 then
+                    local playerPos, playerDist = nearestPlayerPosition(pos, def.fleeRange)
+                    if playerPos then
+                        local away = (flatPos - Vector3.new(playerPos.X, 0, playerPos.Z))
+                        if away.Magnitude > 0.01 then
+                            moveDir = away.Unit
+                        end
+                        moveSpeed = FAUNA_FLEE_SPEED
+                        fleeing = true
                     end
-                    moveSpeed = FAUNA_FLEE_SPEED
-                    fleeing = true
                 end
-            end
 
-            -- 2. Attract toward food source (if not fleeing)
-            if not fleeing and def.attractedTo and def.attractRange > 0 then
-                local foodPos, foodDist = nearestFloraPosition(pos, def.attractedTo, def.attractRange)
-                if foodPos then
-                    local toward = Vector3.new(foodPos.X, 0, foodPos.Z) - flatPos
-                    if toward.Magnitude > 1.5 then
-                        moveDir = toward.Unit
+                -- 2. Attract toward food source (if not fleeing)
+                if not fleeing and def.attractedTo and def.attractRange > 0 then
+                    local foodPos, foodDist = nearestFloraPosition(pos, def.attractedTo, def.attractRange)
+                    if foodPos then
+                        local toward = Vector3.new(foodPos.X, 0, foodPos.Z) - flatPos
+                        if toward.Magnitude > 1.5 then
+                            moveDir = toward.Unit
+                        else
+                            moveDir = Vector3.new(0, 0, 0) -- arrived near food, idle
+                        end
+                    end
+                end
+
+                -- 3. Wander (if no other behavior active)
+                if not fleeing and moveDir.Magnitude < 0.01 then
+                    local wanderTimer = (creatureState:GetAttribute("WanderTimer") or 0) - dt
+                    if wanderTimer <= 0 then
+                        local wanderDir = randomWanderDir()
+                        wanderTimer = FAUNA_WANDER_INTERVAL + math.random() * 2
+                        creatureState:SetAttribute("WanderDir", wanderDir)
+                    end
+                    creatureState:SetAttribute("WanderTimer", wanderTimer)
+                    moveDir = creatureState:GetAttribute("WanderDir") or Vector3.new(0, 0, 0)
+                end
+
+                -- 4. Boundary check: steer back toward home if too far
+                local homePos = creatureState:GetAttribute("HomePos") or Vector3.new(0, 0, 0)
+                local homeOffset = flatPos - Vector3.new(homePos.X, 0, homePos.Z)
+                if homeOffset.Magnitude > FAUNA_BOUNDARY then
+                    moveDir = -homeOffset.Unit
+                end
+
+                -- Apply movement (only if staying on land)
+                if moveDir.Magnitude > 0.01 then
+                    local delta = moveDir.Unit * moveSpeed * dt
+                    local newX = pos.X + delta.X
+                    local newZ = pos.Z + delta.Z
+                    if isOverLand(newX, newZ) then
+                        part.Position = Vector3.new(newX, creatureGroundY(def), newZ)
                     else
-                        moveDir = Vector3.new(0, 0, 0) -- arrived near food, idle
+                        local wanderDir = creatureState:GetAttribute("WanderDir")
+                        if wanderDir then
+                            creatureState:SetAttribute("WanderDir", -wanderDir)
+                        end
                     end
-                end
-            end
-
-            -- 3. Wander (if no other behavior active)
-            if not fleeing and moveDir.Magnitude < 0.01 then
-                c.wanderTimer = c.wanderTimer - dt
-                if c.wanderTimer <= 0 then
-                    c.wanderDir = randomWanderDir()
-                    c.wanderTimer = FAUNA_WANDER_INTERVAL + math.random() * 2
-                end
-                moveDir = c.wanderDir
-            end
-
-            -- 4. Boundary check: steer back toward home if too far
-            local homeOffset = flatPos - Vector3.new(c.homePos.X, 0, c.homePos.Z)
-            if homeOffset.Magnitude > FAUNA_BOUNDARY then
-                moveDir = -homeOffset.Unit
-            end
-
-            -- Apply movement (only if staying on land)
-            if moveDir.Magnitude > 0.01 then
-                local delta = moveDir.Unit * moveSpeed * dt
-                local newX = pos.X + delta.X
-                local newZ = pos.Z + delta.Z
-                if isOverLand(newX, newZ) then
-                    part.Position = Vector3.new(newX, creatureGroundY(def), newZ)
-                else
-                    -- Hit water edge, reverse wander direction
-                    c.wanderDir = -c.wanderDir
                 end
             end
         end
@@ -655,8 +739,20 @@ end
 --------------------------------------------------------------------------------
 
 local function setPlayerBlockState(player, block)
-    -- Intentionally keep pickup/held state implicit in observations.
-    -- Agents can infer state from world changes and LastActionResult.
+    local _, heldBlock = getOrCreatePlayerState(player)
+    heldBlock.Value = block
+end
+
+local function createPlacementState(block, startPos, targetPos, duration)
+    local placementId = nextServerCounter("NextPlacementId")
+    local folder = getOrCreateChild(serverPlacementState, "Folder", "Placement_" .. placementId)
+    local blockRef = getOrCreateChild(folder, "ObjectValue", "Block")
+    blockRef.Value = block
+    folder:SetAttribute("StartPos", startPos)
+    folder:SetAttribute("TargetPos", targetPos)
+    folder:SetAttribute("Elapsed", 0)
+    folder:SetAttribute("Duration", duration)
+    return folder
 end
 
 local function setupPlayer(player)
@@ -686,10 +782,10 @@ local function setupPlayer(player)
 end
 
 local function cleanupPlayer(player)
-    local heldBlock = heldBlocksByPlayer[player]
+    local heldBlock = getHeldBlockForPlayer(player)
     if heldBlock then
         heldBlock:Destroy()
-        heldBlocksByPlayer[player] = nil
+        setPlayerBlockState(player, nil)
     end
 end
 
@@ -712,20 +808,18 @@ local function resetPlayerToSpawn(player)
 end
 
 local function releaseBlockReferences(block)
-    for player, heldBlock in pairs(heldBlocksByPlayer) do
+    for _, player in ipairs(Players:GetPlayers()) do
+        local heldBlock = getHeldBlockForPlayer(player)
         if heldBlock == block then
-            heldBlocksByPlayer[player] = nil
             setPlayerBlockState(player, nil)
             player:SetAttribute("LastActionResult", "ResetAfterFall")
         end
     end
 
-    local i = 1
-    while i <= #placingBlocks do
-        if placingBlocks[i].block == block then
-            table.remove(placingBlocks, i)
-        else
-            i = i + 1
+    for _, placement in ipairs(serverPlacementState:GetChildren()) do
+        local blockRef = placement:FindFirstChild("Block")
+        if blockRef and blockRef.Value == block then
+            placement:Destroy()
         end
     end
 end
@@ -769,7 +863,7 @@ local function findNearestBlock(targetPosition, maxDistance)
 end
 
 local function pickupBlock(player, inputData)
-    if heldBlocksByPlayer[player] then
+    if getHeldBlockForPlayer(player) then
         player:SetAttribute("LastActionResult", "PickupFailed:AlreadyHolding")
         return
     end
@@ -792,7 +886,6 @@ local function pickupBlock(player, inputData)
         return
     end
 
-    heldBlocksByPlayer[player] = block
     block.CanCollide = false
     setPlayerBlockState(player, block)
     player:SetAttribute("LastActionResult", "PickupSuccess")
@@ -801,7 +894,7 @@ end
 local function positionOccupied(player, targetPosition)
     local params = OverlapParams.new()
     params.FilterType = Enum.RaycastFilterType.Exclude
-    params.FilterDescendantsInstances = { player.Character, heldBlocksByPlayer[player] }
+    params.FilterDescendantsInstances = { player.Character, getHeldBlockForPlayer(player) }
 
     local hits = Workspace:GetPartBoundsInBox(
         CFrame.new(targetPosition),
@@ -819,7 +912,7 @@ local function positionOccupied(player, targetPosition)
 end
 
 local function placeBlock(player, inputData)
-    local block = heldBlocksByPlayer[player]
+    local block = getHeldBlockForPlayer(player)
     if not block then
         player:SetAttribute("LastActionResult", "PlaceFailed:EmptyHands")
         return
@@ -845,16 +938,9 @@ local function placeBlock(player, inputData)
     local startPos = block.Position
     block.Anchored = true
     block.CanCollide = false
-    heldBlocksByPlayer[player] = nil
     setPlayerBlockState(player, nil)
 
-    table.insert(placingBlocks, {
-        block = block,
-        startPos = startPos,
-        targetPos = targetPosition,
-        elapsed = 0,
-        duration = 0.3,
-    })
+    createPlacementState(block, startPos, targetPosition, 0.3)
 
     player:SetAttribute("LastActionResult", "PlaceSuccess")
 end
@@ -894,7 +980,8 @@ RunService.Heartbeat:Connect(function(dt)
     end
 
     -- Update held blocks
-    for player, heldBlock in pairs(heldBlocksByPlayer) do
+    for _, player in ipairs(Players:GetPlayers()) do
+        local heldBlock = getHeldBlockForPlayer(player)
         local hrp = getHumanoidRootPart(player)
         if hrp and heldBlock then
             heldBlock.Position = hrp.Position + Vector3.new(0, 3.5, 0)
@@ -902,52 +989,72 @@ RunService.Heartbeat:Connect(function(dt)
     end
 
     -- Animate placing blocks
-    local i = 1
-    while i <= #placingBlocks do
-        local p = placingBlocks[i]
-        p.elapsed = p.elapsed + dt
-        local alpha = math.min(p.elapsed / p.duration, 1)
+    for _, placement in ipairs(serverPlacementState:GetChildren()) do
+        local blockRef = placement:FindFirstChild("Block")
+        local block = blockRef and blockRef.Value or nil
+        if not block or not block.Parent then
+            placement:Destroy()
+        else
+        local elapsed = (placement:GetAttribute("Elapsed") or 0) + dt
+        local duration = placement:GetAttribute("Duration") or 0.3
+        local startPos = placement:GetAttribute("StartPos") or block.Position
+        local targetPos = placement:GetAttribute("TargetPos") or block.Position
+        local alpha = math.min(elapsed / duration, 1)
         -- Smooth ease-out
         local t = 1 - (1 - alpha) * (1 - alpha)
-        p.block.Position = p.startPos:Lerp(p.targetPos, t)
+        block.Position = startPos:Lerp(targetPos, t)
 
         if alpha >= 1 then
-            p.block.Anchored = false
-            p.block.CanCollide = true
-            setBlockMetadata(p.block, p.block:GetAttribute("ItemColorName"))
-            table.remove(placingBlocks, i)
+            block.Anchored = false
+            block.CanCollide = true
+            setBlockMetadata(block, block:GetAttribute("ItemColorName"))
+            placement:Destroy()
         else
-            i = i + 1
+            placement:SetAttribute("Elapsed", elapsed)
+        end
         end
     end
 
     -- Update player effects (delayed immobilization)
-    for player, effect in pairs(playerEffects) do
+    for _, player in ipairs(Players:GetPlayers()) do
+        local playerState = getPlayerState(player)
+        local effectActive = playerState and playerState:GetAttribute("ImmobilizeActive")
+        local delayRemaining = playerState and playerState:GetAttribute("ImmobilizeDelayRemaining")
+        local durationRemaining = playerState and playerState:GetAttribute("ImmobilizeDurationRemaining")
+        if playerState and (effectActive or (delayRemaining and delayRemaining > 0) or (durationRemaining and durationRemaining > 0)) then
         local humanoid = nil
         local character = player.Character
         if character then
             humanoid = character:FindFirstChild("Humanoid")
         end
         if not humanoid then
-            playerEffects[player] = nil
+            playerState:SetAttribute("ImmobilizeDelayRemaining", 0)
+            playerState:SetAttribute("ImmobilizeDurationRemaining", 0)
+            playerState:SetAttribute("ImmobilizeActive", false)
         else
-            effect.timer = effect.timer - dt
-            if effect.timer <= 0 and not effect.active then
+            delayRemaining = math.max(0, (delayRemaining or 0) - dt)
+            if delayRemaining <= 0 and not effectActive and (durationRemaining or 0) > 0 then
                 -- Immobilize
-                effect.active = true
+                effectActive = true
+                playerState:SetAttribute("ImmobilizeActive", true)
                 humanoid.WalkSpeed = 0
                 humanoid.JumpPower = 0
                 humanoid:CancelMoveTo()
             end
-            if effect.active then
-                effect.duration = effect.duration - dt
-                if effect.duration <= 0 then
+            playerState:SetAttribute("ImmobilizeDelayRemaining", delayRemaining)
+            if effectActive then
+                durationRemaining = math.max(0, (durationRemaining or 0) - dt)
+                playerState:SetAttribute("ImmobilizeDurationRemaining", durationRemaining)
+                if durationRemaining <= 0 then
                     -- Restore
                     humanoid.WalkSpeed = 16
                     humanoid.JumpPower = 50
-                    playerEffects[player] = nil
+                    playerState:SetAttribute("ImmobilizeActive", false)
+                    playerState:SetAttribute("ImmobilizeDelayRemaining", 0)
+                    playerState:SetAttribute("ImmobilizeDurationRemaining", 0)
                 end
             end
+        end
         end
     end
 
@@ -955,19 +1062,23 @@ RunService.Heartbeat:Connect(function(dt)
     updateCreatures(dt)
 
     -- Update flora: pulsing glow + regrowth
-    for part, data in pairs(flora) do
-        if not part.Parent then
-            flora[part] = nil
-        elseif data.harvested then
-            data.regrowTimer = data.regrowTimer - dt
-            if data.regrowTimer <= 0 then
-                data.harvested = false
+    for _, floraState in ipairs(serverFloraState:GetChildren()) do
+        local partRef = floraState:FindFirstChild("Part")
+        local part = partRef and partRef.Value or nil
+        if not part or not part.Parent then
+            floraState:Destroy()
+        elseif floraState:GetAttribute("Harvested") then
+            local regrowTimer = math.max(0, (floraState:GetAttribute("RegrowTimer") or 0) - dt)
+            floraState:SetAttribute("RegrowTimer", regrowTimer)
+            if regrowTimer <= 0 then
+                floraState:SetAttribute("Harvested", false)
                 part.Transparency = 0
                 part.CanQuery = true
             end
         else
-            data.age = data.age + dt
-            part.Transparency = 0.15 + 0.15 * math.sin(data.age * 2.0)
+            local age = (floraState:GetAttribute("Age") or 0) + dt
+            floraState:SetAttribute("Age", age)
+            part.Transparency = 0.15 + 0.15 * math.sin(age * 2.0)
         end
     end
 
