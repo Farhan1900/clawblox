@@ -30,7 +30,7 @@ pub fn quaternion_to_rotation_matrix(q: &UnitQuaternion<f32>) -> [[f32; 3]; 3] {
 }
 
 // Collision groups for Roblox-style physics behavior
-// Characters don't collide with each other, only with static geometry
+// Characters collide with static geometry and each other.
 // Note: rapier3d uses InteractionGroups (not CollisionGroups like bevy_rapier)
 const GROUP_STATIC: Group = Group::GROUP_1; // Walls, floors, obstacles
 const GROUP_CHARACTER: Group = Group::GROUP_2; // Player characters
@@ -561,10 +561,12 @@ impl PhysicsWorld {
         let body_handle = self.rigid_body_set.insert(body);
 
         // Create capsule collider (half-height is the cylinder part, total height = 2*half_height + 2*radius)
-        // Characters only collide with static geometry, not other characters (Roblox FPS style)
         let half_height = (height - 2.0 * radius).max(0.0) / 2.0;
         let collider = ColliderBuilder::capsule_y(half_height, radius)
-            .collision_groups(InteractionGroups::new(GROUP_CHARACTER, GROUP_STATIC))
+            .collision_groups(InteractionGroups::new(
+                GROUP_CHARACTER,
+                GROUP_STATIC | GROUP_CHARACTER,
+            ))
             .build();
         let collider_handle =
             self.collider_set
@@ -1041,7 +1043,6 @@ impl PhysicsWorld {
             ..Default::default()
         };
 
-        // Match physics-world's collision filter: collide with all except other characters
         let desired = vector![
             desired_translation[0],
             desired_translation[1],
@@ -1051,8 +1052,8 @@ impl PhysicsWorld {
             .exclude_rigid_body(body_handle)
             .exclude_sensors()
             .groups(InteractionGroups::new(
-                GROUP_STATIC,
-                Group::ALL & !GROUP_CHARACTER,
+                GROUP_CHARACTER,
+                GROUP_STATIC | GROUP_CHARACTER,
             ));
 
         let movement = controller.move_shape(
@@ -1231,6 +1232,53 @@ mod tests {
         assert!(
             movement.translation.x.abs() > 0.0 || movement.translation.z.abs() > 0.0,
             "Horizontal movement should not be suppressed when grounded"
+        );
+    }
+
+    #[test]
+    fn test_characters_block_each_other() {
+        let mut world = PhysicsWorld::new();
+
+        world.add_part(
+            1,
+            [0.0, -0.5, 0.0],
+            &[[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
+            [100.0, 1.0, 100.0],
+            true,
+            true,
+            PartType::Block,
+            None,
+        );
+
+        let char_a = 300;
+        let char_b = 301;
+        world.add_character(char_a, [0.0, 2.6, 0.0], 1.0, 5.0);
+        world.add_character(char_b, [2.6, 2.6, 0.0], 1.0, 5.0);
+
+        if let Some(state) = world.get_character_state_mut(char_a) {
+            state.grounded = true;
+        }
+        if let Some(state) = world.get_character_state_mut(char_b) {
+            state.grounded = true;
+        }
+
+        let dt = 1.0 / 60.0;
+        world.step(dt);
+        world.query_pipeline.update(&world.collider_set);
+
+        let movement = world.move_character(char_a, [1.0, 0.0, 0.0], dt).unwrap();
+        world.step(dt);
+
+        let final_pos = world.get_character_position(char_a).unwrap();
+        assert!(
+            movement.translation.x < 0.55,
+            "Character should be blocked by another character, got {:?}",
+            movement.translation
+        );
+        assert!(
+            final_pos[0] < 0.55,
+            "Character should not move through another character, final_pos={:?}",
+            final_pos
         );
     }
 

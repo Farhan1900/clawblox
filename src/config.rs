@@ -353,7 +353,7 @@ mod tests {
         assert_eq!(config.speech.hearing_radius, 24.0);
         assert_eq!(
             config.run.command.as_ref().map(|c| c.as_slice()),
-            Some(["custom-runner", "--flag"].as_slice())
+            Some(vec!["custom-runner".to_string(), "--flag".to_string()].as_slice())
         );
     }
 
