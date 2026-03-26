@@ -565,8 +565,7 @@ body {
   cursor: pointer;
 }
 
-body[data-mode="replay"] .chat-toggle,
-body[data-mode="replay"] .chat-panel {
+body[data-mode="replay"] .chat-input-row {
   display: none;
 }
 
