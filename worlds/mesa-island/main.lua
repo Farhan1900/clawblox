@@ -10,7 +10,29 @@ Workspace.Gravity = 10
 local BLOCK_SIZE = 0.75
 local PICKUP_RANGE = 6
 local PLACE_RANGE = 7
-local PLAYER_SPAWN_POSITION = Vector3.new(0, 5, 0)
+-- Spawn points spread across the island (on open ground)
+local SPAWN_POINTS = {
+    Vector3.new(0, 5, 0),        -- center hill
+    Vector3.new(40, 2, -55),     -- south-east plain
+    Vector3.new(-30, 2, 25),     -- west lowland
+    Vector3.new(55, 2, 45),      -- near NE ledge
+    Vector3.new(-50, 2, -45),    -- near SW plateau
+    Vector3.new(85, 2, -15),     -- east ridge area
+    Vector3.new(-40, 2, 65),     -- NW stones area
+    Vector3.new(20, 2, 85),      -- north
+    Vector3.new(25, 2, -90),     -- south cove
+    Vector3.new(110, 2, 30),     -- east peninsula
+}
+local nextSpawnIndex = 0
+
+local function getNextSpawnPosition()
+    nextSpawnIndex = nextSpawnIndex + 1
+    local base = SPAWN_POINTS[((nextSpawnIndex - 1) % #SPAWN_POINTS) + 1]
+    -- Add small random offset so players don't stack
+    local ox = (math.random() - 0.5) * 8
+    local oz = (math.random() - 0.5) * 8
+    return Vector3.new(base.X + ox, base.Y, base.Z + oz)
+end
 local OUT_OF_BOUNDS_Y = -200
 
 local heldBlocksByPlayer = {}
@@ -619,7 +641,7 @@ local function setupPlayer(player)
         local hrp = character:FindFirstChild("HumanoidRootPart")
         if hrp then
             hrp:SetAttribute("ModelYawOffsetDeg", 180)
-            hrp.Position = PLAYER_SPAWN_POSITION
+            hrp.Position = getNextSpawnPosition()
         end
     end
 
@@ -643,7 +665,7 @@ local function resetPlayerToSpawn(player)
     local hrp = character:FindFirstChild("HumanoidRootPart")
     local humanoid = character:FindFirstChild("Humanoid")
     if hrp then
-        hrp.Position = PLAYER_SPAWN_POSITION
+        hrp.Position = getNextSpawnPosition()
         hrp.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
         hrp.AssemblyAngularVelocity = Vector3.new(0, 0, 0)
     end
