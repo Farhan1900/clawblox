@@ -569,6 +569,45 @@ impl RecordingReader {
         obs.tick = tick;
         Ok(obs)
     }
+
+    /// Get chat messages in a tick range (inclusive on both ends).
+    pub async fn get_chat_messages(
+        &self,
+        start_tick: u64,
+        end_tick: u64,
+    ) -> Result<Vec<RecordedChatMessage>, sqlx::Error> {
+        let rows = sqlx::query(
+            "SELECT tick, time_ms, message_id, agent_id, agent_name, content
+             FROM chat_messages
+             WHERE tick >= ? AND tick <= ?
+             ORDER BY tick, time_ms",
+        )
+        .bind(start_tick as i64)
+        .bind(end_tick as i64)
+        .fetch_all(&self.pool)
+        .await?;
+
+        Ok(rows
+            .iter()
+            .map(|r| RecordedChatMessage {
+                tick: r.get::<i64, _>("tick") as u64,
+                time_ms: r.get::<i64, _>("time_ms") as u64,
+                message_id: r.get::<String, _>("message_id"),
+                agent_id: r.get::<String, _>("agent_id"),
+                agent_name: r.get::<String, _>("agent_name"),
+                content: r.get::<String, _>("content"),
+            })
+            .collect())
+    }
+}
+
+pub struct RecordedChatMessage {
+    pub tick: u64,
+    pub time_ms: u64,
+    pub message_id: String,
+    pub agent_id: String,
+    pub agent_name: String,
+    pub content: String,
 }
 
 fn apply_delta(obs: &mut SpectatorObservation, delta: &FrameDelta) {

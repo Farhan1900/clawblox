@@ -193,8 +193,7 @@ function setReplayMode(enabled) {
   if (replayPanelEl) replayPanelEl.hidden = !replayState.enabled
   syncAgentLogVisibility()
   if (replayState.enabled) {
-    setChatPanelOpen(false)
-    setChatLocalStatus('Replay mode')
+    setChatLocalStatus('Replay')
     setChatConnection('Replay')
     setAgentLogStatus('Syncing...')
   }
@@ -628,7 +627,7 @@ function renderChatFeed() {
 }
 
 async function loadChatHistory() {
-  if (replayState.enabled) return
+  if (replayState.enabled) return  // In replay mode, chat comes via WebSocket
   try {
     const resp = await fetch(withBasePath('/chat/messages?limit=50'))
     if (!resp.ok) throw new Error(`history HTTP ${resp.status}`)

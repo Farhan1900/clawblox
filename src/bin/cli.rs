@@ -2095,6 +2095,7 @@ async fn replay_spectate_ws(
 async fn handle_replay_ws(socket: WebSocket, state: ReplayState) {
     let (mut sender, mut receiver) = socket.split();
     let mut tick_interval = interval(Duration::from_millis(33));
+    let mut last_tick: u64 = 0;
 
     loop {
         tokio::select! {
@@ -2114,6 +2115,27 @@ async fn handle_replay_ws(socket: WebSocket, state: ReplayState) {
                     pb.advance_frame(Duration::from_millis(33));
                     tick
                 };
+
+                // Send chat messages that occurred between last_tick and current tick
+                if tick > last_tick {
+                    if let Ok(messages) = state.reader.get_chat_messages(last_tick + 1, tick).await {
+                        for chat in &messages {
+                            let payload = serde_json::json!({
+                                "type": "chat_message",
+                                "id": chat.message_id,
+                                "agent_id": chat.agent_id,
+                                "agent_name": chat.agent_name,
+                                "message_type": "text",
+                                "content": chat.content,
+                                "created_at": "",
+                            });
+                            if sender.send(Message::Text(payload.to_string().into())).await.is_err() {
+                                break;
+                            }
+                        }
+                    }
+                }
+                last_tick = tick;
 
                 match state.reader.get_state_at(tick).await {
                     Ok(obs) => {
