@@ -134,6 +134,9 @@ pub struct WorldConfig {
     /// Observation configuration
     #[serde(default)]
     pub observation: ObservationConfig,
+    /// AFK timeout in seconds (0 = disabled). Players idle longer than this are kicked.
+    #[serde(default = "default_afk_timeout")]
+    pub afk_timeout: u64,
     /// Optional external runtime command
     #[serde(default)]
     pub run: RunConfig,
@@ -141,6 +144,10 @@ pub struct WorldConfig {
 
 fn default_max_players() -> u32 {
     8
+}
+
+fn default_afk_timeout() -> u64 {
+    300
 }
 
 fn default_renderer_name() -> String {

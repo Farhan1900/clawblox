@@ -133,6 +133,23 @@ impl RecordingWriter {
             .execute(&pool)
             .await?;
 
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS chat_messages (
+                tick INTEGER NOT NULL,
+                time_ms INTEGER NOT NULL,
+                message_id TEXT NOT NULL,
+                agent_id TEXT NOT NULL,
+                agent_name TEXT NOT NULL,
+                content TEXT NOT NULL
+            )",
+        )
+        .execute(&pool)
+        .await?;
+
+        sqlx::query("CREATE INDEX IF NOT EXISTS idx_chat_messages_tick ON chat_messages(tick)")
+            .execute(&pool)
+            .await?;
+
         let now = chrono::Utc::now().to_rfc3339();
         for (k, v) in [
             ("world_name", world_name),
@@ -219,6 +236,31 @@ impl RecordingWriter {
         .await
         {
             eprintln!("Warning: failed to record input at tick {}: {}", tick, e);
+        }
+    }
+
+    pub async fn record_chat(
+        &self,
+        tick: u64,
+        time_ms: u64,
+        message_id: &str,
+        agent_id: &Uuid,
+        agent_name: &str,
+        content: &str,
+    ) {
+        if let Err(e) = sqlx::query(
+            "INSERT INTO chat_messages (tick, time_ms, message_id, agent_id, agent_name, content) VALUES (?, ?, ?, ?, ?, ?)",
+        )
+        .bind(tick as i64)
+        .bind(time_ms as i64)
+        .bind(message_id)
+        .bind(agent_id.to_string())
+        .bind(agent_name)
+        .bind(content)
+        .execute(&self.pool)
+        .await
+        {
+            eprintln!("Warning: failed to record chat at tick {}: {}", tick, e);
         }
     }
 

@@ -1730,6 +1730,17 @@ fn run_game(
         Some(&script),
     );
     let instance_id = result.instance_id;
+
+    // Apply AFK timeout from world config (0 = disabled)
+    if let Some(handle) = game_handle.instances.get(&instance_id) {
+        let mut instance = handle.write();
+        if config.afk_timeout == 0 {
+            instance.set_afk_timeout(std::time::Duration::from_secs(u64::MAX));
+        } else {
+            instance.set_afk_timeout(std::time::Duration::from_secs(config.afk_timeout));
+        }
+    }
+
     println!("Instance: {}", instance_id);
 
     // Run game loop in background thread
@@ -3257,6 +3268,33 @@ async fn local_chat(
     };
 
     let _ = state.chat_tx.send(msg.clone());
+
+    // Record chat message if recording is enabled
+    if let Some(ref writer) = state.recording_writer {
+        let time_ms = state.started_at.elapsed().as_millis() as u64;
+        let tick = game::get_spectator_observation_for_instance(
+            &state.game_handle,
+            state.instance_id,
+        )
+        .map(|obs| obs.tick)
+        .unwrap_or(0);
+        let writer = writer.clone();
+        let msg_id = msg.id.clone();
+        let agent_name_clone = msg.agent_name.clone();
+        let content_clone = msg.content.clone();
+        tokio::spawn(async move {
+            let w = writer.lock().await;
+            w.record_chat(
+                tick,
+                time_ms,
+                &msg_id,
+                &agent_id,
+                &agent_name_clone,
+                &content_clone,
+            )
+            .await;
+        });
+    }
 
     Ok(Json(ChatPostResponse {
         id: msg.id,

@@ -41,3 +41,11 @@ uv run python analysis/plot_eval_naive_vs_experienced.py /storage/nacloos/projec
 
 # multi agent
 bash launch_multi_generations.sh --generations 10 --generation-duration 1h --base-port 8085 --agents-per-world 2
+
+
+
+# mesa island
+
+./launch_multi.sh --num-worlds 1 --agents-per-world 5 --world-dir worlds/mesa-island --template worlds/mesa-island/agent-template --record true
+
+

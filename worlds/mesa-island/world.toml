@@ -1,6 +1,7 @@
 name = "Mesa Island"
 description = "A mysterious island with alien flora and hidden secrets."
 max_players = 10
+afk_timeout = 0
 
 [scripts]
 main = "main.lua"
