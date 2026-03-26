@@ -130,51 +130,19 @@ collect_session_recordings() {
   local window_name
   tmux list-windows -t "$TMUX_SESSION" -F "#{window_name}" 2>/dev/null | while IFS= read -r window_name; do
     [[ "$window_name" == world-* ]] || continue
-    tmux capture-pane -p -S -2000 -t "${TMUX_SESSION}:${window_name}" 2>/dev/null \
+    tmux capture-pane -J -p -S -2000 -t "${TMUX_SESSION}:${window_name}" 2>/dev/null \
       | sed -n 's/^Recording to: //p' \
       | tail -n 1
   done | awk 'NF && !seen[$0]++'
 }
 
-finalize_recording_db() {
+verify_recording_db() {
   local recording_file="$1"
-  local wal_file="${recording_file}-wal"
-  local shm_file="${recording_file}-shm"
-  local max_tick
-  local max_ms
-  local current_total_ticks
-  local current_duration_ms
-
   if [[ ! -f "$recording_file" ]]; then
     return 0
   fi
-
-  if ! command -v sqlite3 >/dev/null 2>&1; then
-    echo "Warning: sqlite3 not found; cannot checkpoint '$recording_file'."
-    return 0
-  fi
-
-  if sqlite3 "$recording_file" "PRAGMA wal_checkpoint(TRUNCATE);" >/dev/null 2>&1; then
-    if [[ -f "$wal_file" && ! -s "$wal_file" ]]; then
-      rm -f "$wal_file"
-    fi
-    if [[ -f "$shm_file" && ! -f "$wal_file" ]]; then
-      rm -f "$shm_file"
-    fi
-  else
-    echo "Warning: failed to checkpoint recording '$recording_file'."
-  fi
-
-  max_tick="$(sqlite3 "$recording_file" "SELECT COALESCE(MAX(tick),0) FROM (SELECT tick FROM checkpoints UNION ALL SELECT tick FROM deltas);")"
-  max_ms="$(sqlite3 "$recording_file" "SELECT COALESCE(MAX(time_ms),0) FROM (SELECT time_ms FROM checkpoints UNION ALL SELECT time_ms FROM deltas);")"
-  current_total_ticks="$(sqlite3 "$recording_file" "SELECT value FROM meta WHERE key='total_ticks' LIMIT 1;")"
-  current_duration_ms="$(sqlite3 "$recording_file" "SELECT value FROM meta WHERE key='duration_ms' LIMIT 1;")"
-
-  if [[ -z "$current_total_ticks" || "$current_total_ticks" -eq 0 ]]; then
-    sqlite3 "$recording_file" "INSERT OR REPLACE INTO meta(key,value) VALUES('total_ticks','$max_tick');" >/dev/null 2>&1 || true
-  fi
-  if [[ -z "$current_duration_ms" || "$current_duration_ms" -eq 0 ]]; then
-    sqlite3 "$recording_file" "INSERT OR REPLACE INTO meta(key,value) VALUES('duration_ms','$max_ms');" >/dev/null 2>&1 || true
+  if [[ -f "${recording_file}-wal" || -f "${recording_file}-shm" ]]; then
+    echo "Warning: recording not finalized cleanly: $recording_file"
   fi
 }
 
@@ -191,42 +159,22 @@ do_stop() {
       tmux send-keys -t "$pane_target" C-c
     done < <(tmux list-panes -t "$TMUX_SESSION" -F "#{session_name}:#{window_name}.#{pane_index}")
 
-    # Wait for clawblox server to close recording DBs (WAL files become empty)
-    local waited=0
-    echo "Waiting for server shutdown (up to ${STOP_GRACE_SECONDS}s)..."
-    while ((waited < STOP_GRACE_SECONDS)); do
-      local wal_busy=0
-      for recording_file in "${recordings[@]}"; do
-        local wal_file="${recording_file}-wal"
-        if [[ -f "$wal_file" && -s "$wal_file" ]]; then
-          wal_busy=1
-          break
-        fi
-      done
-      if ((wal_busy == 0)); then
-        echo "Server shut down cleanly after ${waited}s."
-        break
-      fi
-      sleep 1
-      ((waited++))
-    done
-    if ((waited >= STOP_GRACE_SECONDS)); then
-      echo "Warning: server did not shut down within ${STOP_GRACE_SECONDS}s."
-    fi
-
-    # Finalize recordings BEFORE killing tmux
-    if ((${#recordings[@]} > 0)); then
-      echo "Finalizing recording databases..."
-      for recording_file in "${recordings[@]}"; do
-        finalize_recording_db "$recording_file"
-      done
-    fi
+    echo "Waiting ${STOP_GRACE_SECONDS}s for graceful shutdown..."
+    sleep "$STOP_GRACE_SECONDS"
 
     if tmux has-session -t "$TMUX_SESSION" 2>/dev/null; then
       echo "Killing tmux session '$TMUX_SESSION'..."
       tmux kill-session -t "$TMUX_SESSION" 2>/dev/null || true
     else
       echo "Tmux session '$TMUX_SESSION' already exited."
+    fi
+
+    # Finalize recordings AFTER killing tmux so no process holds the DB open
+    if ((${#recordings[@]} > 0)); then
+      echo "Verifying recording databases..."
+      for recording_file in "${recordings[@]}"; do
+        verify_recording_db "$recording_file"
+      done
     fi
 
     echo "Stopped."

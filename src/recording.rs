@@ -271,6 +271,9 @@ impl RecordingWriter {
         let _ = sqlx::query("PRAGMA wal_checkpoint(TRUNCATE)")
             .execute(&self.pool)
             .await;
+        let _ = sqlx::query("PRAGMA journal_mode=DELETE")
+            .execute(&self.pool)
+            .await;
         self.pool.close().await;
     }
 
