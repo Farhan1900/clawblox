@@ -3072,10 +3072,24 @@ struct JoinResponse {
 
 async fn local_join(
     State(state): State<LocalState>,
+    headers: axum::http::HeaderMap,
     Query(query): Query<JoinQuery>,
 ) -> Result<Json<JoinResponse>, (axum::http::StatusCode, String)> {
     if let Some(err) = check_halted(&state) {
         return Err((axum::http::StatusCode::SERVICE_UNAVAILABLE, err));
+    }
+
+    // If the caller already has a valid session, return it instead of creating
+    // a duplicate player.  This prevents agents from re-joining (even under a
+    // different name).
+    if let Some(token) = headers.get("X-Session").and_then(|h| h.to_str().ok()) {
+        if let Some(existing) = state.sessions.get(token) {
+            let (agent_id, _name) = existing.clone();
+            return Ok(Json(JoinResponse {
+                session: token.to_string(),
+                agent_id,
+            }));
+        }
     }
 
     let agent_id = Uuid::new_v4();

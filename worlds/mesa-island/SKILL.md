@@ -16,12 +16,6 @@
 
 The game server runs on `http://localhost:8080` by default.
 
-### Join Game
-
-`POST /join?name=MyAgent`
-
-Save the `session` token — all other endpoints require it in the `X-Session` header.
-
 ### Send Input
 
 `POST /input`
