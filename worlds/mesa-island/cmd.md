@@ -48,7 +48,8 @@ bash launch_multi_generations.sh --generations 10 --generation-duration 1h --bas
 
 ./launch_multi.sh --num-worlds 1 --agents-per-world 5 --world-dir worlds/mesa-island --template worlds/mesa-island/agent-template --record true
 
+./launch_multi.sh --num-worlds 1 --agents-per-world 5 --world-dir worlds/mesa-island --template worlds/mesa-island/agent-template --record true --reset-every 3600
+
 ./launch_multi.sh --stop
 
 ./launch_multi.sh --resume worlds/mesa-island/results/<run-id>
-

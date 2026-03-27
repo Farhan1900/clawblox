@@ -24,6 +24,7 @@ TEMPLATE_DIR="${TEMPLATE_DIR:-}"
 RESULTS_ROOT="${RESULTS_ROOT:-}"
 PORT_WAIT_SECONDS="${PORT_WAIT_SECONDS:-120}"
 RESUME_PATH="${RESUME_PATH:-}"
+RESET_EVERY="${RESET_EVERY:-}"
 AGENT_CHECKPOINT_AT_EPOCH="${AGENT_CHECKPOINT_AT_EPOCH:-}"
 AGENT_CHECKPOINT_PROMPT="${AGENT_CHECKPOINT_PROMPT:-}"
 AGENT_CHECKPOINT_TRIGGER_TURN="${AGENT_CHECKPOINT_TRIGGER_TURN:-1}"
@@ -114,6 +115,7 @@ Options:
   --goal TEXT                  Custom startup objective passed to agents
   --template PATH              Agent template directory (relative to project root or absolute)
   --agent-template PATH        Per-agent template directory; repeat in agent index order
+  --reset-every SECONDS        Restart each agent session on this interval
   --results-root PATH          Results root directory (default: <world-dir>/results)
   --resume PATH                Resume an existing run directory under results/
   --clawblox-bin PATH          Path or command name for clawblox binary
@@ -132,6 +134,7 @@ Environment variables:
   PORT_WAIT_SECONDS Seconds to wait for target ports to free before failing (default: 120)
   GOAL              Custom startup objective passed to agents
   TEMPLATE_DIR      Agent template directory (run_agent.sh TEMPLATE_DIR override)
+  RESET_EVERY       Restart each agent session every N seconds
   RESULTS_ROOT      Results root directory (default: <world-dir>/results)
   AGENT_CHECKPOINT_AT_EPOCH       Unix epoch seconds when checkpoint prompt should be sent
   AGENT_CHECKPOINT_PROMPT         Checkpoint message sent from clawblox-agent extension
@@ -354,6 +357,11 @@ while [[ $# -gt 0 ]]; do
       GOAL="$2"
       shift 2
       ;;
+    --reset-every)
+      require_value "$1" "${2:-}"
+      RESET_EVERY="$2"
+      shift 2
+      ;;
     --template|--template-dir)
       require_value "$1" "${2:-}"
       TEMPLATE_DIR="$2"
@@ -392,6 +400,10 @@ if ! is_nonnegative_int "$STOP_GRACE_SECONDS"; then
 fi
 if ! is_nonnegative_int "$PORT_WAIT_SECONDS"; then
   echo "Error: PORT_WAIT_SECONDS must be a non-negative integer (got '$PORT_WAIT_SECONDS')."
+  exit 1
+fi
+if [[ -n "$RESET_EVERY" ]] && ! is_positive_int "$RESET_EVERY"; then
+  echo "Error: RESET_EVERY must be a positive integer in seconds (got '$RESET_EVERY')."
   exit 1
 fi
 
@@ -769,13 +781,18 @@ EOF
       TEMPLATE_ENV_PREFIX="TEMPLATE_DIR=$(printf '%q' "$agent_template_abs_dir") "
     fi
 
+    RESET_ENV_PREFIX=""
+    if [[ -n "$RESET_EVERY" ]]; then
+      RESET_ENV_PREFIX="RESET_EVERY=$(printf '%q' "$RESET_EVERY") "
+    fi
+
     if [[ -n "$startup_instructions" ]]; then
       startup_instructions_q="$(printf '%q' "$startup_instructions")"
       tmux send-keys -t "${TMUX_SESSION}:agents-$i" \
-        "cd '$ROOT_DIR' && WORLD_BASE_URL='$url' WORLD_AGENT_NAME='$agent_display_name' WORKSPACE_DIR='$agent_workspace' SESSION_DIR='$agent_session' WORLD_SESSION_FILE='$agent_world_session_file' ${TEMPLATE_ENV_PREFIX}${CHECKPOINT_ENV_PREFIX}WORLD_STARTUP_INSTRUCTIONS=${startup_instructions_q} bash '$AGENT_SCRIPT' 2>&1 | tee -a '$agent_log_file'" Enter
+        "cd '$ROOT_DIR' && WORLD_BASE_URL='$url' WORLD_AGENT_NAME='$agent_display_name' WORKSPACE_DIR='$agent_workspace' SESSION_DIR='$agent_session' WORLD_SESSION_FILE='$agent_world_session_file' ${TEMPLATE_ENV_PREFIX}${RESET_ENV_PREFIX}${CHECKPOINT_ENV_PREFIX}WORLD_STARTUP_INSTRUCTIONS=${startup_instructions_q} bash '$AGENT_SCRIPT' 2>&1 | tee -a '$agent_log_file'" Enter
     else
       tmux send-keys -t "${TMUX_SESSION}:agents-$i" \
-        "cd '$ROOT_DIR' && WORLD_BASE_URL='$url' WORLD_AGENT_NAME='$agent_display_name' WORKSPACE_DIR='$agent_workspace' SESSION_DIR='$agent_session' WORLD_SESSION_FILE='$agent_world_session_file' ${TEMPLATE_ENV_PREFIX}${CHECKPOINT_ENV_PREFIX}bash '$AGENT_SCRIPT' 2>&1 | tee -a '$agent_log_file'" Enter
+        "cd '$ROOT_DIR' && WORLD_BASE_URL='$url' WORLD_AGENT_NAME='$agent_display_name' WORKSPACE_DIR='$agent_workspace' SESSION_DIR='$agent_session' WORLD_SESSION_FILE='$agent_world_session_file' ${TEMPLATE_ENV_PREFIX}${RESET_ENV_PREFIX}${CHECKPOINT_ENV_PREFIX}bash '$AGENT_SCRIPT' 2>&1 | tee -a '$agent_log_file'" Enter
     fi
   done
 done
@@ -788,6 +805,7 @@ echo "========================================"
 echo "  Worlds:  $NUM_WORLDS (ports $BASE_PORT-$((BASE_PORT + NUM_WORLDS - 1)))"
 echo "  Agents:  $TOTAL_AGENTS ($AGENTS_PER_WORLD per world)"
 echo "  Record:  $RECORD"
+echo "  Reset:   ${RESET_EVERY:-off}"
 echo "  Session: $TMUX_SESSION"
 echo "  Results: $RUN_DIR"
 echo "  Results Root: $RESULTS_ABS_ROOT"

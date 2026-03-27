@@ -17,6 +17,7 @@ CLAWBLOX_AGENT_EXTENSION_PATH="${CLAWBLOX_AGENT_EXTENSION_PATH:-$ROOT_DIR/agent/
 PI_EXTENSION_PATH="${PI_EXTENSION_PATH:-}"
 PI_NO_GLOBAL_EXTENSIONS="${PI_NO_GLOBAL_EXTENSIONS:-1}"
 SESSION_DIR="${SESSION_DIR:-}"
+RESET_EVERY="${RESET_EVERY:-}"
 SYSTEM_PROMPT_SNAPSHOT_FILE="${SYSTEM_PROMPT_SNAPSHOT_FILE:-}"
 WORLD_STARTUP_INSTRUCTIONS="${WORLD_STARTUP_INSTRUCTIONS:-}"
 PI_PROVIDER="${PI_PROVIDER:-}"
@@ -65,6 +66,10 @@ if [[ -z "${ANTHROPIC_API_KEY:-}" ]]; then
   echo "Set it in environment or in $ROOT_DIR/.env before running agents." >&2
   exit 1
 fi
+if [[ -n "$RESET_EVERY" && ! "$RESET_EVERY" =~ ^[1-9][0-9]*$ ]]; then
+  echo "Error: RESET_EVERY must be a positive integer in seconds." >&2
+  exit 1
+fi
 
 mkdir -p "$WORKSPACE_DIR"
 mkdir -p "$SESSION_DIR"
@@ -107,7 +112,19 @@ if [[ -n "$WORLD_SESSION_FILE" && -n "$SESSION_ID" ]]; then
 fi
 
 PROMPT_FILE="$(mktemp -t pi-agent-prompt.XXXXXX.md)"
+PI_CHILD_PID=""
+RESET_TIMER_PID=""
 cleanup() {
+  if [[ -n "$RESET_TIMER_PID" ]]; then
+    kill "$RESET_TIMER_PID" >/dev/null 2>&1 || true
+    wait "$RESET_TIMER_PID" 2>/dev/null || true
+    RESET_TIMER_PID=""
+  fi
+  if [[ -n "$PI_CHILD_PID" ]]; then
+    kill "$PI_CHILD_PID" >/dev/null 2>&1 || true
+    wait "$PI_CHILD_PID" 2>/dev/null || true
+    PI_CHILD_PID=""
+  fi
   rm -f "$PROMPT_FILE"
   if [[ -n "${SESSION_ID:-}" && -n "$WORLD_LEAVE_PATH" ]]; then
     curl -fsS -X POST -H "${WORLD_SESSION_HEADER}: ${SESSION_ID}" "${WORLD_BASE_URL%/}${WORLD_LEAVE_PATH}" >/dev/null 2>&1 || true
@@ -140,6 +157,9 @@ echo "Pi session dir: $SESSION_DIR"
 if [[ -n "$SESSION_ID" ]]; then
   echo "Session: $SESSION_ID"
 fi
+if [[ -n "$RESET_EVERY" ]]; then
+  echo "Reset every: ${RESET_EVERY}s"
+fi
 
 WATCH_FLAG=()
 if pi --help 2>&1 | grep -q -- '--watch'; then
@@ -165,15 +185,66 @@ if [[ -n "$PI_MODEL" ]]; then
   MODEL_FLAGS+=(--model "$PI_MODEL")
 fi
 
-set +e
-pi \
-  "${WATCH_FLAG[@]}" \
-  "${MODEL_FLAGS[@]}" \
-  "${EXTENSION_FLAGS[@]}" \
-  --session-dir "$SESSION_DIR" \
-  --append-system-prompt "$PROMPT_FILE" \
-  --continue \
-  "continue"
-status=$?
-set -e
-exit "$status"
+run_pi_session() {
+  local active_session_dir="$1"
+  pi \
+    "${WATCH_FLAG[@]}" \
+    "${MODEL_FLAGS[@]}" \
+    "${EXTENSION_FLAGS[@]}" \
+    --session-dir "$active_session_dir" \
+    --append-system-prompt "$PROMPT_FILE" \
+    --continue \
+    "continue"
+}
+
+if [[ -z "$RESET_EVERY" ]]; then
+  set +e
+  run_pi_session "$SESSION_DIR"
+  status=$?
+  set -e
+  exit "$status"
+fi
+
+reset_index=0
+while true; do
+  active_session_dir="$(printf '%s/reset-%s-%04d' "$SESSION_DIR" "$(date -u +%Y%m%dT%H%M%SZ)" "$reset_index")"
+  mkdir -p "$active_session_dir"
+  echo "Active pi session dir: $active_session_dir"
+
+  reset_flag="$(mktemp "$SESSION_DIR/reset-flag.XXXXXX")"
+  rm -f "$reset_flag"
+
+  set +e
+  run_pi_session "$active_session_dir" &
+  PI_CHILD_PID="$!"
+  (
+    sleep "$RESET_EVERY"
+    if kill -0 "$PI_CHILD_PID" >/dev/null 2>&1; then
+      : >"$reset_flag"
+      kill "$PI_CHILD_PID" >/dev/null 2>&1 || true
+      sleep 5
+      if kill -0 "$PI_CHILD_PID" >/dev/null 2>&1; then
+        kill -9 "$PI_CHILD_PID" >/dev/null 2>&1 || true
+      fi
+    fi
+  ) &
+  RESET_TIMER_PID="$!"
+
+  wait "$PI_CHILD_PID"
+  status=$?
+
+  kill "$RESET_TIMER_PID" >/dev/null 2>&1 || true
+  wait "$RESET_TIMER_PID" 2>/dev/null || true
+  PI_CHILD_PID=""
+  RESET_TIMER_PID=""
+  set -e
+
+  if [[ -f "$reset_flag" ]]; then
+    rm -f "$reset_flag"
+    reset_index=$((reset_index + 1))
+    continue
+  fi
+
+  rm -f "$reset_flag"
+  exit "$status"
+done
