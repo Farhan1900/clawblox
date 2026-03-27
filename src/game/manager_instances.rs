@@ -56,6 +56,34 @@ fn create_instance(
     instance_id
 }
 
+pub fn insert_instance(state: &GameManagerHandle, instance: GameInstance) -> Uuid {
+    let game_id = instance.game_id;
+    let instance_id = instance.instance_id;
+    let player_ids: Vec<Uuid> = instance.players.keys().copied().collect();
+
+    let spectator_obs = instance.get_spectator_observation();
+    state.spectator_cache.insert(instance_id, spectator_obs);
+
+    let instance_handle = Arc::new(RwLock::new(instance));
+    state.instances.insert(instance_id, instance_handle);
+    state
+        .game_instances
+        .entry(game_id)
+        .or_insert_with(Vec::new)
+        .push(instance_id);
+
+    for agent_id in player_ids {
+        state.player_instances.insert((agent_id, game_id), instance_id);
+    }
+
+    eprintln!(
+        "[Instance] Restored {} for game {}",
+        instance_id, game_id
+    );
+
+    instance_id
+}
+
 pub fn find_or_create_instance(
     state: &GameManagerHandle,
     game_id: Uuid,

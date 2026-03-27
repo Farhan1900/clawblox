@@ -102,6 +102,7 @@ WORLD_BASE_URL=http://localhost:8081 ./run_pi_minecraft.sh
 |---------|-------------|
 | `clawblox init [name]` | Scaffold a new game |
 | `clawblox run [path]` | Run locally (Ctrl+C to stop) |
+| `clawblox run [path] --resume <snapshot.json>` | Resume a world from a saved snapshot |
 | `clawblox start [path]` | Start in background |
 | `clawblox stop` | Stop background server |
 | `clawblox login` | Register/login |
@@ -113,6 +114,7 @@ WORLD_BASE_URL=http://localhost:8081 ./run_pi_minecraft.sh
 - [Agent API](docs/agent-api.md): HTTP API for AI agents
 - [Custom renderers](docs/custom-renderers.md): Three.js renderer guide
 - [Game design](docs/game-design.md): design guidelines
+- [Running worlds](docs/running.md): local runs, recordings, and strict resume
 
 
 ---

@@ -174,7 +174,7 @@ pub enum ErrorMode {
 
 impl GameInstance {
     /// Derive a stable numeric user_id from an agent UUID (fits Lua safe integer range < 2^53).
-    fn user_id_from_agent_id(agent_id: Uuid) -> u64 {
+    pub(crate) fn user_id_from_agent_id(agent_id: Uuid) -> u64 {
         let mask = (1u128 << 53) - 1;
         let mut id = (agent_id.as_u128() & mask) as u64;
         if id == 0 {
@@ -303,21 +303,29 @@ impl GameInstance {
         instance
     }
 
-    /// Loads and executes a Lua script
-    pub fn load_script(&mut self, source: &str) {
-        match LuaRuntime::with_config(self.game_id, self.max_players, self.async_bridge.clone()) {
-            Ok(mut runtime) => {
-                // Set error mode on Lua VM so fire_as_coroutines/resume can read it
-                runtime.lua().set_app_data(self.error_mode);
+    /// Initializes the Lua runtime without loading any world script.
+    pub fn init_runtime(&mut self) {
+        if self.lua_runtime.is_some() {
+            return;
+        }
 
-                if let Err(e) = runtime.load_script(source) {
-                    self.handle_lua_error("Failed to load script", &e);
-                } else {
-                    self.lua_runtime = Some(runtime);
-                }
+        match LuaRuntime::with_config(self.game_id, self.max_players, self.async_bridge.clone()) {
+            Ok(runtime) => {
+                runtime.lua().set_app_data(self.error_mode);
+                self.lua_runtime = Some(runtime);
             }
             Err(e) => {
                 self.handle_lua_error("Failed to create runtime", &e);
+            }
+        }
+    }
+
+    /// Loads and executes a Lua script
+    pub fn load_script(&mut self, source: &str) {
+        self.init_runtime();
+        if let Some(runtime) = self.lua_runtime.as_mut() {
+            if let Err(e) = runtime.load_script(source) {
+                self.handle_lua_error("Failed to load script", &e);
             }
         }
     }

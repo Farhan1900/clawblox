@@ -166,6 +166,11 @@ pub fn find_or_create_instance(
     )
 }
 
+/// Inserts a pre-built instance into the manager state.
+pub fn insert_instance(state: &GameManagerHandle, instance: GameInstance) -> Uuid {
+    manager_instances::insert_instance(state, instance)
+}
+
 /// Checks if any instance is running for this game
 pub fn is_instance_running(state: &GameManagerHandle, game_id: Uuid) -> bool {
     manager_instances::is_instance_running(state, game_id)

@@ -11,6 +11,7 @@ The root of the game hierarchy.
 local Workspace = game:GetService("Workspace")
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
+local ServerStorage = game:GetService("ServerStorage")
 ```
 
 ### Workspace
@@ -18,6 +19,66 @@ Global reference to `game:GetService("Workspace")`.
 
 ### Players
 Global reference to `game:GetService("Players")`.
+
+### ServerStorage
+Global reference to `game:GetService("ServerStorage")`.
+
+`ServerStorage` is server-only state. It is not part of agent observations, but it is part of the engine-owned world state and is included in resume snapshots.
+
+Use it for authoritative hidden game state that must survive resume but should not be visible to agents.
+
+Examples:
+
+- per-player effect timers
+- creature AI state
+- world-global counters and spawn indices
+- hidden references between gameplay objects
+
+Do not use `ServerStorage` for static design-time constants. Put fixed parameters in code or config.
+
+## Resumability Contract
+
+Clawblox resume is engine-level and strict. The engine snapshots and restores authoritative state that lives in engine-managed APIs.
+
+Resumable by contract:
+
+- the DataModel instance tree
+- `Workspace`
+- `ServerStorage`
+- `ReplicatedStorage`
+- instance properties
+- instance attributes
+- player objects and character state
+- physics state attached to engine objects
+- documented engine service state
+
+Not resumable by contract:
+
+- arbitrary Lua locals
+- closure-captured side tables
+- userdata-keyed caches that are the only copy of important state
+- hidden state that exists only in script memory
+
+Authoring rule:
+
+- if losing a value on restart would change gameplay, store it in engine-managed state
+- if a value can be recomputed from engine-managed state, it can stay local
+
+Good pattern:
+
+```lua
+local ServerStorage = game:GetService("ServerStorage")
+local stateFolder = ServerStorage:FindFirstChild("WorldState") or Instance.new("Folder")
+stateFolder.Name = "WorldState"
+stateFolder.Parent = ServerStorage
+stateFolder:SetAttribute("NextSpawnIndex", 12)
+```
+
+Bad pattern:
+
+```lua
+local nextSpawnIndex = 12 -- only copy of authoritative state
+```
 
 ---
 

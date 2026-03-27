@@ -115,6 +115,9 @@ enum Commands {
         /// Directory to write recording output into (default: <world>/recordings)
         #[arg(long, env = "CLAWBLOX_RECORD_DIR")]
         record_dir: Option<PathBuf>,
+        /// Resume a previously snapshotted local run from this file
+        #[arg(long)]
+        resume: Option<PathBuf>,
     },
     /// Replay a recorded session
     Replay {
@@ -207,7 +210,17 @@ fn main() {
             datastore,
             record,
             record_dir,
-        } => run_game(path, port, &base_path, daemon, datastore, record, record_dir),
+            resume,
+        } => run_game(
+            path,
+            port,
+            &base_path,
+            daemon,
+            datastore,
+            record,
+            record_dir,
+            resume,
+        ),
         Commands::Replay {
             file,
             speed,
@@ -1594,6 +1607,7 @@ fn run_game(
     datastore: LocalDatastore,
     record: bool,
     record_dir: Option<PathBuf>,
+    resume: Option<PathBuf>,
 ) {
     let base_path = normalize_base_path(base_path);
     let path = std::fs::canonicalize(&path).unwrap_or_else(|_| {
@@ -1659,6 +1673,31 @@ fn run_game(
         eprintln!("Error: {}", e);
         std::process::exit(1);
     });
+    let resume_snapshot = resume.as_ref().map(|resume_path| {
+        let resume_path = if resume_path.is_absolute() {
+            resume_path.clone()
+        } else {
+            std::env::current_dir()
+                .unwrap_or_else(|_| PathBuf::from("."))
+                .join(resume_path)
+        };
+        let snapshot_content = std::fs::read_to_string(&resume_path).unwrap_or_else(|e| {
+            eprintln!(
+                "Error: failed to read resume snapshot {}: {}",
+                resume_path.display(),
+                e
+            );
+            std::process::exit(1);
+        });
+        serde_json::from_str::<LocalRuntimeSnapshot>(&snapshot_content).unwrap_or_else(|e| {
+            eprintln!(
+                "Error: failed to parse resume snapshot {}: {}",
+                resume_path.display(),
+                e
+            );
+            std::process::exit(1);
+        })
+    });
 
     let pid_file = pid_path(port);
 
@@ -1671,6 +1710,9 @@ fn run_game(
         println!("Script tree: {}", tree);
     } else if path.join("scripts").is_dir() {
         println!("Script tree: scripts (auto-detected)");
+    }
+    if resume_snapshot.is_some() {
+        println!("Resume: enabled");
     }
 
     // Create game manager with selected datastore backend.
@@ -1719,18 +1761,39 @@ fn run_game(
         }
     };
 
-    // Use a random game_id for this session
-    let game_id = Uuid::new_v4();
+    let game_id = resume_snapshot
+        .as_ref()
+        .map(|snapshot| snapshot.game_id)
+        .unwrap_or_else(Uuid::new_v4);
 
-    // Create the instance
-    let result = find_or_create_instance(
-        &game_handle,
-        game_id,
-        config.max_players,
-        config.observation.radius,
-        Some(&script),
-    );
-    let instance_id = result.instance_id;
+    let instance_id = if let Some(snapshot) = resume_snapshot.as_ref() {
+        let mut instance = clawblox::game::instance::GameInstance::new_with_config(
+            game_id,
+            config.max_players,
+            config.observation.radius,
+            game_handle.async_bridge.clone(),
+            ErrorMode::Halt,
+        );
+        instance.instance_id = snapshot.instance.instance_id;
+        instance.init_runtime();
+        clawblox::snapshot::restore_game_instance(&mut instance, &snapshot.instance).unwrap_or_else(
+            |e| {
+                eprintln!("Error: failed to restore snapshot state: {}", e);
+                std::process::exit(1);
+            },
+        );
+        instance.load_script(&script);
+        game::insert_instance(&game_handle, instance)
+    } else {
+        let result = find_or_create_instance(
+            &game_handle,
+            game_id,
+            config.max_players,
+            config.observation.radius,
+            Some(&script),
+        );
+        result.instance_id
+    };
 
     // Apply AFK timeout from world config (0 = disabled)
     if let Some(handle) = game_handle.instances.get(&instance_id) {
@@ -1751,6 +1814,7 @@ fn run_game(
 
     // Start HTTP server
     let rt = tokio::runtime::Runtime::new().unwrap();
+    let resume_snapshot_for_server = resume_snapshot.clone();
     rt.block_on(async {
         let recording_writer = if record {
             let rec_dir = if let Some(dir) = record_dir.as_ref() {
@@ -1816,6 +1880,17 @@ fn run_game(
             recording_writer: recording_writer.clone(),
         };
 
+        if let Some(snapshot) = resume_snapshot_for_server {
+            for session in snapshot.sessions {
+                state
+                    .sessions
+                    .insert(session.token, (session.agent_id, session.name));
+            }
+            let mut chat_state = state.chat_state.lock().unwrap();
+            chat_state.next_seq = snapshot.chat.next_seq;
+            chat_state.messages = snapshot.chat.messages.into_iter().collect();
+        }
+
         // Spawn recording task if recording is enabled
         let mut recording_shutdown_tx = None;
         let mut recording_task: Option<JoinHandle<()>> = None;
@@ -1873,6 +1948,7 @@ fn run_game(
             .route("/join", post(local_join))
             .route("/input", post(local_input))
             .route("/observe", get(local_observe))
+            .route("/snapshot", get(local_snapshot))
             .route("/skill.md", get(local_skill))
             .route("/audio", post(local_audio))
             .route("/chat", post(local_chat))
@@ -2609,7 +2685,7 @@ struct ChatAudibilityEntry {
     heard: bool,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 struct LocalChatMessage {
     id: String,
     instance_id: Uuid,
@@ -2623,6 +2699,28 @@ struct LocalChatMessage {
     hearing_radius: Option<f32>,
     heard_by: Vec<Uuid>,
     audibility: Vec<ChatAudibilityEntry>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct SessionSnapshot {
+    token: String,
+    agent_id: Uuid,
+    name: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct ChatStateSnapshot {
+    next_seq: u64,
+    messages: Vec<LocalChatMessage>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct LocalRuntimeSnapshot {
+    schema_version: u32,
+    game_id: Uuid,
+    instance: clawblox::snapshot::GameInstanceSnapshot,
+    sessions: Vec<SessionSnapshot>,
+    chat: ChatStateSnapshot,
 }
 
 #[derive(Debug, Default)]
@@ -3110,6 +3208,57 @@ fn external_snapshot(state: &ExternalLocalState) -> serde_json::Value {
     })
 }
 
+fn capture_local_runtime_snapshot(state: &LocalState) -> Result<LocalRuntimeSnapshot, String> {
+    let handle = state
+        .game_handle
+        .instances
+        .get(&state.instance_id)
+        .ok_or_else(|| format!("missing instance {}", state.instance_id))?;
+    let instance_snapshot = {
+        let instance = handle.read();
+        clawblox::snapshot::capture_game_instance(&instance)?
+    };
+
+    let sessions = state
+        .sessions
+        .iter()
+        .map(|entry| {
+            let (agent_id, name) = entry.value().clone();
+            SessionSnapshot {
+                token: entry.key().clone(),
+                agent_id,
+                name,
+            }
+        })
+        .collect();
+
+    let chat_state = state.chat_state.lock().unwrap();
+    let chat = ChatStateSnapshot {
+        next_seq: chat_state.next_seq,
+        messages: chat_state.messages.iter().cloned().collect(),
+    };
+
+    Ok(LocalRuntimeSnapshot {
+        schema_version: 1,
+        game_id: state.game_id,
+        instance: instance_snapshot,
+        sessions,
+        chat,
+    })
+}
+
+async fn local_snapshot(
+    State(state): State<LocalState>,
+) -> Result<Json<LocalRuntimeSnapshot>, (axum::http::StatusCode, String)> {
+    if let Some(err) = check_halted(&state) {
+        return Err((axum::http::StatusCode::SERVICE_UNAVAILABLE, err));
+    }
+
+    let snapshot = capture_local_runtime_snapshot(&state)
+        .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    Ok(Json(snapshot))
+}
+
 async fn external_renderer_manifest(
     State(state): State<ExternalLocalState>,
 ) -> Json<LocalRendererManifest> {
@@ -3202,7 +3351,19 @@ async fn local_join(
     // different name).
     if let Some(token) = headers.get("X-Session").and_then(|h| h.to_str().ok()) {
         if let Some(existing) = state.sessions.get(token) {
-            let (agent_id, _name) = existing.clone();
+            let (agent_id, name) = existing.clone();
+            if game::get_player_instance(&state.game_handle, agent_id, state.game_id)
+                != Some(state.instance_id)
+            {
+                game::join_instance(
+                    &state.game_handle,
+                    state.instance_id,
+                    state.game_id,
+                    agent_id,
+                    &name,
+                )
+                .map_err(|e| (axum::http::StatusCode::BAD_REQUEST, e))?;
+            }
             return Ok(Json(JoinResponse {
                 session: token.to_string(),
                 agent_id,
