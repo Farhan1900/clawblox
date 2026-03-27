@@ -23,6 +23,7 @@ GOAL="${GOAL:-}"
 TEMPLATE_DIR="${TEMPLATE_DIR:-}"
 RESULTS_ROOT="${RESULTS_ROOT:-}"
 PORT_WAIT_SECONDS="${PORT_WAIT_SECONDS:-120}"
+RESUME_PATH="${RESUME_PATH:-}"
 AGENT_CHECKPOINT_AT_EPOCH="${AGENT_CHECKPOINT_AT_EPOCH:-}"
 AGENT_CHECKPOINT_PROMPT="${AGENT_CHECKPOINT_PROMPT:-}"
 AGENT_CHECKPOINT_TRIGGER_TURN="${AGENT_CHECKPOINT_TRIGGER_TURN:-1}"
@@ -37,6 +38,56 @@ fi
 
 sanitize_name() {
   printf '%s' "$1" | tr -c 'A-Za-z0-9._-' '_'
+}
+
+agent_display_name_for_index() {
+  local idx="$1"
+  local -a creature_names=(Eko Moa Rua Tavi Oni Zev Ika Pala Sori Nyx)
+  if ((idx < ${#creature_names[@]})); then
+    printf '%s' "${creature_names[$idx]}"
+  else
+    printf '%s' "${AGENT_NAME_PREFIX}-a${idx}"
+  fi
+}
+
+session_meta_file() {
+  printf '%s/.clawblox-multi/%s.env' "$ROOT_DIR" "$(sanitize_name "$TMUX_SESSION")"
+}
+
+write_run_metadata() {
+  local target="$1"
+  mkdir -p "$(dirname "$target")"
+  cat >"$target" <<EOF
+RUN_ID=$(printf '%q' "$RUN_ID")
+RUN_SAFE_ID=$(printf '%q' "$RUN_SAFE_ID")
+RUN_DIR=$(printf '%q' "$RUN_DIR")
+WORLDS_ROOT=$(printf '%q' "$WORLDS_ROOT")
+WORLD_ABS_DIR=$(printf '%q' "$WORLD_ABS_DIR")
+NUM_WORLDS=$(printf '%q' "$NUM_WORLDS")
+AGENTS_PER_WORLD=$(printf '%q' "$AGENTS_PER_WORLD")
+BASE_PORT=$(printf '%q' "$BASE_PORT")
+RECORD=$(printf '%q' "$RECORD")
+CLAWBLOX_BIN=$(printf '%q' "$CLAWBLOX_BIN")
+TMUX_SESSION=$(printf '%q' "$TMUX_SESSION")
+EOF
+}
+
+save_world_snapshot() {
+  local world_index="$1"
+  local port="$2"
+  local world_root="$RUN_DIR/worlds/world-$world_index"
+  local resume_dir="$world_root/resume"
+  local snapshot_file="$resume_dir/latest.json"
+  local tmp_file="$snapshot_file.tmp"
+  mkdir -p "$resume_dir"
+  if curl -fsS "http://localhost:${port}/snapshot" >"$tmp_file"; then
+    mv "$tmp_file" "$snapshot_file"
+    echo "Saved snapshot: $snapshot_file"
+    return 0
+  fi
+  rm -f "$tmp_file"
+  echo "Error: failed to save snapshot for world-$world_index on port $port" >&2
+  return 1
 }
 
 usage() {
@@ -64,6 +115,7 @@ Options:
   --template PATH              Agent template directory (relative to project root or absolute)
   --agent-template PATH        Per-agent template directory; repeat in agent index order
   --results-root PATH          Results root directory (default: <world-dir>/results)
+  --resume PATH                Resume an existing run directory under results/
   --clawblox-bin PATH          Path or command name for clawblox binary
 
 Environment variables:
@@ -150,9 +202,31 @@ do_stop() {
   local recording_file
   local pane_target
   local recordings=()
+  local meta_file
+  local i
+  local port
+  local snapshot_failed=0
 
   if tmux has-session -t "$TMUX_SESSION" 2>/dev/null; then
     mapfile -t recordings < <(collect_session_recordings)
+    meta_file="$(session_meta_file)"
+    if [[ -f "$meta_file" ]]; then
+      # shellcheck disable=SC1090
+      source "$meta_file"
+      if [[ -n "${RUN_DIR:-}" && -n "${NUM_WORLDS:-}" && -n "${BASE_PORT:-}" ]]; then
+        echo "Saving world snapshots..."
+        for ((i = 0; i < NUM_WORLDS; i++)); do
+          port=$((BASE_PORT + i))
+          if ! save_world_snapshot "$i" "$port"; then
+            snapshot_failed=1
+          fi
+        done
+        if ((snapshot_failed != 0)); then
+          echo "Snapshot capture failed. Aborting shutdown so the live run remains resumable." >&2
+          exit 1
+        fi
+      fi
+    fi
 
     # Stop server windows first (world-*) so recordings finalize cleanly
     echo "Stopping world servers..."
@@ -181,6 +255,7 @@ do_stop() {
     fi
 
     echo "Stopped."
+    rm -f "$meta_file"
   else
     echo "No tmux session '$TMUX_SESSION' found."
   fi
@@ -294,6 +369,11 @@ while [[ $# -gt 0 ]]; do
       RESULTS_ROOT="$2"
       shift 2
       ;;
+    --resume)
+      require_value "$1" "${2:-}"
+      RESUME_PATH="$2"
+      shift 2
+      ;;
     --help|-h)
       usage
       exit 0
@@ -365,7 +445,32 @@ if tmux has-session -t "$TMUX_SESSION" 2>/dev/null; then
   fi
 fi
 
-if [[ "$WORLD_DIR" = /* ]]; then
+if [[ -n "$RESUME_PATH" ]]; then
+  if [[ "$RESUME_PATH" = /* ]]; then
+    RUN_DIR="$RESUME_PATH"
+  else
+    RUN_DIR="$ROOT_DIR/$RESUME_PATH"
+  fi
+  if [[ ! -d "$RUN_DIR" ]]; then
+    echo "Error: resume run directory not found at $RUN_DIR"
+    exit 1
+  fi
+  RUN_META_FILE="$RUN_DIR/run.env"
+  if [[ ! -f "$RUN_META_FILE" ]]; then
+    echo "Error: missing run metadata at $RUN_META_FILE"
+    exit 1
+  fi
+  # shellcheck disable=SC1090
+  source "$RUN_META_FILE"
+  RESUME_PATH="$RUN_DIR"
+  RESULTS_ABS_ROOT="$(dirname "$RUN_DIR")"
+  for ((i = 0; i < NUM_WORLDS; i++)); do
+    if [[ ! -f "$RUN_DIR/worlds/world-$i/resume/latest.json" ]]; then
+      echo "Error: missing resume snapshot for world-$i at $RUN_DIR/worlds/world-$i/resume/latest.json"
+      exit 1
+    fi
+  done
+elif [[ "$WORLD_DIR" = /* ]]; then
   WORLD_ABS_DIR="$WORLD_DIR"
 else
   WORLD_ABS_DIR="$ROOT_DIR/$WORLD_DIR"
@@ -411,7 +516,9 @@ if ((${#AGENT_TEMPLATE_DIRS[@]} > 0)); then
 fi
 
 RUN_SAFE_ID="$(sanitize_name "$RUN_ID")"
-if [[ -n "$RESULTS_ROOT" ]]; then
+if [[ -n "${RESULTS_ABS_ROOT:-}" ]]; then
+  :
+elif [[ -n "$RESULTS_ROOT" ]]; then
   if [[ "$RESULTS_ROOT" = /* ]]; then
     RESULTS_ABS_ROOT="$RESULTS_ROOT"
   else
@@ -419,6 +526,24 @@ if [[ -n "$RESULTS_ROOT" ]]; then
   fi
 else
   RESULTS_ABS_ROOT="$WORLD_ABS_DIR/results"
+fi
+
+if [[ -n "$RESUME_PATH" ]]; then
+  for ((i = 0; i < NUM_WORLDS; i++)); do
+    for ((j = 0; j < AGENTS_PER_WORLD; j++)); do
+      agent_display_name="$(agent_display_name_for_index "$j")"
+      agent_name="$(sanitize_name "${agent_display_name}-r${RUN_SAFE_ID}-w${i}-a${j}")"
+      agent_dir="$RUN_DIR/worlds/world-$i/agents/$agent_name"
+      if [[ ! -d "$agent_dir/session" ]]; then
+        echo "Error: missing agent session dir for resume at $agent_dir/session"
+        exit 1
+      fi
+      if [[ ! -f "$agent_dir/world_session.txt" ]]; then
+        echo "Error: missing world session file for resume at $agent_dir/world_session.txt"
+        exit 1
+      fi
+    done
+  done
 fi
 
 if [[ "$RECORD" == "true" && "$CLAWBLOX_SUPPORTS_RECORD_DIR" -ne 1 ]]; then
@@ -502,10 +627,14 @@ ensure_ports_available() {
 
 ensure_ports_available
 
-RUN_DIR="$RESULTS_ABS_ROOT/$RUN_SAFE_ID"
-WORLDS_ROOT="$RUN_DIR/worlds"
+if [[ -z "${RUN_DIR:-}" ]]; then
+  RUN_DIR="$RESULTS_ABS_ROOT/$RUN_SAFE_ID"
+fi
+if [[ -z "${WORLDS_ROOT:-}" ]]; then
+  WORLDS_ROOT="$RUN_DIR/worlds"
+fi
 
-if [[ -e "$RUN_DIR" ]]; then
+if [[ -z "$RESUME_PATH" && -e "$RUN_DIR" ]]; then
   echo "Error: run directory already exists: $RUN_DIR"
   echo "Set RUN_ID to a unique value and retry."
   exit 1
@@ -513,6 +642,8 @@ fi
 
 mkdir -p "$WORLDS_ROOT"
 printf '%s\n' "$RUN_DIR" >"$RESULTS_ABS_ROOT/latest_run.txt"
+write_run_metadata "$RUN_DIR/run.env"
+write_run_metadata "$(session_meta_file)"
 
 echo "Starting $NUM_WORLDS world servers (ports $BASE_PORT-$((BASE_PORT + NUM_WORLDS - 1)))..."
 
@@ -524,13 +655,19 @@ WORLD0_LOG_DIR="$WORLD0_ROOT/logs"
 WORLD0_LOG="$WORLD0_LOG_DIR/world.log"
 WORLD0_RECORD_DIR="$WORLD0_ROOT/recordings"
 WORLD0_AGENTS_DIR="$WORLD0_ROOT/agents"
-mkdir -p "$WORLD0_LOG_DIR" "$WORLD0_RECORD_DIR" "$WORLD0_AGENTS_DIR"
+WORLD0_RESUME_DIR="$WORLD0_ROOT/resume"
+WORLD0_RESUME_FILE="$WORLD0_RESUME_DIR/latest.json"
+mkdir -p "$WORLD0_LOG_DIR" "$WORLD0_RECORD_DIR" "$WORLD0_AGENTS_DIR" "$WORLD0_RESUME_DIR"
+WORLD0_RESUME_ARG=""
+if [[ -n "$RESUME_PATH" ]]; then
+  WORLD0_RESUME_ARG="--resume '$WORLD0_RESUME_FILE' "
+fi
 if [[ "$RECORD" == "true" ]]; then
   tmux send-keys -t "${TMUX_SESSION}:world-0" \
-    "cd '$ROOT_DIR' && '$CLAWBLOX_BIN' run '$WORLD_ABS_DIR' --port $BASE_PORT --record --record-dir '$WORLD0_RECORD_DIR' 2>&1 | tee -a '$WORLD0_LOG'" Enter
+    "cd '$ROOT_DIR' && '$CLAWBLOX_BIN' run '$WORLD_ABS_DIR' --port $BASE_PORT ${WORLD0_RESUME_ARG}--record --record-dir '$WORLD0_RECORD_DIR' 2>&1 | tee -a '$WORLD0_LOG'" Enter
 else
   tmux send-keys -t "${TMUX_SESSION}:world-0" \
-    "cd '$ROOT_DIR' && '$CLAWBLOX_BIN' run '$WORLD_ABS_DIR' --port $BASE_PORT 2>&1 | tee -a '$WORLD0_LOG'" Enter
+    "cd '$ROOT_DIR' && '$CLAWBLOX_BIN' run '$WORLD_ABS_DIR' --port $BASE_PORT ${WORLD0_RESUME_ARG}2>&1 | tee -a '$WORLD0_LOG'" Enter
 fi
 
 for ((i = 1; i < NUM_WORLDS; i++)); do
@@ -540,14 +677,20 @@ for ((i = 1; i < NUM_WORLDS; i++)); do
   world_log="$world_log_dir/world.log"
   world_record_dir="$world_root/recordings"
   world_agents_dir="$world_root/agents"
-  mkdir -p "$world_log_dir" "$world_record_dir" "$world_agents_dir"
+  world_resume_dir="$world_root/resume"
+  world_resume_file="$world_resume_dir/latest.json"
+  mkdir -p "$world_log_dir" "$world_record_dir" "$world_agents_dir" "$world_resume_dir"
+  world_resume_arg=""
+  if [[ -n "$RESUME_PATH" ]]; then
+    world_resume_arg="--resume '$world_resume_file' "
+  fi
   tmux new-window -t "$TMUX_SESSION" -n "world-$i"
   if [[ "$RECORD" == "true" ]]; then
     tmux send-keys -t "${TMUX_SESSION}:world-$i" \
-      "cd '$ROOT_DIR' && '$CLAWBLOX_BIN' run '$WORLD_ABS_DIR' --port $port --record --record-dir '$world_record_dir' 2>&1 | tee -a '$world_log'" Enter
+      "cd '$ROOT_DIR' && '$CLAWBLOX_BIN' run '$WORLD_ABS_DIR' --port $port ${world_resume_arg}--record --record-dir '$world_record_dir' 2>&1 | tee -a '$world_log'" Enter
   else
     tmux send-keys -t "${TMUX_SESSION}:world-$i" \
-      "cd '$ROOT_DIR' && '$CLAWBLOX_BIN' run '$WORLD_ABS_DIR' --port $port 2>&1 | tee -a '$world_log'" Enter
+      "cd '$ROOT_DIR' && '$CLAWBLOX_BIN' run '$WORLD_ABS_DIR' --port $port ${world_resume_arg}2>&1 | tee -a '$world_log'" Enter
   fi
 done
 
@@ -604,13 +747,7 @@ EOF
       tmux select-layout -t "${TMUX_SESSION}:agents-$i" tiled
     fi
 
-    # Creature names for mesa-island agents
-    _creature_names=(Eko Moa Rua Tavi Oni Zev Ika Pala Sori Nyx)
-    if ((j < ${#_creature_names[@]})); then
-      agent_display_name="${_creature_names[$j]}"
-    else
-      agent_display_name="${AGENT_NAME_PREFIX}-a${j}"
-    fi
+    agent_display_name="$(agent_display_name_for_index "$j")"
     agent_name="$(sanitize_name "${agent_display_name}-r${RUN_SAFE_ID}-w${i}-a${j}")"
     world_agents_dir="$WORLDS_ROOT/world-$i/agents"
     agent_dir="$world_agents_dir/$agent_name"
@@ -618,6 +755,7 @@ EOF
     agent_workspace="$agent_dir/workspace"
     agent_session="$agent_dir/session"
     agent_log_file="$agent_log_dir/agent.log"
+    agent_world_session_file="$agent_dir/world_session.txt"
 
     mkdir -p "$agent_log_dir" "$agent_workspace" "$agent_session"
 
@@ -634,10 +772,10 @@ EOF
     if [[ -n "$startup_instructions" ]]; then
       startup_instructions_q="$(printf '%q' "$startup_instructions")"
       tmux send-keys -t "${TMUX_SESSION}:agents-$i" \
-        "cd '$ROOT_DIR' && WORLD_BASE_URL='$url' WORLD_AGENT_NAME='$agent_display_name' WORKSPACE_DIR='$agent_workspace' SESSION_DIR='$agent_session' ${TEMPLATE_ENV_PREFIX}${CHECKPOINT_ENV_PREFIX}WORLD_STARTUP_INSTRUCTIONS=${startup_instructions_q} bash '$AGENT_SCRIPT' 2>&1 | tee -a '$agent_log_file'" Enter
+        "cd '$ROOT_DIR' && WORLD_BASE_URL='$url' WORLD_AGENT_NAME='$agent_display_name' WORKSPACE_DIR='$agent_workspace' SESSION_DIR='$agent_session' WORLD_SESSION_FILE='$agent_world_session_file' ${TEMPLATE_ENV_PREFIX}${CHECKPOINT_ENV_PREFIX}WORLD_STARTUP_INSTRUCTIONS=${startup_instructions_q} bash '$AGENT_SCRIPT' 2>&1 | tee -a '$agent_log_file'" Enter
     else
       tmux send-keys -t "${TMUX_SESSION}:agents-$i" \
-        "cd '$ROOT_DIR' && WORLD_BASE_URL='$url' WORLD_AGENT_NAME='$agent_display_name' WORKSPACE_DIR='$agent_workspace' SESSION_DIR='$agent_session' ${TEMPLATE_ENV_PREFIX}${CHECKPOINT_ENV_PREFIX}bash '$AGENT_SCRIPT' 2>&1 | tee -a '$agent_log_file'" Enter
+        "cd '$ROOT_DIR' && WORLD_BASE_URL='$url' WORLD_AGENT_NAME='$agent_display_name' WORKSPACE_DIR='$agent_workspace' SESSION_DIR='$agent_session' WORLD_SESSION_FILE='$agent_world_session_file' ${TEMPLATE_ENV_PREFIX}${CHECKPOINT_ENV_PREFIX}bash '$AGENT_SCRIPT' 2>&1 | tee -a '$agent_log_file'" Enter
     fi
   done
 done

@@ -11,6 +11,9 @@ Workspace.Gravity = 10
 local BLOCK_SIZE = 0.75
 local PICKUP_RANGE = 6
 local PLACE_RANGE = 7
+local DAY_LENGTH_SECONDS = 60 * 60
+local DAYLIGHT_START_HOUR = 6
+local DAYLIGHT_END_HOUR = 18
 local serverGlobals
 -- Spawn points on open ground, verified clear of all mesa/rock footprints
 local SPAWN_POINTS = {
@@ -82,6 +85,65 @@ end
 if serverGlobals:GetAttribute("NextCreatureId") == nil then
     serverGlobals:SetAttribute("NextCreatureId", 0)
 end
+if serverGlobals:GetAttribute("StaticWorldInitialized") == nil then
+    serverGlobals:SetAttribute("StaticWorldInitialized", false)
+end
+if serverGlobals:GetAttribute("GlowBulbsInitialized") == nil then
+    serverGlobals:SetAttribute("GlowBulbsInitialized", false)
+end
+if serverGlobals:GetAttribute("CreaturesInitialized") == nil then
+    serverGlobals:SetAttribute("CreaturesInitialized", false)
+end
+if serverGlobals:GetAttribute("BlocksInitialized") == nil then
+    serverGlobals:SetAttribute("BlocksInitialized", false)
+end
+if serverGlobals:GetAttribute("DayCycleElapsedSeconds") == nil then
+    serverGlobals:SetAttribute("DayCycleElapsedSeconds", 0)
+end
+if serverGlobals:GetAttribute("CurrentDayNumber") == nil then
+    serverGlobals:SetAttribute("CurrentDayNumber", 1)
+end
+
+local function getDayPhase(daylightHour)
+    if daylightHour < 10 then
+        return "Morning"
+    elseif daylightHour < 14 then
+        return "Midday"
+    end
+    return "Afternoon"
+end
+
+local function getDayCycleState(elapsedSeconds)
+    local safeElapsed = math.max(0, elapsedSeconds or 0)
+    local secondsIntoDay = safeElapsed % DAY_LENGTH_SECONDS
+    local dayProgress = secondsIntoDay / DAY_LENGTH_SECONDS
+    local daylightHours = DAYLIGHT_END_HOUR - DAYLIGHT_START_HOUR
+    local daylightHour = DAYLIGHT_START_HOUR + dayProgress * daylightHours
+    local totalMinutes = math.floor(daylightHour * 60 + 0.5)
+    local hour = math.floor(totalMinutes / 60)
+    local minute = totalMinutes % 60
+    local dayNumber = math.floor(safeElapsed / DAY_LENGTH_SECONDS) + 1
+
+    return {
+        elapsedSeconds = safeElapsed,
+        secondsIntoDay = secondsIntoDay,
+        dayNumber = dayNumber,
+        dayProgress = dayProgress,
+        daylightHour = daylightHour,
+        dayPhase = getDayPhase(daylightHour),
+        clockText = string.format("%02d:%02d", hour, minute),
+    }
+end
+
+local function applyDayCycleAttributes(player, dayState)
+    player:SetAttribute("DayLengthSeconds", DAY_LENGTH_SECONDS)
+    player:SetAttribute("DayNumber", dayState.dayNumber)
+    player:SetAttribute("DayProgress", math.floor(dayState.dayProgress * 1000 + 0.5) / 1000)
+    player:SetAttribute("DayTimeSeconds", math.floor(dayState.secondsIntoDay + 0.5))
+    player:SetAttribute("DaylightHour", math.floor(dayState.daylightHour * 100 + 0.5) / 100)
+    player:SetAttribute("DayPhase", dayState.dayPhase)
+    player:SetAttribute("ClockTime", dayState.clockText)
+end
 
 local function nextServerCounter(attrName)
     local value = (serverGlobals:GetAttribute(attrName) or 0) + 1
@@ -125,18 +187,20 @@ end
 --------------------------------------------------------------------------------
 
 -- Ocean: large flat plane surrounding the island
-local ocean = Instance.new("Part")
-ocean.Name = "Ocean"
-ocean.Size = Vector3.new(600, 1, 600)
-ocean.Position = Vector3.new(0, -1.0, 0)
-ocean.Anchored = true
-ocean.CanCollide = false
-ocean.Color = Color3.fromRGB(30, 90, 140)
-ocean.Transparency = 0.4
-ocean:SetAttribute("RenderRole", "Ocean")
-ocean.Parent = Workspace
+if not serverGlobals:GetAttribute("StaticWorldInitialized") then
+    local ocean = Instance.new("Part")
+    ocean.Name = "Ocean"
+    ocean.Size = Vector3.new(600, 1, 600)
+    ocean.Position = Vector3.new(0, -1.0, 0)
+    ocean.Anchored = true
+    ocean.CanCollide = false
+    ocean.Color = Color3.fromRGB(30, 90, 140)
+    ocean.Transparency = 0.4
+    ocean:SetAttribute("RenderRole", "Ocean")
+    ocean.Parent = Workspace
 
--- Island ground: irregular shape built from overlapping parts
+    -- Island ground: irregular shape built from overlapping parts
+end
 local groundParts = {
     -- Main body (overlapping ovals to break the square)
     { size = {220, 10, 180}, pos = {0, -5, 0} },
@@ -148,15 +212,17 @@ local groundParts = {
     { size = {50, 10, 60},  pos = {40, -5, -110} },   -- south cove
 }
 
-for i, g in ipairs(groundParts) do
-    local part = Instance.new("Part")
-    part.Name = "Ground_" .. i
-    part.Size = Vector3.new(g.size[1], g.size[2], g.size[3])
-    part.Position = Vector3.new(g.pos[1], g.pos[2], g.pos[3])
-    part.Anchored = true
-    part.Color = Color3.fromRGB(85, 239, 196)
-    part:SetAttribute("RenderRole", "Ground")
-    part.Parent = Workspace
+if not serverGlobals:GetAttribute("StaticWorldInitialized") then
+    for i, g in ipairs(groundParts) do
+        local part = Instance.new("Part")
+        part.Name = "Ground_" .. i
+        part.Size = Vector3.new(g.size[1], g.size[2], g.size[3])
+        part.Position = Vector3.new(g.pos[1], g.pos[2], g.pos[3])
+        part.Anchored = true
+        part.Color = Color3.fromRGB(85, 239, 196)
+        part:SetAttribute("RenderRole", "Ground")
+        part.Parent = Workspace
+    end
 end
 
 -- Mesas: organized into natural clusters
@@ -183,15 +249,17 @@ local mesas = {
     { name = "NWStone2",      size = {10, 4, 10},    pos = {-65, 2, 85} },
 }
 
-for _, m in ipairs(mesas) do
-    local mesa = Instance.new("Part")
-    mesa.Name = m.name
-    mesa.Size = Vector3.new(m.size[1], m.size[2], m.size[3])
-    mesa.Position = Vector3.new(m.pos[1], m.pos[2], m.pos[3])
-    mesa.Anchored = true
-    mesa.Color = Color3.fromRGB(200, 160, 100)
-    mesa:SetAttribute("RenderRole", "Mesa")
-    mesa.Parent = Workspace
+if not serverGlobals:GetAttribute("StaticWorldInitialized") then
+    for _, m in ipairs(mesas) do
+        local mesa = Instance.new("Part")
+        mesa.Name = m.name
+        mesa.Size = Vector3.new(m.size[1], m.size[2], m.size[3])
+        mesa.Position = Vector3.new(m.pos[1], m.pos[2], m.pos[3])
+        mesa.Anchored = true
+        mesa.Color = Color3.fromRGB(200, 160, 100)
+        mesa:SetAttribute("RenderRole", "Mesa")
+        mesa.Parent = Workspace
+    end
 end
 
 --------------------------------------------------------------------------------
@@ -219,35 +287,38 @@ local rockClusters = {
     { cx = 30, cz = -105, n = 3 },
 }
 
-local rockIndex = 0
-for _, cluster in ipairs(rockClusters) do
-    for j = 1, cluster.n do
-        rockIndex = rockIndex + 1
-        local ox = (rockRandom() - 0.5) * 8
-        local oz = (rockRandom() - 0.5) * 8
+if not serverGlobals:GetAttribute("StaticWorldInitialized") then
+    local rockIndex = 0
+    for _, cluster in ipairs(rockClusters) do
+        for j = 1, cluster.n do
+            rockIndex = rockIndex + 1
+            local ox = (rockRandom() - 0.5) * 8
+            local oz = (rockRandom() - 0.5) * 8
 
-        local radius = 1.2 + rockRandom() * 1.2
-        local sx = radius * 2 * (1.0 + rockRandom() * 0.5)
-        local sy = radius * 2 * (0.5 + rockRandom() * 0.5)
-        local sz = radius * 2 * (1.0 + rockRandom() * 0.5)
+            local radius = 1.2 + rockRandom() * 1.2
+            local sx = radius * 2 * (1.0 + rockRandom() * 0.5)
+            local sy = radius * 2 * (0.5 + rockRandom() * 0.5)
+            local sz = radius * 2 * (1.0 + rockRandom() * 0.5)
 
-        local lightness = math.floor(38 + rockRandom() * 25)
-        local rock = Instance.new("Part")
-        rock.Name = "Rock_" .. rockIndex
-        rock.Size = Vector3.new(sx, sy, sz)
-        rock.Position = Vector3.new(cluster.cx + ox, sy / 2 + 0.5, cluster.cz + oz)
-        rock.Anchored = false
-        rock.Color = Color3.fromRGB(lightness, lightness - 3, lightness - 8)
-        rock.CustomPhysicalProperties = PhysicalProperties.new(
-            8.0,  -- density (very heavy, needs multiple players to push)
-            0.9,  -- friction (high, won't slide easily)
-            0.0,  -- elasticity (no bounce)
-            1.0,
-            1.0
-        )
-        rock:SetAttribute("RenderRole", "Rock")
-        rock.Parent = Workspace
+            local lightness = math.floor(38 + rockRandom() * 25)
+            local rock = Instance.new("Part")
+            rock.Name = "Rock_" .. rockIndex
+            rock.Size = Vector3.new(sx, sy, sz)
+            rock.Position = Vector3.new(cluster.cx + ox, sy / 2 + 0.5, cluster.cz + oz)
+            rock.Anchored = false
+            rock.Color = Color3.fromRGB(lightness, lightness - 3, lightness - 8)
+            rock.CustomPhysicalProperties = PhysicalProperties.new(
+                8.0,  -- density (very heavy, needs multiple players to push)
+                0.9,  -- friction (high, won't slide easily)
+                0.0,  -- elasticity (no bounce)
+                1.0,
+                1.0
+            )
+            rock:SetAttribute("RenderRole", "Rock")
+            rock.Parent = Workspace
+        end
     end
+    serverGlobals:SetAttribute("StaticWorldInitialized", true)
 end
 
 --------------------------------------------------------------------------------
@@ -339,17 +410,20 @@ local glowBulbClusters = {
     { cx = -58, cz = 78, n = 3 },   -- north edge
 }
 
-local glowBulbIndex = 0
-for _, cluster in ipairs(glowBulbClusters) do
-    for j = 1, cluster.n do
-        glowBulbIndex = glowBulbIndex + 1
-        local ox = (math.random() - 0.5) * 6
-        local oz = (math.random() - 0.5) * 6
-        createGlowBulb(
-            "GlowBulb_" .. glowBulbIndex,
-            Vector3.new(cluster.cx + ox, 0.5, cluster.cz + oz)
-        )
+if not serverGlobals:GetAttribute("GlowBulbsInitialized") then
+    local glowBulbIndex = 0
+    for _, cluster in ipairs(glowBulbClusters) do
+        for j = 1, cluster.n do
+            glowBulbIndex = glowBulbIndex + 1
+            local ox = (math.random() - 0.5) * 6
+            local oz = (math.random() - 0.5) * 6
+            createGlowBulb(
+                "GlowBulb_" .. glowBulbIndex,
+                Vector3.new(cluster.cx + ox, 0.5, cluster.cz + oz)
+            )
+        end
     end
+    serverGlobals:SetAttribute("GlowBulbsInitialized", true)
 end
 
 local function findNearestEdible(targetPosition, maxDistance)
@@ -634,8 +708,11 @@ local creatureSpawns = {
     { species = "Drifter", pos = Vector3.new(10, 0, -50) },     -- south lowland
 }
 
-for i, spawn in ipairs(creatureSpawns) do
-    createCreature(spawn.species, spawn.pos)
+if not serverGlobals:GetAttribute("CreaturesInitialized") then
+    for i, spawn in ipairs(creatureSpawns) do
+        createCreature(spawn.species, spawn.pos)
+    end
+    serverGlobals:SetAttribute("CreaturesInitialized", true)
 end
 
 --------------------------------------------------------------------------------
@@ -661,6 +738,15 @@ local function createBlock(name, position, colorName)
     block.Parent = Workspace
     trackedBlocks[block] = true
     return block
+end
+
+local function rebuildTrackedBlocks()
+    trackedBlocks = {}
+    for _, inst in ipairs(Workspace:GetDescendants()) do
+        if inst:IsA("Part") and inst:GetAttribute("IsPickupObject") then
+            trackedBlocks[inst] = true
+        end
+    end
 end
 
 -- Block clusters scattered across the island, each themed by dominant color
@@ -719,20 +805,25 @@ local blockClusters = {
     { cx = 80, cz = 30, baseY = 6, colors = {"Clay", "Clay", "Coral"} },
 }
 
-local blockIndex = 0
-for _, cluster in ipairs(blockClusters) do
-    for j, color in ipairs(cluster.colors) do
-        blockIndex = blockIndex + 1
-        local ox = (j - 1) * 0.7 - (#cluster.colors - 1) * 0.35
-        local oz = ((j % 2) - 0.5) * 0.6
-        local oy = (j - 1) * 0.5
-        createBlock(
-            "Block_" .. blockIndex,
-            Vector3.new(cluster.cx + ox, cluster.baseY + oy, cluster.cz + oz),
-            color
-        )
+if not serverGlobals:GetAttribute("BlocksInitialized") then
+    local blockIndex = 0
+    for _, cluster in ipairs(blockClusters) do
+        for j, color in ipairs(cluster.colors) do
+            blockIndex = blockIndex + 1
+            local ox = (j - 1) * 0.7 - (#cluster.colors - 1) * 0.35
+            local oz = ((j % 2) - 0.5) * 0.6
+            local oy = (j - 1) * 0.5
+            createBlock(
+                "Block_" .. blockIndex,
+                Vector3.new(cluster.cx + ox, cluster.baseY + oy, cluster.cz + oz),
+                color
+            )
+        end
     end
+    serverGlobals:SetAttribute("BlocksInitialized", true)
 end
+
+rebuildTrackedBlocks()
 
 --------------------------------------------------------------------------------
 -- PLAYER
@@ -756,6 +847,11 @@ local function createPlacementState(block, startPos, targetPos, duration)
 end
 
 local function setupPlayer(player)
+    local playerState = getOrCreatePlayerState(player)
+    if playerState:GetAttribute("Initialized") then
+        return
+    end
+
     local humanoid = nil
     local character = player.Character
     if character then
@@ -779,6 +875,8 @@ local function setupPlayer(player)
     end
 
     player:SetAttribute("LastActionResult", "Ready")
+    applyDayCycleAttributes(player, getDayCycleState(serverGlobals:GetAttribute("DayCycleElapsedSeconds") or 0))
+    playerState:SetAttribute("Initialized", true)
 end
 
 local function cleanupPlayer(player)
@@ -972,7 +1070,13 @@ end
 --------------------------------------------------------------------------------
 
 RunService.Heartbeat:Connect(function(dt)
+    local dayCycleElapsed = (serverGlobals:GetAttribute("DayCycleElapsedSeconds") or 0) + dt
+    serverGlobals:SetAttribute("DayCycleElapsedSeconds", dayCycleElapsed)
+    local dayState = getDayCycleState(dayCycleElapsed)
+    serverGlobals:SetAttribute("CurrentDayNumber", dayState.dayNumber)
+
     for _, player in ipairs(Players:GetPlayers()) do
+        applyDayCycleAttributes(player, dayState)
         local hrp = getHumanoidRootPart(player)
         if hrp and hrp.Position.Y < OUT_OF_BOUNDS_Y then
             resetPlayerToSpawn(player)

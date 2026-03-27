@@ -9,6 +9,7 @@ WORLD_LEAVE_PATH="${WORLD_LEAVE_PATH:-}"
 WORLD_SKILL_PATH="${WORLD_SKILL_PATH:-/skill.md}"
 WORLD_SESSION_FIELD="${WORLD_SESSION_FIELD:-session}"
 WORLD_SESSION_HEADER="${WORLD_SESSION_HEADER:-X-Session}"
+WORLD_SESSION_FILE="${WORLD_SESSION_FILE:-}"
 WORLD_AGENT_NAME="${WORLD_AGENT_NAME:-}"
 WORKSPACE_DIR="${WORKSPACE_DIR:-}"
 TEMPLATE_DIR="${TEMPLATE_DIR:-$SCRIPT_DIR/agent-template}"
@@ -80,15 +81,30 @@ if [[ -d "$TEMPLATE_DIR" ]]; then
 fi
 
 SESSION_ID=""
+EXISTING_SESSION_ID=""
 if [[ -n "$WORLD_JOIN_PATH" ]]; then
-  JOIN_JSON="$(curl -fsS -X POST "${WORLD_BASE_URL%/}${WORLD_JOIN_PATH}?name=${WORLD_AGENT_NAME}")"
+  JOIN_HEADERS=()
+  if [[ -n "$WORLD_SESSION_FILE" && -f "$WORLD_SESSION_FILE" ]]; then
+    EXISTING_SESSION_ID="$(tr -d '[:space:]' < "$WORLD_SESSION_FILE")"
+    if [[ -n "$EXISTING_SESSION_ID" ]]; then
+      JOIN_HEADERS=(-H "${WORLD_SESSION_HEADER}: ${EXISTING_SESSION_ID}")
+    fi
+  fi
+  JOIN_JSON="$(curl -fsS -X POST "${JOIN_HEADERS[@]}" "${WORLD_BASE_URL%/}${WORLD_JOIN_PATH}?name=${WORLD_AGENT_NAME}")"
   SESSION_ID="$(node -e 'const o=JSON.parse(process.argv[1]); const key=process.argv[2]; process.stdout.write(String(o[key]||""));' "$JOIN_JSON" "$WORLD_SESSION_FIELD")"
   if [[ -z "$SESSION_ID" ]]; then
     echo "Failed to get session field '$WORLD_SESSION_FIELD' from: $JOIN_JSON" >&2
     exit 1
   fi
+  if [[ -n "$EXISTING_SESSION_ID" && "$SESSION_ID" != "$EXISTING_SESSION_ID" ]]; then
+    echo "Resume error: expected world session $EXISTING_SESSION_ID but server returned $SESSION_ID" >&2
+    exit 1
+  fi
 fi
 export WORLD_SESSION_ID="${SESSION_ID:-}"
+if [[ -n "$WORLD_SESSION_FILE" && -n "$SESSION_ID" ]]; then
+  printf '%s\n' "$SESSION_ID" > "$WORLD_SESSION_FILE"
+fi
 
 PROMPT_FILE="$(mktemp -t pi-agent-prompt.XXXXXX.md)"
 cleanup() {
@@ -156,6 +172,7 @@ pi \
   "${EXTENSION_FLAGS[@]}" \
   --session-dir "$SESSION_DIR" \
   --append-system-prompt "$PROMPT_FILE" \
+  --continue \
   "continue"
 status=$?
 set -e
