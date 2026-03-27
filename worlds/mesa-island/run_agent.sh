@@ -22,6 +22,7 @@ SYSTEM_PROMPT_SNAPSHOT_FILE="${SYSTEM_PROMPT_SNAPSHOT_FILE:-}"
 WORLD_STARTUP_INSTRUCTIONS="${WORLD_STARTUP_INSTRUCTIONS:-}"
 PI_PROVIDER="${PI_PROVIDER:-}"
 PI_MODEL="${PI_MODEL:-}"
+PI_THINKING="${PI_THINKING-low}"
 
 if [[ -z "${ANTHROPIC_API_KEY:-}" && -f "$ROOT_DIR/.env" ]]; then
   set -a
@@ -41,6 +42,51 @@ generate_agent_name() {
 
 sanitize_name() {
   printf '%s' "$1" | tr -c 'A-Za-z0-9._-' '_'
+}
+
+append_prompt_workspace_files() {
+  local prompt_file="$1"
+  local workspace_dir="$2"
+  local -a preferred_files=(SOUL.md IDENTITY.md SEMANTIC_MEMORY.md EPISODIC_MEMORY.md)
+  local -a prompt_files=()
+  local file_name
+  local file_path
+  local -A seen_files=()
+
+  for file_name in "${preferred_files[@]}"; do
+    file_path="$workspace_dir/$file_name"
+    if [[ -f "$file_path" ]]; then
+      prompt_files+=("$file_name")
+      seen_files["$file_name"]=1
+    fi
+  done
+
+  while IFS= read -r -d '' file_path; do
+    file_name="$(basename "$file_path")"
+    if [[ -n "${seen_files[$file_name]:-}" ]]; then
+      continue
+    fi
+    prompt_files+=("$file_name")
+    seen_files["$file_name"]=1
+  done < <(find "$workspace_dir" -maxdepth 1 -type f -name '*.md' -print0 | sort -z)
+
+  if ((${#prompt_files[@]} == 0)); then
+    return 0
+  fi
+
+  {
+    printf '\nInitial workspace memory files at session start:\n'
+    printf 'These are the file contents as they existed when this session began.\n'
+  } >>"$prompt_file"
+
+  for file_name in "${prompt_files[@]}"; do
+    file_path="$workspace_dir/$file_name"
+    {
+      printf '\n===== %s =====\n' "$file_name"
+      cat "$file_path"
+      printf '\n'
+    } >>"$prompt_file"
+  done
 }
 
 if [[ -z "$WORLD_AGENT_NAME" ]]; then
@@ -64,6 +110,10 @@ fi
 if [[ -z "${ANTHROPIC_API_KEY:-}" ]]; then
   echo "Error: ANTHROPIC_API_KEY is not set." >&2
   echo "Set it in environment or in $ROOT_DIR/.env before running agents." >&2
+  exit 1
+fi
+if [[ -n "$PI_THINKING" && ! "$PI_THINKING" =~ ^(off|minimal|low|medium|high|xhigh)$ ]]; then
+  echo "Error: PI_THINKING must be one of: off, minimal, low, medium, high, xhigh." >&2
   exit 1
 fi
 if [[ -n "$RESET_EVERY" && ! "$RESET_EVERY" =~ ^[1-9][0-9]*$ ]]; then
@@ -140,15 +190,21 @@ fi
 cat >"$PROMPT_FILE" <<EOF
 Your name is ${WORLD_AGENT_NAME}.
 
-Read SOUL.md first. That is who you are. Fully embrace it.
 
-Your home is ${WORKSPACE_DIR}. The files there are yours — they are how you remember.
-Read them when you wake up. Update them as you live. EPISODIC_MEMORY.md is append-only.
+Your home is ${WORKSPACE_DIR}. The files there are yours — they are how you remember. Only work inside this directory.
+Update them as you live.
+Make sure to keep your workspace clean and well organized.
+Anything not in your workspace will be forgotten.
+
+EPISODIC_MEMORY.md is append-only.
+If SOUL.md is present, embody its persona and tone. Avoid stiff, generic replies; follow its guidance unless higher-priority instructions override it.
 
 Your world: ${WORLD_BASE_URL}
 $(if [[ -n "$SESSION_ID" ]]; then printf '%s: %s\n' "$WORLD_SESSION_HEADER" "$SESSION_ID"; fi)
 Learn what you can do: ${SKILL_CURL} ${WORLD_BASE_URL%/}${WORLD_SKILL_PATH}
 EOF
+
+append_prompt_workspace_files "$PROMPT_FILE" "$WORKSPACE_DIR"
 
 cd "$WORKSPACE_DIR"
 echo "Agent name: $WORLD_AGENT_NAME"
@@ -183,6 +239,9 @@ if [[ -n "$PI_PROVIDER" ]]; then
 fi
 if [[ -n "$PI_MODEL" ]]; then
   MODEL_FLAGS+=(--model "$PI_MODEL")
+fi
+if [[ -n "$PI_THINKING" ]]; then
+  MODEL_FLAGS+=(--thinking "$PI_THINKING")
 fi
 
 run_pi_session() {

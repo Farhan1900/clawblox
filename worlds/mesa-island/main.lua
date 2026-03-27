@@ -236,10 +236,12 @@ local mesas = {
     { name = "NEShelf",       size = {22, 10, 18},   pos = {72, 5, 70} },
     { name = "NEPeak",        size = {12, 16, 12},   pos = {78, 8, 82} },
 
-    -- === Southwest cluster: tall spire formation ===
-    { name = "SWPlateau",     size = {30, 6, 25},    pos = {-65, 3, -55} },
-    { name = "SWTower",       size = {18, 12, 18},   pos = {-72, 6, -70} },
-    { name = "SWSpire",       size = {10, 28, 10},   pos = {-76, 14, -80} },
+    -- === Southwest cluster: larger footprint, same elevation profile ===
+    { name = "SWSteppingStone", size = {10, 2.5, 10},   pos = {-65, 1.25, -62} },
+    { name = "SWTallMesa",      size = {16, 6, 14},     pos = {-72, 3, -70} },
+    { name = "SWTowerBase",     size = {10, 7, 10},     pos = {-75, 3.5, -76} },
+    { name = "SWSummit",        size = {8, 10, 8},      pos = {-75, 5, -80} },
+    { name = "SWSpire",         size = {5, 20, 5},      pos = {-77, 10, -83} },
 
     -- === East ridge: long narrow formation ===
     { name = "EastRidge",     size = {16, 6, 60},    pos = {100, 3, 10} },
@@ -399,7 +401,7 @@ local glowBulbClusters = {
     -- Outside NELedge (edges at x=42..78, z=42..68)
     { cx = 40, cz = 55, n = 3 },    -- west edge
     { cx = 65, cz = 70, n = 2 },    -- north edge
-    -- Outside SWPlateau (edges at x=-80..-50, z=-68..-42)
+    -- Outside southwest spire approach
     { cx = -48, cz = -55, n = 2 },  -- east edge
     { cx = -65, cz = -40, n = 3 },  -- north edge
     -- Outside EastRidge (edges at x=92..108, z=-20..40)

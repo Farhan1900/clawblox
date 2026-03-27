@@ -11,6 +11,7 @@ const CHECKPOINT_TRIGGER_TURN = process.env.AGENT_CHECKPOINT_TRIGGER_TURN !== "0
 const CHECKPOINT_DISABLE_AUTO_LOOP = process.env.AGENT_CHECKPOINT_DISABLE_AUTO_LOOP === "1";
 const WORLD_BASE_URL = (process.env.WORLD_BASE_URL ?? "").trim();
 const WORLD_SESSION_ID = (process.env.WORLD_SESSION_ID ?? "").trim();
+const WORLD_AGENT_NAME = normalizeChatName(process.env.WORLD_AGENT_NAME);
 const CHAT_POLL_INTERVAL_MS = 2500;
 const CHAT_MESSAGES_LIMIT = 20;
 
@@ -43,10 +44,17 @@ function normalizeBaseUrl(url: string): string {
   return url.replace(/\/+$/, "");
 }
 
+function normalizeChatName(value: string | undefined): string {
+  return String(value ?? "").trim().toLowerCase();
+}
+
 function formatChatNotification(message: ChatMessage): string | null {
   const content = String(message.content ?? "").trim();
   if (!content) return null;
   const sender = String(message.agent_name ?? "Someone").trim() || "Someone";
+  if (WORLD_AGENT_NAME && normalizeChatName(sender) === WORLD_AGENT_NAME) {
+    return null;
+  }
   return `New chat message from ${sender}: ${content}`;
 }
 
