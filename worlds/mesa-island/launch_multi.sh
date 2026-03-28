@@ -68,6 +68,7 @@ NUM_WORLDS=$(printf '%q' "$NUM_WORLDS")
 AGENTS_PER_WORLD=$(printf '%q' "$AGENTS_PER_WORLD")
 BASE_PORT=$(printf '%q' "$BASE_PORT")
 RECORD=$(printf '%q' "$RECORD")
+RESET_EVERY=$(printf '%q' "$RESET_EVERY")
 CLAWBLOX_BIN=$(printf '%q' "$CLAWBLOX_BIN")
 TMUX_SESSION=$(printf '%q' "$TMUX_SESSION")
 EOF

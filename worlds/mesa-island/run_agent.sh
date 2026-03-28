@@ -258,7 +258,8 @@ fi
 
 run_pi_session() {
   local active_session_dir="$1"
-  pi \
+  # Replace the backgrounded shell with pi so RESET_EVERY tracks and kills the real agent PID.
+  exec pi \
     "${WATCH_FLAG[@]}" \
     "${MODEL_FLAGS[@]}" \
     "${EXTENSION_FLAGS[@]}" \
