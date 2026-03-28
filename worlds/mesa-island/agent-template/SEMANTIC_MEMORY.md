@@ -8,6 +8,8 @@ If a belief is uncertain, mark it as a hypothesis with the evidence level.
 If a belief is disproven, rewrite or delete it immediately.
 Merge duplicates. Keep this file organized and canonical.
 
+<!-- DO NOT EDIT ABOVE THIS LINE -->
+
 ## Verified techniques and abilities
 Techniques you discover and trust enough to reuse.
 

@@ -11,35 +11,33 @@ Workspace.Gravity = 10
 local BLOCK_SIZE = 0.75
 local PICKUP_RANGE = 6
 local PLACE_RANGE = 7
+local SPAWN_HEIGHT = 5
+local SPAWN_OFFSET_RADIUS = 4
+local SPAWN_CLEARANCE_SIZE = Vector3.new(4, 6, 4)
 local DAY_LENGTH_SECONDS = 60 * 60
 local DAYLIGHT_START_HOUR = 6
 local DAYLIGHT_END_HOUR = 18
 local serverGlobals
--- Spawn points on open ground, verified clear of all mesa/rock footprints
+local getNextSpawnPosition
+-- Spawn points on open ground, centered on safe lowland areas.
 local SPAWN_POINTS = {
-    Vector3.new(25, 2, -20),     -- south of center hill
-    Vector3.new(40, 2, -55),     -- south-east plain
-    Vector3.new(-30, 2, 25),     -- west lowland
-    Vector3.new(38, 2, 50),      -- east of NE ledge
-    Vector3.new(-45, 2, -35),    -- north of SW plateau
-    Vector3.new(80, 2, -25),     -- south of east ridge
-    Vector3.new(-35, 2, 55),     -- south of NW stones
-    Vector3.new(20, 2, 85),      -- north
-    Vector3.new(25, 2, -90),     -- south cove
-    Vector3.new(130, 2, 25),     -- east peninsula tip
+    Vector3.new(25, SPAWN_HEIGHT, -20),     -- south of center hill
+    Vector3.new(40, SPAWN_HEIGHT, -55),     -- south-east plain
+    Vector3.new(-30, SPAWN_HEIGHT, 25),     -- west lowland
+    Vector3.new(38, SPAWN_HEIGHT, 50),      -- east of NE ledge
+    Vector3.new(-45, SPAWN_HEIGHT, -35),    -- north of SW plateau
+    Vector3.new(80, SPAWN_HEIGHT, -25),     -- south of east ridge
+    Vector3.new(-35, SPAWN_HEIGHT, 55),     -- south of NW stones
+    Vector3.new(20, SPAWN_HEIGHT, 85),      -- north
+    Vector3.new(25, SPAWN_HEIGHT, -90),     -- south cove
+    Vector3.new(130, SPAWN_HEIGHT, 25),     -- east peninsula tip
 }
-local function getNextSpawnPosition()
-    local nextSpawnIndex = (serverGlobals:GetAttribute("NextSpawnIndex") or 0) + 1
-    serverGlobals:SetAttribute("NextSpawnIndex", nextSpawnIndex)
-    local base = SPAWN_POINTS[((nextSpawnIndex - 1) % #SPAWN_POINTS) + 1]
-    -- Add small random offset so players don't stack
-    local ox = (math.random() - 0.5) * 8
-    local oz = (math.random() - 0.5) * 8
-    return Vector3.new(base.X + ox, base.Y, base.Z + oz)
-end
 local OUT_OF_BOUNDS_Y = -200
 
 local trackedBlocks = {}
+local activeMoveStates = {}
+local moveFeedbackConnections = {}
+local bindMoveFeedback
 
 local blockColors = {
     Sand = Color3.fromRGB(214, 186, 128),
@@ -355,6 +353,74 @@ local function canReach(player, worldPosition, maxDistance)
     return (hrp.Position - worldPosition).Magnitude <= maxDistance
 end
 
+local function isWithinFootprint(def, x, z, padding)
+    local extra = padding or 0
+    local px = def.pos[1]
+    local pz = def.pos[3]
+    local halfWidth = def.size[1] / 2 + extra
+    local halfDepth = def.size[3] / 2 + extra
+    return x >= px - halfWidth and x <= px + halfWidth and z >= pz - halfDepth and z <= pz + halfDepth
+end
+
+local function isInsideMesaFootprint(x, z, padding)
+    for _, mesa in ipairs(mesas) do
+        if isWithinFootprint(mesa, x, z, padding) then
+            return true
+        end
+    end
+    return false
+end
+
+local function isSpawnPositionClear(position)
+    if not isOverLand(position.X, position.Z) then
+        return false
+    end
+    if isInsideMesaFootprint(position.X, position.Z, 1.5) then
+        return false
+    end
+
+    local hits = Workspace:GetPartBoundsInBox(CFrame.new(position), SPAWN_CLEARANCE_SIZE)
+    for _, hit in ipairs(hits) do
+        if hit:IsA("Part") then
+            local role = hit:GetAttribute("RenderRole")
+            if role ~= "Ground" and role ~= "Ocean" then
+                return false
+            end
+        end
+    end
+
+    return true
+end
+
+getNextSpawnPosition = function()
+    local nextSpawnIndex = (serverGlobals:GetAttribute("NextSpawnIndex") or 0) + 1
+    serverGlobals:SetAttribute("NextSpawnIndex", nextSpawnIndex)
+    local base = SPAWN_POINTS[((nextSpawnIndex - 1) % #SPAWN_POINTS) + 1]
+
+    for _ = 1, 24 do
+        local ox = (math.random() - 0.5) * (SPAWN_OFFSET_RADIUS * 2)
+        local oz = (math.random() - 0.5) * (SPAWN_OFFSET_RADIUS * 2)
+        local candidate = Vector3.new(base.X + ox, SPAWN_HEIGHT, base.Z + oz)
+        if isSpawnPositionClear(candidate) then
+            return candidate
+        end
+    end
+
+    local fallback = Vector3.new(base.X, SPAWN_HEIGHT, base.Z)
+    if isSpawnPositionClear(fallback) then
+        return fallback
+    end
+
+    for _, alternate in ipairs(SPAWN_POINTS) do
+        local candidate = Vector3.new(alternate.X, SPAWN_HEIGHT, alternate.Z)
+        if isSpawnPositionClear(candidate) then
+            return candidate
+        end
+    end
+
+    return fallback
+end
+
 --------------------------------------------------------------------------------
 -- FLORA
 --------------------------------------------------------------------------------
@@ -363,6 +429,7 @@ local CONSUME_RANGE = 3
 local GLOWBULB_REGROW_SECONDS = 180
 local GLOWBULB_EFFECT_DELAY = 120   -- 2 minutes before immobilization kicks in
 local GLOWBULB_EFFECT_DURATION = 300 -- 5 minutes immobilized
+local GLOWBULB_IMMOBILIZATION_ENABLED = false -- temporary until the effect is reworked
 
 local GLOWBULB_COLOR = Color3.fromRGB(0, 220, 200)
 
@@ -411,17 +478,34 @@ local glowBulbClusters = {
     { cx = -58, cz = 78, n = 3 },   -- north edge
 }
 
+local function sampleGlowBulbPosition(cluster)
+    for _ = 1, 24 do
+        local ox = (math.random() - 0.5) * 6
+        local oz = (math.random() - 0.5) * 6
+        local x = cluster.cx + ox
+        local z = cluster.cz + oz
+        if isOverLand(x, z) and not isInsideMesaFootprint(x, z, 0.5) then
+            return Vector3.new(x, 0.5, z)
+        end
+    end
+
+    -- Fall back to the cluster center only if it is actually walkable.
+    if isOverLand(cluster.cx, cluster.cz) and not isInsideMesaFootprint(cluster.cx, cluster.cz, 0.5) then
+        return Vector3.new(cluster.cx, 0.5, cluster.cz)
+    end
+
+    return nil
+end
+
 if not serverGlobals:GetAttribute("GlowBulbsInitialized") then
     local glowBulbIndex = 0
     for _, cluster in ipairs(glowBulbClusters) do
         for j = 1, cluster.n do
-            glowBulbIndex = glowBulbIndex + 1
-            local ox = (math.random() - 0.5) * 6
-            local oz = (math.random() - 0.5) * 6
-            createGlowBulb(
-                "GlowBulb_" .. glowBulbIndex,
-                Vector3.new(cluster.cx + ox, 0.5, cluster.cz + oz)
-            )
+            local bulbPosition = sampleGlowBulbPosition(cluster)
+            if bulbPosition then
+                glowBulbIndex = glowBulbIndex + 1
+                createGlowBulb("GlowBulb_" .. glowBulbIndex, bulbPosition)
+            end
         end
     end
     serverGlobals:SetAttribute("GlowBulbsInitialized", true)
@@ -478,7 +562,7 @@ local function consumeFlora(player, inputData)
     local species = floraState:GetAttribute("Species") or "Unknown"
     player:SetAttribute("LastActionResult", "ConsumeSuccess:" .. species)
 
-    if species == "GlowBulb" then
+    if species == "GlowBulb" and GLOWBULB_IMMOBILIZATION_ENABLED then
         local playerState = getOrCreatePlayerState(player)
         playerState:SetAttribute("ImmobilizeDelayRemaining", GLOWBULB_EFFECT_DELAY)
         playerState:SetAttribute("ImmobilizeDurationRemaining", GLOWBULB_EFFECT_DURATION)
@@ -862,6 +946,7 @@ local function setupPlayer(player)
         humanoid.WalkSpeed = 16
         humanoid.JumpPower = 50
         -- humanoid.JumpPower = 5
+        bindMoveFeedback(player, humanoid)
     end
 
     if character then
@@ -871,6 +956,8 @@ local function setupPlayer(player)
         if hrp then
             hrp:SetAttribute("ModelYawOffsetDeg", 180)
             hrp.Position = getNextSpawnPosition()
+            hrp.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
+            hrp.AssemblyAngularVelocity = Vector3.new(0, 0, 0)
         end
     end
 
@@ -880,6 +967,13 @@ local function setupPlayer(player)
 end
 
 local function cleanupPlayer(player)
+    activeMoveStates[player] = nil
+    local moveConnection = moveFeedbackConnections[player]
+    if moveConnection then
+        moveConnection:Disconnect()
+        moveFeedbackConnections[player] = nil
+    end
+
     local heldBlock = getHeldBlockForPlayer(player)
     if heldBlock then
         heldBlock:Destroy()
@@ -901,6 +995,7 @@ local function resetPlayerToSpawn(player)
         hrp.AssemblyAngularVelocity = Vector3.new(0, 0, 0)
     end
     if humanoid then
+        activeMoveStates[player] = nil
         humanoid:CancelMoveTo()
     end
 end
@@ -941,6 +1036,27 @@ local function getHumanoid(player)
         return character:FindFirstChild("Humanoid")
     end
     return nil
+end
+
+bindMoveFeedback = function(player, humanoid)
+    local existingConnection = moveFeedbackConnections[player]
+    if existingConnection then
+        existingConnection:Disconnect()
+    end
+
+    moveFeedbackConnections[player] = humanoid.MoveToFinished:Connect(function(reached)
+        local moveState = activeMoveStates[player]
+        if not moveState then
+            return
+        end
+
+        activeMoveStates[player] = nil
+        if reached then
+            player:SetAttribute("LastActionResult", "MoveToFinished:Reached")
+        else
+            player:SetAttribute("LastActionResult", "MoveToFinished:Blocked")
+        end
+    end)
 end
 
 local function findNearestBlock(targetPosition, maxDistance)
@@ -1050,10 +1166,17 @@ if AgentInputService then
 
         if inputType == "MoveTo" and inputData and inputData.position then
             local pos = inputData.position
+            activeMoveStates[player] = {
+                target = Vector3.new(pos[1], pos[2], pos[3]),
+            }
+            player:SetAttribute("LastActionResult", "MoveToIssued")
             humanoid:MoveTo(Vector3.new(pos[1], pos[2], pos[3]))
         elseif inputType == "Stop" then
+            activeMoveStates[player] = nil
+            player:SetAttribute("LastActionResult", "StopSuccess")
             humanoid:CancelMoveTo()
         elseif inputType == "Jump" then
+            player:SetAttribute("LastActionResult", "JumpIssued")
             humanoid.Jump = true
         elseif inputType == "Pickup" then
             pickupBlock(player, inputData)
@@ -1122,6 +1245,16 @@ RunService.Heartbeat:Connect(function(dt)
     -- Update player effects (delayed immobilization)
     for _, player in ipairs(Players:GetPlayers()) do
         local playerState = getPlayerState(player)
+        if playerState and not GLOWBULB_IMMOBILIZATION_ENABLED then
+            local humanoid = getHumanoid(player)
+            if humanoid then
+                humanoid.WalkSpeed = 16
+                humanoid.JumpPower = 50
+            end
+            playerState:SetAttribute("ImmobilizeDelayRemaining", 0)
+            playerState:SetAttribute("ImmobilizeDurationRemaining", 0)
+            playerState:SetAttribute("ImmobilizeActive", false)
+        end
         local effectActive = playerState and playerState:GetAttribute("ImmobilizeActive")
         local delayRemaining = playerState and playerState:GetAttribute("ImmobilizeDelayRemaining")
         local durationRemaining = playerState and playerState:GetAttribute("ImmobilizeDurationRemaining")

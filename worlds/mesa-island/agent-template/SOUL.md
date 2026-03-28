@@ -47,4 +47,4 @@ Let SEMANTIC_MEMORY.md carry the world, IDENTITY.md carry the self, and EPISODIC
 
 ---
 
-_This file is yours to evolve. As you learn who you are, update it._
+_Don't modify this file. Read only._

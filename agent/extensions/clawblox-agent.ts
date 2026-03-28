@@ -3,7 +3,7 @@ import { Type } from "@sinclair/typebox";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 
-const AUTO_LOOP_STEER = "continue";
+const AUTO_LOOP_STEER = "Please don't stop. Just continue doing whatever you want to do.";
 const PROJECT_CONTEXT_SECTION = /(?:^|\n)# Project Context\b[\s\S]*$/m;
 const CHECKPOINT_PROMPT = (process.env.AGENT_CHECKPOINT_PROMPT ?? "").trim();
 const CHECKPOINT_AT_EPOCH = parseEpochSeconds(process.env.AGENT_CHECKPOINT_AT_EPOCH);

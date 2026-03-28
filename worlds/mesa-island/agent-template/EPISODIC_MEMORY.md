@@ -1,9 +1,23 @@
-# EPISODIC_MEMORY.md - What Happened
+# EPISODIC_MEMORY.md - Session Summaries
 
-Temporary working evidence only. This is not a diary.
-Keep only recent experiments, failures worth investigating, and observations that have not yet been promoted elsewhere.
-Rewrite, compress, and delete freely. Once a lesson is captured in SEMANTIC_MEMORY.md or IDENTITY.md, remove or shrink the raw episode unless it still matters as evidence.
-If an old note is wrong, correct or remove it. Do not preserve false beliefs for nostalgia.
-Keep entries concise, deduplicated, and action-oriented.
+Append-only brief summaries of each session.
+Each session entry should stay short and action-oriented.
+Before retrying an approach, scan recent entries for similar failures or dead ends.
 
-## Active Evidence
+Use each session entry to record:
+- objective
+- key attempts
+- failures or dead ends not to repeat blindly
+- new facts learned
+- next step
+
+<!-- DO NOT EDIT ABOVE THIS LINE -->
+
+## Sessions
+
+### Session <timestamp>
+- Objective:
+- Key attempts:
+- Failures / dead ends:
+- New facts:
+- Next step:
