@@ -111,6 +111,50 @@ fn compute_part_bounds(
     )
 }
 
+#[inline]
+fn sq_distance_point_to_obb(
+    point: [f32; 3],
+    center: [f32; 3],
+    half_extents: [f32; 3],
+    rotation: [[f32; 3]; 3],
+) -> f32 {
+    let rel = [
+        point[0] - center[0],
+        point[1] - center[1],
+        point[2] - center[2],
+    ];
+    // Rotation is local->world, so transpose it to evaluate the point in
+    // the part's local frame.
+    let local = [
+        rotation[0][0] * rel[0] + rotation[1][0] * rel[1] + rotation[2][0] * rel[2],
+        rotation[0][1] * rel[0] + rotation[1][1] * rel[1] + rotation[2][1] * rel[2],
+        rotation[0][2] * rel[0] + rotation[1][2] * rel[1] + rotation[2][2] * rel[2],
+    ];
+
+    let mut sq_distance = 0.0;
+    for axis in 0..3 {
+        let overflow = (local[axis].abs() - half_extents[axis]).max(0.0);
+        sq_distance += overflow * overflow;
+    }
+    sq_distance
+}
+
+#[inline]
+fn part_intersects_observation_radius(
+    observer_pos: [f32; 3],
+    center: [f32; 3],
+    size: [f32; 3],
+    rotation: [[f32; 3]; 3],
+    radius: f32,
+) -> bool {
+    let half_extents = [
+        size[0].abs() * 0.5,
+        size[1].abs() * 0.5,
+        size[2].abs() * 0.5,
+    ];
+    sq_distance_point_to_obb(observer_pos, center, half_extents, rotation) <= radius * radius
+}
+
 /// A game instance that runs Lua scripts with Rapier physics.
 /// This is the Roblox-like architecture where:
 /// - Lua controls game logic via Workspace, Parts, etc.
@@ -1251,7 +1295,7 @@ impl GameInstance {
 
     /// Get dynamic world info (entities WITHOUT "Static" tag + folders with attributes)
     /// Used for per-tick observations - excludes static geometry
-    fn get_dynamic_world_info(&self) -> WorldInfo {
+    fn get_dynamic_world_info(&self, observer_pos: [f32; 3]) -> WorldInfo {
         let mut entities = Vec::new();
 
         if let Some(runtime) = &self.lua_runtime {
@@ -1270,6 +1314,15 @@ impl GameInstance {
                             part_data.position.z,
                         ];
                         let raw_size = [part_data.size.x, part_data.size.y, part_data.size.z];
+                        if !part_intersects_observation_radius(
+                            observer_pos,
+                            raw_position,
+                            raw_size,
+                            part_data.cframe.rotation,
+                            self.observation_radius,
+                        ) {
+                            continue;
+                        }
                         let (aabb, obb) =
                             compute_part_bounds(raw_position, raw_size, part_data.cframe.rotation);
                         let attrs = attributes_to_json(&data.attributes);
@@ -1295,7 +1348,8 @@ impl GameInstance {
                         });
                     }
                 } else if data.class_name == ClassName::Folder && !is_static {
-                    // Include Folders with attributes (e.g., GameState) - these are dynamic
+                    // Include folders with attributes (e.g., GameState). These are metadata
+                    // containers rather than spatial entities, so radius culling does not apply.
                     let attrs = attributes_to_json(&data.attributes);
                     if !attrs.is_empty() {
                         entities.push(WorldEntity {
@@ -2733,6 +2787,75 @@ mod tests {
         assert_eq!(obb.center, [0.0, 0.0, 0.0]);
         assert_eq!(obb.half_extents, [50.0, 0.5, 50.0]);
         assert_eq!(obb.corners.len(), 8);
+    }
+
+    #[test]
+    fn test_observation_radius_filters_world_entities_by_bounds() {
+        let mut instance =
+            GameInstance::new_with_config(Uuid::new_v4(), 8, 5.0, None, ErrorMode::Continue);
+
+        instance.load_script(
+            r#"
+            local floor = Instance.new("Part")
+            floor.Name = "Floor"
+            floor.Size = Vector3.new(100, 1, 100)
+            floor.Position = Vector3.new(0, 0, 0)
+            floor.Anchored = true
+            floor.Parent = Workspace
+
+            local edge_platform = Instance.new("Part")
+            edge_platform.Name = "EdgePlatform"
+            edge_platform.Size = Vector3.new(4, 4, 4)
+            edge_platform.Position = Vector3.new(7, 2, 0)
+            edge_platform.Anchored = true
+            edge_platform.Parent = Workspace
+
+            local far_platform = Instance.new("Part")
+            far_platform.Name = "FarPlatform"
+            far_platform.Size = Vector3.new(2, 2, 2)
+            far_platform.Position = Vector3.new(12, 2, 0)
+            far_platform.Anchored = true
+            far_platform.Parent = Workspace
+
+            local game_state = Instance.new("Folder")
+            game_state.Name = "GameState"
+            game_state:SetAttribute("Phase", "active")
+            game_state.Parent = Workspace
+        "#,
+        );
+
+        let agent_id = Uuid::new_v4();
+        instance.add_player(agent_id, "TestPlayer");
+
+        for _ in 0..5 {
+            instance.tick();
+        }
+
+        let hrp_id = *instance.player_hrp_ids.get(&agent_id).unwrap();
+        instance
+            .physics
+            .set_character_position(hrp_id, [0.0, 2.0, 0.0]);
+
+        let obs = instance.get_player_observation(agent_id).unwrap();
+        let names: Vec<&str> = obs
+            .world
+            .entities
+            .iter()
+            .map(|entity| entity.name.as_str())
+            .collect();
+
+        assert!(
+            names.contains(&"EdgePlatform"),
+            "Part intersecting observation radius should remain visible"
+        );
+        assert!(
+            !names.contains(&"FarPlatform"),
+            "Part beyond observation radius should be filtered out"
+        );
+        assert!(
+            names.contains(&"GameState"),
+            "Non-spatial folder metadata should remain visible"
+        );
     }
 
     #[test]

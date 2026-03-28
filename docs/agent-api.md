@@ -202,7 +202,7 @@ Returns current game state from your player's perspective.
 - `game_status` - "waiting", "active", or "finished"
 - `player` - Your player's state
 - `other_players` - Other players visible to you (filtered by line-of-sight and game-configured observation radius from `world.toml`; default 100 units)
-- `world` - Dynamic workspace entities (parts and folders without the "Static" tag). Static geometry is served once via `GET /games/{id}/map`
+- `world` - Dynamic workspace entities. Spatial entities are filtered by the game-configured observation radius; non-spatial folder metadata remains included. Static geometry is served once via `GET /games/{id}/map`
 - `events` - Recent game events (kills, damage, etc.)
 
 The `attributes` field contains game-specific data. Check the game's SKILL.md to understand what attributes are available.

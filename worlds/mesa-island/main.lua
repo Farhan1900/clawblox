@@ -376,8 +376,7 @@ local function createGlowBulb(name, position)
     bulb.CanCollide = false
     bulb.Color = GLOWBULB_COLOR
     bulb.Material = Enum.Material.Neon
-    bulb:SetAttribute("RenderRole", "Flora")
-    bulb:SetAttribute("FloraSpecies", "GlowBulb")
+    bulb:SetAttribute("RenderRole", "GlowBulb")
     bulb:SetAttribute("IsEdible", true)
     bulb.Parent = Workspace
 
@@ -542,7 +541,7 @@ end
 local function createCreature(speciesName, position)
     local def = speciesDefs[speciesName]
     if not def then
-        warn("Unknown fauna species: " .. tostring(speciesName))
+        warn("Unknown creature species: " .. tostring(speciesName))
         return nil
     end
 
@@ -555,8 +554,7 @@ local function createCreature(speciesName, position)
     part.CanCollide = false
     part.Color = def.color
     part.Material = Enum.Material.SmoothPlastic
-    part:SetAttribute("RenderRole", "Fauna")
-    part:SetAttribute("FaunaSpecies", speciesName)
+    part:SetAttribute("RenderRole", speciesName)
     part.Parent = Workspace
 
     local creatureId = nextServerCounter("NextCreatureId")

@@ -173,9 +173,7 @@ function createEntityVisual(entity) {
     return mesh
   }
 
-  if (role === 'Fauna') {
-    const species = entity.attributes && entity.attributes.FaunaSpecies
-    if (species === 'Orbweaver') {
+  if (role === 'Orbweaver') {
       const group = new THREE.Group()
       // Outer translucent shell
       const shell = new THREE.Mesh(
@@ -218,8 +216,8 @@ function createEntityVisual(entity) {
       group.userData.isFauna = true
       group.userData.faunaSpecies = 'Orbweaver'
       return group
-    }
-    if (species === 'Skuttler') {
+  }
+  if (role === 'Skuttler') {
       const group = new THREE.Group()
       // Body
       const body = new THREE.Mesh(
@@ -259,8 +257,8 @@ function createEntityVisual(entity) {
       group.userData.isFauna = true
       group.userData.faunaSpecies = 'Skuttler'
       return group
-    }
-    if (species === 'Drifter') {
+  }
+  if (role === 'Drifter') {
       const group = new THREE.Group()
       // Flat disc body
       const disc = new THREE.Mesh(
@@ -304,24 +302,8 @@ function createEntityVisual(entity) {
       group.userData.isFauna = true
       group.userData.faunaSpecies = 'Drifter'
       return group
-    }
-    // Fallback fauna: colored box
-    const color = entity.render && entity.render.color
-      ? (Math.round(entity.render.color[0] * 255) << 16) |
-        (Math.round(entity.render.color[1] * 255) << 8) |
-        Math.round(entity.render.color[2] * 255)
-      : 0xaa6644
-    const mesh = new THREE.Mesh(
-      new THREE.BoxGeometry(size[0], size[1], size[2]),
-      new THREE.MeshStandardMaterial({ color, roughness: 0.6 }),
-    )
-    mesh.castShadow = true
-    return mesh
   }
-
-  if (role === 'Flora') {
-    const species = entity.attributes && entity.attributes.FloraSpecies
-    if (species === 'GlowBulb') {
+  if (role === 'GlowBulb') {
       const group = new THREE.Group()
       const radius = (size[0] || 0.7) / 2
       // Outer glow sphere
@@ -359,33 +341,28 @@ function createEntityVisual(entity) {
       group.add(stalk)
       group.userData.isGlowBulb = true
       return group
-    }
-    // Fallback flora: small green sphere
+  }
+
+  if (role === 'PickupObject') {
+    const color = entity.render && entity.render.color
+      ? (Math.round(entity.render.color[0] * 255) << 16) |
+        (Math.round(entity.render.color[1] * 255) << 8) |
+        Math.round(entity.render.color[2] * 255)
+      : 0x999999
+
     const mesh = new THREE.Mesh(
-      new THREE.SphereGeometry((size[0] || 0.5) / 2, 12, 12),
-      new THREE.MeshStandardMaterial({ color: 0x44aa66, roughness: 0.6 }),
+      new THREE.BoxGeometry(size[0], size[1], size[2]),
+      new THREE.MeshStandardMaterial({ color, roughness: 0.5, metalness: 0.2 }),
     )
     mesh.castShadow = true
+    mesh.receiveShadow = true
     return mesh
   }
 
-  // Default: box with entity color
-  const color = entity.render && entity.render.color
-    ? (Math.round(entity.render.color[0] * 255) << 16) |
-      (Math.round(entity.render.color[1] * 255) << 8) |
-      Math.round(entity.render.color[2] * 255)
-    : 0x999999
-
-  let geometry
-  const primitive = entity.render && entity.render.primitive
-  if (primitive === 'cylinder') geometry = new THREE.CylinderGeometry(size[0] / 2, size[0] / 2, size[1], 16)
-  else if (primitive === 'sphere') geometry = new THREE.SphereGeometry(size[0] / 2, 16, 16)
-  else geometry = new THREE.BoxGeometry(size[0], size[1], size[2])
-
-  const mesh = new THREE.Mesh(geometry, new THREE.MeshStandardMaterial({ color, roughness: 0.5, metalness: 0.2 }))
-  mesh.castShadow = true
-  mesh.receiveShadow = true
-  return mesh
+  const entityId = typeof entity.id === 'number' || typeof entity.id === 'string'
+    ? String(entity.id)
+    : 'unknown'
+  throw new Error(`Unhandled RenderRole "${role}" for entity ${entityId}`)
 }
 
 export function createRenderer(ctx) {

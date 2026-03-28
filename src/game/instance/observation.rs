@@ -154,7 +154,7 @@ pub(super) fn build_player_observation(
     let other_players = instance.get_other_players(agent_id);
 
     // Get dynamic world entities only (static entities fetched via /map endpoint)
-    let world = instance.get_dynamic_world_info();
+    let world = instance.get_dynamic_world_info(position);
 
     Some(PlayerObservation {
         tick: instance.tick,

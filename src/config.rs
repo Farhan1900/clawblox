@@ -98,7 +98,8 @@ impl Default for RendererConfig {
 /// Observation configuration section.
 #[derive(Debug, Clone, Deserialize)]
 pub struct ObservationConfig {
-    /// Maximum distance at which other players are included in observations.
+    /// Maximum distance at which other players and spatial dynamic entities are
+    /// included in observations.
     #[serde(default = "default_observation_radius")]
     pub radius: f32,
 }
