@@ -22,12 +22,24 @@ function resolveEntityModelUrl(entity) {
   return null
 }
 
-function resolveEntityColorHex(entity, fallback) {
+function resolveEntityColorHex(entity) {
   const color = entity?.render?.color
-  if (!Array.isArray(color) || color.length < 3) return fallback
+  if (!Array.isArray(color) || color.length < 3) {
+    console.warn(`Entity ${entity?.id ?? '?'} (role=${entity?.render?.role ?? '?'}) missing render.color`)
+    return 0xff00ff
+  }
   return (Math.round(color[0] * 255) << 16) |
     (Math.round(color[1] * 255) << 8) |
     Math.round(color[2] * 255)
+}
+
+function resolveEntityColor(entity) {
+  const color = entity?.render?.color
+  if (!Array.isArray(color) || color.length < 3) {
+    console.warn(`Entity ${entity?.id ?? '?'} (role=${entity?.render?.role ?? '?'}) missing render.color`)
+    return new THREE.Color(0xff00ff)
+  }
+  return new THREE.Color(color[0], color[1], color[2])
 }
 
 function darkenHex(hex, factor = 0.75) {
@@ -36,11 +48,20 @@ function darkenHex(hex, factor = 0.75) {
   return color.getHex()
 }
 
+function createRockLikeMaterial(color) {
+  return new THREE.MeshStandardMaterial({
+    color,
+    roughness: 0.95,
+    metalness: 0.0,
+    flatShading: true,
+  })
+}
+
 function applyEntityAppearance(obj, entity) {
   if (!obj?.userData) return
 
   if (obj.userData.dynamicRole === 'Skuttler') {
-    const bodyHex = resolveEntityColorHex(entity, 0xb4643c)
+    const bodyHex = resolveEntityColorHex(entity)
     const legHex = darkenHex(bodyHex, 0.72)
     if (obj.userData.skuttlerBodyMaterial) {
       obj.userData.skuttlerBodyMaterial.color.setHex(bodyHex)
@@ -59,12 +80,12 @@ function applyEntityAppearance(obj, entity) {
     )
   }
 
-  if (obj.userData.dynamicRole === 'PickupObject' && obj.material) {
-    obj.material.color.setHex(resolveEntityColorHex(entity, 0x999999))
+  if (obj.userData.dynamicRole === 'StoneBlock' && obj.material) {
+    obj.material.color.setHex(resolveEntityColorHex(entity))
   }
 
   if (obj.userData.dynamicRole === 'Clump' && obj.material) {
-    obj.material.color.setHex(resolveEntityColorHex(entity, 0xc48e4e))
+    obj.material.color.setHex(resolveEntityColorHex(entity))
   }
 }
 
@@ -202,20 +223,15 @@ function createEntityVisual(entity) {
     return group
   }
 
-  if (role === 'Rock') {
-    // Dodecahedron with flat shading, earthy tones derived from entity color
-    const r = Math.max(size[0], size[1], size[2]) / 2
-    const geo = new THREE.DodecahedronGeometry(r, 0)
-    const color = entity.render && entity.render.color
-      ? new THREE.Color(entity.render.color[0], entity.render.color[1], entity.render.color[2])
-      : new THREE.Color().setHSL(0.1, 0.2, 0.18)
-    const mesh = new THREE.Mesh(geo, new THREE.MeshStandardMaterial({
-      color,
-      roughness: 0.95,
-      flatShading: true,
-    }))
+  if (role === 'Rock' || role === 'StoneBlock') {
+    const color = resolveEntityColor(entity)
+    const geo = role === 'Rock'
+      ? new THREE.DodecahedronGeometry(Math.max(size[0], size[1], size[2]) / 2, 0)
+      : new THREE.BoxGeometry(size[0], size[1], size[2])
+    const mesh = new THREE.Mesh(geo, createRockLikeMaterial(color))
     mesh.castShadow = true
     mesh.receiveShadow = true
+    mesh.userData.dynamicRole = role
     return mesh
   }
 
@@ -265,7 +281,7 @@ function createEntityVisual(entity) {
   }
   if (role === 'Skuttler') {
       const group = new THREE.Group()
-      const bodyColor = resolveEntityColorHex(entity, 0xb4643c)
+      const bodyColor = resolveEntityColorHex(entity)
       // Body
       const bodyMaterial = new THREE.MeshStandardMaterial({ color: bodyColor, roughness: 0.7, metalness: 0.05 })
       const body = new THREE.Mesh(
@@ -396,21 +412,9 @@ function createEntityVisual(entity) {
       return group
   }
 
-  if (role === 'PickupObject') {
-    const color = resolveEntityColorHex(entity, 0x999999)
-
-    const mesh = new THREE.Mesh(
-      new THREE.BoxGeometry(size[0], size[1], size[2]),
-      new THREE.MeshStandardMaterial({ color, roughness: 0.5, metalness: 0.2 }),
-    )
-    mesh.castShadow = true
-    mesh.receiveShadow = true
-    mesh.userData.dynamicRole = 'PickupObject'
-    return mesh
-  }
 
   if (role === 'Clump') {
-    const color = resolveEntityColorHex(entity, 0xc48e4e)
+    const color = resolveEntityColorHex(entity)
     const mesh = new THREE.Mesh(
       new THREE.SphereGeometry(Math.max(size[0], size[1], size[2]) * 0.5, 14, 14),
       new THREE.MeshStandardMaterial({

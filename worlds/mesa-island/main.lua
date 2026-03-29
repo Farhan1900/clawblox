@@ -44,10 +44,12 @@ local DEFAULT_HOLD_OFFSET = Vector3.new(0, 3.5, 0)
 local DEFAULT_PLACE_DURATION = 0.3
 
 local BLOCK_TYPE_NAME = "Stone"
-local ROCK_BLOCK_COLOR = Color3.fromRGB(50, 47, 42)
+local BLOCK_RENDER_ROLE = "StoneBlock"
+local ROCK_COLOR = Color3.fromRGB(52, 49, 44)
+local STONE_BLOCK_COLOR = Color3.fromRGB(140, 135, 125)
 
 local blockColors = {
-    [BLOCK_TYPE_NAME] = ROCK_BLOCK_COLOR,
+    [BLOCK_TYPE_NAME] = STONE_BLOCK_COLOR,
 }
 
 local blockPhysics = PhysicalProperties.new(
@@ -322,13 +324,12 @@ if not serverGlobals:GetAttribute("StaticWorldInitialized") then
             local sy = radius * 2 * (0.5 + rockRandom() * 0.5)
             local sz = radius * 2 * (1.0 + rockRandom() * 0.5)
 
-            local lightness = math.floor(38 + rockRandom() * 25)
             local rock = Instance.new("Part")
             rock.Name = "Rock_" .. rockIndex
             rock.Size = Vector3.new(sx, sy, sz)
             rock.Position = Vector3.new(cluster.cx + ox, sy / 2 + 0.5, cluster.cz + oz)
             rock.Anchored = false
-            rock.Color = Color3.fromRGB(lightness, lightness - 3, lightness - 8)
+            rock.Color = ROCK_COLOR
             rock.CustomPhysicalProperties = PhysicalProperties.new(
                 8.0,  -- density (very heavy, needs multiple players to push)
                 0.9,  -- friction (high, won't slide easily)
@@ -1347,7 +1348,7 @@ local function findNearestBlock(targetPosition, maxDistance)
 end
 
 local function setBlockMetadata(block, colorName)
-    block:SetAttribute("RenderRole", "PickupObject")
+    block:SetAttribute("RenderRole", BLOCK_RENDER_ROLE)
     block:SetAttribute("ItemColorName", BLOCK_TYPE_NAME)
     block:SetAttribute("IsPickupObject", true)
     block:SetAttribute("IsCarryable", true)
@@ -1400,74 +1401,47 @@ local function rebuildTrackedCarryables()
     end
 end
 
--- Block clusters scattered across the island, each themed by dominant color
+-- Block clusters placed near rock formations for a natural look
+-- Rock clusters: (40,-60), (-35,15), (15,95), (130,35), (30,-105)
 local blockClusters = {
-    -- === Sand deposits (warm, near center & south) ===
-    { cx = -12, cz = -6, baseY = 6, colors = {"Sand", "Sand", "Sand", "Clay", "Sand"} },
-    { cx = 35, cz = -95, baseY = 6, colors = {"Sand", "Sand", "Clay", "Sand"} },
-    { cx = 25, cz = -40, baseY = 6, colors = {"Sand", "Clay", "Sand"} },
+    -- Near SE rocks (40, -60)
+    { cx = 45, cz = -55, baseY = 6, n = 5 },
+    { cx = 35, cz = -65, baseY = 6, n = 4 },
+    { cx = 48, cz = -62, baseY = 6, n = 3 },
 
-    -- === Slate quarries (grey, near ridges & highlands) ===
-    { cx = 92, cz = -20, baseY = 6, colors = {"Slate", "Slate", "Obsidian", "Slate", "Slate"} },
-    { cx = -58, cz = -48, baseY = 6, colors = {"Slate", "Slate", "Slate", "Obsidian"} },
-    { cx = 90, cz = 45, baseY = 6, colors = {"Slate", "Obsidian", "Slate"} },
+    -- Near W rocks (-35, 15)
+    { cx = -30, cz = 20, baseY = 6, n = 5 },
+    { cx = -40, cz = 12, baseY = 6, n = 4 },
+    { cx = -32, cz = 10, baseY = 6, n = 3 },
 
-    -- === Coral fragments (warm pink, near coast) ===
-    { cx = 115, cz = 25, baseY = 6, colors = {"Coral", "Coral", "Coral", "Sand", "Coral"} },
-    { cx = 40, cz = -100, baseY = 6, colors = {"Coral", "Coral", "Sand"} },
-    { cx = -100, cz = -15, baseY = 6, colors = {"Coral", "Coral", "Coral"} },
+    -- Near N rocks (15, 95)
+    { cx = 20, cz = 100, baseY = 6, n = 4 },
+    { cx = 10, cz = 90, baseY = 6, n = 4 },
+    { cx = 18, cz = 92, baseY = 6, n = 3 },
 
-    -- === Moss stones (green, near vegetation) ===
-    { cx = -45, cz = 65, baseY = 6, colors = {"Moss", "Moss", "Moss", "Slate", "Moss"} },
-    { cx = 52, cz = 48, baseY = 6, colors = {"Moss", "Moss", "Moss"} },
-    { cx = -15, cz = 110, baseY = 6, colors = {"Moss", "Moss", "Clay", "Moss"} },
+    -- Near E rocks (130, 35)
+    { cx = 125, cz = 30, baseY = 6, n = 5 },
+    { cx = 133, cz = 40, baseY = 6, n = 3 },
+    { cx = 128, cz = 38, baseY = 6, n = 3 },
 
-    -- === Obsidian shards (dark, rare, near SW spire) ===
-    { cx = -80, cz = -72, baseY = 6, colors = {"Obsidian", "Obsidian", "Obsidian"} },
-    { cx = 80, cz = 85, baseY = 6, colors = {"Obsidian", "Obsidian"} },
-
-    -- === Clay deposits (earthy, scattered) ===
-    { cx = -30, cz = 30, baseY = 6, colors = {"Clay", "Clay", "Sand", "Clay"} },
-    { cx = 60, cz = -30, baseY = 6, colors = {"Clay", "Clay", "Clay"} },
-
-    -- === Second wave: more deposits across the island ===
-    -- Sand
-    { cx = 10, cz = -70, baseY = 6, colors = {"Sand", "Sand", "Sand", "Sand"} },
-    { cx = -80, cz = 15, baseY = 6, colors = {"Sand", "Clay", "Sand", "Sand"} },
-    { cx = 70, cz = -60, baseY = 6, colors = {"Sand", "Sand", "Slate"} },
-    -- Slate
-    { cx = -40, cz = -80, baseY = 6, colors = {"Slate", "Slate", "Slate", "Slate"} },
-    { cx = 50, cz = -10, baseY = 6, colors = {"Slate", "Obsidian", "Slate", "Slate"} },
-    { cx = -90, cz = 50, baseY = 6, colors = {"Slate", "Slate", "Slate"} },
-    -- Coral
-    { cx = -70, cz = -90, baseY = 6, colors = {"Coral", "Coral", "Coral", "Coral"} },
-    { cx = 100, cz = -50, baseY = 6, colors = {"Coral", "Sand", "Coral"} },
-    { cx = -20, cz = -110, baseY = 6, colors = {"Coral", "Coral", "Coral"} },
-    -- Moss
-    { cx = 30, cz = 60, baseY = 6, colors = {"Moss", "Moss", "Moss"} },
-    { cx = -60, cz = 30, baseY = 6, colors = {"Moss", "Clay", "Moss", "Moss"} },
-    { cx = 70, cz = 70, baseY = 6, colors = {"Moss", "Moss", "Slate"} },
-    -- Obsidian
-    { cx = -50, cz = -100, baseY = 6, colors = {"Obsidian", "Obsidian", "Obsidian"} },
-    { cx = 120, cz = -10, baseY = 6, colors = {"Obsidian", "Obsidian"} },
-    -- Clay
-    { cx = -110, cz = -40, baseY = 6, colors = {"Clay", "Clay", "Clay", "Clay"} },
-    { cx = 20, cz = 110, baseY = 6, colors = {"Clay", "Sand", "Clay"} },
-    { cx = 80, cz = 30, baseY = 6, colors = {"Clay", "Clay", "Coral"} },
+    -- Near S cove rocks (30, -105)
+    { cx = 35, cz = -100, baseY = 6, n = 4 },
+    { cx = 25, cz = -110, baseY = 6, n = 4 },
+    { cx = 33, cz = -108, baseY = 6, n = 3 },
 }
 
 if not serverGlobals:GetAttribute("BlocksInitialized") then
     local blockIndex = 0
     for _, cluster in ipairs(blockClusters) do
-        for j, color in ipairs(cluster.colors) do
+        for j = 1, cluster.n do
             blockIndex = blockIndex + 1
-            local ox = (j - 1) * 0.7 - (#cluster.colors - 1) * 0.35
+            local ox = (j - 1) * 0.7 - (cluster.n - 1) * 0.35
             local oz = ((j % 2) - 0.5) * 0.6
             local oy = (j - 1) * 0.5
             createBlock(
                 "Block_" .. blockIndex,
                 Vector3.new(cluster.cx + ox, cluster.baseY + oy, cluster.cz + oz),
-                color
+                BLOCK_TYPE_NAME
             )
         end
     end
