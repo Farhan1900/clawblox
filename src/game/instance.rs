@@ -1158,19 +1158,25 @@ impl GameInstance {
         self.prev_touches = current;
     }
 
-    /// Process weld constraints - update Part1 position based on Part0's CFrame
-    fn process_welds(&mut self) {
+    /// Rebuild Roblox-style weld constraints into Rapier fixed joints.
+    fn sync_constraints_to_physics(&mut self) {
         let Some(runtime) = &self.lua_runtime else {
             return;
         };
 
         let descendants = runtime.workspace().get_descendants();
+        self.physics.clear_impulse_joints();
 
-        // Collect welds and their data first to avoid borrow conflicts
-        let mut weld_updates: Vec<(
-            crate::game::lua::instance::InstanceRef, // Part1 ref
-            crate::game::lua::types::Vector3,        // new position
-        )> = Vec::new();
+        let cframe_to_isometry = |cframe: crate::game::lua::types::CFrame| {
+            rapier3d::prelude::Isometry::from_parts(
+                nalgebra::Translation3::new(
+                    cframe.position.x,
+                    cframe.position.y,
+                    cframe.position.z,
+                ),
+                super::physics::rotation_matrix_to_quaternion(&cframe.rotation),
+            )
+        };
 
         for instance in &descendants {
             let data = instance.data.lock().unwrap();
@@ -1185,30 +1191,23 @@ impl GameInstance {
                 let part1_ref = weld_data.part1.as_ref().and_then(|w| w.upgrade());
 
                 if let (Some(part0_ref), Some(part1_ref)) = (part0_ref, part1_ref) {
-                    // Get Part0's CFrame
-                    let part0_data = part0_ref.lock().unwrap();
-                    if let Some(p0_part) = &part0_data.part_data {
-                        let part0_cframe = p0_part.cframe;
-                        let c0 = weld_data.c0;
-                        let c1 = weld_data.c1;
-                        drop(part0_data);
-
-                        // Calculate Part1's new position:
-                        // Part1.CFrame = Part0.CFrame * C0 * C1:Inverse()
-                        // For simplicity (no rotation yet), just use position offset:
-                        // Part1.Position = Part0.Position + C0.Position - C1.Position
-                        let new_pos = crate::game::lua::types::Vector3::new(
-                            part0_cframe.position.x + c0.position.x - c1.position.x,
-                            part0_cframe.position.y + c0.position.y - c1.position.y,
-                            part0_cframe.position.z + c0.position.z - c1.position.z,
-                        );
-
-                        weld_updates.push((part1_ref, new_pos));
-                    }
+                    let part0_id = part0_ref.lock().unwrap().id.0;
+                    let part1_id = part1_ref.lock().unwrap().id.0;
+                    let Some(handle0) = self.physics.get_handle(part0_id) else {
+                        continue;
+                    };
+                    let Some(handle1) = self.physics.get_handle(part1_id) else {
+                        continue;
+                    };
+                    self.physics.insert_fixed_joint(
+                        handle0,
+                        handle1,
+                        cframe_to_isometry(weld_data.c0),
+                        cframe_to_isometry(weld_data.c1),
+                    );
                 }
             }
 
-            // WeldConstraint: same idea but uses cached offset instead of C0/C1
             if let Some(wc_data) = &data.weld_constraint_data {
                 if !wc_data.enabled {
                     continue;
@@ -1217,29 +1216,24 @@ impl GameInstance {
                 let part0_ref = wc_data.part0.as_ref().and_then(|w| w.upgrade());
                 let part1_ref = wc_data.part1.as_ref().and_then(|w| w.upgrade());
 
-                if let (Some(part0_ref), Some(part1_ref)) = (part0_ref, part1_ref) {
-                    if let Some(offset) = &wc_data.offset {
-                        let part0_data = part0_ref.lock().unwrap();
-                        if let Some(p0_part) = &part0_data.part_data {
-                            let new_pos = crate::game::lua::types::Vector3::new(
-                                p0_part.position.x + offset.x,
-                                p0_part.position.y + offset.y,
-                                p0_part.position.z + offset.z,
-                            );
-                            drop(part0_data);
-                            weld_updates.push((part1_ref, new_pos));
-                        }
-                    }
+                if let (Some(part0_ref), Some(part1_ref), Some(relative_cframe)) =
+                    (part0_ref, part1_ref, wc_data.relative_cframe)
+                {
+                    let part0_id = part0_ref.lock().unwrap().id.0;
+                    let part1_id = part1_ref.lock().unwrap().id.0;
+                    let Some(handle0) = self.physics.get_handle(part0_id) else {
+                        continue;
+                    };
+                    let Some(handle1) = self.physics.get_handle(part1_id) else {
+                        continue;
+                    };
+                    self.physics.insert_fixed_joint(
+                        handle0,
+                        handle1,
+                        cframe_to_isometry(relative_cframe),
+                        rapier3d::prelude::Isometry::identity(),
+                    );
                 }
-            }
-        }
-
-        // Apply updates
-        for (part1_ref, new_pos) in weld_updates {
-            let mut part1_data = part1_ref.lock().unwrap();
-            if let Some(p1_part) = &mut part1_data.part_data {
-                p1_part.position = new_pos;
-                p1_part.cframe.position = new_pos;
             }
         }
     }
@@ -4309,6 +4303,84 @@ mod tests {
         assert!(
             get_trigger_bool_attr(&instance, "WaitForChildMarker", "Found"),
             "WaitForChild should resolve in game loop when child appears"
+        );
+    }
+
+    #[test]
+    fn test_weld_constraint_moves_as_bidirectional_assembly() {
+        let mut instance = GameInstance::new(Uuid::new_v4(), None);
+
+        instance.load_script(
+            r#"
+            Workspace.Gravity = 0
+
+            local left = Instance.new("Part")
+            left.Name = "Left"
+            left.Position = Vector3.new(0, 5, 0)
+            left.CanCollide = false
+            left.Parent = Workspace
+
+            local right = Instance.new("Part")
+            right.Name = "Right"
+            right.Position = Vector3.new(2, 5, 0)
+            right.CanCollide = false
+            right.Parent = Workspace
+            _G.right = right
+
+            local weld = Instance.new("WeldConstraint")
+            weld.Part0 = left
+            weld.Part1 = right
+            weld.Parent = Workspace
+        "#,
+        );
+
+        for _ in 0..5 {
+            instance.tick();
+        }
+
+        let runtime = instance.lua_runtime.as_ref().unwrap();
+        runtime
+            .lua()
+            .load(
+                r#"
+                _G.right.Position = Vector3.new(8, 5, 0)
+            "#,
+            )
+            .exec()
+            .expect("failed to teleport welded part");
+
+        for _ in 0..60 {
+            instance.tick();
+        }
+
+        let runtime = instance.lua_runtime.as_ref().unwrap();
+        let descendants = runtime.workspace().get_descendants();
+        let mut left_x = None;
+        let mut right_x = None;
+        for inst in &descendants {
+            let data = inst.data.lock().unwrap();
+            match data.name.as_str() {
+                "Left" => {
+                    left_x = data.part_data.as_ref().map(|part| part.position.x);
+                }
+                "Right" => {
+                    right_x = data.part_data.as_ref().map(|part| part.position.x);
+                }
+                _ => {}
+            }
+        }
+
+        let left_x = left_x.expect("Left part missing");
+        let right_x = right_x.expect("Right part missing");
+        let spacing = right_x - left_x;
+
+        assert!(
+            left_x > 0.5,
+            "moving Part1 should drag Part0; got left_x={left_x}, right_x={right_x}"
+        );
+        assert!(
+            (spacing - 2.0).abs() < 0.25,
+            "welded spacing should stay near 2 studs; got left_x={left_x}, right_x={right_x}, spacing={spacing}"
         );
     }
 

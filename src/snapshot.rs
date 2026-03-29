@@ -242,6 +242,8 @@ pub struct WeldConstraintSnapshot {
     pub enabled: bool,
     #[serde(default)]
     pub offset: Option<[f32; 3]>,
+    #[serde(default)]
+    pub relative_cframe: Option<SnapshotCFrame>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -969,7 +971,15 @@ fn apply_instance_snapshot(
         }
         if let (Some(wc), Some(saved)) = (data.weld_constraint_data.as_mut(), snapshot.weld_constraint.as_ref()) {
             wc.enabled = saved.enabled;
-            wc.offset = saved.offset.map(|o| crate::game::lua::types::Vector3::new(o[0], o[1], o[2]));
+            wc.relative_cframe = saved
+                .relative_cframe
+                .as_ref()
+                .map(restore_cframe)
+                .or_else(|| {
+                    saved
+                        .offset
+                        .map(|o| CFrame::from_position(crate::game::lua::types::Vector3::new(o[0], o[1], o[2])))
+                });
             wc.part0 = None;
             wc.part1 = None;
             fixups.push(RefFixup {
@@ -1381,7 +1391,8 @@ fn snapshot_weld_constraint_data(wc: &WeldConstraintData) -> WeldConstraintSnaps
             .and_then(|weak| weak.upgrade())
             .map(|instance| instance.lock().unwrap().id.0),
         enabled: wc.enabled,
-        offset: wc.offset.map(|o| [o.x, o.y, o.z]),
+        offset: wc.relative_cframe.map(|cf| [cf.position.x, cf.position.y, cf.position.z]),
+        relative_cframe: wc.relative_cframe.map(snapshot_cframe),
     }
 }
 

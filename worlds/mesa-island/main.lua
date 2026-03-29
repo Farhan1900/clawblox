@@ -1236,11 +1236,12 @@ local function getNearestBondTarget(block)
 
     local nearestBlock = nil
     local nearestBlockDistance = math.huge
+    local terrainHit = nil
     for _, hit in ipairs(hits) do
         if hit:IsA("Part") then
             local role = hit:GetAttribute("RenderRole")
             if role == "Ground" or role == "Mesa" or role == "Rock" then
-                return "Terrain", hit
+                terrainHit = hit
             end
             if isBlockPart(hit) then
                 local distance = (hit.Position - block.Position).Magnitude
@@ -1252,8 +1253,12 @@ local function getNearestBondTarget(block)
         end
     end
 
+    -- Prefer block-to-block bonds over terrain bonds
     if nearestBlock then
         return "Block", nearestBlock
+    end
+    if terrainHit then
+        return "Terrain", terrainHit
     end
 
     return nil, nil
@@ -1492,10 +1497,6 @@ local function getObjectPlacementDuration(object)
 end
 
 local function prepareObjectForHolding(object)
-    if isBlockPart(object) then
-        clearBlockTreatment(object)
-    end
-
     object.Anchored = true
     object.CanCollide = false
     object.AssemblyLinearVelocity = Vector3.new(0, 0, 0)

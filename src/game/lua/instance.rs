@@ -559,14 +559,14 @@ impl Default for WeldData {
     }
 }
 
-/// Data for WeldConstraint – locks Part0 and Part1 at their current relative offset.
+/// Data for WeldConstraint – locks Part0 and Part1 at their current relative transform.
 #[derive(Debug, Clone)]
 pub struct WeldConstraintData {
     pub part0: Option<WeakInstanceRef>,
     pub part1: Option<WeakInstanceRef>,
     pub enabled: bool,
-    /// Cached relative offset (Part1.Position - Part0.Position) computed when both parts are set.
-    pub offset: Option<crate::game::lua::types::Vector3>,
+    /// Cached relative transform (Part0:Inverse() * Part1) computed when both parts are set.
+    pub relative_cframe: Option<CFrame>,
 }
 
 impl Default for WeldConstraintData {
@@ -575,7 +575,7 @@ impl Default for WeldConstraintData {
             part0: None,
             part1: None,
             enabled: true,
-            offset: None,
+            relative_cframe: None,
         }
     }
 }
@@ -1047,8 +1047,8 @@ pub struct Instance {
     pub data: InstanceRef,
 }
 
-/// Compute and cache the relative offset for a WeldConstraint when both parts are set.
-fn compute_weld_constraint_offset(data: &mut InstanceData) {
+/// Compute and cache the relative transform for a WeldConstraint when both parts are set.
+fn compute_weld_constraint_relative_cframe(data: &mut InstanceData) {
     let wc = match &data.weld_constraint_data {
         Some(wc) => wc,
         None => return,
@@ -1059,13 +1059,9 @@ fn compute_weld_constraint_offset(data: &mut InstanceData) {
         let p0_data = p0.lock().unwrap();
         let p1_data = p1.lock().unwrap();
         if let (Some(p0_part), Some(p1_part)) = (&p0_data.part_data, &p1_data.part_data) {
-            let offset = crate::game::lua::types::Vector3::new(
-                p1_part.position.x - p0_part.position.x,
-                p1_part.position.y - p0_part.position.y,
-                p1_part.position.z - p0_part.position.z,
-            );
+            let relative_cframe = p0_part.cframe.inverse().multiply(&p1_part.cframe);
             if let Some(wc) = &mut data.weld_constraint_data {
-                wc.offset = Some(offset);
+                wc.relative_cframe = Some(relative_cframe);
             }
         }
     }
@@ -2699,7 +2695,7 @@ impl UserData for Instance {
             }
             if let Some(wc) = &mut data.weld_constraint_data {
                 wc.part0 = weak;
-                compute_weld_constraint_offset(&mut data);
+                compute_weld_constraint_relative_cframe(&mut data);
             }
             Ok(())
         });
@@ -2730,7 +2726,7 @@ impl UserData for Instance {
             }
             if let Some(wc) = &mut data.weld_constraint_data {
                 wc.part1 = weak;
-                compute_weld_constraint_offset(&mut data);
+                compute_weld_constraint_relative_cframe(&mut data);
             }
             Ok(())
         });

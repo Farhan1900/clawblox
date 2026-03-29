@@ -23,6 +23,9 @@ pub(super) fn run_tick_phases(instance: &mut GameInstance, dt: f32) {
     // Sync new/changed Lua parts to physics (skip character-controlled parts).
     instance.sync_lua_to_physics(dt);
 
+    // Rebuild physics constraints from Lua weld objects before the solver step.
+    instance.sync_constraints_to_physics();
+
     // Sync script control targets to physics character controllers.
     instance.sync_controller_targets();
 
@@ -44,6 +47,4 @@ pub(super) fn run_tick_phases(instance: &mut GameInstance, dt: f32) {
     // Sync physics results back to Lua (for Anchored=false parts and characters).
     instance.sync_physics_to_lua();
 
-    // Process weld constraints (update Part1 positions based on Part0).
-    instance.process_welds();
 }

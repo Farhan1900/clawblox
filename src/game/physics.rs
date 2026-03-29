@@ -187,6 +187,29 @@ impl PhysicsWorld {
         );
     }
 
+    /// Removes all impulse joints. Constraints are rebuilt from Lua every tick.
+    pub fn clear_impulse_joints(&mut self) {
+        let handles: Vec<_> = self.impulse_joint_set.iter().map(|(handle, _)| handle).collect();
+        for handle in handles {
+            self.impulse_joint_set.remove(handle, true);
+        }
+    }
+
+    /// Inserts a fixed joint between two rigid bodies using body-local joint frames.
+    pub fn insert_fixed_joint(
+        &mut self,
+        body1: RigidBodyHandle,
+        body2: RigidBodyHandle,
+        local_frame1: Isometry<Real>,
+        local_frame2: Isometry<Real>,
+    ) -> ImpulseJointHandle {
+        let joint = FixedJointBuilder::new()
+            .contacts_enabled(false)
+            .local_frame1(local_frame1)
+            .local_frame2(local_frame2);
+        self.impulse_joint_set.insert(body1, body2, joint, true)
+    }
+
     /// Adds a part to the physics world
     /// - Anchored parts become kinematic (position-based, no physics simulation)
     /// - Non-anchored parts become dynamic (affected by gravity and collisions)
