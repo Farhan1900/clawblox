@@ -60,6 +60,7 @@ pub struct InstanceData {
     pub model_data: Option<ModelData>,
     pub gui_data: Option<GuiObjectData>,
     pub weld_data: Option<WeldData>,
+    pub weld_constraint_data: Option<WeldConstraintData>,
     pub billboard_gui_data: Option<BillboardGuiData>,
     pub ui_corner_data: Option<UICornerData>,
     pub script_data: Option<ScriptData>,
@@ -558,6 +559,27 @@ impl Default for WeldData {
     }
 }
 
+/// Data for WeldConstraint – locks Part0 and Part1 at their current relative offset.
+#[derive(Debug, Clone)]
+pub struct WeldConstraintData {
+    pub part0: Option<WeakInstanceRef>,
+    pub part1: Option<WeakInstanceRef>,
+    pub enabled: bool,
+    /// Cached relative offset (Part1.Position - Part0.Position) computed when both parts are set.
+    pub offset: Option<crate::game::lua::types::Vector3>,
+}
+
+impl Default for WeldConstraintData {
+    fn default() -> Self {
+        Self {
+            part0: None,
+            part1: None,
+            enabled: true,
+            offset: None,
+        }
+    }
+}
+
 /// Data for BillboardGui (3D GUI that floats above parts)
 #[derive(Debug, Clone)]
 pub struct BillboardGuiData {
@@ -797,6 +819,7 @@ impl InstanceData {
             model_data: None,
             gui_data: None,
             weld_data: None,
+            weld_constraint_data: None,
             billboard_gui_data: None,
             ui_corner_data: None,
             script_data: None,
@@ -821,6 +844,12 @@ impl InstanceData {
     pub fn new_weld(name: &str) -> Self {
         let mut inst = Self::new(ClassName::Weld, name);
         inst.weld_data = Some(WeldData::default());
+        inst
+    }
+
+    pub fn new_weld_constraint(name: &str) -> Self {
+        let mut inst = Self::new(ClassName::WeldConstraint, name);
+        inst.weld_constraint_data = Some(WeldConstraintData::default());
         inst
     }
 
@@ -1016,6 +1045,30 @@ impl InstanceData {
 #[derive(Clone)]
 pub struct Instance {
     pub data: InstanceRef,
+}
+
+/// Compute and cache the relative offset for a WeldConstraint when both parts are set.
+fn compute_weld_constraint_offset(data: &mut InstanceData) {
+    let wc = match &data.weld_constraint_data {
+        Some(wc) => wc,
+        None => return,
+    };
+    let part0_ref = wc.part0.as_ref().and_then(|w| w.upgrade());
+    let part1_ref = wc.part1.as_ref().and_then(|w| w.upgrade());
+    if let (Some(p0), Some(p1)) = (part0_ref, part1_ref) {
+        let p0_data = p0.lock().unwrap();
+        let p1_data = p1.lock().unwrap();
+        if let (Some(p0_part), Some(p1_part)) = (&p0_data.part_data, &p1_data.part_data) {
+            let offset = crate::game::lua::types::Vector3::new(
+                p1_part.position.x - p0_part.position.x,
+                p1_part.position.y - p0_part.position.y,
+                p1_part.position.z - p0_part.position.z,
+            );
+            if let Some(wc) = &mut data.weld_constraint_data {
+                wc.offset = Some(offset);
+            }
+        }
+    }
 }
 
 impl Instance {
@@ -2622,8 +2675,17 @@ impl UserData for Instance {
 
         fields.add_field_method_get("Part0", |_, this| {
             let data = this.data.lock().unwrap();
-            Ok(data
+            let from_weld = data
                 .weld_data
+                .as_ref()
+                .and_then(|w| w.part0.as_ref())
+                .and_then(|w| w.upgrade())
+                .map(Instance::from_ref);
+            if from_weld.is_some() {
+                return Ok(from_weld);
+            }
+            Ok(data
+                .weld_constraint_data
                 .as_ref()
                 .and_then(|w| w.part0.as_ref())
                 .and_then(|w| w.upgrade())
@@ -2631,16 +2693,30 @@ impl UserData for Instance {
         });
         fields.add_field_method_set("Part0", |_, this, part: Option<Instance>| {
             let mut data = this.data.lock().unwrap();
+            let weak = part.map(|p| Arc::downgrade(&p.data));
             if let Some(weld) = &mut data.weld_data {
-                weld.part0 = part.map(|p| Arc::downgrade(&p.data));
+                weld.part0 = weak.clone();
+            }
+            if let Some(wc) = &mut data.weld_constraint_data {
+                wc.part0 = weak;
+                compute_weld_constraint_offset(&mut data);
             }
             Ok(())
         });
 
         fields.add_field_method_get("Part1", |_, this| {
             let data = this.data.lock().unwrap();
-            Ok(data
+            let from_weld = data
                 .weld_data
+                .as_ref()
+                .and_then(|w| w.part1.as_ref())
+                .and_then(|w| w.upgrade())
+                .map(Instance::from_ref);
+            if from_weld.is_some() {
+                return Ok(from_weld);
+            }
+            Ok(data
+                .weld_constraint_data
                 .as_ref()
                 .and_then(|w| w.part1.as_ref())
                 .and_then(|w| w.upgrade())
@@ -2648,8 +2724,13 @@ impl UserData for Instance {
         });
         fields.add_field_method_set("Part1", |_, this, part: Option<Instance>| {
             let mut data = this.data.lock().unwrap();
+            let weak = part.map(|p| Arc::downgrade(&p.data));
             if let Some(weld) = &mut data.weld_data {
-                weld.part1 = part.map(|p| Arc::downgrade(&p.data));
+                weld.part1 = weak.clone();
+            }
+            if let Some(wc) = &mut data.weld_constraint_data {
+                wc.part1 = weak;
+                compute_weld_constraint_offset(&mut data);
             }
             Ok(())
         });
@@ -2680,9 +2761,12 @@ impl UserData for Instance {
 
         fields.add_field_method_get("Enabled", |_, this| {
             let data = this.data.lock().unwrap();
-            // Return Enabled for Welds, BillboardGui, or existing gui_data.enabled
+            // Return Enabled for Welds, WeldConstraints, BillboardGui, or existing gui_data.enabled
             if let Some(weld) = &data.weld_data {
                 return Ok(Some(weld.enabled));
+            }
+            if let Some(wc) = &data.weld_constraint_data {
+                return Ok(Some(wc.enabled));
             }
             if let Some(billboard) = &data.billboard_gui_data {
                 return Ok(Some(billboard.enabled));
@@ -3876,6 +3960,7 @@ pub fn register_instance(lua: &Lua) -> Result<()> {
                     }
                     // Constraints
                     "Weld" => Instance::from_data(InstanceData::new_weld("Weld")),
+                    "WeldConstraint" => Instance::from_data(InstanceData::new_weld_constraint("WeldConstraint")),
                     // 3D GUI
                     "BillboardGui" => {
                         Instance::from_data(InstanceData::new_billboard_gui("BillboardGui"))

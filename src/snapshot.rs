@@ -7,7 +7,7 @@ use crate::game::instance::GameInstance;
 use crate::game::lua::instance::{
     AttributeValue, BillboardGuiData, BodyAngularVelocityData, BodyForceData, BodyVelocityData,
     ClassName, GuiObjectData, HumanoidData, Instance, InstanceData, ModelData, ObjectValueData,
-    PartData, ScriptData, TextXAlignment, TextYAlignment, UICornerData, WeldData,
+    PartData, ScriptData, TextXAlignment, TextYAlignment, UICornerData, WeldConstraintData, WeldData,
 };
 use crate::game::lua::services::agent_input::AgentInput;
 use crate::game::lua::services::remote_event::ReplicatedEvent;
@@ -132,6 +132,8 @@ pub struct InstanceSnapshot {
     #[serde(default)]
     pub weld: Option<WeldSnapshot>,
     #[serde(default)]
+    pub weld_constraint: Option<WeldConstraintSnapshot>,
+    #[serde(default)]
     pub billboard_gui: Option<BillboardGuiSnapshot>,
     #[serde(default)]
     pub ui_corner: Option<UICornerSnapshot>,
@@ -229,6 +231,17 @@ pub struct WeldSnapshot {
     pub c0: SnapshotCFrame,
     pub c1: SnapshotCFrame,
     pub enabled: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WeldConstraintSnapshot {
+    #[serde(default)]
+    pub part0_id: Option<u64>,
+    #[serde(default)]
+    pub part1_id: Option<u64>,
+    pub enabled: bool,
+    #[serde(default)]
+    pub offset: Option<[f32; 3]>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -330,6 +343,8 @@ enum RefFixupKind {
     ModelPrimaryPart(Option<u64>),
     WeldPart0(Option<u64>),
     WeldPart1(Option<u64>),
+    WeldConstraintPart0(Option<u64>),
+    WeldConstraintPart1(Option<u64>),
     BillboardAdornee(Option<u64>),
 }
 
@@ -544,6 +559,7 @@ fn snapshot_instance(instance: Instance) -> Result<InstanceSnapshot, String> {
             .as_ref()
             .map(snapshot_body_angular_velocity_data),
         weld: data.weld_data.as_ref().map(snapshot_weld_data),
+        weld_constraint: data.weld_constraint_data.as_ref().map(snapshot_weld_constraint_data),
         billboard_gui: data
             .billboard_gui_data
             .as_ref()
@@ -951,6 +967,20 @@ fn apply_instance_snapshot(
                 kind: RefFixupKind::WeldPart1(saved.part1_id),
             });
         }
+        if let (Some(wc), Some(saved)) = (data.weld_constraint_data.as_mut(), snapshot.weld_constraint.as_ref()) {
+            wc.enabled = saved.enabled;
+            wc.offset = saved.offset.map(|o| crate::game::lua::types::Vector3::new(o[0], o[1], o[2]));
+            wc.part0 = None;
+            wc.part1 = None;
+            fixups.push(RefFixup {
+                instance: instance.clone(),
+                kind: RefFixupKind::WeldConstraintPart0(saved.part0_id),
+            });
+            fixups.push(RefFixup {
+                instance: instance.clone(),
+                kind: RefFixupKind::WeldConstraintPart1(saved.part1_id),
+            });
+        }
         if let (Some(billboard), Some(saved)) =
             (data.billboard_gui_data.as_mut(), snapshot.billboard_gui.as_ref())
         {
@@ -983,6 +1013,8 @@ fn apply_ref_fixups(map: &HashMap<u64, Instance>, fixups: Vec<RefFixup>) {
             | RefFixupKind::ModelPrimaryPart(id)
             | RefFixupKind::WeldPart0(id)
             | RefFixupKind::WeldPart1(id)
+            | RefFixupKind::WeldConstraintPart0(id)
+            | RefFixupKind::WeldConstraintPart1(id)
             | RefFixupKind::BillboardAdornee(id) => id.and_then(|id| map.get(&id).cloned()),
         };
 
@@ -1006,6 +1038,16 @@ fn apply_ref_fixups(map: &HashMap<u64, Instance>, fixups: Vec<RefFixup>) {
             RefFixupKind::WeldPart1(_) => {
                 if let Some(weld) = data.weld_data.as_mut() {
                     weld.part1 = target.map(|instance| std::sync::Arc::downgrade(&instance.data));
+                }
+            }
+            RefFixupKind::WeldConstraintPart0(_) => {
+                if let Some(wc) = data.weld_constraint_data.as_mut() {
+                    wc.part0 = target.map(|instance| std::sync::Arc::downgrade(&instance.data));
+                }
+            }
+            RefFixupKind::WeldConstraintPart1(_) => {
+                if let Some(wc) = data.weld_constraint_data.as_mut() {
+                    wc.part1 = target.map(|instance| std::sync::Arc::downgrade(&instance.data));
                 }
             }
             RefFixupKind::BillboardAdornee(_) => {
@@ -1078,6 +1120,7 @@ fn create_instance_from_class_name(class_name: &str, name: &str) -> Result<Insta
             crate::game::lua::instance::InstanceData::new_align_orientation(name),
         ),
         "Weld" => Instance::from_data(crate::game::lua::instance::InstanceData::new_weld(name)),
+        "WeldConstraint" => Instance::from_data(crate::game::lua::instance::InstanceData::new_weld_constraint(name)),
         "BillboardGui" => Instance::from_data(
             crate::game::lua::instance::InstanceData::new_billboard_gui(name),
         ),
@@ -1322,6 +1365,23 @@ fn snapshot_weld_data(weld: &WeldData) -> WeldSnapshot {
         c0: snapshot_cframe(weld.c0),
         c1: snapshot_cframe(weld.c1),
         enabled: weld.enabled,
+    }
+}
+
+fn snapshot_weld_constraint_data(wc: &WeldConstraintData) -> WeldConstraintSnapshot {
+    WeldConstraintSnapshot {
+        part0_id: wc
+            .part0
+            .as_ref()
+            .and_then(|weak| weak.upgrade())
+            .map(|instance| instance.lock().unwrap().id.0),
+        part1_id: wc
+            .part1
+            .as_ref()
+            .and_then(|weak| weak.upgrade())
+            .map(|instance| instance.lock().unwrap().id.0),
+        enabled: wc.enabled,
+        offset: wc.offset.map(|o| [o.x, o.y, o.z]),
     }
 }
 

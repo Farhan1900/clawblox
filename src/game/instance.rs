@@ -1207,6 +1207,31 @@ impl GameInstance {
                     }
                 }
             }
+
+            // WeldConstraint: same idea but uses cached offset instead of C0/C1
+            if let Some(wc_data) = &data.weld_constraint_data {
+                if !wc_data.enabled {
+                    continue;
+                }
+
+                let part0_ref = wc_data.part0.as_ref().and_then(|w| w.upgrade());
+                let part1_ref = wc_data.part1.as_ref().and_then(|w| w.upgrade());
+
+                if let (Some(part0_ref), Some(part1_ref)) = (part0_ref, part1_ref) {
+                    if let Some(offset) = &wc_data.offset {
+                        let part0_data = part0_ref.lock().unwrap();
+                        if let Some(p0_part) = &part0_data.part_data {
+                            let new_pos = crate::game::lua::types::Vector3::new(
+                                p0_part.position.x + offset.x,
+                                p0_part.position.y + offset.y,
+                                p0_part.position.z + offset.z,
+                            );
+                            drop(part0_data);
+                            weld_updates.push((part1_ref, new_pos));
+                        }
+                    }
+                }
+            }
         }
 
         // Apply updates
