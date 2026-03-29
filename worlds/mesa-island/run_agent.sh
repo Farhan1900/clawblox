@@ -234,7 +234,20 @@ if [[ -n "$RESET_EVERY" ]]; then
 fi
 
 WATCH_FLAG=()
-if pi --help 2>&1 | grep -q -- '--watch'; then
+PI_BIN="$(command -v pi)"
+PI_NODE_BIN="$(command -v node)"
+if [[ -n "$PI_BIN" ]]; then
+  pi_dir="$(dirname "$PI_BIN")"
+  if [[ -x "$pi_dir/node" ]]; then
+    PI_NODE_BIN="$pi_dir/node"
+  fi
+fi
+
+run_pi() {
+  "$PI_NODE_BIN" "$PI_BIN" "$@"
+}
+
+if run_pi --help 2>&1 | grep -q -- '--watch'; then
   WATCH_FLAG=(--watch)
 fi
 
@@ -263,7 +276,7 @@ fi
 run_pi_session() {
   local active_session_dir="$1"
   # Replace the backgrounded shell with pi so RESET_EVERY tracks and kills the real agent PID.
-  exec pi \
+  exec "$PI_NODE_BIN" "$PI_BIN" \
     "${WATCH_FLAG[@]}" \
     "${MODEL_FLAGS[@]}" \
     "${EXTENSION_FLAGS[@]}" \

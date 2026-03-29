@@ -38,3 +38,7 @@ worlds/mesa-world/cmd.md
 
 
 .codex_pydeps/
+
+# Local multi-world and build cache artifacts
+.clawblox-multi/*.env
+worlds/mesa-island/.cargo-target/
