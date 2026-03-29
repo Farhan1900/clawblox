@@ -34,10 +34,12 @@ local SPAWN_POINTS = {
 }
 local OUT_OF_BOUNDS_Y = -200
 
-local trackedBlocks = {}
+local trackedCarryables = {}
 local activeMoveStates = {}
 local moveFeedbackConnections = {}
 local bindMoveFeedback
+local DEFAULT_HOLD_OFFSET = Vector3.new(0, 3.5, 0)
+local DEFAULT_PLACE_DURATION = 0.3
 
 local blockColors = {
     Sand = Color3.fromRGB(214, 186, 128),
@@ -155,29 +157,31 @@ end
 
 local function getOrCreatePlayerState(player)
     local folder = getOrCreateChild(serverPlayerState, "Folder", playerStateKey(player))
-    local heldBlock = folder:FindFirstChild("HeldBlock")
-    if not heldBlock then
-        heldBlock = Instance.new("ObjectValue")
-        heldBlock.Name = "HeldBlock"
-        heldBlock.Parent = folder
+    local heldObject = folder:FindFirstChild("HeldObject") or folder:FindFirstChild("HeldBlock")
+    if not heldObject then
+        heldObject = Instance.new("ObjectValue")
+        heldObject.Name = "HeldObject"
+        heldObject.Parent = folder
+    elseif heldObject.Name ~= "HeldObject" then
+        heldObject.Name = "HeldObject"
     end
-    return folder, heldBlock
+    return folder, heldObject
 end
 
 local function getPlayerState(player)
     return serverPlayerState:FindFirstChild(playerStateKey(player))
 end
 
-local function getHeldBlockForPlayer(player)
+local function getHeldObjectForPlayer(player)
     local folder = getPlayerState(player)
     if not folder then
         return nil
     end
-    local heldBlock = folder:FindFirstChild("HeldBlock")
-    if not heldBlock then
+    local heldObject = folder:FindFirstChild("HeldObject") or folder:FindFirstChild("HeldBlock")
+    if not heldObject then
         return nil
     end
-    return heldBlock.Value
+    return heldObject.Value
 end
 
 --------------------------------------------------------------------------------
@@ -578,6 +582,7 @@ local FAUNA_FLEE_RANGE = 8
 local FAUNA_FLEE_SPEED = 7
 local FAUNA_WANDER_INTERVAL = 3 -- seconds between wander direction changes
 local FAUNA_BOUNDARY = 120 -- keep creatures within this radius of origin
+local FAUNA_OBSTACLE_PADDING = 0.35
 
 local speciesDefs = {
     Orbweaver = {
@@ -589,16 +594,31 @@ local speciesDefs = {
         hoverHeight = 3.0, -- extra height above ground (floats)
         attractedTo = "GlowBulb",
         attractRange = 20,
+        motionStyle = "kinematic",
+        carryable = false,
+        canCollide = false,
     },
     Skuttler = {
         shape = Enum.PartType.Block,
         size = Vector3.new(0.6, 0.55, 0.8),
         color = Color3.fromRGB(180, 100, 60),
-        speed = 5.0,
+        speed = 3.5,
         fleeRange = 5,
         hoverHeight = 0, -- walks on ground
         attractedTo = nil,
         attractRange = 0,
+        motionStyle = "physics",
+        carryable = true,
+        canCollide = true,
+        placementDuration = 0.25,
+        holdOffset = Vector3.new(0, 3.0, 0),
+        physicsProperties = PhysicalProperties.new(
+            0.2,
+            0.8,
+            0.0,
+            1.0,
+            1.0
+        ),
     },
     Drifter = {
         shape = Enum.PartType.Cylinder,
@@ -609,6 +629,9 @@ local speciesDefs = {
         hoverHeight = 0, -- glides on ground
         attractedTo = nil,
         attractRange = 0,
+        motionStyle = "kinematic",
+        carryable = false,
+        canCollide = false,
     },
 }
 
@@ -620,6 +643,40 @@ end
 local function randomWanderDir()
     local angle = math.random() * math.pi * 2
     return Vector3.new(math.cos(angle), 0, math.sin(angle))
+end
+
+local function getCreatureStateForPart(part)
+    local stateName = part and part:GetAttribute("CreatureStateName")
+    if not stateName then
+        return nil
+    end
+    return serverCreatureState:FindFirstChild(stateName)
+end
+
+local function setCreatureMotionMode(creatureState, mode)
+    creatureState:SetAttribute("MotionMode", mode)
+
+    local partRef = creatureState:FindFirstChild("Part")
+    local part = partRef and partRef.Value or nil
+    if not part or not part.Parent then
+        return
+    end
+
+    local speciesName = creatureState:GetAttribute("Species")
+    local def = speciesDefs[speciesName]
+    if not def then
+        return
+    end
+
+    if mode == "AI" then
+        part.Anchored = def.motionStyle ~= "physics"
+        part.CanCollide = def.canCollide == true
+    else
+        part.Anchored = true
+        part.CanCollide = false
+        part.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
+        part.AssemblyAngularVelocity = Vector3.new(0, 0, 0)
+    end
 end
 
 local function createCreature(speciesName, position)
@@ -634,21 +691,35 @@ local function createCreature(speciesName, position)
     part.Shape = def.shape
     part.Size = def.size
     part.Position = Vector3.new(position.X, creatureGroundY(def), position.Z)
-    part.Anchored = true
-    part.CanCollide = false
+    part.Anchored = def.motionStyle ~= "physics"
+    part.CanCollide = def.canCollide == true
     part.Color = def.color
     part.Material = Enum.Material.SmoothPlastic
+    if def.physicsProperties then
+        part.CustomPhysicalProperties = def.physicsProperties
+    end
     part:SetAttribute("RenderRole", speciesName)
+    part:SetAttribute("Species", speciesName)
+    part:SetAttribute("CarryKind", "Creature")
+    part:SetAttribute("IsCarryable", def.carryable == true)
+    part:SetAttribute("PlacementDuration", def.placementDuration or DEFAULT_PLACE_DURATION)
+    part:SetAttribute("HoldOffset", def.holdOffset or DEFAULT_HOLD_OFFSET)
     part.Parent = Workspace
 
     local creatureId = nextServerCounter("NextCreatureId")
-    local creatureState = getOrCreateChild(serverCreatureState, "Folder", "Creature_" .. creatureId)
+    local creatureStateName = "Creature_" .. creatureId
+    local creatureState = getOrCreateChild(serverCreatureState, "Folder", creatureStateName)
     local partRef = getOrCreateChild(creatureState, "ObjectValue", "Part")
     partRef.Value = part
     creatureState:SetAttribute("Species", speciesName)
     creatureState:SetAttribute("WanderDir", randomWanderDir())
     creatureState:SetAttribute("WanderTimer", math.random() * FAUNA_WANDER_INTERVAL)
     creatureState:SetAttribute("HomePos", position)
+    creatureState:SetAttribute("MotionMode", "AI")
+    part:SetAttribute("CreatureStateName", creatureStateName)
+    if def.carryable then
+        trackedCarryables[part] = true
+    end
     return part
 end
 
@@ -689,6 +760,47 @@ local function nearestFloraPosition(pos, speciesFilter, maxRange)
     return closest, closestDist
 end
 
+local function isCreatureObstacle(selfPart, hit)
+    if not hit:IsA("Part") or hit == selfPart then
+        return false
+    end
+    if hit:GetAttribute("CarryKind") == "Block" or hit:GetAttribute("IsPickupObject") then
+        return true
+    end
+    if hit:GetAttribute("RenderRole") == "Rock" then
+        return true
+    end
+    return false
+end
+
+local function isCreaturePathBlocked(part, def, moveDir)
+    if moveDir.Magnitude <= 0.01 then
+        return false
+    end
+
+    local params = OverlapParams.new()
+    params.FilterType = Enum.RaycastFilterType.Exclude
+    params.FilterDescendantsInstances = { part }
+
+    local forward = moveDir.Unit
+    local lookAhead = math.max(def.size.X, def.size.Z) * 0.75 + FAUNA_OBSTACLE_PADDING
+    local probeCenter = part.Position + forward * lookAhead
+    local probeSize = Vector3.new(
+        def.size.X + FAUNA_OBSTACLE_PADDING,
+        math.max(def.size.Y, 1.0),
+        def.size.Z + FAUNA_OBSTACLE_PADDING
+    )
+
+    local hits = Workspace:GetPartBoundsInBox(CFrame.new(probeCenter), probeSize, params)
+    for _, hit in ipairs(hits) do
+        if isCreatureObstacle(part, hit) then
+            return true
+        end
+    end
+
+    return false
+end
+
 local function updateCreatures(dt)
     for _, creatureState in ipairs(serverCreatureState:GetChildren()) do
         local partRef = creatureState:FindFirstChild("Part")
@@ -701,6 +813,13 @@ local function updateCreatures(dt)
             if not def then
                 creatureState:Destroy()
             else
+                local motionMode = creatureState:GetAttribute("MotionMode") or "AI"
+                if motionMode ~= "AI" then
+                    if motionMode == "Held" then
+                        part.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
+                        part.AssemblyAngularVelocity = Vector3.new(0, 0, 0)
+                    end
+                else
                 local pos = part.Position
                 local flatPos = Vector3.new(pos.X, 0, pos.Z)
                 local moveDir = Vector3.new(0, 0, 0)
@@ -757,14 +876,34 @@ local function updateCreatures(dt)
                     local delta = moveDir.Unit * moveSpeed * dt
                     local newX = pos.X + delta.X
                     local newZ = pos.Z + delta.Z
-                    if isOverLand(newX, newZ) then
-                        part.Position = Vector3.new(newX, creatureGroundY(def), newZ)
+                    if isOverLand(newX, newZ) and not isCreaturePathBlocked(part, def, moveDir) then
+                        if def.motionStyle == "physics" then
+                            local currentVelocity = part.AssemblyLinearVelocity
+                            local desiredVelocity = moveDir.Unit * moveSpeed
+                            part.AssemblyLinearVelocity = Vector3.new(
+                                desiredVelocity.X,
+                                currentVelocity.Y,
+                                desiredVelocity.Z
+                            )
+                            part.AssemblyAngularVelocity = Vector3.new(0, 0, 0)
+                        else
+                            part.Position = Vector3.new(newX, creatureGroundY(def), newZ)
+                        end
                     else
                         local wanderDir = creatureState:GetAttribute("WanderDir")
                         if wanderDir then
                             creatureState:SetAttribute("WanderDir", -wanderDir)
                         end
+                        if def.motionStyle == "physics" then
+                            local currentVelocity = part.AssemblyLinearVelocity
+                            part.AssemblyLinearVelocity = Vector3.new(0, currentVelocity.Y, 0)
+                        end
                     end
+                elseif def.motionStyle == "physics" then
+                    local currentVelocity = part.AssemblyLinearVelocity
+                    part.AssemblyLinearVelocity = Vector3.new(0, currentVelocity.Y, 0)
+                    part.AssemblyAngularVelocity = Vector3.new(0, 0, 0)
+                end
                 end
             end
         end
@@ -773,11 +912,11 @@ end
 
 -- Spawn creatures near their ecological niches
 local creatureSpawns = {
-    -- Orbweavers: hover near GlowBulb clusters (they feed on the glow)
-    { species = "Orbweaver", pos = Vector3.new(15, 0, 18) },    -- CenterHill cluster
-    { species = "Orbweaver", pos = Vector3.new(55, 0, 50) },    -- NE cluster
-    { species = "Orbweaver", pos = Vector3.new(-60, 0, -50) },  -- SW cluster
-    { species = "Orbweaver", pos = Vector3.new(-50, 0, 68) },   -- NW stones
+    -- Orbweavers are disabled while the physical fauna path is being tuned.
+    -- { species = "Orbweaver", pos = Vector3.new(15, 0, 18) },
+    -- { species = "Orbweaver", pos = Vector3.new(55, 0, 50) },
+    -- { species = "Orbweaver", pos = Vector3.new(-60, 0, -50) },
+    -- { species = "Orbweaver", pos = Vector3.new(-50, 0, 68) },
 
     -- Skuttlers: roam open ground between formations
     { species = "Skuttler", pos = Vector3.new(35, 0, -30) },    -- open south-east
@@ -786,10 +925,10 @@ local creatureSpawns = {
     { species = "Skuttler", pos = Vector3.new(-20, 0, -70) },   -- south open
     { species = "Skuttler", pos = Vector3.new(30, 0, 90) },     -- north
 
-    -- Drifters: glide slowly across flat lowlands
-    { species = "Drifter", pos = Vector3.new(40, 0, 30) },      -- central plain
-    { species = "Drifter", pos = Vector3.new(-40, 0, 40) },     -- west lowland
-    { species = "Drifter", pos = Vector3.new(10, 0, -50) },     -- south lowland
+    -- Drifters are disabled while the physical fauna path is being tuned.
+    -- { species = "Drifter", pos = Vector3.new(40, 0, 30) },
+    -- { species = "Drifter", pos = Vector3.new(-40, 0, 40) },
+    -- { species = "Drifter", pos = Vector3.new(10, 0, -50) },
 }
 
 if not serverGlobals:GetAttribute("CreaturesInitialized") then
@@ -807,6 +946,10 @@ local function setBlockMetadata(block, colorName)
     block:SetAttribute("RenderRole", "PickupObject")
     block:SetAttribute("ItemColorName", colorName)
     block:SetAttribute("IsPickupObject", true)
+    block:SetAttribute("IsCarryable", true)
+    block:SetAttribute("CarryKind", "Block")
+    block:SetAttribute("PlacementDuration", DEFAULT_PLACE_DURATION)
+    block:SetAttribute("HoldOffset", DEFAULT_HOLD_OFFSET)
 end
 
 local function createBlock(name, position, colorName)
@@ -820,15 +963,27 @@ local function createBlock(name, position, colorName)
     block.CustomPhysicalProperties = blockPhysics
     setBlockMetadata(block, colorName)
     block.Parent = Workspace
-    trackedBlocks[block] = true
+    trackedCarryables[block] = true
     return block
 end
 
-local function rebuildTrackedBlocks()
-    trackedBlocks = {}
+local function isCarryableObject(inst)
+    return inst:IsA("Part") and (inst:GetAttribute("IsCarryable") or inst:GetAttribute("IsPickupObject"))
+end
+
+local function rebuildTrackedCarryables()
+    trackedCarryables = {}
     for _, inst in ipairs(Workspace:GetDescendants()) do
         if inst:IsA("Part") and inst:GetAttribute("IsPickupObject") then
-            trackedBlocks[inst] = true
+            inst:SetAttribute("IsCarryable", true)
+            inst:SetAttribute("CarryKind", inst:GetAttribute("CarryKind") or "Block")
+            inst:SetAttribute("PlacementDuration", inst:GetAttribute("PlacementDuration") or DEFAULT_PLACE_DURATION)
+            if inst:GetAttribute("HoldOffset") == nil then
+                inst:SetAttribute("HoldOffset", DEFAULT_HOLD_OFFSET)
+            end
+        end
+        if isCarryableObject(inst) then
+            trackedCarryables[inst] = true
         end
     end
 end
@@ -907,27 +1062,84 @@ if not serverGlobals:GetAttribute("BlocksInitialized") then
     serverGlobals:SetAttribute("BlocksInitialized", true)
 end
 
-rebuildTrackedBlocks()
+rebuildTrackedCarryables()
 
 --------------------------------------------------------------------------------
 -- PLAYER
 --------------------------------------------------------------------------------
 
-local function setPlayerBlockState(player, block)
-    local _, heldBlock = getOrCreatePlayerState(player)
-    heldBlock.Value = block
+local function setHeldObjectForPlayer(player, object)
+    local _, heldObject = getOrCreatePlayerState(player)
+    heldObject.Value = object
 end
 
-local function createPlacementState(block, startPos, targetPos, duration)
+local function createPlacementState(object, startPos, targetPos, duration)
     local placementId = nextServerCounter("NextPlacementId")
     local folder = getOrCreateChild(serverPlacementState, "Folder", "Placement_" .. placementId)
-    local blockRef = getOrCreateChild(folder, "ObjectValue", "Block")
-    blockRef.Value = block
+    local objectRef = getOrCreateChild(folder, "ObjectValue", "Object")
+    objectRef.Value = object
     folder:SetAttribute("StartPos", startPos)
     folder:SetAttribute("TargetPos", targetPos)
     folder:SetAttribute("Elapsed", 0)
     folder:SetAttribute("Duration", duration)
     return folder
+end
+
+local function getPlacementObjectRef(placement)
+    return placement:FindFirstChild("Object") or placement:FindFirstChild("Block")
+end
+
+local function getObjectHoldOffset(object)
+    local offset = object and object:GetAttribute("HoldOffset")
+    if typeof(offset) == "Vector3" then
+        return offset
+    end
+    return DEFAULT_HOLD_OFFSET
+end
+
+local function getObjectPlacementDuration(object)
+    local duration = object and object:GetAttribute("PlacementDuration")
+    if typeof(duration) == "number" and duration > 0 then
+        return duration
+    end
+    return DEFAULT_PLACE_DURATION
+end
+
+local function prepareObjectForHolding(object)
+    object.Anchored = true
+    object.CanCollide = false
+    object.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
+    object.AssemblyAngularVelocity = Vector3.new(0, 0, 0)
+
+    local creatureState = getCreatureStateForPart(object)
+    if creatureState then
+        setCreatureMotionMode(creatureState, "Held")
+    end
+end
+
+local function restoreObjectAfterPlacement(object)
+    local creatureState = getCreatureStateForPart(object)
+    if creatureState then
+        setCreatureMotionMode(creatureState, "AI")
+        return
+    end
+
+    object.Anchored = false
+    object.CanCollide = true
+end
+
+local function dropHeldObject(player)
+    local heldObject = getHeldObjectForPlayer(player)
+    if not heldObject then
+        return
+    end
+
+    local hrp = getHumanoidRootPart(player)
+    if hrp then
+        heldObject.Position = hrp.Position + getObjectHoldOffset(heldObject)
+    end
+    restoreObjectAfterPlacement(heldObject)
+    setHeldObjectForPlayer(player, nil)
 end
 
 local function setupPlayer(player)
@@ -974,11 +1186,7 @@ local function cleanupPlayer(player)
         moveFeedbackConnections[player] = nil
     end
 
-    local heldBlock = getHeldBlockForPlayer(player)
-    if heldBlock then
-        heldBlock:Destroy()
-        setPlayerBlockState(player, nil)
-    end
+    dropHeldObject(player)
 end
 
 local function resetPlayerToSpawn(player)
@@ -1000,30 +1208,30 @@ local function resetPlayerToSpawn(player)
     end
 end
 
-local function releaseBlockReferences(block)
+local function releaseHeldObjectReferences(object)
     for _, player in ipairs(Players:GetPlayers()) do
-        local heldBlock = getHeldBlockForPlayer(player)
-        if heldBlock == block then
-            setPlayerBlockState(player, nil)
+        local heldObject = getHeldObjectForPlayer(player)
+        if heldObject == object then
+            setHeldObjectForPlayer(player, nil)
             player:SetAttribute("LastActionResult", "ResetAfterFall")
         end
     end
 
     for _, placement in ipairs(serverPlacementState:GetChildren()) do
-        local blockRef = placement:FindFirstChild("Block")
-        if blockRef and blockRef.Value == block then
+        local objectRef = getPlacementObjectRef(placement)
+        if objectRef and objectRef.Value == object then
             placement:Destroy()
         end
     end
 end
 
-local function destroyBlock(block)
-    if not block.Parent then
+local function destroyCarryableObject(object)
+    if not object.Parent then
         return
     end
-    releaseBlockReferences(block)
-    trackedBlocks[block] = nil
-    block:Destroy()
+    releaseHeldObjectReferences(object)
+    trackedCarryables[object] = nil
+    object:Destroy()
 end
 
 --------------------------------------------------------------------------------
@@ -1059,25 +1267,25 @@ bindMoveFeedback = function(player, humanoid)
     end)
 end
 
-local function findNearestBlock(targetPosition, maxDistance)
-    local closestBlock = nil
+local function findNearestCarryableObject(targetPosition, maxDistance)
+    local closestObject = nil
     local closestDistance = maxDistance
 
     for _, inst in ipairs(Workspace:GetDescendants()) do
-        if inst:IsA("Part") and inst:GetAttribute("IsPickupObject") then
+        if isCarryableObject(inst) then
             local distance = (inst.Position - targetPosition).Magnitude
             if distance <= closestDistance then
-                closestBlock = inst
+                closestObject = inst
                 closestDistance = distance
             end
         end
     end
 
-    return closestBlock
+    return closestObject
 end
 
-local function pickupBlock(player, inputData)
-    if getHeldBlockForPlayer(player) then
+local function pickupObject(player, inputData)
+    if getHeldObjectForPlayer(player) then
         player:SetAttribute("LastActionResult", "PickupFailed:AlreadyHolding")
         return
     end
@@ -1094,25 +1302,25 @@ local function pickupBlock(player, inputData)
         return
     end
 
-    local block = findNearestBlock(targetPosition, 1.5)
-    if not block then
-        player:SetAttribute("LastActionResult", "PickupFailed:NoBlock")
+    local object = findNearestCarryableObject(targetPosition, 1.5)
+    if not object then
+        player:SetAttribute("LastActionResult", "PickupFailed:NoObject")
         return
     end
 
-    block.CanCollide = false
-    setPlayerBlockState(player, block)
+    prepareObjectForHolding(object)
+    setHeldObjectForPlayer(player, object)
     player:SetAttribute("LastActionResult", "PickupSuccess")
 end
 
-local function positionOccupied(player, targetPosition)
+local function positionOccupied(player, targetPosition, objectSize)
     local params = OverlapParams.new()
     params.FilterType = Enum.RaycastFilterType.Exclude
-    params.FilterDescendantsInstances = { player.Character, getHeldBlockForPlayer(player) }
+    params.FilterDescendantsInstances = { player.Character, getHeldObjectForPlayer(player) }
 
     local hits = Workspace:GetPartBoundsInBox(
         CFrame.new(targetPosition),
-        Vector3.new(BLOCK_SIZE, BLOCK_SIZE, BLOCK_SIZE),
+        objectSize,
         params
     )
 
@@ -1125,9 +1333,9 @@ local function positionOccupied(player, targetPosition)
     return false
 end
 
-local function placeBlock(player, inputData)
-    local block = getHeldBlockForPlayer(player)
-    if not block then
+local function placeHeldObject(player, inputData)
+    local object = getHeldObjectForPlayer(player)
+    if not object then
         player:SetAttribute("LastActionResult", "PlaceFailed:EmptyHands")
         return
     end
@@ -1144,17 +1352,25 @@ local function placeBlock(player, inputData)
         return
     end
 
-    if positionOccupied(player, targetPosition) then
+    if positionOccupied(player, targetPosition, object.Size) then
         player:SetAttribute("LastActionResult", "PlaceFailed:Occupied")
         return
     end
 
-    local startPos = block.Position
-    block.Anchored = true
-    block.CanCollide = false
-    setPlayerBlockState(player, nil)
+    local creatureState = getCreatureStateForPart(object)
+    if creatureState then
+        setCreatureMotionMode(creatureState, "Placed")
+    else
+        object.Anchored = true
+        object.CanCollide = false
+    end
+    object.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
+    object.AssemblyAngularVelocity = Vector3.new(0, 0, 0)
 
-    createPlacementState(block, startPos, targetPosition, 0.3)
+    local startPos = object.Position
+    setHeldObjectForPlayer(player, nil)
+
+    createPlacementState(object, startPos, targetPosition, getObjectPlacementDuration(object))
 
     player:SetAttribute("LastActionResult", "PlaceSuccess")
 end
@@ -1179,9 +1395,9 @@ if AgentInputService then
             player:SetAttribute("LastActionResult", "JumpIssued")
             humanoid.Jump = true
         elseif inputType == "Pickup" then
-            pickupBlock(player, inputData)
+            pickupObject(player, inputData)
         elseif inputType == "Place" then
-            placeBlock(player, inputData)
+            placeHeldObject(player, inputData)
         elseif inputType == "Consume" then
             consumeFlora(player, inputData)
         end
@@ -1206,35 +1422,38 @@ RunService.Heartbeat:Connect(function(dt)
         end
     end
 
-    -- Update held blocks
+    -- Update held objects
     for _, player in ipairs(Players:GetPlayers()) do
-        local heldBlock = getHeldBlockForPlayer(player)
+        local heldObject = getHeldObjectForPlayer(player)
         local hrp = getHumanoidRootPart(player)
-        if hrp and heldBlock then
-            heldBlock.Position = hrp.Position + Vector3.new(0, 3.5, 0)
+        if hrp and heldObject then
+            heldObject.Position = hrp.Position + getObjectHoldOffset(heldObject)
+            heldObject.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
+            heldObject.AssemblyAngularVelocity = Vector3.new(0, 0, 0)
         end
     end
 
-    -- Animate placing blocks
+    -- Animate placing objects
     for _, placement in ipairs(serverPlacementState:GetChildren()) do
-        local blockRef = placement:FindFirstChild("Block")
-        local block = blockRef and blockRef.Value or nil
-        if not block or not block.Parent then
+        local objectRef = getPlacementObjectRef(placement)
+        local object = objectRef and objectRef.Value or nil
+        if not object or not object.Parent then
             placement:Destroy()
         else
         local elapsed = (placement:GetAttribute("Elapsed") or 0) + dt
-        local duration = placement:GetAttribute("Duration") or 0.3
-        local startPos = placement:GetAttribute("StartPos") or block.Position
-        local targetPos = placement:GetAttribute("TargetPos") or block.Position
+        local duration = placement:GetAttribute("Duration") or DEFAULT_PLACE_DURATION
+        local startPos = placement:GetAttribute("StartPos") or object.Position
+        local targetPos = placement:GetAttribute("TargetPos") or object.Position
         local alpha = math.min(elapsed / duration, 1)
         -- Smooth ease-out
         local t = 1 - (1 - alpha) * (1 - alpha)
-        block.Position = startPos:Lerp(targetPos, t)
+        object.Position = startPos:Lerp(targetPos, t)
 
         if alpha >= 1 then
-            block.Anchored = false
-            block.CanCollide = true
-            setBlockMetadata(block, block:GetAttribute("ItemColorName"))
+            restoreObjectAfterPlacement(object)
+            if object:GetAttribute("CarryKind") == "Block" then
+                setBlockMetadata(object, object:GetAttribute("ItemColorName"))
+            end
             placement:Destroy()
         else
             placement:SetAttribute("Elapsed", elapsed)
@@ -1319,11 +1538,11 @@ RunService.Heartbeat:Connect(function(dt)
         end
     end
 
-    for block, _ in pairs(trackedBlocks) do
-        if not block.Parent then
-            trackedBlocks[block] = nil
-        elseif block.Position.Y < OUT_OF_BOUNDS_Y then
-            destroyBlock(block)
+    for object, _ in pairs(trackedCarryables) do
+        if not object.Parent then
+            trackedCarryables[object] = nil
+        elseif object.Position.Y < OUT_OF_BOUNDS_Y then
+            destroyCarryableObject(object)
         end
     end
 end)
