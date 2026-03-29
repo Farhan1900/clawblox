@@ -22,6 +22,52 @@ function resolveEntityModelUrl(entity) {
   return null
 }
 
+function resolveEntityColorHex(entity, fallback) {
+  const color = entity?.render?.color
+  if (!Array.isArray(color) || color.length < 3) return fallback
+  return (Math.round(color[0] * 255) << 16) |
+    (Math.round(color[1] * 255) << 8) |
+    Math.round(color[2] * 255)
+}
+
+function darkenHex(hex, factor = 0.75) {
+  const color = new THREE.Color(hex)
+  color.multiplyScalar(factor)
+  return color.getHex()
+}
+
+function applyEntityAppearance(obj, entity) {
+  if (!obj?.userData) return
+
+  if (obj.userData.dynamicRole === 'Skuttler') {
+    const bodyHex = resolveEntityColorHex(entity, 0xb4643c)
+    const legHex = darkenHex(bodyHex, 0.72)
+    if (obj.userData.skuttlerBodyMaterial) {
+      obj.userData.skuttlerBodyMaterial.color.setHex(bodyHex)
+    }
+    if (obj.userData.skuttlerLegMaterial) {
+      obj.userData.skuttlerLegMaterial.color.setHex(legHex)
+    }
+  }
+
+  if (obj.userData.dynamicRole === 'GlowBulb') {
+    const size = entity.size || [0.7, 0.7, 0.7]
+    obj.scale.set(
+      (size[0] || 0.7) / 0.7,
+      (size[1] || 0.7) / 0.7,
+      (size[2] || 0.7) / 0.7,
+    )
+  }
+
+  if (obj.userData.dynamicRole === 'PickupObject' && obj.material) {
+    obj.material.color.setHex(resolveEntityColorHex(entity, 0x999999))
+  }
+
+  if (obj.userData.dynamicRole === 'Clump' && obj.material) {
+    obj.material.color.setHex(resolveEntityColorHex(entity, 0xc48e4e))
+  }
+}
+
 function buildSky(scene) {
   const skyMat = new THREE.ShaderMaterial({
     uniforms: {
@@ -219,16 +265,18 @@ function createEntityVisual(entity) {
   }
   if (role === 'Skuttler') {
       const group = new THREE.Group()
+      const bodyColor = resolveEntityColorHex(entity, 0xb4643c)
       // Body
+      const bodyMaterial = new THREE.MeshStandardMaterial({ color: bodyColor, roughness: 0.7, metalness: 0.05 })
       const body = new THREE.Mesh(
         new THREE.BoxGeometry(0.6, 0.35, 0.8),
-        new THREE.MeshStandardMaterial({ color: 0xb4643c, roughness: 0.7, metalness: 0.05 }),
+        bodyMaterial,
       )
       body.castShadow = true
       body.receiveShadow = true
       group.add(body)
       // Four stubby legs
-      const legMat = new THREE.MeshStandardMaterial({ color: 0x8a4a28, roughness: 0.8 })
+      const legMat = new THREE.MeshStandardMaterial({ color: darkenHex(bodyColor, 0.72), roughness: 0.8 })
       const legGeo = new THREE.BoxGeometry(0.08, 0.18, 0.08)
       const legOffsets = [
         [-0.2, -0.2, 0.25],
@@ -256,6 +304,9 @@ function createEntityVisual(entity) {
       }
       group.userData.isFauna = true
       group.userData.faunaSpecies = 'Skuttler'
+      group.userData.dynamicRole = 'Skuttler'
+      group.userData.skuttlerBodyMaterial = bodyMaterial
+      group.userData.skuttlerLegMaterial = legMat
       return group
   }
   if (role === 'Drifter') {
@@ -305,7 +356,7 @@ function createEntityVisual(entity) {
   }
   if (role === 'GlowBulb') {
       const group = new THREE.Group()
-      const radius = (size[0] || 0.7) / 2
+      const radius = 0.35
       // Outer glow sphere
       const glowMat = new THREE.MeshStandardMaterial({
         color: 0x00dcc8,
@@ -340,15 +391,13 @@ function createEntityVisual(entity) {
       stalk.position.y = -radius * 1.2
       group.add(stalk)
       group.userData.isGlowBulb = true
+      group.userData.dynamicRole = 'GlowBulb'
+      applyEntityAppearance(group, entity)
       return group
   }
 
   if (role === 'PickupObject') {
-    const color = entity.render && entity.render.color
-      ? (Math.round(entity.render.color[0] * 255) << 16) |
-        (Math.round(entity.render.color[1] * 255) << 8) |
-        Math.round(entity.render.color[2] * 255)
-      : 0x999999
+    const color = resolveEntityColorHex(entity, 0x999999)
 
     const mesh = new THREE.Mesh(
       new THREE.BoxGeometry(size[0], size[1], size[2]),
@@ -356,6 +405,25 @@ function createEntityVisual(entity) {
     )
     mesh.castShadow = true
     mesh.receiveShadow = true
+    mesh.userData.dynamicRole = 'PickupObject'
+    return mesh
+  }
+
+  if (role === 'Clump') {
+    const color = resolveEntityColorHex(entity, 0xc48e4e)
+    const mesh = new THREE.Mesh(
+      new THREE.SphereGeometry(Math.max(size[0], size[1], size[2]) * 0.5, 14, 14),
+      new THREE.MeshStandardMaterial({
+        color,
+        roughness: 0.85,
+        metalness: 0.0,
+        transparent: true,
+        opacity: 0.92,
+      }),
+    )
+    mesh.castShadow = true
+    mesh.receiveShadow = true
+    mesh.userData.dynamicRole = 'Clump'
     return mesh
   }
 
@@ -486,6 +554,7 @@ export function createRenderer(ctx) {
       obj.position.set(entity.position[0], entity.position[1], entity.position[2])
       if (entity.rotation) obj.quaternion.copy(rotationToQuaternion(entity.rotation))
       obj.visible = !(entity.render && entity.render.visible === false)
+      applyEntityAppearance(obj, entity)
 
       const prev = obj.userData.prevPos
       let speed = 0

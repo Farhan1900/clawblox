@@ -38,16 +38,16 @@ local trackedCarryables = {}
 local activeMoveStates = {}
 local moveFeedbackConnections = {}
 local bindMoveFeedback
+local findNearestCarryableObject
+local createSecretionClump
 local DEFAULT_HOLD_OFFSET = Vector3.new(0, 3.5, 0)
 local DEFAULT_PLACE_DURATION = 0.3
 
+local BLOCK_TYPE_NAME = "Stone"
+local ROCK_BLOCK_COLOR = Color3.fromRGB(50, 47, 42)
+
 local blockColors = {
-    Sand = Color3.fromRGB(214, 186, 128),
-    Slate = Color3.fromRGB(148, 136, 124),
-    Coral = Color3.fromRGB(205, 120, 100),
-    Moss = Color3.fromRGB(95, 160, 110),
-    Obsidian = Color3.fromRGB(55, 50, 60),
-    Clay = Color3.fromRGB(180, 140, 105),
+    [BLOCK_TYPE_NAME] = ROCK_BLOCK_COLOR,
 }
 
 local blockPhysics = PhysicalProperties.new(
@@ -57,6 +57,20 @@ local blockPhysics = PhysicalProperties.new(
     1.0, -- friction weight
     1.0 -- elasticity weight
 )
+
+local RESIDUE_COLOR = Color3.fromRGB(196, 142, 78)
+local RESIDUE_SET_COLOR = Color3.fromRGB(120, 90, 64)
+local RESIDUE_CLUMP_SIZE = Vector3.new(0.38, 0.38, 0.38)
+local RESIDUE_HOLD_OFFSET = Vector3.new(0, 3.1, 0)
+local RESIDUE_PLACE_RANGE = 1.2
+local RESIDUE_CONTACT_PADDING = 0.14
+local RESIDUE_BOND_NAME = "SkuttlerBond"
+local SKUTTLER_BITE_DISTANCE = 1.35
+local SKUTTLER_BITE_COOLDOWN = 5
+local SKUTTLER_FORAGE_COOLDOWN_AFTER_BITE = 180
+local SKUTTLER_SECRETION_PER_BITE = 1
+local SKUTTLER_SECRETION_FOR_CLUMP = 2
+local SKUTTLER_CLUMP_COOLDOWN = 14
 
 local function getOrCreateChild(parent, className, name)
     local child = parent:FindFirstChild(name)
@@ -75,6 +89,7 @@ local serverPlayerState = getOrCreateChild(serverStateRoot, "Folder", "Players")
 local serverPlacementState = getOrCreateChild(serverStateRoot, "Folder", "Placements")
 local serverFloraState = getOrCreateChild(serverStateRoot, "Folder", "Flora")
 local serverCreatureState = getOrCreateChild(serverStateRoot, "Folder", "Creatures")
+local serverBlockState = getOrCreateChild(serverStateRoot, "Folder", "Blocks")
 
 if serverGlobals:GetAttribute("NextSpawnIndex") == nil then
     serverGlobals:SetAttribute("NextSpawnIndex", 0)
@@ -84,6 +99,9 @@ if serverGlobals:GetAttribute("NextPlacementId") == nil then
 end
 if serverGlobals:GetAttribute("NextCreatureId") == nil then
     serverGlobals:SetAttribute("NextCreatureId", 0)
+end
+if serverGlobals:GetAttribute("NextResidueId") == nil then
+    serverGlobals:SetAttribute("NextResidueId", 0)
 end
 if serverGlobals:GetAttribute("StaticWorldInitialized") == nil then
     serverGlobals:SetAttribute("StaticWorldInitialized", false)
@@ -436,12 +454,66 @@ local GLOWBULB_EFFECT_DURATION = 300 -- 5 minutes immobilized
 local GLOWBULB_IMMOBILIZATION_ENABLED = false -- temporary until the effect is reworked
 
 local GLOWBULB_COLOR = Color3.fromRGB(0, 220, 200)
+local GLOWBULB_BASE_SIZE = Vector3.new(0.7, 0.7, 0.7)
+local GLOWBULB_MAX_BITE_STEPS = 4
+local GLOWBULB_MIN_SCALE = 0.35
+
+local function clampGlowBulbBiteStep(step)
+    return math.clamp(math.floor(step or 0), 0, GLOWBULB_MAX_BITE_STEPS)
+end
+
+local function getGlowBulbScaleForStep(step)
+    local clampedStep = clampGlowBulbBiteStep(step)
+    if GLOWBULB_MAX_BITE_STEPS <= 1 then
+        return 1
+    end
+    local alpha = (clampedStep - 1) / (GLOWBULB_MAX_BITE_STEPS - 1)
+    return GLOWBULB_MIN_SCALE + (1 - GLOWBULB_MIN_SCALE) * alpha
+end
+
+local function applyGlowBulbVisuals(floraState, bulb)
+    local harvested = floraState:GetAttribute("Harvested")
+    if harvested then
+        bulb.Size = GLOWBULB_BASE_SIZE * GLOWBULB_MIN_SCALE
+        bulb.Transparency = 1
+        bulb.CanQuery = false
+        return
+    end
+
+    local biteStep = clampGlowBulbBiteStep(floraState:GetAttribute("BiteStep"))
+    local scale = getGlowBulbScaleForStep(biteStep)
+    bulb.Size = GLOWBULB_BASE_SIZE * scale
+    bulb.Transparency = 0
+    bulb.CanQuery = true
+end
+
+local function takeGlowBulbBite(floraState, bulb)
+    if not floraState or not bulb or not bulb.Parent or floraState:GetAttribute("Harvested") then
+        return false
+    end
+
+    local biteStep = clampGlowBulbBiteStep(floraState:GetAttribute("BiteStep"))
+    if biteStep <= 0 then
+        return false
+    end
+
+    local nextStep = math.max(0, biteStep - 1)
+    floraState:SetAttribute("BiteStep", nextStep)
+
+    if nextStep <= 0 then
+        floraState:SetAttribute("Harvested", true)
+        floraState:SetAttribute("RegrowTimer", GLOWBULB_REGROW_SECONDS)
+    end
+
+    applyGlowBulbVisuals(floraState, bulb)
+    return true
+end
 
 local function createGlowBulb(name, position)
     local bulb = Instance.new("Part")
     bulb.Name = name
     bulb.Shape = Enum.PartType.Ball
-    bulb.Size = Vector3.new(0.7, 0.7, 0.7)
+    bulb.Size = GLOWBULB_BASE_SIZE
     bulb.Position = position
     bulb.Anchored = true
     bulb.CanCollide = false
@@ -456,9 +528,11 @@ local function createGlowBulb(name, position)
     partRef.Value = bulb
     floraState:SetAttribute("Species", "GlowBulb")
     floraState:SetAttribute("Age", math.random() * 6.28)
+    floraState:SetAttribute("BiteStep", GLOWBULB_MAX_BITE_STEPS)
     floraState:SetAttribute("Harvested", false)
     floraState:SetAttribute("RegrowTimer", 0)
     floraState:SetAttribute("SpawnPos", position)
+    applyGlowBulbVisuals(floraState, bulb)
     return bulb
 end
 
@@ -558,13 +632,20 @@ local function consumeFlora(player, inputData)
         return
     end
 
-    floraState:SetAttribute("Harvested", true)
-    floraState:SetAttribute("RegrowTimer", GLOWBULB_REGROW_SECONDS)
-    plant.Transparency = 1
-    plant.CanQuery = false
-
     local species = floraState:GetAttribute("Species") or "Unknown"
-    player:SetAttribute("LastActionResult", "ConsumeSuccess:" .. species)
+    if species == "GlowBulb" then
+        if not takeGlowBulbBite(floraState, plant) then
+            player:SetAttribute("LastActionResult", "ConsumeFailed:NothingEdible")
+            return
+        end
+        player:SetAttribute("LastActionResult", string.format("ConsumeSuccess:%s", species))
+    else
+        floraState:SetAttribute("Harvested", true)
+        floraState:SetAttribute("RegrowTimer", GLOWBULB_REGROW_SECONDS)
+        plant.Transparency = 1
+        plant.CanQuery = false
+        player:SetAttribute("LastActionResult", "ConsumeSuccess:" .. species)
+    end
 
     if species == "GlowBulb" and GLOWBULB_IMMOBILIZATION_ENABLED then
         local playerState = getOrCreatePlayerState(player)
@@ -605,8 +686,8 @@ local speciesDefs = {
         speed = 3.5,
         fleeRange = 5,
         hoverHeight = 0, -- walks on ground
-        attractedTo = nil,
-        attractRange = 0,
+        attractedTo = "GlowBulb",
+        attractRange = 18,
         motionStyle = "physics",
         carryable = true,
         canCollide = true,
@@ -643,6 +724,28 @@ end
 local function randomWanderDir()
     local angle = math.random() * math.pi * 2
     return Vector3.new(math.cos(angle), 0, math.sin(angle))
+end
+
+local function refreshCreatureAppearance(part, creatureState)
+    if not part or not part.Parent or not creatureState then
+        return
+    end
+
+    local speciesName = creatureState:GetAttribute("Species")
+    local def = speciesDefs[speciesName]
+    if not def then
+        return
+    end
+
+    if speciesName == "Skuttler" then
+        local secretionLevel = creatureState:GetAttribute("SecretionLevel") or 0
+        local tintAlpha = math.clamp(secretionLevel / (SKUTTLER_SECRETION_FOR_CLUMP * 2), 0, 0.45)
+        part.Color = def.color:Lerp(RESIDUE_COLOR, tintAlpha)
+        part.Material = tintAlpha > 0 and Enum.Material.Slate or Enum.Material.SmoothPlastic
+    else
+        part.Color = def.color
+        part.Material = Enum.Material.SmoothPlastic
+    end
 end
 
 local function getCreatureStateForPart(part)
@@ -716,7 +819,12 @@ local function createCreature(speciesName, position)
     creatureState:SetAttribute("WanderTimer", math.random() * FAUNA_WANDER_INTERVAL)
     creatureState:SetAttribute("HomePos", position)
     creatureState:SetAttribute("MotionMode", "AI")
+    creatureState:SetAttribute("FeedCooldown", 0)
+    creatureState:SetAttribute("ForageCooldown", 0)
+    creatureState:SetAttribute("SecretionLevel", 0)
+    creatureState:SetAttribute("ClumpCooldown", 0)
     part:SetAttribute("CreatureStateName", creatureStateName)
+    refreshCreatureAppearance(part, creatureState)
     if def.carryable then
         trackedCarryables[part] = true
     end
@@ -760,6 +868,29 @@ local function nearestFloraPosition(pos, speciesFilter, maxRange)
     return closest, closestDist
 end
 
+local function nearestFloraTarget(pos, speciesFilter, maxRange)
+    local closestPart = nil
+    local closestState = nil
+    local closestDist = maxRange
+    for _, floraState in ipairs(serverFloraState:GetChildren()) do
+        local partRef = floraState:FindFirstChild("Part")
+        local part = partRef and partRef.Value or nil
+        local harvested = floraState:GetAttribute("Harvested")
+        local species = floraState:GetAttribute("Species")
+        if part and part.Parent and not harvested then
+            if speciesFilter == nil or species == speciesFilter then
+                local dist = (part.Position - pos).Magnitude
+                if dist < closestDist then
+                    closestPart = part
+                    closestState = floraState
+                    closestDist = dist
+                end
+            end
+        end
+    end
+    return closestPart, closestState, closestDist
+end
+
 local function isCreatureObstacle(selfPart, hit)
     if not hit:IsA("Part") or hit == selfPart then
         return false
@@ -801,6 +932,34 @@ local function isCreaturePathBlocked(part, def, moveDir)
     return false
 end
 
+local function maybeDropSkuttlerClump(creatureState, part, fleeing)
+    if not creatureState or not part or not part.Parent or fleeing then
+        return
+    end
+
+    if creatureState:GetAttribute("Species") ~= "Skuttler" then
+        return
+    end
+
+    local secretionLevel = creatureState:GetAttribute("SecretionLevel") or 0
+    local clumpCooldown = creatureState:GetAttribute("ClumpCooldown") or 0
+    if secretionLevel < SKUTTLER_SECRETION_FOR_CLUMP or clumpCooldown > 0 then
+        return
+    end
+
+    local dropPosition = Vector3.new(part.Position.X, RESIDUE_CLUMP_SIZE.Y * 0.6, part.Position.Z)
+    for object, _ in pairs(trackedCarryables) do
+        if object ~= part and object.Parent and (object.Position - dropPosition).Magnitude <= 0.7 then
+            return
+        end
+    end
+
+    createSecretionClump(dropPosition)
+    creatureState:SetAttribute("SecretionLevel", secretionLevel - SKUTTLER_SECRETION_FOR_CLUMP)
+    creatureState:SetAttribute("ClumpCooldown", SKUTTLER_CLUMP_COOLDOWN)
+    refreshCreatureAppearance(part, creatureState)
+end
+
 local function updateCreatures(dt)
     for _, creatureState in ipairs(serverCreatureState:GetChildren()) do
         local partRef = creatureState:FindFirstChild("Part")
@@ -813,6 +972,13 @@ local function updateCreatures(dt)
             if not def then
                 creatureState:Destroy()
             else
+                local feedCooldown = math.max(0, (creatureState:GetAttribute("FeedCooldown") or 0) - dt)
+                local forageCooldown = math.max(0, (creatureState:GetAttribute("ForageCooldown") or 0) - dt)
+                local clumpCooldown = math.max(0, (creatureState:GetAttribute("ClumpCooldown") or 0) - dt)
+                creatureState:SetAttribute("FeedCooldown", feedCooldown)
+                creatureState:SetAttribute("ForageCooldown", forageCooldown)
+                creatureState:SetAttribute("ClumpCooldown", clumpCooldown)
+
                 local motionMode = creatureState:GetAttribute("MotionMode") or "AI"
                 if motionMode ~= "AI" then
                     if motionMode == "Held" then
@@ -825,6 +991,9 @@ local function updateCreatures(dt)
                 local moveDir = Vector3.new(0, 0, 0)
                 local moveSpeed = def.speed
                 local fleeing = false
+                local foodPart = nil
+                local foodState = nil
+                local foodDist = def.attractRange
 
                 -- 1. Flee from nearby players
                 if def.fleeRange > 0 then
@@ -840,10 +1009,10 @@ local function updateCreatures(dt)
                 end
 
                 -- 2. Attract toward food source (if not fleeing)
-                if not fleeing and def.attractedTo and def.attractRange > 0 then
-                    local foodPos, foodDist = nearestFloraPosition(pos, def.attractedTo, def.attractRange)
-                    if foodPos then
-                        local toward = Vector3.new(foodPos.X, 0, foodPos.Z) - flatPos
+                if not fleeing and forageCooldown <= 0 and def.attractedTo and def.attractRange > 0 then
+                    foodPart, foodState, foodDist = nearestFloraTarget(pos, def.attractedTo, def.attractRange)
+                    if foodPart then
+                        local toward = Vector3.new(foodPart.Position.X, 0, foodPart.Position.Z) - flatPos
                         if toward.Magnitude > 1.5 then
                             moveDir = toward.Unit
                         else
@@ -904,6 +1073,28 @@ local function updateCreatures(dt)
                     part.AssemblyLinearVelocity = Vector3.new(0, currentVelocity.Y, 0)
                     part.AssemblyAngularVelocity = Vector3.new(0, 0, 0)
                 end
+
+                if not fleeing and foodPart and foodState and foodDist <= SKUTTLER_BITE_DISTANCE and feedCooldown <= 0 then
+                    if takeGlowBulbBite(foodState, foodPart) then
+                        creatureState:SetAttribute("FeedCooldown", SKUTTLER_BITE_COOLDOWN)
+                        creatureState:SetAttribute(
+                            "ForageCooldown",
+                            SKUTTLER_FORAGE_COOLDOWN_AFTER_BITE + math.random() * 4
+                        )
+                        creatureState:SetAttribute(
+                            "SecretionLevel",
+                            (creatureState:GetAttribute("SecretionLevel") or 0) + SKUTTLER_SECRETION_PER_BITE
+                        )
+                        local awayFromFood = flatPos - Vector3.new(foodPart.Position.X, 0, foodPart.Position.Z)
+                        if awayFromFood.Magnitude > 0.01 then
+                            creatureState:SetAttribute("WanderDir", awayFromFood.Unit)
+                            creatureState:SetAttribute("WanderTimer", FAUNA_WANDER_INTERVAL + math.random())
+                        end
+                        refreshCreatureAppearance(part, creatureState)
+                    end
+                end
+
+                maybeDropSkuttlerClump(creatureState, part, fleeing)
                 end
             end
         end
@@ -942,14 +1133,229 @@ end
 -- BLOCKS
 --------------------------------------------------------------------------------
 
+local function isBlockPart(inst)
+    return inst and inst:IsA("Part") and inst:GetAttribute("CarryKind") == "Block"
+end
+
+local function isResidueClump(inst)
+    return inst and inst:IsA("Part") and inst:GetAttribute("CarryKind") == "Clump"
+end
+
+local function getHiddenBlockState(block)
+    if not isBlockPart(block) then
+        return nil
+    end
+
+    local state = getOrCreateChild(serverBlockState, "Folder", block.Name)
+    local partRef = getOrCreateChild(state, "ObjectValue", "Part")
+    partRef.Value = block
+
+    local colorName = BLOCK_TYPE_NAME
+    state:SetAttribute("BaseColorName", colorName)
+    if state:GetAttribute("CoatingPhase") == nil then
+        state:SetAttribute("CoatingPhase", "Bare")
+    end
+
+    return state
+end
+
+local function getBlockBaseColor(block)
+    local state = getHiddenBlockState(block)
+    local colorName = state and state:GetAttribute("BaseColorName") or block:GetAttribute("ItemColorName") or BLOCK_TYPE_NAME
+    return blockColors[colorName] or blockColors[BLOCK_TYPE_NAME]
+end
+
+local function removeBlockBonds(block)
+    if not block or not block.Parent then
+        return
+    end
+
+    for object, _ in pairs(trackedCarryables) do
+        if object.Parent and isBlockPart(object) then
+            for _, child in ipairs(object:GetChildren()) do
+                if child:IsA("WeldConstraint")
+                    and child.Name == RESIDUE_BOND_NAME
+                    and (child.Part0 == block or child.Part1 == block)
+                then
+                    child:Destroy()
+                end
+            end
+        end
+    end
+
+    block.Anchored = false
+end
+
+local function refreshBlockAppearance(block)
+    if not isBlockPart(block) then
+        return
+    end
+
+    local state = getHiddenBlockState(block)
+    local phase = state and state:GetAttribute("CoatingPhase") or "Bare"
+    local baseColor = getBlockBaseColor(block)
+
+    if phase == "Coated" then
+        block.Color = baseColor:Lerp(RESIDUE_COLOR, 0.48)
+        block.Material = Enum.Material.SmoothPlastic
+    elseif phase == "Set" then
+        block.Color = baseColor:Lerp(RESIDUE_SET_COLOR, 0.42)
+        block.Material = Enum.Material.Slate
+    else
+        block.Color = baseColor
+        block.Material = Enum.Material.SmoothPlastic
+    end
+end
+
+local function clearBlockTreatment(block)
+    if not isBlockPart(block) then
+        return
+    end
+
+    removeBlockBonds(block)
+    local state = getHiddenBlockState(block)
+    state:SetAttribute("CoatingPhase", "Bare")
+    refreshBlockAppearance(block)
+end
+
+local function getNearestBondTarget(block)
+    if not isBlockPart(block) then
+        return nil, nil
+    end
+
+    local params = OverlapParams.new()
+    params.FilterType = Enum.RaycastFilterType.Exclude
+    params.FilterDescendantsInstances = { block }
+
+    local hits = Workspace:GetPartBoundsInBox(
+        CFrame.new(block.Position),
+        block.Size + Vector3.new(RESIDUE_CONTACT_PADDING, RESIDUE_CONTACT_PADDING, RESIDUE_CONTACT_PADDING),
+        params
+    )
+
+    local nearestBlock = nil
+    local nearestBlockDistance = math.huge
+    for _, hit in ipairs(hits) do
+        if hit:IsA("Part") then
+            local role = hit:GetAttribute("RenderRole")
+            if role == "Ground" or role == "Mesa" or role == "Rock" then
+                return "Terrain", hit
+            end
+            if isBlockPart(hit) then
+                local distance = (hit.Position - block.Position).Magnitude
+                if distance < nearestBlockDistance then
+                    nearestBlock = hit
+                    nearestBlockDistance = distance
+                end
+            end
+        end
+    end
+
+    if nearestBlock then
+        return "Block", nearestBlock
+    end
+
+    return nil, nil
+end
+
+local function trySetBlockBond(block)
+    if not isBlockPart(block) then
+        return false
+    end
+
+    local state = getHiddenBlockState(block)
+    if not state or state:GetAttribute("CoatingPhase") ~= "Coated" then
+        return false
+    end
+
+    local targetKind, target = getNearestBondTarget(block)
+    if not targetKind or not target then
+        return false
+    end
+
+    removeBlockBonds(block)
+    if targetKind == "Terrain" then
+        block.Anchored = true
+    else
+        local bond = Instance.new("WeldConstraint")
+        bond.Name = RESIDUE_BOND_NAME
+        bond.Part0 = block
+        bond.Part1 = target
+        bond.Parent = block
+    end
+
+    state:SetAttribute("CoatingPhase", "Set")
+    refreshBlockAppearance(block)
+    return true
+end
+
+local function coatBlock(block)
+    if not isBlockPart(block) then
+        return false
+    end
+
+    removeBlockBonds(block)
+    local state = getHiddenBlockState(block)
+    state:SetAttribute("CoatingPhase", "Coated")
+    refreshBlockAppearance(block)
+    trySetBlockBond(block)
+    return true
+end
+
+local function setResidueMetadata(clump)
+    clump:SetAttribute("RenderRole", "Clump")
+    clump:SetAttribute("IsCarryable", true)
+    clump:SetAttribute("CarryKind", "Clump")
+    clump:SetAttribute("PlacementDuration", 0.12)
+    clump:SetAttribute("HoldOffset", RESIDUE_HOLD_OFFSET)
+end
+
+createSecretionClump = function(position)
+    local clumpId = nextServerCounter("NextResidueId")
+    local clump = Instance.new("Part")
+    clump.Name = "Clump_" .. clumpId
+    clump.Shape = Enum.PartType.Block
+    clump.Size = RESIDUE_CLUMP_SIZE
+    clump.Position = position
+    clump.Anchored = false
+    clump.CanCollide = true
+    clump.Color = RESIDUE_COLOR
+    clump.Material = Enum.Material.SmoothPlastic
+    clump.Transparency = 0.08
+    clump.CustomPhysicalProperties = PhysicalProperties.new(0.35, 1.0, 0.0, 1.0, 1.0)
+    setResidueMetadata(clump)
+    clump.Parent = Workspace
+    trackedCarryables[clump] = true
+    return clump
+end
+
+local function findNearestBlock(targetPosition, maxDistance)
+    local closestBlock = nil
+    local closestDistance = maxDistance
+
+    for _, inst in ipairs(Workspace:GetDescendants()) do
+        if isBlockPart(inst) then
+            local distance = (inst.Position - targetPosition).Magnitude
+            if distance <= closestDistance then
+                closestBlock = inst
+                closestDistance = distance
+            end
+        end
+    end
+
+    return closestBlock
+end
+
 local function setBlockMetadata(block, colorName)
     block:SetAttribute("RenderRole", "PickupObject")
-    block:SetAttribute("ItemColorName", colorName)
+    block:SetAttribute("ItemColorName", BLOCK_TYPE_NAME)
     block:SetAttribute("IsPickupObject", true)
     block:SetAttribute("IsCarryable", true)
     block:SetAttribute("CarryKind", "Block")
     block:SetAttribute("PlacementDuration", DEFAULT_PLACE_DURATION)
     block:SetAttribute("HoldOffset", DEFAULT_HOLD_OFFSET)
+    getHiddenBlockState(block)
+    refreshBlockAppearance(block)
 end
 
 local function createBlock(name, position, colorName)
@@ -958,10 +1364,10 @@ local function createBlock(name, position, colorName)
     block.Size = Vector3.new(BLOCK_SIZE, BLOCK_SIZE, BLOCK_SIZE)
     block.Position = position
     block.Anchored = false
-    block.Material = Enum.Material.SmoothPlastic
-    block.Color = blockColors[colorName]
+    block.Material = Enum.Material.Slate
+    block.Color = blockColors[BLOCK_TYPE_NAME]
     block.CustomPhysicalProperties = blockPhysics
-    setBlockMetadata(block, colorName)
+    setBlockMetadata(block, BLOCK_TYPE_NAME)
     block.Parent = Workspace
     trackedCarryables[block] = true
     return block
@@ -981,6 +1387,12 @@ local function rebuildTrackedCarryables()
             if inst:GetAttribute("HoldOffset") == nil then
                 inst:SetAttribute("HoldOffset", DEFAULT_HOLD_OFFSET)
             end
+            if inst:GetAttribute("CarryKind") == "Block" then
+                getHiddenBlockState(inst)
+                refreshBlockAppearance(inst)
+            end
+        elseif isResidueClump(inst) then
+            setResidueMetadata(inst)
         end
         if isCarryableObject(inst) then
             trackedCarryables[inst] = true
@@ -1106,6 +1518,10 @@ local function getObjectPlacementDuration(object)
 end
 
 local function prepareObjectForHolding(object)
+    if isBlockPart(object) then
+        clearBlockTreatment(object)
+    end
+
     object.Anchored = true
     object.CanCollide = false
     object.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
@@ -1231,6 +1647,10 @@ local function destroyCarryableObject(object)
     end
     releaseHeldObjectReferences(object)
     trackedCarryables[object] = nil
+    local blockState = isBlockPart(object) and serverBlockState:FindFirstChild(object.Name) or nil
+    if blockState then
+        blockState:Destroy()
+    end
     object:Destroy()
 end
 
@@ -1267,7 +1687,7 @@ bindMoveFeedback = function(player, humanoid)
     end)
 end
 
-local function findNearestCarryableObject(targetPosition, maxDistance)
+findNearestCarryableObject = function(targetPosition, maxDistance)
     local closestObject = nil
     local closestDistance = maxDistance
 
@@ -1350,6 +1770,17 @@ local function placeHeldObject(player, inputData)
     if not canReach(player, targetPosition, PLACE_RANGE) then
         player:SetAttribute("LastActionResult", "PlaceFailed:OutOfRange")
         return
+    end
+
+    if isResidueClump(object) then
+        local targetBlock = findNearestBlock(targetPosition, RESIDUE_PLACE_RANGE)
+        if targetBlock then
+            setHeldObjectForPlayer(player, nil)
+            coatBlock(targetBlock)
+            destroyCarryableObject(object)
+            player:SetAttribute("LastActionResult", "PlaceSuccess")
+            return
+        end
     end
 
     if positionOccupied(player, targetPosition, object.Size) then
@@ -1453,6 +1884,7 @@ RunService.Heartbeat:Connect(function(dt)
             restoreObjectAfterPlacement(object)
             if object:GetAttribute("CarryKind") == "Block" then
                 setBlockMetadata(object, object:GetAttribute("ItemColorName"))
+                trySetBlockBond(object)
             end
             placement:Destroy()
         else
@@ -1527,13 +1959,14 @@ RunService.Heartbeat:Connect(function(dt)
             local regrowTimer = math.max(0, (floraState:GetAttribute("RegrowTimer") or 0) - dt)
             floraState:SetAttribute("RegrowTimer", regrowTimer)
             if regrowTimer <= 0 then
+                floraState:SetAttribute("BiteStep", GLOWBULB_MAX_BITE_STEPS)
                 floraState:SetAttribute("Harvested", false)
-                part.Transparency = 0
-                part.CanQuery = true
+                applyGlowBulbVisuals(floraState, part)
             end
         else
             local age = (floraState:GetAttribute("Age") or 0) + dt
             floraState:SetAttribute("Age", age)
+            applyGlowBulbVisuals(floraState, part)
             part.Transparency = 0.15 + 0.15 * math.sin(age * 2.0)
         end
     end
@@ -1541,8 +1974,13 @@ RunService.Heartbeat:Connect(function(dt)
     for object, _ in pairs(trackedCarryables) do
         if not object.Parent then
             trackedCarryables[object] = nil
-        elseif object.Position.Y < OUT_OF_BOUNDS_Y then
+        else
+            if isBlockPart(object) then
+                trySetBlockBond(object)
+            end
+            if object.Position.Y < OUT_OF_BOUNDS_Y then
             destroyCarryableObject(object)
+            end
         end
     end
 end)
