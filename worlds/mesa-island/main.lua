@@ -368,6 +368,16 @@ local function getHumanoidRootPart(player)
     return nil
 end
 
+local function parsePosition(pos)
+    if type(pos) ~= "table" then return nil end
+    local x = tonumber(pos[1])
+    local y = tonumber(pos[2])
+    local z = tonumber(pos[3])
+    if not x or not y or not z then return nil end
+    if x ~= x or y ~= y or z ~= z then return nil end -- NaN check
+    return Vector3.new(x, y, z)
+end
+
 local function canReach(player, worldPosition, maxDistance)
     local hrp = getHumanoidRootPart(player)
     if not hrp then
@@ -614,8 +624,11 @@ local function consumeFlora(player, inputData)
         return
     end
 
-    local pos = inputData.position
-    local targetPosition = Vector3.new(pos[1], pos[2], pos[3])
+    local targetPosition = parsePosition(inputData.position)
+    if not targetPosition then
+        player:SetAttribute("LastActionResult", "ConsumeFailed:InvalidPosition")
+        return
+    end
     if not canReach(player, targetPosition, CONSUME_RANGE) then
         player:SetAttribute("LastActionResult", "ConsumeFailed:OutOfRange")
         return
@@ -1690,8 +1703,11 @@ local function pickupObject(player, inputData)
         return
     end
 
-    local pos = inputData.position
-    local targetPosition = Vector3.new(pos[1], pos[2], pos[3])
+    local targetPosition = parsePosition(inputData.position)
+    if not targetPosition then
+        player:SetAttribute("LastActionResult", "PickupFailed:InvalidPosition")
+        return
+    end
     if not canReach(player, targetPosition, PICKUP_RANGE) then
         player:SetAttribute("LastActionResult", "PickupFailed:OutOfRange")
         return
@@ -1740,8 +1756,11 @@ local function placeHeldObject(player, inputData)
         return
     end
 
-    local pos = inputData.position
-    local targetPosition = Vector3.new(pos[1], pos[2], pos[3])
+    local targetPosition = parsePosition(inputData.position)
+    if not targetPosition then
+        player:SetAttribute("LastActionResult", "PlaceFailed:InvalidPosition")
+        return
+    end
     if not canReach(player, targetPosition, PLACE_RANGE) then
         player:SetAttribute("LastActionResult", "PlaceFailed:OutOfRange")
         return
@@ -1788,11 +1807,14 @@ if AgentInputService then
 
         if inputType == "MoveTo" and inputData and inputData.position then
             local pos = inputData.position
-            activeMoveStates[player] = {
-                target = Vector3.new(pos[1], pos[2], pos[3]),
-            }
+            local target = parsePosition(pos)
+            if not target then
+                player:SetAttribute("LastActionResult", "MoveToFailed:InvalidPosition")
+                return
+            end
+            activeMoveStates[player] = { target = target }
             player:SetAttribute("LastActionResult", "MoveToIssued")
-            humanoid:MoveTo(Vector3.new(pos[1], pos[2], pos[3]))
+            humanoid:MoveTo(target)
         elseif inputType == "Stop" then
             activeMoveStates[player] = nil
             player:SetAttribute("LastActionResult", "StopSuccess")
