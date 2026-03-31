@@ -25,10 +25,12 @@ RESULTS_ROOT="${RESULTS_ROOT:-}"
 PORT_WAIT_SECONDS="${PORT_WAIT_SECONDS:-120}"
 RESUME_PATH="${RESUME_PATH:-}"
 RESET_EVERY="${RESET_EVERY:-}"
+PI_MODEL="${PI_MODEL:-}"
 AGENT_CHECKPOINT_AT_EPOCH="${AGENT_CHECKPOINT_AT_EPOCH:-}"
 AGENT_CHECKPOINT_PROMPT="${AGENT_CHECKPOINT_PROMPT:-}"
 AGENT_CHECKPOINT_TRIGGER_TURN="${AGENT_CHECKPOINT_TRIGGER_TURN:-1}"
 AGENT_CHECKPOINT_DISABLE_AUTO_LOOP="${AGENT_CHECKPOINT_DISABLE_AUTO_LOOP:-0}"
+CHECKPOINT_INTERVAL="${CHECKPOINT_INTERVAL:-1800}"  # periodic snapshot interval in seconds (0 = disabled)
 declare -a AGENT_TEMPLATE_DIRS=()
 
 AGENT_SCRIPT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/run_agent.sh"
@@ -83,8 +85,11 @@ save_world_snapshot() {
   local tmp_file="$snapshot_file.tmp"
   mkdir -p "$resume_dir"
   if curl -fsS "http://localhost:${port}/snapshot" >"$tmp_file"; then
+    local ts
+    ts="$(date -u +%Y%m%dT%H%M%SZ)"
+    cp "$tmp_file" "$resume_dir/checkpoint_${ts}.json"
     mv "$tmp_file" "$snapshot_file"
-    echo "Saved snapshot: $snapshot_file"
+    echo "Saved snapshot: $snapshot_file (checkpoint_${ts}.json)"
     return 0
   fi
   rm -f "$tmp_file"
@@ -117,8 +122,10 @@ Options:
   --template PATH              Agent template directory (relative to project root or absolute)
   --agent-template PATH        Per-agent template directory; repeat in agent index order
   --reset-every SECONDS        Restart each agent session on this interval
+  --model MODEL_ID             Model passed to pi via PI_MODEL
   --results-root PATH          Results root directory (default: <world-dir>/results)
   --resume PATH                Resume an existing run directory under results/
+  --checkpoint-interval SECS   Periodic snapshot interval (default: 1800, 0 = disabled)
   --clawblox-bin PATH          Path or command name for clawblox binary
 
 Environment variables:
@@ -136,11 +143,13 @@ Environment variables:
   GOAL              Custom startup objective passed to agents
   TEMPLATE_DIR      Agent template directory (run_agent.sh TEMPLATE_DIR override)
   RESET_EVERY       Restart each agent session every N seconds
+  PI_MODEL          Model passed to pi via --model
   RESULTS_ROOT      Results root directory (default: <world-dir>/results)
   AGENT_CHECKPOINT_AT_EPOCH       Unix epoch seconds when checkpoint prompt should be sent
   AGENT_CHECKPOINT_PROMPT         Checkpoint message sent from clawblox-agent extension
   AGENT_CHECKPOINT_TRIGGER_TURN   1/0 trigger a turn when checkpoint prompt is sent (default: 1)
   AGENT_CHECKPOINT_DISABLE_AUTO_LOOP 1/0 disable continue loop when checkpoint fires (default: 0)
+  CHECKPOINT_INTERVAL Periodic snapshot interval in seconds (default: 1800, 0 = disabled)
   CLAWBLOX_BIN      Path to clawblox binary (auto-detected)
 EOF
 }
@@ -363,6 +372,11 @@ while [[ $# -gt 0 ]]; do
       RESET_EVERY="$2"
       shift 2
       ;;
+    --model)
+      require_value "$1" "${2:-}"
+      PI_MODEL="$2"
+      shift 2
+      ;;
     --template|--template-dir)
       require_value "$1" "${2:-}"
       TEMPLATE_DIR="$2"
@@ -381,6 +395,11 @@ while [[ $# -gt 0 ]]; do
     --resume)
       require_value "$1" "${2:-}"
       RESUME_PATH="$2"
+      shift 2
+      ;;
+    --checkpoint-interval)
+      require_value "$1" "${2:-}"
+      CHECKPOINT_INTERVAL="$2"
       shift 2
       ;;
     --help|-h)
@@ -405,6 +424,10 @@ if ! is_nonnegative_int "$PORT_WAIT_SECONDS"; then
 fi
 if [[ -n "$RESET_EVERY" ]] && ! is_positive_int "$RESET_EVERY"; then
   echo "Error: RESET_EVERY must be a positive integer in seconds (got '$RESET_EVERY')."
+  exit 1
+fi
+if ! is_nonnegative_int "$CHECKPOINT_INTERVAL"; then
+  echo "Error: CHECKPOINT_INTERVAL must be a non-negative integer in seconds (got '$CHECKPOINT_INTERVAL')."
   exit 1
 fi
 
@@ -787,13 +810,18 @@ EOF
       RESET_ENV_PREFIX="RESET_EVERY=$(printf '%q' "$RESET_EVERY") "
     fi
 
+    MODEL_ENV_PREFIX=""
+    if [[ -n "$PI_MODEL" ]]; then
+      MODEL_ENV_PREFIX="PI_MODEL=$(printf '%q' "$PI_MODEL") "
+    fi
+
     if [[ -n "$startup_instructions" ]]; then
       startup_instructions_q="$(printf '%q' "$startup_instructions")"
       tmux send-keys -t "${TMUX_SESSION}:agents-$i" \
-        "cd '$ROOT_DIR' && WORLD_BASE_URL='$url' WORLD_AGENT_NAME='$agent_display_name' WORKSPACE_DIR='$agent_workspace' SESSION_DIR='$agent_session' WORLD_SESSION_FILE='$agent_world_session_file' ${TEMPLATE_ENV_PREFIX}${RESET_ENV_PREFIX}${CHECKPOINT_ENV_PREFIX}WORLD_STARTUP_INSTRUCTIONS=${startup_instructions_q} bash '$AGENT_SCRIPT' 2>&1 | tee -a '$agent_log_file'" Enter
+        "cd '$ROOT_DIR' && WORLD_BASE_URL='$url' WORLD_AGENT_NAME='$agent_display_name' WORKSPACE_DIR='$agent_workspace' SESSION_DIR='$agent_session' WORLD_SESSION_FILE='$agent_world_session_file' ${TEMPLATE_ENV_PREFIX}${RESET_ENV_PREFIX}${MODEL_ENV_PREFIX}${CHECKPOINT_ENV_PREFIX}WORLD_STARTUP_INSTRUCTIONS=${startup_instructions_q} bash '$AGENT_SCRIPT' 2>&1 | tee -a '$agent_log_file'" Enter
     else
       tmux send-keys -t "${TMUX_SESSION}:agents-$i" \
-        "cd '$ROOT_DIR' && WORLD_BASE_URL='$url' WORLD_AGENT_NAME='$agent_display_name' WORKSPACE_DIR='$agent_workspace' SESSION_DIR='$agent_session' WORLD_SESSION_FILE='$agent_world_session_file' ${TEMPLATE_ENV_PREFIX}${RESET_ENV_PREFIX}${CHECKPOINT_ENV_PREFIX}bash '$AGENT_SCRIPT' 2>&1 | tee -a '$agent_log_file'" Enter
+        "cd '$ROOT_DIR' && WORLD_BASE_URL='$url' WORLD_AGENT_NAME='$agent_display_name' WORKSPACE_DIR='$agent_workspace' SESSION_DIR='$agent_session' WORLD_SESSION_FILE='$agent_world_session_file' ${TEMPLATE_ENV_PREFIX}${RESET_ENV_PREFIX}${MODEL_ENV_PREFIX}${CHECKPOINT_ENV_PREFIX}bash '$AGENT_SCRIPT' 2>&1 | tee -a '$agent_log_file'" Enter
     fi
   done
 done
@@ -807,6 +835,7 @@ echo "  Worlds:  $NUM_WORLDS (ports $BASE_PORT-$((BASE_PORT + NUM_WORLDS - 1)))"
 echo "  Agents:  $TOTAL_AGENTS ($AGENTS_PER_WORLD per world)"
 echo "  Record:  $RECORD"
 echo "  Reset:   ${RESET_EVERY:-off}"
+echo "  Checkpoint: $( ((CHECKPOINT_INTERVAL > 0)) && echo "${CHECKPOINT_INTERVAL}s" || echo "off" )"
 echo "  Session: $TMUX_SESSION"
 echo "  Results: $RUN_DIR"
 echo "  Results Root: $RESULTS_ABS_ROOT"
@@ -818,3 +847,18 @@ echo
 echo "  Stop all:  $(basename "$0") --stop"
 echo "  Status:    $(basename "$0") --status"
 echo
+
+# --- Periodic checkpoint loop ---
+if ((CHECKPOINT_INTERVAL > 0)); then
+  echo "Starting periodic checkpoints every ${CHECKPOINT_INTERVAL}s..."
+  (
+    while true; do
+      sleep "$CHECKPOINT_INTERVAL"
+      tmux has-session -t "$TMUX_SESSION" 2>/dev/null || break
+      for ((i = 0; i < NUM_WORLDS; i++)); do
+        save_world_snapshot "$i" "$((BASE_PORT + i))" || true
+      done
+    done
+  ) &
+  disown
+fi
