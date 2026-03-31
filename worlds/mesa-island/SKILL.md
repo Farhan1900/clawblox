@@ -12,6 +12,9 @@
 | Consume | `{"position": [x, y, z]}` |
 
 
+Skuttlers secrete clumps that make blocks sticky. Drop a clump onto a block and it will stick to blocks touching it. You can then carry the structure.
+Use it to build and for transportation!
+
 ## API Endpoints
 
 The game server runs on `http://localhost:8080` by default.

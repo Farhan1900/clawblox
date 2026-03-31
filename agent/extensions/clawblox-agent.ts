@@ -20,6 +20,15 @@ type ChatMessage = {
   agent_name?: string;
   content?: string;
   created_at?: string;
+  heard_by?: string[];
+  audibility?: ChatAudibilityEntry[];
+};
+
+type ChatAudibilityEntry = {
+  agent_id?: string;
+  agent_name?: string;
+  distance?: number;
+  heard?: boolean;
 };
 
 function writeSystemPromptSnapshot(prompt: string) {
@@ -48,12 +57,39 @@ function normalizeChatName(value: string | undefined): string {
   return String(value ?? "").trim().toLowerCase();
 }
 
+function truncateChatContent(value: string): string {
+  const trimmed = value.trim();
+  if (trimmed.length <= 80) return trimmed;
+  return `${trimmed.slice(0, 77)}...`;
+}
+
+function formatSelfChatFeedback(message: ChatMessage): string | null {
+  const content = String(message.content ?? "").trim();
+  if (!content) return null;
+
+  const audibility = Array.isArray(message.audibility) ? message.audibility : [];
+  const otherHearers = audibility
+    .filter((entry) => entry?.heard)
+    .map((entry) => String(entry.agent_name ?? "").trim())
+    .filter((name) => name && normalizeChatName(name) !== WORLD_AGENT_NAME);
+  const uniqueHearers = [...new Set(otherHearers)];
+  const quotedContent = `"${truncateChatContent(content)}"`;
+
+  if (uniqueHearers.length > 0) {
+    return `Your message ${quotedContent} was heard by ${uniqueHearers.join(", ")}.`;
+  }
+  if (audibility.length > 0) {
+    return `Your message ${quotedContent} was not heard by anyone else.`;
+  }
+  return `Your message ${quotedContent} was sent, but hearing feedback was unavailable.`;
+}
+
 function formatChatNotification(message: ChatMessage): string | null {
   const content = String(message.content ?? "").trim();
   if (!content) return null;
   const sender = String(message.agent_name ?? "Someone").trim() || "Someone";
   if (WORLD_AGENT_NAME && normalizeChatName(sender) === WORLD_AGENT_NAME) {
-    return null;
+    return formatSelfChatFeedback(message);
   }
   return `New chat message from ${sender}: ${content}`;
 }

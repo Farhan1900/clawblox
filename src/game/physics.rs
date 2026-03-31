@@ -263,6 +263,10 @@ impl PhysicsWorld {
 
     /// Removes a part from the physics world
     pub fn remove_part(&mut self, lua_id: u64) -> bool {
+        // If this lua_id is a character HRP, clean up the character controller
+        // to avoid stale handles that would panic in rapier during step/move.
+        self.character_controllers.remove(&lua_id);
+
         if let Some(handle) = self.lua_to_body.remove(&lua_id) {
             self.body_to_lua.remove(&handle);
             self.lua_to_shape.remove(&lua_id);
@@ -1766,5 +1770,47 @@ mod tests {
             "Character should step UP onto 0.2 stud platform. Final X={:.2}",
             final_pos[0]
         );
+    }
+
+    /// Reproduces the crash from run 20260331T191258Z:
+    /// When a character's HRP is removed via `remove_part()` (orphan cleanup),
+    /// the body is destroyed in rapier but `character_controllers` still holds
+    /// the stale handle. The next `move_character` or `step` then panics with
+    /// "No element at index".
+    #[test]
+    fn test_remove_part_on_character_hrp_causes_stale_handle() {
+        let mut world = PhysicsWorld::new();
+
+        // Ground
+        world.add_part(
+            1,
+            [0.0, -0.5, 0.0],
+            &[[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
+            [200.0, 1.0, 200.0],
+            true,
+            true,
+            PartType::Block,
+            None,
+        );
+
+        // Add a character (like a player HRP)
+        let char_id: u64 = 100;
+        world.add_character(char_id, [0.0, 1.0, 0.0], 0.5, 2.0);
+        assert!(world.has_character(char_id));
+
+        // Simulate orphan cleanup: remove_part is called on the character's lua_id
+        // This is what happens when sync_lua_to_physics finds the HRP gone from Lua
+        let removed = world.remove_part(char_id);
+        assert!(removed, "remove_part should find and remove the body");
+
+        // BUG: character_controllers still has the entry with the stale handle
+        assert!(
+            !world.has_character(char_id),
+            "character_controllers should be cleaned up when remove_part destroys a character body"
+        );
+
+        // If the assertion above is removed, the following would panic:
+        // world.move_character(char_id, [1.0, 0.0, 0.0], 1.0 / 60.0);
+        // world.step(1.0 / 60.0);
     }
 }
