@@ -740,7 +740,6 @@ fn mesa_island_plain_block_on_set_block_bonds_and_pickup_moves_both() {
             .eval()
             .expect("failed to read bonded movement after pickup")
     };
-
     assert!(
         sticky_x > (base_x as f64) + 4.0,
         "sticky set block should move when the plain bonded block is picked up; sticky_x={sticky_x}, initial_x={base_x}"

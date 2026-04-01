@@ -36,6 +36,8 @@ local OUT_OF_BOUNDS_Y = -200
 
 local trackedCarryables = {}
 local blockBondTargets = {}
+local heldAssemblyStates = {}
+local frozenBondBlocks = {}
 local activeMoveStates = {}
 local moveFeedbackConnections = {}
 local bindMoveFeedback
@@ -1217,15 +1219,110 @@ local function getBlockCoatingPhase(block)
     return state and state:GetAttribute("CoatingPhase") or "Bare"
 end
 
-local function setBlockBondTarget(block, targetBlock)
+local function getBlockBondKey(block)
     if not isBlockPart(block) then
+        return nil
+    end
+    return block.Name
+end
+
+local function getBlockBondTargets(block)
+    local key = getBlockBondKey(block)
+    local targetNames = key and blockBondTargets[key] or nil
+    if type(targetNames) ~= "table" then
+        return {}
+    end
+
+    local targets = {}
+    local dirty = false
+    for targetName, _ in pairs(targetNames) do
+        local target = Workspace:FindFirstChild(targetName)
+        if isBlockPart(target) then
+            table.insert(targets, target)
+        else
+            targetNames[targetName] = nil
+            dirty = true
+        end
+    end
+
+    if dirty and next(targetNames) == nil then
+        blockBondTargets[key] = nil
+    end
+
+    return targets
+end
+
+local function hasBlockBondTarget(block, targetBlock)
+    local key = getBlockBondKey(block)
+    local targetKey = getBlockBondKey(targetBlock)
+    if not key or not targetKey then
+        return false
+    end
+    local targetNames = blockBondTargets[key]
+    return type(targetNames) == "table" and targetNames[targetKey] == true
+end
+
+local function addBlockBondTarget(block, targetBlock)
+    local key = getBlockBondKey(block)
+    local targetKey = getBlockBondKey(targetBlock)
+    if not key or not targetKey then
         return
     end
 
-    if targetBlock and isBlockPart(targetBlock) and targetBlock.Parent then
-        blockBondTargets[block] = targetBlock
+    local targetNames = blockBondTargets[key]
+    if type(targetNames) ~= "table" then
+        targetNames = {}
+        blockBondTargets[key] = targetNames
+    end
+    targetNames[targetKey] = true
+end
+
+local function removeBlockBondTarget(block, targetBlock)
+    local key = getBlockBondKey(block)
+    local targetKey = getBlockBondKey(targetBlock)
+    if not key then
+        return
+    end
+
+    local targetNames = blockBondTargets[key]
+    if type(targetNames) ~= "table" then
+        return
+    end
+
+    if targetKey then
+        targetNames[targetKey] = nil
+    end
+
+    if next(targetNames) == nil then
+        blockBondTargets[key] = nil
+    end
+end
+
+local function hasAnyBlockBondTargets(block)
+    return #getBlockBondTargets(block) > 0
+end
+
+local function setBlockBondFrozen(block, frozen)
+    local key = getBlockBondKey(block)
+    if not key then
+        return
+    end
+
+    if frozen then
+        frozenBondBlocks[key] = true
     else
-        blockBondTargets[block] = nil
+        frozenBondBlocks[key] = nil
+    end
+end
+
+local function isBlockBondFrozen(block)
+    local key = getBlockBondKey(block)
+    return key ~= nil and frozenBondBlocks[key] == true
+end
+
+local function setAssemblyBondFrozen(memberStates, frozen)
+    for _, memberState in ipairs(memberStates or {}) do
+        setBlockBondFrozen(memberState.object, frozen)
     end
 end
 
@@ -1243,7 +1340,7 @@ local function removeBlockBonds(block)
                 then
                     local otherBlock = child.Part0 == block and child.Part1 or child.Part0
                     if isBlockPart(otherBlock) then
-                        setBlockBondTarget(otherBlock, nil)
+                        removeBlockBondTarget(otherBlock, block)
                     end
                     child:Destroy()
                 end
@@ -1251,7 +1348,7 @@ local function removeBlockBonds(block)
         end
     end
 
-    setBlockBondTarget(block, nil)
+    removeBlockBondTarget(block, nil)
     block.Anchored = false
 end
 
@@ -1307,18 +1404,15 @@ local function getBondedBlocks(rootBlock)
 
     while #pending > 0 do
         local block = table.remove(pending)
-        if block and block.Parent and not visited[block] then
-            visited[block] = true
+        local blockKey = getBlockBondKey(block)
+        if block and block.Parent and blockKey and not visited[blockKey] then
+            visited[blockKey] = true
             table.insert(blocks, block)
 
-            local target = blockBondTargets[block]
-            if isBlockPart(target) and target.Parent and not visited[target] then
-                table.insert(pending, target)
-            end
-
-            for object, targetBlock in pairs(blockBondTargets) do
-                if object.Parent and isBlockPart(object) and targetBlock == block and not visited[object] then
-                    table.insert(pending, object)
+            for _, target in ipairs(getBlockBondTargets(block)) do
+                local targetKey = getBlockBondKey(target)
+                if targetKey and not visited[targetKey] then
+                    table.insert(pending, target)
                 end
             end
         end
@@ -1335,6 +1429,26 @@ local function getCarryAssemblyMembers(rootObject)
         end
     end
     return { rootObject }
+end
+
+local function getCarryRootObject(rootObject)
+    if not isBlockPart(rootObject) then
+        return rootObject
+    end
+
+    local bondedBlocks = getBondedBlocks(rootObject)
+    if #bondedBlocks == 0 then
+        return rootObject
+    end
+
+    for _, block in ipairs(bondedBlocks) do
+        local phase = getBlockCoatingPhase(block)
+        if phase == "Set" or phase == "Coated" then
+            return block
+        end
+    end
+
+    return bondedBlocks[1]
 end
 
 local function captureAssemblyRelativeCFrames(rootObject)
@@ -1463,8 +1577,31 @@ local function getNearestBondTarget(block)
     return nil, nil
 end
 
+local function hasResidueBondBetween(blockA, blockB)
+    if not isBlockPart(blockA) or not isBlockPart(blockB) then
+        return false
+    end
+
+    for _, parent in ipairs({ blockA, blockB }) do
+        for _, child in ipairs(parent:GetChildren()) do
+            if child:IsA("WeldConstraint")
+                and child.Name == RESIDUE_BOND_NAME
+                and ((child.Part0 == blockA and child.Part1 == blockB)
+                    or (child.Part0 == blockB and child.Part1 == blockA))
+            then
+                return true
+            end
+        end
+    end
+
+    return false
+end
+
 local function trySetBlockBond(block)
     if not isBlockPart(block) then
+        return false
+    end
+    if isBlockBondFrozen(block) then
         return false
     end
 
@@ -1472,6 +1609,9 @@ local function trySetBlockBond(block)
     local phase = getBlockCoatingPhase(block)
     local targetKind, target = getNearestBondTarget(block)
     if not targetKind or not target then
+        return false
+    end
+    if targetKind == "Block" and isBlockBondFrozen(target) then
         return false
     end
 
@@ -1488,23 +1628,35 @@ local function trySetBlockBond(block)
         return false
     end
 
-    removeBlockBonds(block)
     if targetKind == "Terrain" then
-        block.Anchored = true
-        setBlockBondTarget(block, nil)
+        if should_mark_set then
+            state:SetAttribute("CoatingPhase", "Set")
+            refreshBlockAppearance(block)
+        end
+        if not hasAnyBlockBondTargets(block) and block.Anchored then
+            return true
+        end
+
+        if not hasAnyBlockBondTargets(block) then
+            removeBlockBonds(block)
+            block.Anchored = true
+        end
     else
+        if should_mark_set then
+            state:SetAttribute("CoatingPhase", "Set")
+            refreshBlockAppearance(block)
+        end
+        if hasBlockBondTarget(block, target) and hasResidueBondBetween(block, target) then
+            return true
+        end
+
         local bond = Instance.new("WeldConstraint")
         bond.Name = RESIDUE_BOND_NAME
         bond.Part0 = bond_owner
         bond.Part1 = bond_other
         bond.Parent = bond_owner
-        setBlockBondTarget(block, target)
-        setBlockBondTarget(target, block)
-    end
-
-    if should_mark_set then
-        state:SetAttribute("CoatingPhase", "Set")
-        refreshBlockAppearance(block)
+        addBlockBondTarget(block, target)
+        addBlockBondTarget(target, block)
     end
     return true
 end
@@ -1630,8 +1782,8 @@ local function rebuildTrackedCarryables()
                     local part0 = child.Part0
                     local part1 = child.Part1
                     if isBlockPart(part0) and isBlockPart(part1) then
-                        setBlockBondTarget(part0, part1)
-                        setBlockBondTarget(part1, part0)
+                        addBlockBondTarget(part0, part1)
+                        addBlockBondTarget(part1, part0)
                     end
                 end
             end
@@ -1697,7 +1849,101 @@ local function setHeldObjectForPlayer(player, object)
     heldObject.Value = object
 end
 
-local function createPlacementState(object, startPos, targetPos, duration)
+local function getHeldAssemblyFolder(player)
+    local playerState = getOrCreatePlayerState(player)
+    return getOrCreateChild(playerState, "Folder", "HeldAssembly")
+end
+
+local function readStoredAssemblyMemberStates(folder)
+    local memberStates = {}
+    for _, memberFolder in ipairs(folder:GetChildren()) do
+        if memberFolder:IsA("Folder") then
+            local memberRef = memberFolder:FindFirstChild("Object")
+            local relativeCFrame = memberFolder:FindFirstChild("RelativeCFrame")
+            local member = memberRef and memberRef.Value or nil
+            if member and member.Parent and relativeCFrame then
+                table.insert(memberStates, {
+                    object = member,
+                    relativeCFrame = relativeCFrame.Value,
+                })
+            end
+        end
+    end
+    return memberStates
+end
+
+local function getHeldAssemblyState(player, object)
+    local folder = getHeldAssemblyFolder(player)
+    local objectRef = folder:FindFirstChild("Object")
+    local storedObject = objectRef and objectRef.Value or nil
+    if storedObject and storedObject.Parent and (object == nil or storedObject == object or object.Parent) then
+        return {
+            object = storedObject,
+            memberStates = readStoredAssemblyMemberStates(folder),
+        }
+    end
+    return nil
+end
+
+local function popHeldAssemblyState(player, object)
+    local state = getHeldAssemblyState(player, object)
+    if state then
+        local folder = getHeldAssemblyFolder(player)
+        for _, child in ipairs(folder:GetChildren()) do
+            child:Destroy()
+        end
+    end
+    return state
+end
+
+local function clearHeldAssemblyState(player)
+    local state = popHeldAssemblyState(player)
+    if state then
+        setAssemblyBondFrozen(state.memberStates, false)
+    end
+end
+
+local function setHeldAssemblyState(player, object, memberStates)
+    clearHeldAssemblyState(player)
+    local frozenStates = memberStates or captureAssemblyRelativeCFrames(object)
+    local folder = getHeldAssemblyFolder(player)
+    local objectRef = getOrCreateChild(folder, "ObjectValue", "Object")
+    objectRef.Value = object
+    for index, memberState in ipairs(frozenStates) do
+        local memberFolder = Instance.new("Folder")
+        memberFolder.Name = "Member_" .. index
+        memberFolder.Parent = folder
+        local memberRef = getOrCreateChild(memberFolder, "ObjectValue", "Object")
+        local relativeCFrame = getOrCreateChild(memberFolder, "CFrameValue", "RelativeCFrame")
+        memberRef.Value = memberState.object
+        relativeCFrame.Value = memberState.relativeCFrame
+    end
+    setAssemblyBondFrozen(frozenStates, true)
+    return frozenStates
+end
+
+local function reconcileBlockAssembly(memberStates)
+    local blocks = {}
+    for _, memberState in ipairs(memberStates or {}) do
+        local member = memberState.object
+        if member and member.Parent and isBlockPart(member) then
+            table.insert(blocks, member)
+        end
+    end
+
+    for _, block in ipairs(blocks) do
+        if getBlockCoatingPhase(block) == "Coated" then
+            trySetBlockBond(block)
+        end
+    end
+    for _, block in ipairs(blocks) do
+        if getBlockCoatingPhase(block) ~= "Coated" then
+            trySetBlockBond(block)
+        end
+    end
+end
+
+local function createPlacementState(object, startPos, targetPos, duration, memberStates)
     local placementId = nextServerCounter("NextPlacementId")
     local folder = getOrCreateChild(serverPlacementState, "Folder", "Placement_" .. placementId)
     local objectRef = getOrCreateChild(folder, "ObjectValue", "Object")
@@ -1710,7 +1956,9 @@ local function createPlacementState(object, startPos, targetPos, duration)
     for _, child in ipairs(membersFolder:GetChildren()) do
         child:Destroy()
     end
-    for index, memberState in ipairs(captureAssemblyRelativeCFrames(object)) do
+    local frozenStates = memberStates or captureAssemblyRelativeCFrames(object)
+    setAssemblyBondFrozen(frozenStates, true)
+    for index, memberState in ipairs(frozenStates) do
         local memberFolder = Instance.new("Folder")
         memberFolder.Name = "Member_" .. index
         memberFolder.Parent = membersFolder
@@ -1770,7 +2018,7 @@ local function getPlacementMemberStates(placement)
     return memberStates
 end
 
-local function prepareObjectForHolding(object)
+local function prepareObjectForHolding(object, memberStates)
     local creatureState = getCreatureStateForPart(object)
     if creatureState then
         setCreatureMotionMode(creatureState, "Held")
@@ -1781,25 +2029,31 @@ local function prepareObjectForHolding(object)
 
     object.Anchored = true
     object.CanCollide = false
-    for _, member in ipairs(getCarryAssemblyMembers(object)) do
-        if member ~= object then
-            member.CanCollide = false
+    for _, memberState in ipairs(memberStates or captureAssemblyRelativeCFrames(object)) do
+        local member = memberState.object
+        if member and member.Parent then
+            if member ~= object then
+                member.CanCollide = false
+            end
+            member.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
+            member.AssemblyAngularVelocity = Vector3.new(0, 0, 0)
         end
-        member.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
-        member.AssemblyAngularVelocity = Vector3.new(0, 0, 0)
     end
 end
 
-local function restoreObjectAfterPlacement(object)
+local function restoreObjectAfterPlacement(object, memberStates)
     local creatureState = getCreatureStateForPart(object)
     if creatureState then
         setCreatureMotionMode(creatureState, "AI")
         return
     end
 
-    object.Anchored = false
-    for _, member in ipairs(getCarryAssemblyMembers(object)) do
-        member.CanCollide = true
+    for _, memberState in ipairs(memberStates or captureAssemblyRelativeCFrames(object)) do
+        local member = memberState.object
+        if member and member.Parent then
+            member.Anchored = false
+            member.CanCollide = true
+        end
     end
 end
 
@@ -1817,6 +2071,7 @@ local function dropHeldObject(player)
         )
     end
     restoreObjectAfterPlacement(heldObject)
+    clearHeldAssemblyState(player)
     setHeldObjectForPlayer(player, nil)
 end
 
@@ -1890,6 +2145,7 @@ releaseHeldObjectReferences = function(object)
     for _, player in ipairs(Players:GetPlayers()) do
         local heldObject = getHeldObjectForPlayer(player)
         if heldObject == object then
+            clearHeldAssemblyState(player)
             setHeldObjectForPlayer(player, nil)
             player:SetAttribute("LastActionResult", "ResetAfterFall")
         end
@@ -1907,6 +2163,7 @@ releaseHeldObjectReferences = function(object)
             end
         end
         if shouldDestroyPlacement then
+            setAssemblyBondFrozen(getPlacementMemberStates(placement), false)
             placement:Destroy()
         end
     end
@@ -2002,13 +2259,17 @@ local function pickupObject(player, inputData)
         return
     end
 
-    prepareObjectForHolding(object)
-    setHeldObjectForPlayer(player, object)
+    local carryRoot = getCarryRootObject(object)
+    local memberStates = captureAssemblyRelativeCFrames(carryRoot)
+    prepareObjectForHolding(carryRoot, memberStates)
+    setHeldObjectForPlayer(player, carryRoot)
+    setHeldAssemblyState(player, carryRoot, memberStates)
     player:SetAttribute("LastActionResult", "PickupSuccess")
 end
 
 local function positionOccupied(player, targetRootCFrame, object)
-    local memberStates = captureAssemblyRelativeCFrames(object)
+    local heldState = getHeldAssemblyState(player, object)
+    local memberStates = heldState and heldState.memberStates or captureAssemblyRelativeCFrames(object)
     local params = OverlapParams.new()
     params.FilterType = Enum.RaycastFilterType.Exclude
     params.FilterDescendantsInstances = { player.Character }
@@ -2079,17 +2340,19 @@ local function placeHeldObject(player, inputData)
     end
 
     local creatureState = getCreatureStateForPart(object)
+    local heldState = popHeldAssemblyState(player, object)
+    local memberStates = heldState and heldState.memberStates or captureAssemblyRelativeCFrames(object)
     if creatureState then
         setCreatureMotionMode(creatureState, "Placed")
     else
-        object.Anchored = true
-        object.CanCollide = false
-        for _, member in ipairs(getCarryAssemblyMembers(object)) do
-            if member ~= object then
+        for _, memberState in ipairs(memberStates) do
+            local member = memberState.object
+            if member and member.Parent then
+                member.Anchored = true
                 member.CanCollide = false
+                member.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
+                member.AssemblyAngularVelocity = Vector3.new(0, 0, 0)
             end
-            member.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
-            member.AssemblyAngularVelocity = Vector3.new(0, 0, 0)
         end
     end
     object.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
@@ -2098,7 +2361,7 @@ local function placeHeldObject(player, inputData)
     local startRootCFrame = object.CFrame
     setHeldObjectForPlayer(player, nil)
 
-    createPlacementState(object, startRootCFrame, targetRootCFrame, getObjectPlacementDuration(object))
+    createPlacementState(object, startRootCFrame, targetRootCFrame, getObjectPlacementDuration(object), memberStates)
 
     player:SetAttribute("LastActionResult", "PlaceSuccess")
 end
@@ -2170,6 +2433,7 @@ RunService.Heartbeat:Connect(function(dt)
         local objectRef = getPlacementObjectRef(placement)
         local object = objectRef and objectRef.Value or nil
         if not object or not object.Parent then
+            setAssemblyBondFrozen(getPlacementMemberStates(placement), false)
             placement:Destroy()
         else
         local elapsed = (placement:GetAttribute("Elapsed") or 0) + dt
@@ -2184,10 +2448,17 @@ RunService.Heartbeat:Connect(function(dt)
         applyAssemblyRootCFrame(object, startCFrame:Lerp(targetCFrame, t), getPlacementMemberStates(placement))
 
         if alpha >= 1 then
-            restoreObjectAfterPlacement(object)
+            local placementMemberStates = getPlacementMemberStates(placement)
+            restoreObjectAfterPlacement(object, placementMemberStates)
+            setAssemblyBondFrozen(placementMemberStates, false)
             if object:GetAttribute("CarryKind") == "Block" then
-                setBlockMetadata(object, object:GetAttribute("ItemColorName"))
-                trySetBlockBond(object)
+                for _, memberState in ipairs(placementMemberStates) do
+                    local member = memberState.object
+                    if member and member.Parent and member:GetAttribute("CarryKind") == "Block" then
+                        setBlockMetadata(member, member:GetAttribute("ItemColorName"))
+                    end
+                end
+                reconcileBlockAssembly(placementMemberStates)
             end
             placement:Destroy()
         else
@@ -2280,7 +2551,7 @@ RunService.Heartbeat:Connect(function(dt)
         if not object.Parent then
             trackedCarryables[object] = nil
         else
-            if isBlockPart(object) then
+            if isBlockPart(object) and getBlockCoatingPhase(object) == "Coated" then
                 trySetBlockBond(object)
             end
             if object.Position.Y < OUT_OF_BOUNDS_Y then
