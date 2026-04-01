@@ -69,6 +69,7 @@ pub struct InstanceData {
     pub bool_value_data: Option<BoolValueData>,
     pub string_value_data: Option<StringValueData>,
     pub object_value_data: Option<ObjectValueData>,
+    pub cframe_value_data: Option<CFrameValueData>,
     pub remote_event_data: Option<RemoteEventData>,
     pub body_velocity_data: Option<BodyVelocityData>,
     pub body_force_data: Option<BodyForceData>,
@@ -431,6 +432,21 @@ impl Default for ObjectValueData {
     fn default() -> Self {
         Self {
             value: None,
+            changed: create_signal("Changed"),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct CFrameValueData {
+    pub value: CFrame,
+    pub changed: RBXScriptSignal,
+}
+
+impl Default for CFrameValueData {
+    fn default() -> Self {
+        Self {
+            value: CFrame::identity(),
             changed: create_signal("Changed"),
         }
     }
@@ -828,6 +844,7 @@ impl InstanceData {
             bool_value_data: None,
             string_value_data: None,
             object_value_data: None,
+            cframe_value_data: None,
             remote_event_data: None,
             body_velocity_data: None,
             body_force_data: None,
@@ -952,6 +969,12 @@ impl InstanceData {
     pub fn new_object_value(name: &str) -> Self {
         let mut inst = Self::new(ClassName::ObjectValue, name);
         inst.object_value_data = Some(ObjectValueData::default());
+        inst
+    }
+
+    pub fn new_cframe_value(name: &str) -> Self {
+        let mut inst = Self::new(ClassName::CFrameValue, name);
+        inst.cframe_value_data = Some(CFrameValueData::default());
         inst
     }
 
@@ -1427,6 +1450,12 @@ impl Instance {
         if let Some(object_data) = &data.object_value_data {
             new_data.object_value_data = Some(ObjectValueData {
                 value: object_data.value.clone(),
+                changed: create_signal("Changed"),
+            });
+        }
+        if let Some(cframe_data) = &data.cframe_value_data {
+            new_data.cframe_value_data = Some(CFrameValueData {
+                value: cframe_data.value,
                 changed: create_signal("Changed"),
             });
         }
@@ -2216,7 +2245,8 @@ impl UserData for Instance {
                 .or_else(|| data.number_value_data.as_ref().map(|v| v.changed.clone()))
                 .or_else(|| data.bool_value_data.as_ref().map(|v| v.changed.clone()))
                 .or_else(|| data.string_value_data.as_ref().map(|v| v.changed.clone()))
-                .or_else(|| data.object_value_data.as_ref().map(|v| v.changed.clone())))
+                .or_else(|| data.object_value_data.as_ref().map(|v| v.changed.clone()))
+                .or_else(|| data.cframe_value_data.as_ref().map(|v| v.changed.clone())))
         });
 
         fields.add_field_method_get("Value", |lua, this| {
@@ -2241,6 +2271,9 @@ impl UserData for Instance {
                     }
                 }
                 return Ok(Value::Nil);
+            }
+            if let Some(v) = &data.cframe_value_data {
+                return Ok(Value::UserData(lua.create_userdata(v.value)?));
             }
             Ok(Value::Nil)
         });
@@ -2292,6 +2325,22 @@ impl UserData for Instance {
                             return Err(mlua::Error::runtime(
                                 "ObjectValue.Value expects Instance or nil",
                             ));
+                        }
+                    }
+                    Some(v.changed.clone())
+                } else if let Some(v) = &mut data.cframe_value_data {
+                    match &value {
+                        Value::UserData(ud) => {
+                            if let Ok(cf) = ud.borrow::<CFrame>() {
+                                v.value = *cf;
+                            } else {
+                                return Err(mlua::Error::runtime(
+                                    "CFrameValue.Value expects CFrame",
+                                ));
+                            }
+                        }
+                        _ => {
+                            return Err(mlua::Error::runtime("CFrameValue.Value expects CFrame"));
                         }
                     }
                     Some(v.changed.clone())
@@ -3942,6 +3991,9 @@ pub fn register_instance(lua: &Lua) -> Result<()> {
                     }
                     "ObjectValue" => {
                         Instance::from_data(InstanceData::new_object_value("ObjectValue"))
+                    }
+                    "CFrameValue" => {
+                        Instance::from_data(InstanceData::new_cframe_value("CFrameValue"))
                     }
                     "BodyVelocity" => {
                         Instance::from_data(InstanceData::new_body_velocity("BodyVelocity"))

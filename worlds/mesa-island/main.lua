@@ -379,6 +379,32 @@ local function parsePosition(pos)
     return Vector3.new(x, y, z)
 end
 
+local function parseRotationDegrees(rotation)
+    if rotation == nil then
+        return nil
+    end
+    if type(rotation) == "number" then
+        if rotation ~= rotation then
+            return nil
+        end
+        return 0, tonumber(rotation), 0
+    end
+    if type(rotation) ~= "table" then
+        return nil
+    end
+
+    local pitch = tonumber(rotation.pitch or rotation.x or rotation[1] or 0)
+    local yaw = tonumber(rotation.yaw or rotation.y or rotation[2] or 0)
+    local roll = tonumber(rotation.roll or rotation.z or rotation[3] or 0)
+    if not pitch or not yaw or not roll then
+        return nil
+    end
+    if pitch ~= pitch or yaw ~= yaw or roll ~= roll then
+        return nil
+    end
+    return pitch, yaw, roll
+end
+
 local function canReach(player, worldPosition, maxDistance)
     local hrp = getHumanoidRootPart(player)
     if not hrp then
@@ -1301,6 +1327,73 @@ local function getBondedBlocks(rootBlock)
     return blocks
 end
 
+local function getCarryAssemblyMembers(rootObject)
+    if isBlockPart(rootObject) then
+        local bondedBlocks = getBondedBlocks(rootObject)
+        if #bondedBlocks > 0 then
+            return bondedBlocks
+        end
+    end
+    return { rootObject }
+end
+
+local function captureAssemblyRelativeCFrames(rootObject)
+    local rootCFrame = rootObject.CFrame
+    local members = {}
+    for _, member in ipairs(getCarryAssemblyMembers(rootObject)) do
+        if member and member.Parent then
+            table.insert(members, {
+                object = member,
+                relativeCFrame = rootCFrame:ToObjectSpace(member.CFrame),
+            })
+        end
+    end
+    return members
+end
+
+local function applyAssemblyRootCFrame(rootObject, rootCFrame, memberStates)
+    if memberStates then
+        for _, memberState in ipairs(memberStates) do
+            local member = memberState.object
+            if member and member.Parent then
+                member.CFrame = rootCFrame * memberState.relativeCFrame
+                member.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
+                member.AssemblyAngularVelocity = Vector3.new(0, 0, 0)
+            end
+        end
+    else
+        rootObject.CFrame = rootCFrame
+        rootObject.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
+        rootObject.AssemblyAngularVelocity = Vector3.new(0, 0, 0)
+
+        local members = captureAssemblyRelativeCFrames(rootObject)
+        for _, memberState in ipairs(members) do
+            local member = memberState.object
+            if member and member.Parent and member ~= rootObject then
+                member.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
+                member.AssemblyAngularVelocity = Vector3.new(0, 0, 0)
+            end
+        end
+    end
+end
+
+local function getCurrentRootRotationCFrame(object)
+    local pitch, yaw, roll = object.CFrame:ToOrientation()
+    return CFrame.fromOrientation(pitch, yaw, roll)
+end
+
+local function getTargetRootCFrame(object, targetPosition, rotation)
+    local rotationCFrame = getCurrentRootRotationCFrame(object)
+    if rotation ~= nil then
+        local pitch, yaw, roll = parseRotationDegrees(rotation)
+        if pitch == nil then
+            return nil
+        end
+        rotationCFrame = CFrame.fromOrientation(math.rad(pitch), math.rad(yaw), math.rad(roll))
+    end
+    return CFrame.new(targetPosition) * rotationCFrame
+end
+
 local function resetFallenBlockGroup(block)
     local bondedBlocks = getBondedBlocks(block)
     if #bondedBlocks == 0 then
@@ -1609,8 +1702,23 @@ local function createPlacementState(object, startPos, targetPos, duration)
     local folder = getOrCreateChild(serverPlacementState, "Folder", "Placement_" .. placementId)
     local objectRef = getOrCreateChild(folder, "ObjectValue", "Object")
     objectRef.Value = object
-    folder:SetAttribute("StartPos", startPos)
-    folder:SetAttribute("TargetPos", targetPos)
+    local startCFrameValue = getOrCreateChild(folder, "CFrameValue", "StartCFrame")
+    local targetCFrameValue = getOrCreateChild(folder, "CFrameValue", "TargetCFrame")
+    local membersFolder = getOrCreateChild(folder, "Folder", "Members")
+    startCFrameValue.Value = startPos
+    targetCFrameValue.Value = targetPos
+    for _, child in ipairs(membersFolder:GetChildren()) do
+        child:Destroy()
+    end
+    for index, memberState in ipairs(captureAssemblyRelativeCFrames(object)) do
+        local memberFolder = Instance.new("Folder")
+        memberFolder.Name = "Member_" .. index
+        memberFolder.Parent = membersFolder
+        local memberRef = getOrCreateChild(memberFolder, "ObjectValue", "Object")
+        local relativeCFrame = getOrCreateChild(memberFolder, "CFrameValue", "RelativeCFrame")
+        memberRef.Value = memberState.object
+        relativeCFrame.Value = memberState.relativeCFrame
+    end
     folder:SetAttribute("Elapsed", 0)
     folder:SetAttribute("Duration", duration)
     return folder
@@ -1636,15 +1744,49 @@ local function getObjectPlacementDuration(object)
     return DEFAULT_PLACE_DURATION
 end
 
-local function prepareObjectForHolding(object)
-    object.Anchored = true
-    object.CanCollide = false
-    object.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
-    object.AssemblyAngularVelocity = Vector3.new(0, 0, 0)
+local function getPlacementMemberStates(placement)
+    local membersFolder = placement:FindFirstChild("Members")
+    if not membersFolder then
+        local objectRef = getPlacementObjectRef(placement)
+        local object = objectRef and objectRef.Value or nil
+        if object and object.Parent then
+            return captureAssemblyRelativeCFrames(object)
+        end
+        return {}
+    end
 
+    local memberStates = {}
+    for _, memberFolder in ipairs(membersFolder:GetChildren()) do
+        local memberRef = memberFolder:FindFirstChild("Object")
+        local relativeCFrame = memberFolder:FindFirstChild("RelativeCFrame")
+        local member = memberRef and memberRef.Value or nil
+        if member and member.Parent and relativeCFrame then
+            table.insert(memberStates, {
+                object = member,
+                relativeCFrame = relativeCFrame.Value,
+            })
+        end
+    end
+    return memberStates
+end
+
+local function prepareObjectForHolding(object)
     local creatureState = getCreatureStateForPart(object)
     if creatureState then
         setCreatureMotionMode(creatureState, "Held")
+        object.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
+        object.AssemblyAngularVelocity = Vector3.new(0, 0, 0)
+        return
+    end
+
+    object.Anchored = true
+    object.CanCollide = false
+    for _, member in ipairs(getCarryAssemblyMembers(object)) do
+        if member ~= object then
+            member.CanCollide = false
+        end
+        member.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
+        member.AssemblyAngularVelocity = Vector3.new(0, 0, 0)
     end
 end
 
@@ -1656,7 +1798,9 @@ local function restoreObjectAfterPlacement(object)
     end
 
     object.Anchored = false
-    object.CanCollide = true
+    for _, member in ipairs(getCarryAssemblyMembers(object)) do
+        member.CanCollide = true
+    end
 end
 
 local function dropHeldObject(player)
@@ -1667,7 +1811,10 @@ local function dropHeldObject(player)
 
     local hrp = getHumanoidRootPart(player)
     if hrp then
-        heldObject.Position = hrp.Position + getObjectHoldOffset(heldObject)
+        applyAssemblyRootCFrame(
+            heldObject,
+            CFrame.new(hrp.Position + getObjectHoldOffset(heldObject)) * getCurrentRootRotationCFrame(heldObject)
+        )
     end
     restoreObjectAfterPlacement(heldObject)
     setHeldObjectForPlayer(player, nil)
@@ -1750,7 +1897,16 @@ releaseHeldObjectReferences = function(object)
 
     for _, placement in ipairs(serverPlacementState:GetChildren()) do
         local objectRef = getPlacementObjectRef(placement)
-        if objectRef and objectRef.Value == object then
+        local shouldDestroyPlacement = objectRef and objectRef.Value == object
+        if not shouldDestroyPlacement then
+            for _, memberState in ipairs(getPlacementMemberStates(placement)) do
+                if memberState.object == object then
+                    shouldDestroyPlacement = true
+                    break
+                end
+            end
+        end
+        if shouldDestroyPlacement then
             placement:Destroy()
         end
     end
@@ -1851,20 +2007,21 @@ local function pickupObject(player, inputData)
     player:SetAttribute("LastActionResult", "PickupSuccess")
 end
 
-local function positionOccupied(player, targetPosition, object)
-    local bondedBlocks = getBondedBlocks(object)
-    local offset = targetPosition - object.Position
+local function positionOccupied(player, targetRootCFrame, object)
+    local memberStates = captureAssemblyRelativeCFrames(object)
     local params = OverlapParams.new()
     params.FilterType = Enum.RaycastFilterType.Exclude
     params.FilterDescendantsInstances = { player.Character }
-    for _, bondedBlock in ipairs(bondedBlocks) do
-        table.insert(params.FilterDescendantsInstances, bondedBlock)
+    for _, memberState in ipairs(memberStates) do
+        table.insert(params.FilterDescendantsInstances, memberState.object)
     end
 
-    for _, bondedBlock in ipairs(bondedBlocks) do
+    for _, memberState in ipairs(memberStates) do
+        local projectedCFrame = targetRootCFrame * memberState.relativeCFrame
+        local member = memberState.object
         local hits = Workspace:GetPartBoundsInBox(
-            CFrame.new(bondedBlock.Position + offset),
-            bondedBlock.Size,
+            projectedCFrame,
+            member.Size,
             params
         )
 
@@ -1895,6 +2052,11 @@ local function placeHeldObject(player, inputData)
         player:SetAttribute("LastActionResult", "PlaceFailed:InvalidPosition")
         return
     end
+    local targetRootCFrame = getTargetRootCFrame(object, targetPosition, inputData.rotation)
+    if not targetRootCFrame then
+        player:SetAttribute("LastActionResult", "PlaceFailed:InvalidRotation")
+        return
+    end
     if not canReach(player, targetPosition, PLACE_RANGE) then
         player:SetAttribute("LastActionResult", "PlaceFailed:OutOfRange")
         return
@@ -1911,7 +2073,7 @@ local function placeHeldObject(player, inputData)
         end
     end
 
-    if positionOccupied(player, targetPosition, object) then
+    if positionOccupied(player, targetRootCFrame, object) then
         player:SetAttribute("LastActionResult", "PlaceFailed:Occupied")
         return
     end
@@ -1922,14 +2084,21 @@ local function placeHeldObject(player, inputData)
     else
         object.Anchored = true
         object.CanCollide = false
+        for _, member in ipairs(getCarryAssemblyMembers(object)) do
+            if member ~= object then
+                member.CanCollide = false
+            end
+            member.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
+            member.AssemblyAngularVelocity = Vector3.new(0, 0, 0)
+        end
     end
     object.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
     object.AssemblyAngularVelocity = Vector3.new(0, 0, 0)
 
-    local startPos = object.Position
+    local startRootCFrame = object.CFrame
     setHeldObjectForPlayer(player, nil)
 
-    createPlacementState(object, startPos, targetPosition, getObjectPlacementDuration(object))
+    createPlacementState(object, startRootCFrame, targetRootCFrame, getObjectPlacementDuration(object))
 
     player:SetAttribute("LastActionResult", "PlaceSuccess")
 end
@@ -1989,9 +2158,10 @@ RunService.Heartbeat:Connect(function(dt)
         local heldObject = getHeldObjectForPlayer(player)
         local hrp = getHumanoidRootPart(player)
         if hrp and heldObject then
-            heldObject.Position = hrp.Position + getObjectHoldOffset(heldObject)
-            heldObject.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
-            heldObject.AssemblyAngularVelocity = Vector3.new(0, 0, 0)
+            applyAssemblyRootCFrame(
+                heldObject,
+                CFrame.new(hrp.Position + getObjectHoldOffset(heldObject)) * getCurrentRootRotationCFrame(heldObject)
+            )
         end
     end
 
@@ -2004,12 +2174,14 @@ RunService.Heartbeat:Connect(function(dt)
         else
         local elapsed = (placement:GetAttribute("Elapsed") or 0) + dt
         local duration = placement:GetAttribute("Duration") or DEFAULT_PLACE_DURATION
-        local startPos = placement:GetAttribute("StartPos") or object.Position
-        local targetPos = placement:GetAttribute("TargetPos") or object.Position
+        local startCFrameValue = placement:FindFirstChild("StartCFrame")
+        local targetCFrameValue = placement:FindFirstChild("TargetCFrame")
+        local startCFrame = startCFrameValue and startCFrameValue.Value or object.CFrame
+        local targetCFrame = targetCFrameValue and targetCFrameValue.Value or object.CFrame
         local alpha = math.min(elapsed / duration, 1)
         -- Smooth ease-out
         local t = 1 - (1 - alpha) * (1 - alpha)
-        object.Position = startPos:Lerp(targetPos, t)
+        applyAssemblyRootCFrame(object, startCFrame:Lerp(targetCFrame, t), getPlacementMemberStates(placement))
 
         if alpha >= 1 then
             restoreObjectAfterPlacement(object)

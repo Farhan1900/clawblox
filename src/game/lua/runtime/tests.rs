@@ -1970,6 +1970,53 @@ fn test_other_value_base_types() {
 }
 
 #[test]
+fn test_cframe_value_value_and_changed_signal_parity() {
+    let mut runtime = test_runtime();
+    runtime
+        .load_script(
+            r#"
+            local cfv = Instance.new("CFrameValue")
+            _G.className = cfv.ClassName
+            _G.initialType = typeof(cfv.Value)
+            _G.changedType = ""
+            _G.changedX = -1
+
+            cfv.Changed:Connect(function(v)
+                _G.changedType = typeof(v)
+                _G.changedX = v.Position.X
+            end)
+
+            cfv.Value = CFrame.new(5, 6, 7) * CFrame.Angles(0, math.rad(90), 0)
+            _G.valueType = typeof(cfv.Value)
+            _G.valueX = cfv.Value.Position.X
+
+            local ok, _err = pcall(function()
+                cfv.Value = Vector3.new(1, 2, 3)
+            end)
+            _G.invalidOk = ok
+        "#,
+        )
+        .expect("Failed to run script");
+
+    let globals = runtime.lua().globals().get::<mlua::Table>("_G").unwrap();
+    let class_name: String = globals.get("className").unwrap();
+    let initial_type: String = globals.get("initialType").unwrap();
+    let changed_type: String = globals.get("changedType").unwrap();
+    let value_type: String = globals.get("valueType").unwrap();
+    let changed_x: f32 = globals.get("changedX").unwrap();
+    let value_x: f32 = globals.get("valueX").unwrap();
+    let invalid_ok: bool = globals.get("invalidOk").unwrap();
+
+    assert_eq!(class_name, "CFrameValue");
+    assert_eq!(initial_type, "CFrame");
+    assert_eq!(changed_type, "CFrame");
+    assert_eq!(value_type, "CFrame");
+    assert!((changed_x - 5.0).abs() < 1e-4);
+    assert!((value_x - 5.0).abs() < 1e-4);
+    assert!(!invalid_ok);
+}
+
+#[test]
 fn test_body_velocity_applies_to_parent_part_velocity() {
     let mut runtime = test_runtime();
     runtime

@@ -23,6 +23,7 @@ pub enum ClassName {
     BoolValue,
     StringValue,
     ObjectValue,
+    CFrameValue,
     // Constraints
     Weld,
     WeldConstraint,
@@ -71,6 +72,7 @@ impl ClassName {
             ClassName::BoolValue => "BoolValue",
             ClassName::StringValue => "StringValue",
             ClassName::ObjectValue => "ObjectValue",
+            ClassName::CFrameValue => "CFrameValue",
             ClassName::Weld => "Weld",
             ClassName::WeldConstraint => "WeldConstraint",
             ClassName::RemoteEvent => "RemoteEvent",
@@ -117,6 +119,7 @@ impl ClassName {
             "BoolValue" => matches!(self, ClassName::BoolValue),
             "StringValue" => matches!(self, ClassName::StringValue),
             "ObjectValue" => matches!(self, ClassName::ObjectValue),
+            "CFrameValue" => matches!(self, ClassName::CFrameValue),
             "ValueBase" => matches!(
                 self,
                 ClassName::IntValue
@@ -124,6 +127,7 @@ impl ClassName {
                     | ClassName::BoolValue
                     | ClassName::StringValue
                     | ClassName::ObjectValue
+                    | ClassName::CFrameValue
             ),
             // Constraints
             "Constraint" => matches!(self, ClassName::Weld | ClassName::WeldConstraint),

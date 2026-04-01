@@ -371,6 +371,267 @@ fn mesa_island_place_checks_full_bonded_assembly_occupancy() {
 }
 
 #[test]
+fn mesa_island_rotated_bonded_placement_rotates_the_full_assembly() {
+    let mut instance = GameInstance::new(Uuid::new_v4(), None);
+    let source = fs::read_to_string(mesa_island_script_path()).expect("failed to read mesa-island");
+    instance.load_script(&source);
+
+    let agent_id = Uuid::new_v4();
+    assert!(instance.add_player(agent_id, "TestPlayer"));
+    let user_id = *instance.players.get(&agent_id).expect("missing player");
+    let hrp_id = *instance
+        .player_hrp_ids
+        .get(&agent_id)
+        .expect("missing humanoid root part");
+
+    for _ in 0..10 {
+        instance.tick();
+    }
+
+    let hrp_pos = instance
+        .physics
+        .get_character_position(hrp_id)
+        .expect("missing player position");
+    let block_x = hrp_pos[0] + 2.0;
+    let block_y = hrp_pos[1];
+    let block_z = hrp_pos[2];
+    let place_x = hrp_pos[0] + 4.0;
+    let place_z = hrp_pos[2];
+
+    {
+        let runtime = instance.lua_runtime.as_ref().expect("runtime missing");
+        runtime
+            .lua()
+            .load(&format!(
+                r#"
+                Workspace.Gravity = 0
+
+                local block = Workspace.Block_1
+                local target = Workspace.Block_2
+                block.Position = Vector3.new({block_x}, {block_y}, {block_z})
+                target.Position = Vector3.new({}, {block_y}, {block_z})
+                block.CanCollide = false
+                target.CanCollide = false
+                block.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
+                target.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
+
+                game:GetService("ServerStorage")
+                    .MesaIslandState
+                    .Blocks
+                    .Block_1
+                    :SetAttribute("CoatingPhase", "Coated")
+            "#,
+                block_x + 0.74
+            ))
+            .exec()
+            .expect("failed to configure rotated placement scenario");
+    }
+
+    for _ in 0..30 {
+        instance.tick();
+    }
+
+    instance.queue_agent_input(
+        user_id,
+        "Pickup".to_string(),
+        serde_json::json!({ "position": [block_x, block_y, block_z] }),
+    );
+
+    for _ in 0..10 {
+        instance.tick();
+    }
+
+    instance.queue_agent_input(
+        user_id,
+        "Place".to_string(),
+        serde_json::json!({
+            "position": [place_x, block_y, place_z],
+            "rotation": { "yaw": 90.0, "pitch": 0.0, "roll": 0.0 }
+        }),
+    );
+
+    for _ in 0..20 {
+        instance.tick();
+    }
+
+    let (place_result, block_x_after, block_z_after, target_x_after, target_z_after, still_bonded): (
+        String,
+        f64,
+        f64,
+        f64,
+        f64,
+        bool,
+    ) = {
+        let runtime = instance.lua_runtime.as_ref().expect("runtime missing");
+        runtime
+            .lua()
+            .load(
+                r#"
+                local player = game:GetService("Players"):GetPlayers()[1]
+                local block = Workspace.Block_1
+                local target = Workspace.Block_2
+                return player:GetAttribute("LastActionResult"),
+                    block.Position.X, block.Position.Z,
+                    target.Position.X, target.Position.Z,
+                    block:FindFirstChild("SkuttlerBond") ~= nil
+            "#,
+            )
+            .eval()
+            .expect("failed to inspect rotated bonded placement")
+    };
+
+    let root_dx = (block_x_after - place_x as f64).abs();
+    let root_dz = (block_z_after - place_z as f64).abs();
+    let partner_dx = (target_x_after - block_x_after).abs();
+    let partner_dz = (target_z_after - block_z_after).abs();
+
+    assert_eq!(place_result, "PlaceSuccess");
+    assert!(still_bonded, "rotated placement should preserve the bonded assembly");
+    assert!(
+        root_dx < 0.25 && root_dz < 0.25,
+        "placed root block should land near the requested root position; got ({block_x_after}, {block_z_after}) vs ({place_x}, {place_z})"
+    );
+    assert!(
+        partner_dx < 0.2 && (partner_dz - 0.74).abs() < 0.25,
+        "rotated placement should swing the bonded partner around the root; root=({block_x_after}, {block_z_after}), partner=({target_x_after}, {target_z_after})"
+    );
+}
+
+#[test]
+fn mesa_island_rotated_bonded_placement_checks_rotated_partner_occupancy() {
+    let mut instance = GameInstance::new(Uuid::new_v4(), None);
+    let source = fs::read_to_string(mesa_island_script_path()).expect("failed to read mesa-island");
+    instance.load_script(&source);
+
+    let agent_id = Uuid::new_v4();
+    assert!(instance.add_player(agent_id, "TestPlayer"));
+    let user_id = *instance.players.get(&agent_id).expect("missing player");
+    let hrp_id = *instance
+        .player_hrp_ids
+        .get(&agent_id)
+        .expect("missing humanoid root part");
+    let player_state_key = user_id.to_string();
+
+    for _ in 0..10 {
+        instance.tick();
+    }
+
+    let hrp_pos = instance
+        .physics
+        .get_character_position(hrp_id)
+        .expect("missing player position");
+    let block_x = hrp_pos[0] + 2.0;
+    let block_y = hrp_pos[1];
+    let block_z = hrp_pos[2];
+    let place_x = hrp_pos[0] + 4.0;
+    let place_z = hrp_pos[2];
+
+    {
+        let runtime = instance.lua_runtime.as_ref().expect("runtime missing");
+        runtime
+            .lua()
+            .load(&format!(
+                r#"
+                Workspace.Gravity = 0
+
+                local block = Workspace.Block_1
+                local target = Workspace.Block_2
+                block.Position = Vector3.new({block_x}, {block_y}, {block_z})
+                target.Position = Vector3.new({}, {block_y}, {block_z})
+                block.CanCollide = false
+                target.CanCollide = false
+                block.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
+                target.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
+
+                game:GetService("ServerStorage")
+                    .MesaIslandState
+                    .Blocks
+                    .Block_1
+                    :SetAttribute("CoatingPhase", "Coated")
+            "#,
+                block_x + 0.74
+            ))
+            .exec()
+            .expect("failed to configure rotated occupied placement scenario");
+    }
+
+    for _ in 0..30 {
+        instance.tick();
+    }
+
+    instance.queue_agent_input(
+        user_id,
+        "Pickup".to_string(),
+        serde_json::json!({ "position": [block_x, block_y, block_z] }),
+    );
+
+    for _ in 0..10 {
+        instance.tick();
+    }
+
+    {
+        let runtime = instance.lua_runtime.as_ref().expect("runtime missing");
+        runtime
+            .lua()
+            .load(&format!(
+                r#"
+                local blocker_a = Instance.new("Part")
+                blocker_a.Name = "RotatedPartnerBlockerA"
+                blocker_a.Size = Vector3.new(0.75, 0.75, 0.75)
+                blocker_a.Anchored = true
+                blocker_a.CanCollide = true
+                blocker_a.Position = Vector3.new({place_x}, {block_y}, {})
+                blocker_a.Parent = Workspace
+
+                local blocker_b = Instance.new("Part")
+                blocker_b.Name = "RotatedPartnerBlockerB"
+                blocker_b.Size = Vector3.new(0.75, 0.75, 0.75)
+                blocker_b.Anchored = true
+                blocker_b.CanCollide = true
+                blocker_b.Position = Vector3.new({place_x}, {block_y}, {})
+                blocker_b.Parent = Workspace
+            "#,
+                place_z + 0.74,
+                place_z - 0.74
+            ))
+            .exec()
+            .expect("failed to create blockers at the rotated partner positions");
+    }
+
+    instance.queue_agent_input(
+        user_id,
+        "Place".to_string(),
+        serde_json::json!({
+            "position": [place_x, block_y, place_z],
+            "rotation": { "yaw": 90.0, "pitch": 0.0, "roll": 0.0 }
+        }),
+    );
+
+    for _ in 0..10 {
+        instance.tick();
+    }
+
+    let (place_result, still_holding): (String, bool) = {
+        let runtime = instance.lua_runtime.as_ref().expect("runtime missing");
+        runtime
+            .lua()
+            .load(&format!(
+                r#"
+                local player = game:GetService("Players"):GetPlayers()[1]
+                local heldValue = game:GetService("ServerStorage").MesaIslandState.Players["{}"].HeldObject
+                return player:GetAttribute("LastActionResult"), heldValue.Value ~= nil
+            "#,
+                player_state_key
+            ))
+            .eval()
+            .expect("failed to inspect rotated occupied placement result")
+    };
+
+    assert_eq!(place_result, "PlaceFailed:Occupied");
+    assert!(still_holding, "rotated occupied placement should keep the bonded assembly in hand");
+}
+
+#[test]
 fn mesa_island_plain_block_on_set_block_bonds_and_pickup_moves_both() {
     let mut instance = GameInstance::new(Uuid::new_v4(), None);
     let source = fs::read_to_string(mesa_island_script_path()).expect("failed to read mesa-island");

@@ -6,7 +6,7 @@ use uuid::Uuid;
 use crate::game::instance::GameInstance;
 use crate::game::lua::instance::{
     AttributeValue, BillboardGuiData, BodyAngularVelocityData, BodyForceData, BodyVelocityData,
-    ClassName, GuiObjectData, HumanoidData, Instance, InstanceData, ModelData, ObjectValueData,
+    CFrameValueData, ClassName, GuiObjectData, HumanoidData, Instance, InstanceData, ModelData, ObjectValueData,
     PartData, ScriptData, TextXAlignment, TextYAlignment, UICornerData, WeldConstraintData, WeldData,
 };
 use crate::game::lua::services::agent_input::AgentInput;
@@ -123,6 +123,8 @@ pub struct InstanceSnapshot {
     pub string_value: Option<String>,
     #[serde(default)]
     pub object_value: Option<ObjectRefSnapshot>,
+    #[serde(default)]
+    pub cframe_value: Option<SnapshotCFrame>,
     #[serde(default)]
     pub body_velocity: Option<BodyVelocitySnapshot>,
     #[serde(default)]
@@ -554,6 +556,7 @@ fn snapshot_instance(instance: Instance) -> Result<InstanceSnapshot, String> {
         bool_value: data.bool_value_data.as_ref().map(|v| v.value),
         string_value: data.string_value_data.as_ref().map(|v| v.value.clone()),
         object_value: data.object_value_data.as_ref().map(snapshot_object_value_data),
+        cframe_value: data.cframe_value_data.as_ref().map(snapshot_cframe_value_data),
         body_velocity: data.body_velocity_data.as_ref().map(snapshot_body_velocity_data),
         body_force: data.body_force_data.as_ref().map(snapshot_body_force_data),
         body_angular_velocity: data
@@ -936,6 +939,9 @@ fn apply_instance_snapshot(
                 ),
             });
         }
+        if let (Some(value), Some(saved)) = (data.cframe_value_data.as_mut(), snapshot.cframe_value.as_ref()) {
+            value.value = restore_cframe(saved);
+        }
         if let (Some(body_velocity), Some(saved)) =
             (data.body_velocity_data.as_mut(), snapshot.body_velocity.as_ref())
         {
@@ -1113,6 +1119,9 @@ fn create_instance_from_class_name(class_name: &str, name: &str) -> Result<Insta
         }
         "ObjectValue" => {
             Instance::from_data(crate::game::lua::instance::InstanceData::new_object_value(name))
+        }
+        "CFrameValue" => {
+            Instance::from_data(crate::game::lua::instance::InstanceData::new_cframe_value(name))
         }
         "BodyVelocity" => Instance::from_data(
             crate::game::lua::instance::InstanceData::new_body_velocity(name),
@@ -1336,6 +1345,10 @@ fn snapshot_object_value_data(value: &ObjectValueData) -> ObjectRefSnapshot {
             .and_then(|weak| weak.upgrade())
             .map(|instance| instance.lock().unwrap().id.0),
     }
+}
+
+fn snapshot_cframe_value_data(value: &CFrameValueData) -> SnapshotCFrame {
+    snapshot_cframe(value.value)
 }
 
 fn snapshot_body_velocity_data(value: &BodyVelocityData) -> BodyVelocitySnapshot {
@@ -1678,6 +1691,14 @@ mod tests {
             data.object_value_data.as_mut().unwrap().value = Some(std::sync::Arc::downgrade(&part.data));
         }
         object_value.set_parent(Some(&folder));
+        let cframe_value = Instance::from_data(InstanceData::new_cframe_value("TrackedCFrame"));
+        let expected_cframe = CFrame::new(1.0, 2.0, 3.0)
+            .multiply(&CFrame::from_orientation(0.2, 0.4, 0.1));
+        {
+            let mut data = cframe_value.data.lock().unwrap();
+            data.cframe_value_data.as_mut().unwrap().value = expected_cframe;
+        }
+        cframe_value.set_parent(Some(&folder));
         folder.set_attribute("InternalCounter", AttributeValue::Number(42.0));
 
         let agent_id = Uuid::new_v4();
@@ -1751,6 +1772,20 @@ mod tests {
             .and_then(|weak| weak.upgrade())
             .map(|instance| instance.lock().unwrap().name.clone());
         assert_eq!(target_name.as_deref(), Some("TrackedPart"));
+        let restored_cframe = restored_folder.find_first_child("TrackedCFrame", false).unwrap();
+        let restored_value = restored_cframe
+            .data
+            .lock()
+            .unwrap()
+            .cframe_value_data
+            .as_ref()
+            .map(|value| value.value)
+            .unwrap();
+        assert_eq!(snapshot_cframe(restored_value).position, [1.0, 2.0, 3.0]);
+        assert_eq!(
+            snapshot_cframe(restored_value).rotation,
+            snapshot_cframe(expected_cframe).rotation
+        );
 
         let restored_user_id = *restored.players.get(&agent_id).unwrap();
         let restored_player = restored_runtime
