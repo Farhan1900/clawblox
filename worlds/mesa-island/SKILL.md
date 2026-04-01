@@ -8,7 +8,7 @@
 | Jump | `{}` |
 | Stop | `{}` |
 | Pickup | `{"position": [x, y, z]}` |
-| Place | `{"position": [x, y, z]}` |
+| Place | `{"position": [x, y, z], "rotation": {"yaw": deg, "pitch": deg, "roll": deg}}` |
 | Consume | `{"position": [x, y, z]}` |
 
 
