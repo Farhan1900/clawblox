@@ -23,6 +23,7 @@ WORLD_STARTUP_INSTRUCTIONS="${WORLD_STARTUP_INSTRUCTIONS:-}"
 PI_PROVIDER="${PI_PROVIDER:-}"
 PI_MODEL="${PI_MODEL:-}"
 PI_THINKING="${PI_THINKING-low}"
+SANDBOX="${SANDBOX:-}"
 
 if [[ -z "${ANTHROPIC_API_KEY:-}" && -f "$ROOT_DIR/.env" ]]; then
   set -a
@@ -49,26 +50,24 @@ append_prompt_workspace_files() {
   local workspace_dir="$2"
   local -a preferred_files=(SOUL.md IDENTITY.md SEMANTIC_MEMORY.md EPISODIC_MEMORY.md)
   local -a prompt_files=()
-  local file_name
-  local file_path
+  local rel_path
   local -A seen_files=()
 
-  for file_name in "${preferred_files[@]}"; do
-    file_path="$workspace_dir/$file_name"
-    if [[ -f "$file_path" ]]; then
-      prompt_files+=("$file_name")
-      seen_files["$file_name"]=1
+  for rel_path in "${preferred_files[@]}"; do
+    if [[ -f "$workspace_dir/$rel_path" ]]; then
+      prompt_files+=("$rel_path")
+      seen_files["$rel_path"]=1
     fi
   done
 
   while IFS= read -r -d '' file_path; do
-    file_name="$(basename "$file_path")"
-    if [[ -n "${seen_files[$file_name]:-}" ]]; then
+    rel_path="${file_path#"$workspace_dir"/}"
+    if [[ -n "${seen_files[$rel_path]:-}" ]]; then
       continue
     fi
-    prompt_files+=("$file_name")
-    seen_files["$file_name"]=1
-  done < <(find "$workspace_dir" -maxdepth 1 -type f -name '*.md' -print0 | sort -z)
+    prompt_files+=("$rel_path")
+    seen_files["$rel_path"]=1
+  done < <(find "$workspace_dir" -type f -name '*.md' -print0 | sort -z)
 
   if ((${#prompt_files[@]} == 0)); then
     return 0
@@ -79,11 +78,10 @@ append_prompt_workspace_files() {
     printf 'These are the file contents as they existed when this session began.\n'
   } >>"$prompt_file"
 
-  for file_name in "${prompt_files[@]}"; do
-    file_path="$workspace_dir/$file_name"
+  for rel_path in "${prompt_files[@]}"; do
     {
-      printf '\n===== %s =====\n' "$file_name"
-      cat "$file_path"
+      printf '\n===== %s =====\n' "$rel_path"
+      cat "$workspace_dir/$rel_path"
       printf '\n'
     } >>"$prompt_file"
   done
@@ -123,16 +121,21 @@ fi
 
 mkdir -p "$WORKSPACE_DIR"
 mkdir -p "$SESSION_DIR"
-export PI_SYSTEM_PROMPT_SNAPSHOT_FILE="$SYSTEM_PROMPT_SNAPSHOT_FILE"
+if [[ "$SANDBOX" == "1" ]]; then
+  export PI_SYSTEM_PROMPT_SNAPSHOT_FILE="/session/system_prompt.txt"
+  SANDBOX_WORKSPACE_DIR="/workspace"
+else
+  export PI_SYSTEM_PROMPT_SNAPSHOT_FILE="$SYSTEM_PROMPT_SNAPSHOT_FILE"
+fi
 
 if [[ -d "$TEMPLATE_DIR" ]]; then
-  while IFS= read -r -d '' template_path; do
-    file_name="$(basename "$template_path")"
-    dest="$WORKSPACE_DIR/$file_name"
+  for entry in "$TEMPLATE_DIR"/*; do
+    [[ -e "$entry" ]] || continue
+    dest="$WORKSPACE_DIR/$(basename "$entry")"
     if [[ ! -e "$dest" ]]; then
-      cp "$template_path" "$dest"
+      cp -r "$entry" "$dest"
     fi
-  done < <(find "$TEMPLATE_DIR" -maxdepth 1 -type f -print0 | sort -z)
+  done
 fi
 
 SESSION_ID=""
@@ -191,7 +194,7 @@ cat >"$PROMPT_FILE" <<EOF
 Your name is ${WORLD_AGENT_NAME}.
 
 
-Your home is ${WORKSPACE_DIR}. The files there are yours — they are how you remember. Only work inside this directory.
+Your home is ${SANDBOX_WORKSPACE_DIR:-$WORKSPACE_DIR}. The files there are yours — they are how you remember. Only work inside this directory.
 Your workspace is a maintained memory system, not a diary.
 Store only information that is likely to improve future decisions or actions.
 Prefer rewriting, merging, pruning, and deleting over endless appending in every memory file except EPISODIC_MEMORY.md.
@@ -273,15 +276,71 @@ if [[ -n "$PI_THINKING" ]]; then
   MODEL_FLAGS+=(--thinking "$PI_THINKING")
 fi
 
+BWRAP_PREFIX=()
+SANDBOX_SESSION_DIR="$SESSION_DIR"
+SANDBOX_PROMPT_FILE="$PROMPT_FILE"
+if [[ "$SANDBOX" == "1" ]]; then
+  if ! command -v bwrap &>/dev/null; then
+    echo "Error: SANDBOX=1 requires bubblewrap (bwrap). Install with: sudo apt install bubblewrap" >&2
+    exit 1
+  fi
+  # Clean paths visible inside the sandbox
+  SANDBOX_SESSION_DIR="/session"
+  SANDBOX_PROMPT_FILE="/tmp/prompt.md"
+
+  BWRAP_PREFIX=(
+    bwrap
+    --ro-bind /usr /usr
+    --ro-bind /bin /bin
+    --ro-bind /sbin /sbin
+    --ro-bind /lib /lib
+    --ro-bind /etc /etc
+    --ro-bind /run /run
+    --proc /proc
+    --dev /dev
+    --tmpfs /tmp
+    --bind "$WORKSPACE_DIR" /workspace
+    --bind "$SESSION_DIR" /session
+    --ro-bind "$PROMPT_FILE" /tmp/prompt.md
+    --chdir /workspace
+    --die-with-parent
+  )
+  [[ -d /lib64 ]] && BWRAP_PREFIX+=(--ro-bind /lib64 /lib64)
+  # WSL: /etc/resolv.conf symlinks to /mnt/wsl/resolv.conf
+  [[ -d /mnt/wsl ]] && BWRAP_PREFIX+=(--ro-bind /mnt/wsl /mnt/wsl)
+  # pi binary and node need to be accessible
+  BWRAP_PREFIX+=(--ro-bind "$PI_BIN" "$PI_BIN")
+  [[ "$(readlink -f "$PI_BIN")" != "$PI_BIN" ]] && BWRAP_PREFIX+=(--ro-bind "$(readlink -f "$PI_BIN")" "$(readlink -f "$PI_BIN")")
+  BWRAP_PREFIX+=(--ro-bind "$PI_NODE_BIN" "$PI_NODE_BIN")
+  [[ "$(readlink -f "$PI_NODE_BIN")" != "$PI_NODE_BIN" ]] && BWRAP_PREFIX+=(--ro-bind "$(readlink -f "$PI_NODE_BIN")" "$(readlink -f "$PI_NODE_BIN")")
+  # pi's package directory (node_modules, etc.)
+  pi_pkg_dir="$(dirname "$(dirname "$(readlink -f "$PI_BIN")")")"
+  BWRAP_PREFIX+=(--ro-bind "$pi_pkg_dir" "$pi_pkg_dir")
+  # Extension files
+  if [[ -n "$CLAWBLOX_AGENT_EXTENSION_PATH" && ( -f "$CLAWBLOX_AGENT_EXTENSION_PATH" || -d "$CLAWBLOX_AGENT_EXTENSION_PATH" ) ]]; then
+    BWRAP_PREFIX+=(--ro-bind "$CLAWBLOX_AGENT_EXTENSION_PATH" "$CLAWBLOX_AGENT_EXTENSION_PATH")
+  fi
+  if [[ -n "$PI_EXTENSION_PATH" && ( -f "$PI_EXTENSION_PATH" || -d "$PI_EXTENSION_PATH" ) ]]; then
+    BWRAP_PREFIX+=(--ro-bind "$PI_EXTENSION_PATH" "$PI_EXTENSION_PATH")
+  fi
+  BWRAP_PREFIX+=(--)
+  echo "Sandbox: enabled (bwrap)"
+fi
+
 run_pi_session() {
   local active_session_dir="$1"
+  local sandbox_active_session_dir="$active_session_dir"
+  if [[ "$SANDBOX" == "1" ]]; then
+    # Map the host session subdir to the sandbox /session mount
+    sandbox_active_session_dir="/session${active_session_dir#"$SESSION_DIR"}"
+  fi
   # Replace the backgrounded shell with pi so RESET_EVERY tracks and kills the real agent PID.
-  exec "$PI_NODE_BIN" "$PI_BIN" \
+  exec "${BWRAP_PREFIX[@]}" "$PI_NODE_BIN" "$PI_BIN" \
     "${WATCH_FLAG[@]}" \
     "${MODEL_FLAGS[@]}" \
     "${EXTENSION_FLAGS[@]}" \
-    --session-dir "$active_session_dir" \
-    --append-system-prompt "$PROMPT_FILE" \
+    --session-dir "$sandbox_active_session_dir" \
+    --append-system-prompt "$SANDBOX_PROMPT_FILE" \
     --continue \
     "continue"
 }

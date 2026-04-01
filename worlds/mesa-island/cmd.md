@@ -55,7 +55,7 @@ bash launch_multi_generations.sh --generations 10 --generation-duration 1h --bas
 ./launch_multi.sh --resume worlds/mesa-island/results/<run-id>
 
 
-./launch_multi.sh --tmux-session clawblox-alt --base-port 8081 --num-worlds 1 --agents-per-world 2 --world-dir worlds/mesa-island --template worlds/mesa-island/agent-template --record true --reset-every 3600
+./launch_multi.sh --tmux-session clawblox --base-port 8081 --num-worlds 1 --agents-per-world 1 --world-dir worlds/mesa-island --template worlds/mesa-island/agent-template --record true --sandbox
 
 
 ./launch_multi.sh --tmux-session clawblox-alt --base-port 8081 --num-worlds 1 --agents-per-world 2 --world-dir worlds/mesa-island --template worlds/mesa-island/agent-template --record true --reset-every 3600 --model claude-sonnet-4-6

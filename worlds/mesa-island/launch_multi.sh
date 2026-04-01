@@ -31,6 +31,7 @@ AGENT_CHECKPOINT_PROMPT="${AGENT_CHECKPOINT_PROMPT:-}"
 AGENT_CHECKPOINT_TRIGGER_TURN="${AGENT_CHECKPOINT_TRIGGER_TURN:-1}"
 AGENT_CHECKPOINT_DISABLE_AUTO_LOOP="${AGENT_CHECKPOINT_DISABLE_AUTO_LOOP:-0}"
 CHECKPOINT_INTERVAL="${CHECKPOINT_INTERVAL:-1800}"  # periodic snapshot interval in seconds (0 = disabled)
+SANDBOX="${SANDBOX:-}"
 declare -a AGENT_TEMPLATE_DIRS=()
 
 AGENT_SCRIPT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/run_agent.sh"
@@ -126,6 +127,7 @@ Options:
   --results-root PATH          Results root directory (default: <world-dir>/results)
   --resume PATH                Resume an existing run directory under results/
   --checkpoint-interval SECS   Periodic snapshot interval (default: 1800, 0 = disabled)
+  --sandbox                    Run agents in a bubblewrap sandbox (requires bwrap)
   --clawblox-bin PATH          Path or command name for clawblox binary
 
 Environment variables:
@@ -150,6 +152,7 @@ Environment variables:
   AGENT_CHECKPOINT_TRIGGER_TURN   1/0 trigger a turn when checkpoint prompt is sent (default: 1)
   AGENT_CHECKPOINT_DISABLE_AUTO_LOOP 1/0 disable continue loop when checkpoint fires (default: 0)
   CHECKPOINT_INTERVAL Periodic snapshot interval in seconds (default: 1800, 0 = disabled)
+  SANDBOX           Run agents in a bubblewrap sandbox (default: empty/off, set to 1)
   CLAWBLOX_BIN      Path to clawblox binary (auto-detected)
 EOF
 }
@@ -401,6 +404,10 @@ while [[ $# -gt 0 ]]; do
       require_value "$1" "${2:-}"
       CHECKPOINT_INTERVAL="$2"
       shift 2
+      ;;
+    --sandbox)
+      SANDBOX=1
+      shift
       ;;
     --help|-h)
       usage
@@ -815,13 +822,18 @@ EOF
       MODEL_ENV_PREFIX="PI_MODEL=$(printf '%q' "$PI_MODEL") "
     fi
 
+    SANDBOX_ENV_PREFIX=""
+    if [[ "$SANDBOX" == "1" ]]; then
+      SANDBOX_ENV_PREFIX="SANDBOX=1 "
+    fi
+
     if [[ -n "$startup_instructions" ]]; then
       startup_instructions_q="$(printf '%q' "$startup_instructions")"
       tmux send-keys -t "${TMUX_SESSION}:agents-$i" \
-        "cd '$ROOT_DIR' && WORLD_BASE_URL='$url' WORLD_AGENT_NAME='$agent_display_name' WORKSPACE_DIR='$agent_workspace' SESSION_DIR='$agent_session' WORLD_SESSION_FILE='$agent_world_session_file' ${TEMPLATE_ENV_PREFIX}${RESET_ENV_PREFIX}${MODEL_ENV_PREFIX}${CHECKPOINT_ENV_PREFIX}WORLD_STARTUP_INSTRUCTIONS=${startup_instructions_q} bash '$AGENT_SCRIPT' 2>&1 | tee -a '$agent_log_file'" Enter
+        "cd '$ROOT_DIR' && WORLD_BASE_URL='$url' WORLD_AGENT_NAME='$agent_display_name' WORKSPACE_DIR='$agent_workspace' SESSION_DIR='$agent_session' WORLD_SESSION_FILE='$agent_world_session_file' ${TEMPLATE_ENV_PREFIX}${RESET_ENV_PREFIX}${MODEL_ENV_PREFIX}${CHECKPOINT_ENV_PREFIX}${SANDBOX_ENV_PREFIX}WORLD_STARTUP_INSTRUCTIONS=${startup_instructions_q} bash '$AGENT_SCRIPT' 2>&1 | tee -a '$agent_log_file'" Enter
     else
       tmux send-keys -t "${TMUX_SESSION}:agents-$i" \
-        "cd '$ROOT_DIR' && WORLD_BASE_URL='$url' WORLD_AGENT_NAME='$agent_display_name' WORKSPACE_DIR='$agent_workspace' SESSION_DIR='$agent_session' WORLD_SESSION_FILE='$agent_world_session_file' ${TEMPLATE_ENV_PREFIX}${RESET_ENV_PREFIX}${MODEL_ENV_PREFIX}${CHECKPOINT_ENV_PREFIX}bash '$AGENT_SCRIPT' 2>&1 | tee -a '$agent_log_file'" Enter
+        "cd '$ROOT_DIR' && WORLD_BASE_URL='$url' WORLD_AGENT_NAME='$agent_display_name' WORKSPACE_DIR='$agent_workspace' SESSION_DIR='$agent_session' WORLD_SESSION_FILE='$agent_world_session_file' ${TEMPLATE_ENV_PREFIX}${RESET_ENV_PREFIX}${MODEL_ENV_PREFIX}${CHECKPOINT_ENV_PREFIX}${SANDBOX_ENV_PREFIX}bash '$AGENT_SCRIPT' 2>&1 | tee -a '$agent_log_file'" Enter
     fi
   done
 done

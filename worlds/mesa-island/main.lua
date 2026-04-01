@@ -35,6 +35,7 @@ local SPAWN_POINTS = {
 local OUT_OF_BOUNDS_Y = -200
 
 local trackedCarryables = {}
+local blockBondTargets = {}
 local activeMoveStates = {}
 local moveFeedbackConnections = {}
 local bindMoveFeedback
@@ -1155,6 +1156,9 @@ local function isResidueClump(inst)
     return inst and inst:IsA("Part") and inst:GetAttribute("CarryKind") == "Clump"
 end
 
+local releaseHeldObjectReferences
+local setBlockMetadata
+
 local function getHiddenBlockState(block)
     if not isBlockPart(block) then
         return nil
@@ -1169,6 +1173,9 @@ local function getHiddenBlockState(block)
     if state:GetAttribute("CoatingPhase") == nil then
         state:SetAttribute("CoatingPhase", "Bare")
     end
+    if state:GetAttribute("SpawnPos") == nil then
+        state:SetAttribute("SpawnPos", block.Position)
+    end
 
     return state
 end
@@ -1177,6 +1184,23 @@ local function getBlockBaseColor(block)
     local state = getHiddenBlockState(block)
     local colorName = state and state:GetAttribute("BaseColorName") or block:GetAttribute("ItemColorName") or BLOCK_TYPE_NAME
     return blockColors[colorName] or blockColors[BLOCK_TYPE_NAME]
+end
+
+local function getBlockCoatingPhase(block)
+    local state = getHiddenBlockState(block)
+    return state and state:GetAttribute("CoatingPhase") or "Bare"
+end
+
+local function setBlockBondTarget(block, targetBlock)
+    if not isBlockPart(block) then
+        return
+    end
+
+    if targetBlock and isBlockPart(targetBlock) and targetBlock.Parent then
+        blockBondTargets[block] = targetBlock
+    else
+        blockBondTargets[block] = nil
+    end
 end
 
 local function removeBlockBonds(block)
@@ -1191,12 +1215,17 @@ local function removeBlockBonds(block)
                     and child.Name == RESIDUE_BOND_NAME
                     and (child.Part0 == block or child.Part1 == block)
                 then
+                    local otherBlock = child.Part0 == block and child.Part1 or child.Part0
+                    if isBlockPart(otherBlock) then
+                        setBlockBondTarget(otherBlock, nil)
+                    end
                     child:Destroy()
                 end
             end
         end
     end
 
+    setBlockBondTarget(block, nil)
     block.Anchored = false
 end
 
@@ -1230,6 +1259,70 @@ local function clearBlockTreatment(block)
     local state = getHiddenBlockState(block)
     state:SetAttribute("CoatingPhase", "Bare")
     refreshBlockAppearance(block)
+end
+
+local function getBlockSpawnPosition(block)
+    local state = getHiddenBlockState(block)
+    local spawnPos = state and state:GetAttribute("SpawnPos")
+    if typeof(spawnPos) == "Vector3" then
+        return spawnPos
+    end
+    return block.Position
+end
+
+local function getBondedBlocks(rootBlock)
+    if not isBlockPart(rootBlock) then
+        return {}
+    end
+
+    local blocks = {}
+    local visited = {}
+    local pending = { rootBlock }
+
+    while #pending > 0 do
+        local block = table.remove(pending)
+        if block and block.Parent and not visited[block] then
+            visited[block] = true
+            table.insert(blocks, block)
+
+            local target = blockBondTargets[block]
+            if isBlockPart(target) and target.Parent and not visited[target] then
+                table.insert(pending, target)
+            end
+
+            for object, targetBlock in pairs(blockBondTargets) do
+                if object.Parent and isBlockPart(object) and targetBlock == block and not visited[object] then
+                    table.insert(pending, object)
+                end
+            end
+        end
+    end
+
+    return blocks
+end
+
+local function resetFallenBlockGroup(block)
+    local bondedBlocks = getBondedBlocks(block)
+    if #bondedBlocks == 0 then
+        return
+    end
+
+    for _, bondedBlock in ipairs(bondedBlocks) do
+        releaseHeldObjectReferences(bondedBlock)
+        clearBlockTreatment(bondedBlock)
+    end
+
+    for _, bondedBlock in ipairs(bondedBlocks) do
+        bondedBlock.Anchored = true
+        bondedBlock.CanCollide = false
+        bondedBlock.Position = getBlockSpawnPosition(bondedBlock)
+        bondedBlock.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
+        bondedBlock.AssemblyAngularVelocity = Vector3.new(0, 0, 0)
+        setBlockMetadata(bondedBlock, bondedBlock:GetAttribute("ItemColorName"))
+        bondedBlock.Anchored = false
+        bondedBlock.CanCollide = true
+        trackedCarryables[bondedBlock] = true
+    end
 end
 
 local function getNearestBondTarget(block)
@@ -1283,28 +1376,43 @@ local function trySetBlockBond(block)
     end
 
     local state = getHiddenBlockState(block)
-    if not state or state:GetAttribute("CoatingPhase") ~= "Coated" then
+    local phase = getBlockCoatingPhase(block)
+    local targetKind, target = getNearestBondTarget(block)
+    if not targetKind or not target then
         return false
     end
 
-    local targetKind, target = getNearestBondTarget(block)
-    if not targetKind or not target then
+    local can_initiate = phase == "Coated"
+    local should_mark_set = phase == "Coated"
+    local bond_owner = block
+    local bond_other = target
+    if not can_initiate and targetKind == "Block" and getBlockCoatingPhase(target) == "Set" then
+        can_initiate = true
+        bond_owner = target
+        bond_other = block
+    end
+    if not can_initiate then
         return false
     end
 
     removeBlockBonds(block)
     if targetKind == "Terrain" then
         block.Anchored = true
+        setBlockBondTarget(block, nil)
     else
         local bond = Instance.new("WeldConstraint")
         bond.Name = RESIDUE_BOND_NAME
-        bond.Part0 = block
-        bond.Part1 = target
-        bond.Parent = block
+        bond.Part0 = bond_owner
+        bond.Part1 = bond_other
+        bond.Parent = bond_owner
+        setBlockBondTarget(block, target)
+        setBlockBondTarget(target, block)
     end
 
-    state:SetAttribute("CoatingPhase", "Set")
-    refreshBlockAppearance(block)
+    if should_mark_set then
+        state:SetAttribute("CoatingPhase", "Set")
+        refreshBlockAppearance(block)
+    end
     return true
 end
 
@@ -1365,7 +1473,7 @@ local function findNearestBlock(targetPosition, maxDistance)
     return closestBlock
 end
 
-local function setBlockMetadata(block, colorName)
+setBlockMetadata = function(block, colorName)
     block:SetAttribute("RenderRole", BLOCK_RENDER_ROLE)
     block:SetAttribute("ItemColorName", BLOCK_TYPE_NAME)
     block:SetAttribute("IsPickupObject", true)
@@ -1373,7 +1481,10 @@ local function setBlockMetadata(block, colorName)
     block:SetAttribute("CarryKind", "Block")
     block:SetAttribute("PlacementDuration", DEFAULT_PLACE_DURATION)
     block:SetAttribute("HoldOffset", DEFAULT_HOLD_OFFSET)
-    getHiddenBlockState(block)
+    local state = getHiddenBlockState(block)
+    if state:GetAttribute("SpawnPos") == nil then
+        state:SetAttribute("SpawnPos", block.Position)
+    end
     refreshBlockAppearance(block)
 end
 
@@ -1398,6 +1509,7 @@ end
 
 local function rebuildTrackedCarryables()
     trackedCarryables = {}
+    blockBondTargets = {}
     for _, inst in ipairs(Workspace:GetDescendants()) do
         if inst:IsA("Part") and inst:GetAttribute("IsPickupObject") then
             inst:SetAttribute("IsCarryable", true)
@@ -1415,6 +1527,21 @@ local function rebuildTrackedCarryables()
         end
         if isCarryableObject(inst) then
             trackedCarryables[inst] = true
+        end
+    end
+
+    for object, _ in pairs(trackedCarryables) do
+        if object.Parent and isBlockPart(object) then
+            for _, child in ipairs(object:GetChildren()) do
+                if child:IsA("WeldConstraint") and child.Name == RESIDUE_BOND_NAME then
+                    local part0 = child.Part0
+                    local part1 = child.Part1
+                    if isBlockPart(part0) and isBlockPart(part1) then
+                        setBlockBondTarget(part0, part1)
+                        setBlockBondTarget(part1, part0)
+                    end
+                end
+            end
         end
     end
 end
@@ -1612,7 +1739,7 @@ local function resetPlayerToSpawn(player)
     end
 end
 
-local function releaseHeldObjectReferences(object)
+releaseHeldObjectReferences = function(object)
     for _, player in ipairs(Players:GetPlayers()) do
         local heldObject = getHeldObjectForPlayer(player)
         if heldObject == object then
@@ -1724,20 +1851,27 @@ local function pickupObject(player, inputData)
     player:SetAttribute("LastActionResult", "PickupSuccess")
 end
 
-local function positionOccupied(player, targetPosition, objectSize)
+local function positionOccupied(player, targetPosition, object)
+    local bondedBlocks = getBondedBlocks(object)
+    local offset = targetPosition - object.Position
     local params = OverlapParams.new()
     params.FilterType = Enum.RaycastFilterType.Exclude
-    params.FilterDescendantsInstances = { player.Character, getHeldObjectForPlayer(player) }
+    params.FilterDescendantsInstances = { player.Character }
+    for _, bondedBlock in ipairs(bondedBlocks) do
+        table.insert(params.FilterDescendantsInstances, bondedBlock)
+    end
 
-    local hits = Workspace:GetPartBoundsInBox(
-        CFrame.new(targetPosition),
-        objectSize,
-        params
-    )
+    for _, bondedBlock in ipairs(bondedBlocks) do
+        local hits = Workspace:GetPartBoundsInBox(
+            CFrame.new(bondedBlock.Position + offset),
+            bondedBlock.Size,
+            params
+        )
 
-    for _, hit in ipairs(hits) do
-        if hit:IsA("Part") then
-            return true
+        for _, hit in ipairs(hits) do
+            if hit:IsA("Part") then
+                return true
+            end
         end
     end
 
@@ -1777,7 +1911,7 @@ local function placeHeldObject(player, inputData)
         end
     end
 
-    if positionOccupied(player, targetPosition, object.Size) then
+    if positionOccupied(player, targetPosition, object) then
         player:SetAttribute("LastActionResult", "PlaceFailed:Occupied")
         return
     end
@@ -1968,6 +2102,8 @@ RunService.Heartbeat:Connect(function(dt)
         end
     end
 
+    local resetBlocks = {}
+    local resetSeen = {}
     for object, _ in pairs(trackedCarryables) do
         if not object.Parent then
             trackedCarryables[object] = nil
@@ -1976,8 +2112,24 @@ RunService.Heartbeat:Connect(function(dt)
                 trySetBlockBond(object)
             end
             if object.Position.Y < OUT_OF_BOUNDS_Y then
-            destroyCarryableObject(object)
+                if isBlockPart(object) then
+                    local bondedBlocks = getBondedBlocks(object)
+                    for _, bondedBlock in ipairs(bondedBlocks) do
+                        if not resetSeen[bondedBlock] then
+                            resetSeen[bondedBlock] = true
+                            table.insert(resetBlocks, bondedBlock)
+                        end
+                    end
+                else
+                    destroyCarryableObject(object)
+                end
             end
+        end
+    end
+
+    for _, block in ipairs(resetBlocks) do
+        if block.Parent and block.Position.Y < OUT_OF_BOUNDS_Y then
+            resetFallenBlockGroup(block)
         end
     end
 end)
