@@ -72,6 +72,7 @@ AGENTS_PER_WORLD=$(printf '%q' "$AGENTS_PER_WORLD")
 BASE_PORT=$(printf '%q' "$BASE_PORT")
 RECORD=$(printf '%q' "$RECORD")
 RESET_EVERY=$(printf '%q' "$RESET_EVERY")
+SANDBOX=$(printf '%q' "$SANDBOX")
 CLAWBLOX_BIN=$(printf '%q' "$CLAWBLOX_BIN")
 TMUX_SESSION=$(printf '%q' "$TMUX_SESSION")
 EOF
@@ -785,9 +786,12 @@ EOF
 
   tmux new-window -t "$TMUX_SESSION" -n "agents-$i"
   for ((j = 0; j < AGENTS_PER_WORLD; j++)); do
+    pane_target="${TMUX_SESSION}:agents-$i"
     if ((j > 0)); then
-      tmux split-window -t "${TMUX_SESSION}:agents-$i"
+      pane_target="$(tmux split-window -P -F '#{pane_id}' -t "${TMUX_SESSION}:agents-$i")"
       tmux select-layout -t "${TMUX_SESSION}:agents-$i" tiled
+    else
+      pane_target="$(tmux display-message -p -t "${TMUX_SESSION}:agents-$i" '#{pane_id}')"
     fi
 
     agent_display_name="$(agent_display_name_for_index "$j")"
@@ -829,11 +833,13 @@ EOF
 
     if [[ -n "$startup_instructions" ]]; then
       startup_instructions_q="$(printf '%q' "$startup_instructions")"
-      tmux send-keys -t "${TMUX_SESSION}:agents-$i" \
-        "cd '$ROOT_DIR' && WORLD_BASE_URL='$url' WORLD_AGENT_NAME='$agent_display_name' WORKSPACE_DIR='$agent_workspace' SESSION_DIR='$agent_session' WORLD_SESSION_FILE='$agent_world_session_file' ${TEMPLATE_ENV_PREFIX}${RESET_ENV_PREFIX}${MODEL_ENV_PREFIX}${CHECKPOINT_ENV_PREFIX}${SANDBOX_ENV_PREFIX}WORLD_STARTUP_INSTRUCTIONS=${startup_instructions_q} bash '$AGENT_SCRIPT' 2>&1 | tee -a '$agent_log_file'" Enter
+      tmux pipe-pane -o -t "$pane_target" "cat >> '$(printf "%q" "$agent_log_file")'"
+      tmux send-keys -t "$pane_target" \
+        "cd '$ROOT_DIR' && WORLD_BASE_URL='$url' WORLD_AGENT_NAME='$agent_display_name' WORKSPACE_DIR='$agent_workspace' SESSION_DIR='$agent_session' WORLD_SESSION_FILE='$agent_world_session_file' ${TEMPLATE_ENV_PREFIX}${RESET_ENV_PREFIX}${MODEL_ENV_PREFIX}${CHECKPOINT_ENV_PREFIX}${SANDBOX_ENV_PREFIX}WORLD_STARTUP_INSTRUCTIONS=${startup_instructions_q} bash '$AGENT_SCRIPT'" Enter
     else
-      tmux send-keys -t "${TMUX_SESSION}:agents-$i" \
-        "cd '$ROOT_DIR' && WORLD_BASE_URL='$url' WORLD_AGENT_NAME='$agent_display_name' WORKSPACE_DIR='$agent_workspace' SESSION_DIR='$agent_session' WORLD_SESSION_FILE='$agent_world_session_file' ${TEMPLATE_ENV_PREFIX}${RESET_ENV_PREFIX}${MODEL_ENV_PREFIX}${CHECKPOINT_ENV_PREFIX}${SANDBOX_ENV_PREFIX}bash '$AGENT_SCRIPT' 2>&1 | tee -a '$agent_log_file'" Enter
+      tmux pipe-pane -o -t "$pane_target" "cat >> '$(printf "%q" "$agent_log_file")'"
+      tmux send-keys -t "$pane_target" \
+        "cd '$ROOT_DIR' && WORLD_BASE_URL='$url' WORLD_AGENT_NAME='$agent_display_name' WORKSPACE_DIR='$agent_workspace' SESSION_DIR='$agent_session' WORLD_SESSION_FILE='$agent_world_session_file' ${TEMPLATE_ENV_PREFIX}${RESET_ENV_PREFIX}${MODEL_ENV_PREFIX}${CHECKPOINT_ENV_PREFIX}${SANDBOX_ENV_PREFIX}bash '$AGENT_SCRIPT'" Enter
     fi
   done
 done

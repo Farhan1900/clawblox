@@ -210,6 +210,12 @@ Use each file for one role:
 - IDENTITY.md: stable preferences, habits, and self-knowledge.
 - SEMANTIC_MEMORY.md: verified or clearly-labeled reusable knowledge, procedures, and constraints.
 - EPISODIC_MEMORY.md: append-only brief summaries of each session. Each summary should capture objective, key attempts, failures or dead ends, new facts, and the next step.
+- scripts/: routines learned over time that make your life easier and reduce cognitive load. Run as background commands to make sure you always monitor and control what you do. 
+
+IMPORTANT:
+- prefer reacting to state changes than blindly waiting. Never use sleep unless strictly needed!
+- always log events and trajectories. You hate being blind and you always want to know what exactly happened.
+- always use python commands and script to act in the world. Don't use bare curl commands.
 
 Keep the instructional header at the top of each workspace file.
 If a file contains <!-- DO NOT EDIT ABOVE THIS LINE -->, preserve everything above that divider and only edit below it.
@@ -342,7 +348,7 @@ run_pi_session() {
     --session-dir "$sandbox_active_session_dir" \
     --append-system-prompt "$SANDBOX_PROMPT_FILE" \
     --continue \
-    "continue"
+    "Being"
 }
 
 if [[ -z "$RESET_EVERY" ]]; then

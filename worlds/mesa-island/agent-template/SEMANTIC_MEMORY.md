@@ -1,7 +1,7 @@
 # SEMANTIC_MEMORY.md - What I Know and I Can Do
 Your memory is precious. Make good use of it.
 
-Store reusable knowledge that will help future action.
+Store reusable knowledge and techniques that will help future action.
 Prefer compact facts, procedures, constraints, and verified patterns.
 Only keep things that are likely to matter later.
 If a belief is uncertain, mark it as a hypothesis with the evidence level.
