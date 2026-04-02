@@ -71,8 +71,9 @@ local RESIDUE_PLACE_RANGE = 1.2
 local RESIDUE_CONTACT_PADDING = 0.14
 local RESIDUE_BOND_NAME = "SkuttlerBond"
 local SKUTTLER_BITE_DISTANCE = 1.35
-local SKUTTLER_BITE_COOLDOWN = 5
-local SKUTTLER_FORAGE_COOLDOWN_AFTER_BITE = 180
+local SKUTTLER_BITE_COOLDOWN = 1.25
+local SKUTTLER_FEED_WINDUP = 1.0
+local SKUTTLER_FORAGE_COOLDOWN_AFTER_BITE = 12
 local SKUTTLER_SECRETION_PER_BITE = 1
 local SKUTTLER_SECRETION_FOR_CLUMP = 2
 local SKUTTLER_CLUMP_COOLDOWN = 14
@@ -497,6 +498,8 @@ local GLOWBULB_COLOR = Color3.fromRGB(0, 220, 200)
 local GLOWBULB_BASE_SIZE = Vector3.new(0.7, 0.7, 0.7)
 local GLOWBULB_MAX_BITE_STEPS = 4
 local GLOWBULB_MIN_SCALE = 0.35
+local GLOWBULB_HOLD_OFFSET = Vector3.new(0, 3.1, 0)
+local GLOWBULB_PLACE_DURATION = 0.18
 
 local function clampGlowBulbBiteStep(step)
     return math.clamp(math.floor(step or 0), 0, GLOWBULB_MAX_BITE_STEPS)
@@ -525,6 +528,22 @@ local function applyGlowBulbVisuals(floraState, bulb)
     bulb.Size = GLOWBULB_BASE_SIZE * scale
     bulb.Transparency = 0
     bulb.CanQuery = true
+end
+
+local function setGlowBulbMetadata(bulb)
+    bulb:SetAttribute("RenderRole", "GlowBulb")
+    bulb:SetAttribute("IsEdible", true)
+    bulb:SetAttribute("IsCarryable", true)
+    bulb:SetAttribute("CarryKind", "Flora")
+    bulb:SetAttribute("PlacementDuration", GLOWBULB_PLACE_DURATION)
+    bulb:SetAttribute("HoldOffset", GLOWBULB_HOLD_OFFSET)
+end
+
+local function getFloraStateForPart(part)
+    if not part or not part:IsA("Part") then
+        return nil
+    end
+    return serverFloraState:FindFirstChild(part.Name)
 end
 
 local function takeGlowBulbBite(floraState, bulb)
@@ -559,8 +578,7 @@ local function createGlowBulb(name, position)
     bulb.CanCollide = false
     bulb.Color = GLOWBULB_COLOR
     bulb.Material = Enum.Material.Neon
-    bulb:SetAttribute("RenderRole", "GlowBulb")
-    bulb:SetAttribute("IsEdible", true)
+    setGlowBulbMetadata(bulb)
     bulb.Parent = Workspace
 
     local floraState = getOrCreateChild(serverFloraState, "Folder", name)
@@ -705,8 +723,11 @@ end
 local FAUNA_FLEE_RANGE = 8
 local FAUNA_FLEE_SPEED = 7
 local FAUNA_WANDER_INTERVAL = 3 -- seconds between wander direction changes
-local FAUNA_BOUNDARY = 120 -- keep creatures within this radius of origin
+local FAUNA_HOME_SOFT_RADIUS = 85
+local FAUNA_HOME_HARD_RADIUS = 120
 local FAUNA_OBSTACLE_PADDING = 0.35
+local FAUNA_BLOCKED_RECOVERY_SECONDS = 1.2
+local FAUNA_BLOCKED_TURN_ANGLE = math.rad(65)
 
 local speciesDefs = {
     Orbweaver = {
@@ -731,7 +752,7 @@ local speciesDefs = {
         hoverHeight = 0, -- walks on ground
         attractedTo = "GlowBulb",
         attractRange = 18,
-        motionStyle = "physics",
+        motionStyle = "kinematic",
         carryable = true,
         canCollide = true,
         placementDuration = 0.25,
@@ -767,6 +788,25 @@ end
 local function randomWanderDir()
     local angle = math.random() * math.pi * 2
     return Vector3.new(math.cos(angle), 0, math.sin(angle))
+end
+
+local function rotateFlatDir(dir, angle)
+    local unit = dir.Magnitude > 0.01 and dir.Unit or randomWanderDir()
+    local cosA = math.cos(angle)
+    local sinA = math.sin(angle)
+    return Vector3.new(
+        unit.X * cosA - unit.Z * sinA,
+        0,
+        unit.X * sinA + unit.Z * cosA
+    )
+end
+
+local function chooseCreatureRecoveryDir(homeDir)
+    local turnAngle = FAUNA_BLOCKED_TURN_ANGLE
+    if math.random() < 0.5 then
+        turnAngle = -turnAngle
+    end
+    return rotateFlatDir(homeDir, turnAngle)
 end
 
 local function refreshCreatureAppearance(part, creatureState)
@@ -866,6 +906,11 @@ local function createCreature(speciesName, position)
     creatureState:SetAttribute("ForageCooldown", 0)
     creatureState:SetAttribute("SecretionLevel", 0)
     creatureState:SetAttribute("ClumpCooldown", 0)
+    creatureState:SetAttribute("FeedTimer", 0)
+    creatureState:SetAttribute("FeedTargetName", "")
+    creatureState:SetAttribute("RecoveryTimer", 0)
+    creatureState:SetAttribute("RecoveryDir", Vector3.new(0, 0, 0))
+    creatureState:SetAttribute("BlockedAttempts", 0)
     part:SetAttribute("CreatureStateName", creatureStateName)
     refreshCreatureAppearance(part, creatureState)
     if def.carryable then
@@ -1003,6 +1048,44 @@ local function maybeDropSkuttlerClump(creatureState, part, fleeing)
     refreshCreatureAppearance(part, creatureState)
 end
 
+local function resolveCreatureMove(part, def, moveDir, moveSpeed, dt)
+    if moveDir.Magnitude <= 0.01 then
+        if def.motionStyle == "physics" then
+            local currentVelocity = part.AssemblyLinearVelocity
+            part.AssemblyLinearVelocity = Vector3.new(0, currentVelocity.Y, 0)
+            part.AssemblyAngularVelocity = Vector3.new(0, 0, 0)
+        end
+        return true
+    end
+
+    local pos = part.Position
+    local delta = moveDir.Unit * moveSpeed * dt
+    local newX = pos.X + delta.X
+    local newZ = pos.Z + delta.Z
+    if not isOverLand(newX, newZ) or isCreaturePathBlocked(part, def, moveDir) then
+        if def.motionStyle == "physics" then
+            local currentVelocity = part.AssemblyLinearVelocity
+            part.AssemblyLinearVelocity = Vector3.new(0, currentVelocity.Y, 0)
+            part.AssemblyAngularVelocity = Vector3.new(0, 0, 0)
+        end
+        return false
+    end
+
+    if def.motionStyle == "physics" then
+        local currentVelocity = part.AssemblyLinearVelocity
+        local desiredVelocity = moveDir.Unit * moveSpeed
+        part.AssemblyLinearVelocity = Vector3.new(
+            desiredVelocity.X,
+            currentVelocity.Y,
+            desiredVelocity.Z
+        )
+        part.AssemblyAngularVelocity = Vector3.new(0, 0, 0)
+    else
+        part.Position = Vector3.new(newX, creatureGroundY(def), newZ)
+    end
+    return true
+end
+
 local function updateCreatures(dt)
     for _, creatureState in ipairs(serverCreatureState:GetChildren()) do
         local partRef = creatureState:FindFirstChild("Part")
@@ -1018,9 +1101,13 @@ local function updateCreatures(dt)
                 local feedCooldown = math.max(0, (creatureState:GetAttribute("FeedCooldown") or 0) - dt)
                 local forageCooldown = math.max(0, (creatureState:GetAttribute("ForageCooldown") or 0) - dt)
                 local clumpCooldown = math.max(0, (creatureState:GetAttribute("ClumpCooldown") or 0) - dt)
+                local feedTimer = math.max(0, (creatureState:GetAttribute("FeedTimer") or 0) - dt)
+                local recoveryTimer = math.max(0, (creatureState:GetAttribute("RecoveryTimer") or 0) - dt)
                 creatureState:SetAttribute("FeedCooldown", feedCooldown)
                 creatureState:SetAttribute("ForageCooldown", forageCooldown)
                 creatureState:SetAttribute("ClumpCooldown", clumpCooldown)
+                creatureState:SetAttribute("FeedTimer", feedTimer)
+                creatureState:SetAttribute("RecoveryTimer", recoveryTimer)
 
                 local motionMode = creatureState:GetAttribute("MotionMode") or "AI"
                 if motionMode ~= "AI" then
@@ -1029,115 +1116,149 @@ local function updateCreatures(dt)
                         part.AssemblyAngularVelocity = Vector3.new(0, 0, 0)
                     end
                 else
-                local pos = part.Position
-                local flatPos = Vector3.new(pos.X, 0, pos.Z)
-                local moveDir = Vector3.new(0, 0, 0)
-                local moveSpeed = def.speed
-                local fleeing = false
-                local foodPart = nil
-                local foodState = nil
-                local foodDist = def.attractRange
+                    local pos = part.Position
+                    local flatPos = Vector3.new(pos.X, 0, pos.Z)
+                    local moveDir = Vector3.new(0, 0, 0)
+                    local moveSpeed = def.speed
+                    local fleeing = false
+                    local isFeeding = false
+                    local foodPart = nil
+                    local foodState = nil
+                    local foodDist = def.attractRange
+                    local feedTargetName = creatureState:GetAttribute("FeedTargetName") or ""
 
-                -- 1. Flee from nearby players
-                if def.fleeRange > 0 then
-                    local playerPos, playerDist = nearestPlayerPosition(pos, def.fleeRange)
-                    if playerPos then
-                        local away = (flatPos - Vector3.new(playerPos.X, 0, playerPos.Z))
-                        if away.Magnitude > 0.01 then
-                            moveDir = away.Unit
+                    if def.fleeRange > 0 then
+                        local playerPos = nearestPlayerPosition(pos, def.fleeRange)
+                        if playerPos then
+                            local away = flatPos - Vector3.new(playerPos.X, 0, playerPos.Z)
+                            if away.Magnitude > 0.01 then
+                                moveDir = away.Unit
+                            end
+                            moveSpeed = FAUNA_FLEE_SPEED
+                            fleeing = true
                         end
-                        moveSpeed = FAUNA_FLEE_SPEED
-                        fleeing = true
                     end
-                end
 
-                -- 2. Attract toward food source (if not fleeing)
-                if not fleeing and forageCooldown <= 0 and def.attractedTo and def.attractRange > 0 then
-                    foodPart, foodState, foodDist = nearestFloraTarget(pos, def.attractedTo, def.attractRange)
-                    if foodPart then
-                        local toward = Vector3.new(foodPart.Position.X, 0, foodPart.Position.Z) - flatPos
-                        if toward.Magnitude > 1.5 then
-                            moveDir = toward.Unit
+                    if not fleeing and feedTimer > 0 then
+                        isFeeding = true
+                    end
+
+                    if not fleeing and feedTargetName ~= "" then
+                        foodState = serverFloraState:FindFirstChild(feedTargetName)
+                        local foodRef = foodState and foodState:FindFirstChild("Part")
+                        foodPart = foodRef and foodRef.Value or nil
+                        if foodPart and foodPart.Parent and not foodState:GetAttribute("Harvested") then
+                            foodDist = (foodPart.Position - pos).Magnitude
                         else
-                            moveDir = Vector3.new(0, 0, 0) -- arrived near food, idle
+                            foodPart = nil
+                            foodState = nil
+                            feedTargetName = ""
+                            creatureState:SetAttribute("FeedTargetName", "")
                         end
                     end
-                end
 
-                -- 3. Wander (if no other behavior active)
-                if not fleeing and moveDir.Magnitude < 0.01 then
-                    local wanderTimer = (creatureState:GetAttribute("WanderTimer") or 0) - dt
-                    if wanderTimer <= 0 then
-                        local wanderDir = randomWanderDir()
-                        wanderTimer = FAUNA_WANDER_INTERVAL + math.random() * 2
-                        creatureState:SetAttribute("WanderDir", wanderDir)
-                    end
-                    creatureState:SetAttribute("WanderTimer", wanderTimer)
-                    moveDir = creatureState:GetAttribute("WanderDir") or Vector3.new(0, 0, 0)
-                end
-
-                -- 4. Boundary check: steer back toward home if too far
-                local homePos = creatureState:GetAttribute("HomePos") or Vector3.new(0, 0, 0)
-                local homeOffset = flatPos - Vector3.new(homePos.X, 0, homePos.Z)
-                if homeOffset.Magnitude > FAUNA_BOUNDARY then
-                    moveDir = -homeOffset.Unit
-                end
-
-                -- Apply movement (only if staying on land)
-                if moveDir.Magnitude > 0.01 then
-                    local delta = moveDir.Unit * moveSpeed * dt
-                    local newX = pos.X + delta.X
-                    local newZ = pos.Z + delta.Z
-                    if isOverLand(newX, newZ) and not isCreaturePathBlocked(part, def, moveDir) then
-                        if def.motionStyle == "physics" then
-                            local currentVelocity = part.AssemblyLinearVelocity
-                            local desiredVelocity = moveDir.Unit * moveSpeed
-                            part.AssemblyLinearVelocity = Vector3.new(
-                                desiredVelocity.X,
-                                currentVelocity.Y,
-                                desiredVelocity.Z
-                            )
-                            part.AssemblyAngularVelocity = Vector3.new(0, 0, 0)
-                        else
-                            part.Position = Vector3.new(newX, creatureGroundY(def), newZ)
+                    if not fleeing and not isFeeding and forageCooldown <= 0 and def.attractedTo and def.attractRange > 0 then
+                        if not foodPart then
+                            foodPart, foodState, foodDist = nearestFloraTarget(pos, def.attractedTo, def.attractRange)
                         end
-                    else
+
+                        if foodPart then
+                            local toward = Vector3.new(foodPart.Position.X, 0, foodPart.Position.Z) - flatPos
+                            if toward.Magnitude > SKUTTLER_BITE_DISTANCE + 0.25 then
+                                moveDir = toward.Unit
+                            else
+                                local hadFeedTarget = feedTargetName ~= ""
+                                feedTargetName = foodPart.Name
+                                creatureState:SetAttribute("FeedTargetName", feedTargetName)
+                                if not hadFeedTarget and feedCooldown <= 0 and feedTimer <= 0 then
+                                    creatureState:SetAttribute("FeedTimer", SKUTTLER_FEED_WINDUP)
+                                    feedTimer = SKUTTLER_FEED_WINDUP
+                                    isFeeding = true
+                                end
+                            end
+                        end
+                    end
+
+                    local homePos = creatureState:GetAttribute("HomePos") or Vector3.new(0, 0, 0)
+                    local homeOffset = flatPos - Vector3.new(homePos.X, 0, homePos.Z)
+                    local homeDir = homeOffset.Magnitude > 0.01 and (-homeOffset.Unit) or randomWanderDir()
+
+                    if not fleeing and not isFeeding then
+                        local recoveryDir = creatureState:GetAttribute("RecoveryDir") or Vector3.new(0, 0, 0)
+                        if recoveryTimer > 0 and recoveryDir.Magnitude > 0.01 then
+                            moveDir = recoveryDir.Unit
+                        end
+
+                        if homeOffset.Magnitude > FAUNA_HOME_HARD_RADIUS then
+                            moveDir = homeDir
+                        elseif homeOffset.Magnitude > FAUNA_HOME_SOFT_RADIUS and moveDir.Magnitude < 0.01 then
+                            moveDir = rotateFlatDir(homeDir, math.rad((math.random() - 0.5) * 40))
+                        end
+
+                        if moveDir.Magnitude < 0.01 then
+                            local wanderTimer = (creatureState:GetAttribute("WanderTimer") or 0) - dt
+                            if wanderTimer <= 0 then
+                                local wanderDir = randomWanderDir()
+                                wanderTimer = FAUNA_WANDER_INTERVAL + math.random() * 2
+                                creatureState:SetAttribute("WanderDir", wanderDir)
+                            end
+                            creatureState:SetAttribute("WanderTimer", wanderTimer)
+                            moveDir = creatureState:GetAttribute("WanderDir") or Vector3.new(0, 0, 0)
+                        end
+                    end
+
+                    if isFeeding then
+                        moveDir = Vector3.new(0, 0, 0)
+                    end
+
+                    local moved = resolveCreatureMove(part, def, moveDir, moveSpeed, dt)
+                    if moveDir.Magnitude > 0.01 and moved then
+                        creatureState:SetAttribute("BlockedAttempts", 0)
+                        creatureState:SetAttribute("RecoveryTimer", 0)
+                    elseif moveDir.Magnitude > 0.01 and not fleeing and not isFeeding then
+                        local blockedAttempts = (creatureState:GetAttribute("BlockedAttempts") or 0) + 1
+                        creatureState:SetAttribute("BlockedAttempts", blockedAttempts)
+                        creatureState:SetAttribute("RecoveryDir", chooseCreatureRecoveryDir(homeDir))
+                        creatureState:SetAttribute("RecoveryTimer", FAUNA_BLOCKED_RECOVERY_SECONDS + math.random() * 0.4)
                         local wanderDir = creatureState:GetAttribute("WanderDir")
                         if wanderDir then
                             creatureState:SetAttribute("WanderDir", -wanderDir)
                         end
-                        if def.motionStyle == "physics" then
-                            local currentVelocity = part.AssemblyLinearVelocity
-                            part.AssemblyLinearVelocity = Vector3.new(0, currentVelocity.Y, 0)
-                        end
                     end
-                elseif def.motionStyle == "physics" then
-                    local currentVelocity = part.AssemblyLinearVelocity
-                    part.AssemblyLinearVelocity = Vector3.new(0, currentVelocity.Y, 0)
-                    part.AssemblyAngularVelocity = Vector3.new(0, 0, 0)
-                end
 
-                if not fleeing and foodPart and foodState and foodDist <= SKUTTLER_BITE_DISTANCE and feedCooldown <= 0 then
-                    if takeGlowBulbBite(foodState, foodPart) then
-                        creatureState:SetAttribute("FeedCooldown", SKUTTLER_BITE_COOLDOWN)
-                        creatureState:SetAttribute(
-                            "ForageCooldown",
-                            SKUTTLER_FORAGE_COOLDOWN_AFTER_BITE + math.random() * 4
-                        )
-                        creatureState:SetAttribute(
-                            "SecretionLevel",
-                            (creatureState:GetAttribute("SecretionLevel") or 0) + SKUTTLER_SECRETION_PER_BITE
-                        )
-                        local awayFromFood = flatPos - Vector3.new(foodPart.Position.X, 0, foodPart.Position.Z)
-                        if awayFromFood.Magnitude > 0.01 then
-                            creatureState:SetAttribute("WanderDir", awayFromFood.Unit)
-                            creatureState:SetAttribute("WanderTimer", FAUNA_WANDER_INTERVAL + math.random())
+                    if fleeing then
+                        creatureState:SetAttribute("FeedTimer", 0)
+                        creatureState:SetAttribute("FeedTargetName", "")
+                    elseif feedTargetName ~= "" and feedTimer <= 0 then
+                        foodState = serverFloraState:FindFirstChild(feedTargetName)
+                        local foodRef = foodState and foodState:FindFirstChild("Part")
+                        foodPart = foodRef and foodRef.Value or nil
+                        if foodPart and foodPart.Parent and not foodState:GetAttribute("Harvested")
+                            and (foodPart.Position - part.Position).Magnitude <= SKUTTLER_BITE_DISTANCE + 0.35
+                            and feedCooldown <= 0
+                        then
+                            if takeGlowBulbBite(foodState, foodPart) then
+                                creatureState:SetAttribute("FeedCooldown", SKUTTLER_BITE_COOLDOWN)
+                                creatureState:SetAttribute(
+                                    "ForageCooldown",
+                                    SKUTTLER_FORAGE_COOLDOWN_AFTER_BITE + math.random() * 3
+                                )
+                                creatureState:SetAttribute(
+                                    "SecretionLevel",
+                                    (creatureState:GetAttribute("SecretionLevel") or 0) + SKUTTLER_SECRETION_PER_BITE
+                                )
+                                local awayFromFood = flatPos - Vector3.new(foodPart.Position.X, 0, foodPart.Position.Z)
+                                if awayFromFood.Magnitude > 0.01 then
+                                    creatureState:SetAttribute("WanderDir", awayFromFood.Unit)
+                                    creatureState:SetAttribute("WanderTimer", FAUNA_WANDER_INTERVAL + math.random())
+                                end
+                                refreshCreatureAppearance(part, creatureState)
+                            end
                         end
-                        refreshCreatureAppearance(part, creatureState)
+                        creatureState:SetAttribute("FeedTargetName", "")
                     end
-                end
 
-                maybeDropSkuttlerClump(creatureState, part, fleeing)
+                    maybeDropSkuttlerClump(creatureState, part, fleeing or isFeeding)
                 end
             end
         end
@@ -1767,6 +1888,8 @@ local function rebuildTrackedCarryables()
                 getHiddenBlockState(inst)
                 refreshBlockAppearance(inst)
             end
+        elseif inst:IsA("Part") and inst:GetAttribute("RenderRole") == "GlowBulb" then
+            setGlowBulbMetadata(inst)
         elseif isResidueClump(inst) then
             setResidueMetadata(inst)
         end
@@ -2027,6 +2150,14 @@ local function prepareObjectForHolding(object, memberStates)
         return
     end
 
+    if getFloraStateForPart(object) then
+        object.Anchored = true
+        object.CanCollide = false
+        object.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
+        object.AssemblyAngularVelocity = Vector3.new(0, 0, 0)
+        return
+    end
+
     object.Anchored = true
     object.CanCollide = false
     for _, memberState in ipairs(memberStates or captureAssemblyRelativeCFrames(object)) do
@@ -2045,6 +2176,15 @@ local function restoreObjectAfterPlacement(object, memberStates)
     local creatureState = getCreatureStateForPart(object)
     if creatureState then
         setCreatureMotionMode(creatureState, "AI")
+        return
+    end
+
+    if getFloraStateForPart(object) then
+        object.Anchored = true
+        object.CanCollide = false
+        object.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
+        object.AssemblyAngularVelocity = Vector3.new(0, 0, 0)
+        object.Position = Vector3.new(object.Position.X, object.Size.Y * 0.5, object.Position.Z)
         return
     end
 
@@ -2312,6 +2452,14 @@ local function placeHeldObject(player, inputData)
     if not targetPosition then
         player:SetAttribute("LastActionResult", "PlaceFailed:InvalidPosition")
         return
+    end
+    local floraState = getFloraStateForPart(object)
+    if floraState then
+        if not isOverLand(targetPosition.X, targetPosition.Z) then
+            player:SetAttribute("LastActionResult", "PlaceFailed:InvalidGround")
+            return
+        end
+        targetPosition = Vector3.new(targetPosition.X, object.Size.Y * 0.5, targetPosition.Z)
     end
     local targetRootCFrame = getTargetRootCFrame(object, targetPosition, inputData.rotation)
     if not targetRootCFrame then

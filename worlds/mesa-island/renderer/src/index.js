@@ -304,6 +304,9 @@ function createEntityVisual(entity) {
         const leg = new THREE.Mesh(legGeo, legMat)
         leg.position.set(lx, ly, lz)
         leg.castShadow = true
+        leg.userData.isSkuttlerLeg = true
+        leg.userData.baseY = ly
+        leg.userData.phase = (lx < 0 ? 1 : -1) * (lz > 0 ? 1 : -1)
         group.add(leg)
       }
       // Two "eye" dots on front
@@ -648,14 +651,11 @@ export function createRenderer(ctx) {
           // Gentle float bob
           obj.position.y += Math.sin(elapsed * 1.2) * 0.004
         } else if (sp === 'Skuttler') {
-          // Quick leg wiggle based on movement
-          const wiggle = Math.sin(elapsed * 12) * 0.08
-          let legIdx = 0
+          const gait = Math.min(speed / 2.5, 1)
+          const wiggle = Math.sin(elapsed * (8 + gait * 8)) * (0.02 + gait * 0.06)
           obj.traverse((child) => {
-            if (child.geometry && child.geometry.type === 'BoxGeometry' &&
-                child !== obj.children[0]) {
-              child.position.y = -0.2 + wiggle * ((legIdx % 2 === 0) ? 1 : -1)
-              legIdx++
+            if (child.userData && child.userData.isSkuttlerLeg) {
+              child.position.y = child.userData.baseY + wiggle * child.userData.phase
             }
           })
         } else if (sp === 'Drifter') {
