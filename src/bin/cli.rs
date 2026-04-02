@@ -41,6 +41,7 @@ use clawblox::{
     db,
     recording, replay,
     replay_agent_log::{load_agent_timeline, ReplayAgentMessage, ReplayAgentTimeline},
+    snapshot::GameInstanceSnapshot,
     game::{
         constants::audio::{
             DEFAULT_BYTES_PER_SAMPLE, DEFAULT_CHANNELS, DEFAULT_PLAYBACK_SPEED,
@@ -50,7 +51,7 @@ use clawblox::{
         self,
         async_bridge::AsyncBridge,
         find_or_create_instance,
-        instance::{ErrorMode, PlayerObservation, SpectatorObservation},
+        instance::{ErrorMode, GameInstance, PlayerObservation, SpectatorObservation},
         script_bundle::load_world_and_entry_script,
         GameManager, GameManagerHandle,
     },
@@ -1798,12 +1799,25 @@ fn run_game(
     // Apply AFK timeout from world config (0 = disabled)
     if let Some(handle) = game_handle.instances.get(&instance_id) {
         let mut instance = handle.write();
-        if config.afk_timeout == 0 {
-            instance.set_afk_timeout(std::time::Duration::from_secs(u64::MAX));
-        } else {
-            instance.set_afk_timeout(std::time::Duration::from_secs(config.afk_timeout));
-        }
+        apply_afk_timeout(&mut instance, config.afk_timeout);
     }
+
+    let initial_instance_snapshot = {
+        let handle = game_handle
+            .instances
+            .get(&instance_id)
+            .unwrap_or_else(|| {
+                eprintln!("Error: missing instance {} after startup", instance_id);
+                std::process::exit(1);
+            });
+        let instance = handle.read();
+        Arc::new(
+            clawblox::snapshot::capture_game_instance(&instance).unwrap_or_else(|e| {
+                eprintln!("Error: failed to capture initial instance snapshot: {}", e);
+                std::process::exit(1);
+            }),
+        )
+    };
 
     println!("Instance: {}", instance_id);
 
@@ -1858,6 +1872,12 @@ fn run_game(
             game_id,
             instance_id,
             game_handle,
+            initial_instance_snapshot,
+            world_script_source: Arc::new(script.clone()),
+            max_players: config.max_players,
+            observation_radius: config.observation.radius,
+            afk_timeout_secs: config.afk_timeout,
+            error_mode: ErrorMode::Halt,
             started_at: Instant::now(),
             base_path: base_path.clone(),
             skill_md,
@@ -1948,6 +1968,7 @@ fn run_game(
             .route("/join", post(local_join))
             .route("/input", post(local_input))
             .route("/observe", get(local_observe))
+            .route("/reset", post(local_reset))
             .route("/snapshot", get(local_snapshot))
             .route("/skill.md", get(local_skill))
             .route("/audio", post(local_audio))
@@ -1972,6 +1993,7 @@ fn run_game(
         println!("  POST /join?name=X  - Join game, returns session token");
         println!("  POST /input        - Send input (requires X-Session header)");
         println!("  GET  /observe      - Player observation (requires X-Session header)");
+        println!("  POST /reset        - Engine-level full reset (requires X-Session header)");
         println!("  POST /chat         - Send chat message (requires X-Session header)");
         println!("  GET  /chat/messages - List local chat messages");
         println!("  GET  /skill.md     - Game skill definition");
@@ -2782,6 +2804,12 @@ struct LocalState {
     game_id: Uuid,
     instance_id: Uuid,
     game_handle: GameManagerHandle,
+    initial_instance_snapshot: Arc<GameInstanceSnapshot>,
+    world_script_source: Arc<String>,
+    max_players: u32,
+    observation_radius: f32,
+    afk_timeout_secs: u64,
+    error_mode: ErrorMode,
     started_at: Instant,
     base_path: String,
     skill_md: Option<String>,
@@ -3206,6 +3234,135 @@ fn external_snapshot(state: &ExternalLocalState) -> serde_json::Value {
         "entities": [],
         "recent_events": []
     })
+}
+
+fn clear_local_instance_caches(state: &LocalState) {
+    state.game_handle.spectator_cache.remove(&state.instance_id);
+
+    let obs_keys: Vec<_> = state
+        .game_handle
+        .observation_cache
+        .iter()
+        .filter(|entry| entry.key().0 == state.instance_id)
+        .map(|entry| *entry.key())
+        .collect();
+    for key in obs_keys {
+        state.game_handle.observation_cache.remove(&key);
+    }
+
+    let player_keys: Vec<_> = state
+        .game_handle
+        .player_instances
+        .iter()
+        .filter(|entry| *entry.value() == state.instance_id)
+        .map(|entry| *entry.key())
+        .collect();
+    for key in player_keys {
+        state.game_handle.player_instances.remove(&key);
+    }
+}
+
+fn apply_afk_timeout(instance: &mut GameInstance, afk_timeout_secs: u64) {
+    if afk_timeout_secs == 0 {
+        instance.set_afk_timeout(Duration::from_secs(u64::MAX));
+    } else {
+        instance.set_afk_timeout(Duration::from_secs(afk_timeout_secs));
+    }
+}
+
+fn reset_local_instance(state: &LocalState) -> Result<(), String> {
+    let sessions: Vec<(Uuid, String)> = state
+        .sessions
+        .iter()
+        .map(|entry| {
+            let (agent_id, name) = entry.value().clone();
+            (agent_id, name)
+        })
+        .collect();
+
+    let mut instance = GameInstance::new_with_config(
+        state.game_id,
+        state.max_players,
+        state.observation_radius,
+        state.game_handle.async_bridge.clone(),
+        state.error_mode,
+    );
+    instance.instance_id = state.instance_id;
+    instance.init_runtime();
+    clawblox::snapshot::restore_game_instance(&mut instance, &state.initial_instance_snapshot)?;
+    instance.load_script(state.world_script_source.as_str());
+    instance.halted_error = None;
+    apply_afk_timeout(&mut instance, state.afk_timeout_secs);
+
+    let spectator_obs = instance.get_spectator_observation();
+
+    clear_local_instance_caches(state);
+    state
+        .game_handle
+        .instances
+        .insert(state.instance_id, Arc::new(parking_lot::RwLock::new(instance)));
+    state
+        .game_handle
+        .spectator_cache
+        .insert(state.instance_id, spectator_obs);
+
+    for (agent_id, name) in sessions {
+        game::join_instance(
+            &state.game_handle,
+            state.instance_id,
+            state.game_id,
+            agent_id,
+            &name,
+        )?;
+    }
+
+    Ok(())
+}
+
+fn record_local_input(
+    state: &LocalState,
+    agent_id: Uuid,
+    input_type: String,
+    input_data: serde_json::Value,
+    tick: u64,
+) {
+    if let Some(writer) = &state.recording_writer {
+        let time_ms = state.started_at.elapsed().as_millis() as u64;
+        let writer = writer.clone();
+        tokio::spawn(async move {
+            let w = writer.lock().await;
+            w.record_input(tick, time_ms, &agent_id, &input_type, &input_data)
+                .await;
+        });
+    }
+}
+
+fn build_local_player_observation(
+    state: &LocalState,
+    agent_id: Uuid,
+) -> Result<PlayerObservation, (axum::http::StatusCode, String)> {
+    let mut observation = game::get_observation(&state.game_handle, state.game_id, agent_id)
+        .map_err(|e| (axum::http::StatusCode::BAD_REQUEST, e))?;
+    resolve_local_player_assets(&mut observation, &state.base_path);
+    maybe_publish_authoritative_speech_events(&state, &observation.recent_events);
+    Ok(observation)
+}
+
+fn perform_engine_reset_for_session(
+    state: &LocalState,
+    agent_id: Uuid,
+) -> Result<PlayerObservation, (axum::http::StatusCode, String)> {
+    reset_local_instance(state)
+        .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    let observation = build_local_player_observation(state, agent_id)?;
+    record_local_input(
+        state,
+        agent_id,
+        "Reset".to_string(),
+        serde_json::json!({}),
+        observation.tick,
+    );
+    Ok(observation)
 }
 
 fn capture_local_runtime_snapshot(state: &LocalState) -> Result<LocalRuntimeSnapshot, String> {
@@ -3695,11 +3852,14 @@ async fn local_input(
     headers: axum::http::HeaderMap,
     Json(input): Json<InputRequest>,
 ) -> Result<Json<PlayerObservation>, (axum::http::StatusCode, String)> {
+    let (agent_id, agent_name) = get_session(&state, &headers)?;
+    if input.input_type == "Reset" {
+        return perform_engine_reset_for_session(&state, agent_id).map(Json);
+    }
+
     if let Some(err) = check_halted(&state) {
         return Err((axum::http::StatusCode::SERVICE_UNAVAILABLE, err));
     }
-
-    let (agent_id, agent_name) = get_session(&state, &headers)?;
 
     let speech_progress = extract_speech_progress_event(&input.input_type, &input.data);
     let input_type = input.input_type.clone();
@@ -3715,27 +3875,22 @@ async fn local_input(
     .map_err(|e| (axum::http::StatusCode::BAD_REQUEST, e))?;
 
     // Return observation
-    let mut observation = game::get_observation(&state.game_handle, state.game_id, agent_id)
-        .map_err(|e| (axum::http::StatusCode::BAD_REQUEST, e))?;
-    resolve_local_player_assets(&mut observation, &state.base_path);
-    maybe_publish_authoritative_speech_events(&state, &observation.recent_events);
-
-    if let Some(writer) = &state.recording_writer {
-        let time_ms = state.started_at.elapsed().as_millis() as u64;
-        let tick = observation.tick;
-        let writer = writer.clone();
-        tokio::spawn(async move {
-            let w = writer.lock().await;
-            w.record_input(tick, time_ms, &agent_id, &input_type, &input_data)
-                .await;
-        });
-    }
+    let observation = build_local_player_observation(&state, agent_id)?;
+    record_local_input(&state, agent_id, input_type, input_data, observation.tick);
 
     if let Some(progress) = speech_progress {
         maybe_publish_speech_progress(&state, &observation, &agent_name, progress);
     }
 
     Ok(Json(observation))
+}
+
+async fn local_reset(
+    State(state): State<LocalState>,
+    headers: axum::http::HeaderMap,
+) -> Result<Json<PlayerObservation>, (axum::http::StatusCode, String)> {
+    let (agent_id, _) = get_session(&state, &headers)?;
+    perform_engine_reset_for_session(&state, agent_id).map(Json)
 }
 
 #[derive(Clone, Debug)]
