@@ -176,7 +176,8 @@ impl RecordingWriter {
             ("world_dir", world_dir),
             ("created_at", &now),
             ("tick_rate", &tick_rate.to_string()),
-            ("version", "2"),
+            ("version", "3"),
+            ("tick_semantics", "monotonic_recording_tick"),
         ] {
             sqlx::query("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)")
                 .bind(k)

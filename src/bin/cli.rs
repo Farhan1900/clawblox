@@ -1898,6 +1898,7 @@ fn run_game(
             audio_speech_text: Arc::new(Mutex::new(HashMap::new())),
             chat_state: Arc::new(Mutex::new(LocalChatState::default())),
             recording_writer: recording_writer.clone(),
+            recording_timeline: Arc::new(Mutex::new(RecordingTimeline::default())),
         };
 
         if let Some(snapshot) = resume_snapshot_for_server {
@@ -1919,11 +1920,12 @@ fn run_game(
             let game_handle = state.game_handle.clone();
             let instance_id = state.instance_id;
             let recording_base_path = state.base_path.clone();
+            let recording_timeline = state.recording_timeline.clone();
             let (shutdown_tx, mut shutdown_rx) = watch::channel(false);
             recording_shutdown_tx = Some(shutdown_tx);
             recording_task = Some(tokio::spawn(async move {
                 let mut tick_interval = interval(Duration::from_millis(16));
-                let mut last_tick: u64 = 0;
+                let mut last_obs_key: Option<(u64, u64)> = None;
                 let start = Instant::now();
                 loop {
                     tokio::select! {
@@ -1936,12 +1938,19 @@ fn run_game(
                             let obs = game::get_spectator_observation_for_instance(&game_handle, instance_id);
                             match obs {
                                 Ok(mut obs) => {
-                                    if obs.tick != last_tick {
+                                    let obs_key = (obs.tick, obs.server_time_ms);
+                                    if last_obs_key != Some(obs_key) {
                                         resolve_local_spectator_assets(&mut obs, &recording_base_path);
                                         let time_ms = start.elapsed().as_millis() as u64;
+                                        let recording_tick = {
+                                            let mut timeline = recording_timeline.lock().unwrap();
+                                            timeline.note_source_tick(obs.tick)
+                                        };
+                                        obs.tick = recording_tick;
+                                        obs.server_time_ms = time_ms;
                                         let mut w = writer.lock().await;
-                                        w.record_tick(obs.tick, time_ms, &obs).await;
-                                        last_tick = obs.tick;
+                                        w.record_tick(recording_tick, time_ms, &obs).await;
+                                        last_obs_key = Some(obs_key);
                                     }
                                 }
                                 Err(_) => break,
@@ -2834,6 +2843,7 @@ struct LocalState {
     /// Session recording writer (None if not recording). Kept alive via Arc.
     #[allow(dead_code)]
     recording_writer: Option<Arc<tokio::sync::Mutex<recording::RecordingWriter>>>,
+    recording_timeline: Arc<Mutex<RecordingTimeline>>,
 }
 
 #[derive(Clone)]
@@ -2842,6 +2852,43 @@ struct ExternalLocalState {
     renderer_manifest: LocalRendererManifest,
     skill_md: Option<String>,
     started_at: Instant,
+}
+
+#[derive(Debug, Default)]
+struct RecordingTimeline {
+    epoch_offset: u64,
+    last_source_tick: Option<u64>,
+    latest_recording_tick: u64,
+    pending_epoch_break: bool,
+}
+
+impl RecordingTimeline {
+    fn note_source_tick(&mut self, source_tick: u64) -> u64 {
+        let should_advance_epoch = if self.pending_epoch_break {
+            self.last_source_tick
+                .map(|last_source_tick| source_tick < last_source_tick)
+                .unwrap_or(false)
+        } else {
+            self.last_source_tick
+                .map(|last_source_tick| source_tick < last_source_tick)
+                .unwrap_or(false)
+        };
+
+        if should_advance_epoch {
+            self.epoch_offset = self.latest_recording_tick.saturating_add(1);
+            self.pending_epoch_break = false;
+            self.last_source_tick = None;
+        }
+
+        let recording_tick = self.epoch_offset.saturating_add(source_tick);
+        self.last_source_tick = Some(source_tick);
+        self.latest_recording_tick = self.latest_recording_tick.max(recording_tick);
+        recording_tick
+    }
+
+    fn note_reset_boundary(&mut self) {
+        self.pending_epoch_break = true;
+    }
 }
 
 fn base64_decoded_len(data: &str) -> Option<usize> {
@@ -3324,17 +3371,23 @@ fn record_local_input(
     agent_id: Uuid,
     input_type: String,
     input_data: serde_json::Value,
-    tick: u64,
+    source_tick: u64,
 ) {
     if let Some(writer) = &state.recording_writer {
         let time_ms = state.started_at.elapsed().as_millis() as u64;
+        let recording_tick = remap_recording_tick(state, source_tick);
         let writer = writer.clone();
         tokio::spawn(async move {
             let w = writer.lock().await;
-            w.record_input(tick, time_ms, &agent_id, &input_type, &input_data)
+            w.record_input(recording_tick, time_ms, &agent_id, &input_type, &input_data)
                 .await;
         });
     }
+}
+
+fn remap_recording_tick(state: &LocalState, source_tick: u64) -> u64 {
+    let mut timeline = state.recording_timeline.lock().unwrap();
+    timeline.note_source_tick(source_tick)
 }
 
 fn build_local_player_observation(
@@ -3352,17 +3405,20 @@ fn perform_engine_reset_for_session(
     state: &LocalState,
     agent_id: Uuid,
 ) -> Result<PlayerObservation, (axum::http::StatusCode, String)> {
-    reset_local_instance(state)
-        .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e))?;
-    let observation = build_local_player_observation(state, agent_id)?;
+    let source_tick = game::get_spectator_observation_for_instance(&state.game_handle, state.instance_id)
+        .map(|obs| obs.tick)
+        .unwrap_or(0);
     record_local_input(
         state,
         agent_id,
         "Reset".to_string(),
         serde_json::json!({}),
-        observation.tick,
+        source_tick,
     );
-    Ok(observation)
+    state.recording_timeline.lock().unwrap().note_reset_boundary();
+    reset_local_instance(state)
+        .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    build_local_player_observation(state, agent_id)
 }
 
 fn capture_local_runtime_snapshot(state: &LocalState) -> Result<LocalRuntimeSnapshot, String> {
@@ -3757,12 +3813,13 @@ async fn local_chat(
     // Record chat message if recording is enabled
     if let Some(ref writer) = state.recording_writer {
         let time_ms = state.started_at.elapsed().as_millis() as u64;
-        let tick = game::get_spectator_observation_for_instance(
+        let source_tick = game::get_spectator_observation_for_instance(
             &state.game_handle,
             state.instance_id,
         )
         .map(|obs| obs.tick)
         .unwrap_or(0);
+        let recording_tick = remap_recording_tick(&state, source_tick);
         let writer = writer.clone();
         let msg_id = msg.id.clone();
         let agent_name_clone = msg.agent_name.clone();
@@ -3784,7 +3841,7 @@ async fn local_chat(
         tokio::spawn(async move {
             let w = writer.lock().await;
             w.record_chat(
-                tick,
+                recording_tick,
                 time_ms,
                 &msg_id,
                 &agent_id,
