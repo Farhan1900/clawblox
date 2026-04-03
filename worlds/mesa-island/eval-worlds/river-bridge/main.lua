@@ -651,9 +651,9 @@ local function handleFallenBlockGroup(block)
     end
 end
 
-local function getNearestBondTarget(block)
+local function getBondTargets(block)
     if not isBlockPart(block) then
-        return nil, nil
+        return {}, false
     end
 
     local params = OverlapParams.new()
@@ -666,34 +666,26 @@ local function getNearestBondTarget(block)
         params
     )
 
-    local nearestBlock = nil
-    local nearestBlockDistance = math.huge
-    local terrainHit = nil
+    local blockTargets = {}
+    local seenBlocks = {}
+    local terrainHit = false
     for _, hit in ipairs(hits) do
         if hit:IsA("Part") then
             local role = hit:GetAttribute("RenderRole")
             if role == "Ground" or role == "Mesa" or role == "Rock" then
-                terrainHit = hit
+                terrainHit = true
             end
             if isBlockPart(hit) then
-                local distance = (hit.Position - block.Position).Magnitude
-                if distance < nearestBlockDistance then
-                    nearestBlock = hit
-                    nearestBlockDistance = distance
+                local targetKey = getBlockBondKey(hit)
+                if targetKey and not seenBlocks[targetKey] then
+                    seenBlocks[targetKey] = true
+                    table.insert(blockTargets, hit)
                 end
             end
         end
     end
 
-    -- Prefer block-to-block bonds over terrain bonds
-    if nearestBlock then
-        return "Block", nearestBlock
-    end
-    if terrainHit then
-        return "Terrain", terrainHit
-    end
-
-    return nil, nil
+    return blockTargets, terrainHit
 end
 
 local function hasResidueBondBetween(blockA, blockB)
@@ -726,28 +718,50 @@ local function trySetBlockBond(block)
 
     local state = getHiddenBlockState(block)
     local phase = getBlockCoatingPhase(block)
-    local targetKind, target = getNearestBondTarget(block)
-    if not targetKind or not target then
-        return false
-    end
-    if targetKind == "Block" and isBlockBondFrozen(target) then
-        return false
-    end
+    local targets, terrainHit = getBondTargets(block)
 
-    local can_initiate = phase == "Coated"
     local should_mark_set = phase == "Coated"
-    local bond_owner = block
-    local bond_other = target
-    if not can_initiate and targetKind == "Block" and getBlockCoatingPhase(target) == "Set" then
-        can_initiate = true
-        bond_owner = target
-        bond_other = block
-    end
-    if not can_initiate then
-        return false
+    local createdBond = false
+
+    for _, target in ipairs(targets) do
+        if not isBlockBondFrozen(target) then
+            local can_initiate = phase == "Coated"
+            local bond_owner = block
+            local bond_other = target
+            if not can_initiate and getBlockCoatingPhase(target) == "Set" then
+                can_initiate = true
+                bond_owner = target
+                bond_other = block
+            end
+
+            if can_initiate then
+                if should_mark_set then
+                    state:SetAttribute("CoatingPhase", "Set")
+                    refreshBlockAppearance(block)
+                    should_mark_set = false
+                end
+                if not (hasBlockBondTarget(block, target) and hasResidueBondBetween(block, target)) then
+                    local bond = Instance.new("WeldConstraint")
+                    bond.Name = RESIDUE_BOND_NAME
+                    bond.Part0 = bond_owner
+                    bond.Part1 = bond_other
+                    bond.Parent = bond_owner
+                    addBlockBondTarget(block, target)
+                    addBlockBondTarget(target, block)
+                end
+                createdBond = true
+            end
+        end
     end
 
-    if targetKind == "Terrain" then
+    if createdBond then
+        return true
+    end
+
+    if terrainHit then
+        if phase ~= "Coated" then
+            return false
+        end
         if should_mark_set then
             state:SetAttribute("CoatingPhase", "Set")
             refreshBlockAppearance(block)
@@ -760,24 +774,10 @@ local function trySetBlockBond(block)
             removeBlockBonds(block)
             block.Anchored = true
         end
-    else
-        if should_mark_set then
-            state:SetAttribute("CoatingPhase", "Set")
-            refreshBlockAppearance(block)
-        end
-        if hasBlockBondTarget(block, target) and hasResidueBondBetween(block, target) then
-            return true
-        end
-
-        local bond = Instance.new("WeldConstraint")
-        bond.Name = RESIDUE_BOND_NAME
-        bond.Part0 = bond_owner
-        bond.Part1 = bond_other
-        bond.Parent = bond_owner
-        addBlockBondTarget(block, target)
-        addBlockBondTarget(target, block)
+        return true
     end
-    return true
+
+    return false
 end
 
 local function coatBlock(block)
