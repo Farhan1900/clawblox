@@ -14,6 +14,7 @@ local PLACE_RANGE = 7
 local SPAWN_HEIGHT = 5
 local PLAYER_SPAWN_POSITION = Vector3.new(-16, SPAWN_HEIGHT, 0)
 local OUT_OF_BOUNDS_Y = -25
+local BLOCK_OUT_OF_BOUNDS_MODE = "destroy" -- "destroy" or "respawn"
 
 local BANK_LENGTH_Z = 40
 local BANK_WIDTH_X = 22
@@ -626,6 +627,27 @@ local function resetFallenBlockGroup(block)
         bondedBlock.Anchored = false
         bondedBlock.CanCollide = true
         trackedCarryables[bondedBlock] = true
+    end
+end
+
+local function handleFallenBlockGroup(block)
+    if BLOCK_OUT_OF_BOUNDS_MODE == "respawn" then
+        resetFallenBlockGroup(block)
+        return
+    end
+
+    local bondedBlocks = getBondedBlocks(block)
+    if #bondedBlocks == 0 then
+        return
+    end
+
+    for _, bondedBlock in ipairs(bondedBlocks) do
+        releaseHeldObjectReferences(bondedBlock)
+        clearBlockTreatment(bondedBlock)
+        trackedCarryables[bondedBlock] = nil
+        if bondedBlock.Parent then
+            bondedBlock:Destroy()
+        end
     end
 end
 
@@ -1593,7 +1615,7 @@ RunService.Heartbeat:Connect(function(dt)
 
     for _, block in ipairs(resetBlocks) do
         if block.Parent and block.Position.Y < OUT_OF_BOUNDS_Y then
-            resetFallenBlockGroup(block)
+            handleFallenBlockGroup(block)
         end
     end
 end)

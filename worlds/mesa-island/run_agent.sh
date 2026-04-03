@@ -18,6 +18,8 @@ PI_EXTENSION_PATH="${PI_EXTENSION_PATH:-}"
 PI_NO_GLOBAL_EXTENSIONS="${PI_NO_GLOBAL_EXTENSIONS:-1}"
 SESSION_DIR="${SESSION_DIR:-}"
 RESET_EVERY="${RESET_EVERY:-}"
+CHECKPOINT_WARNING_SECONDS=300
+CHECKPOINT_WARNING_PROMPT="You will be reset in 5 minutes."
 SYSTEM_PROMPT_SNAPSHOT_FILE="${SYSTEM_PROMPT_SNAPSHOT_FILE:-}"
 WORLD_STARTUP_INSTRUCTIONS="${WORLD_STARTUP_INSTRUCTIONS:-}"
 PI_PROVIDER="${PI_PROVIDER:-}"
@@ -210,12 +212,13 @@ Use each file for one role:
 - IDENTITY.md: stable preferences, habits, and self-knowledge.
 - SEMANTIC_MEMORY.md: verified or clearly-labeled reusable knowledge, procedures, and constraints.
 - EPISODIC_MEMORY.md: append-only brief summaries of each session. Each summary should capture objective, key attempts, failures or dead ends, new facts, and the next step.
-- scripts/: routines learned over time that make your life easier and reduce cognitive load. Run as background commands to make sure you always monitor and control what you do. 
+- scripts/: routines learned over time that make your life easier and reduce cognitive load. Keep clean and documented in semantic memory.
 
 IMPORTANT:
 - prefer reacting to state changes than blindly waiting. Never use sleep unless strictly needed!
 - always log events and trajectories. You hate being blind and you always want to know what exactly happened.
 - always use python commands and script to act in the world. Don't use bare curl commands.
+- always monitor what you are doing in the world, use tmux for non blocking execution (a single terminal to keep it clean).
 
 Keep the instructional header at the top of each workspace file.
 If a file contains <!-- DO NOT EDIT ABOVE THIS LINE -->, preserve everything above that divider and only edit below it.
@@ -336,19 +339,26 @@ fi
 run_pi_session() {
   local active_session_dir="$1"
   local sandbox_active_session_dir="$active_session_dir"
+  local checkpoint_at_epoch=""
   if [[ "$SANDBOX" == "1" ]]; then
     # Map the host session subdir to the sandbox /session mount
     sandbox_active_session_dir="/session${active_session_dir#"$SESSION_DIR"}"
   fi
+  if [[ -n "$RESET_EVERY" && "$RESET_EVERY" -gt "$CHECKPOINT_WARNING_SECONDS" ]]; then
+    checkpoint_at_epoch="$(( $(date +%s) + RESET_EVERY - CHECKPOINT_WARNING_SECONDS ))"
+  fi
   # Replace the backgrounded shell with pi so RESET_EVERY tracks and kills the real agent PID.
-  exec "${BWRAP_PREFIX[@]}" "$PI_NODE_BIN" "$PI_BIN" \
+  exec env \
+    AGENT_CHECKPOINT_AT_EPOCH="$checkpoint_at_epoch" \
+    AGENT_CHECKPOINT_PROMPT="$CHECKPOINT_WARNING_PROMPT" \
+    "${BWRAP_PREFIX[@]}" "$PI_NODE_BIN" "$PI_BIN" \
     "${WATCH_FLAG[@]}" \
     "${MODEL_FLAGS[@]}" \
     "${EXTENSION_FLAGS[@]}" \
     --session-dir "$sandbox_active_session_dir" \
     --append-system-prompt "$SANDBOX_PROMPT_FILE" \
     --continue \
-    "Being"
+    "Begin"
 }
 
 if [[ -z "$RESET_EVERY" ]]; then
