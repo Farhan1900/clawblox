@@ -1927,6 +1927,8 @@ fn run_game(
                 let mut tick_interval = interval(Duration::from_millis(16));
                 let mut last_obs_key: Option<(u64, u64)> = None;
                 let start = Instant::now();
+                let mut consecutive_observe_failures: u32 = 0;
+                let mut total_observe_failures: u64 = 0;
                 loop {
                     tokio::select! {
                         _ = shutdown_rx.changed() => {
@@ -1938,6 +1940,15 @@ fn run_game(
                             let obs = game::get_spectator_observation_for_instance(&game_handle, instance_id);
                             match obs {
                                 Ok(mut obs) => {
+                                    if consecutive_observe_failures > 0 {
+                                        eprintln!(
+                                            "[recording] spectator observation recovered for instance {} after {} consecutive failures ({} total)",
+                                            instance_id,
+                                            consecutive_observe_failures,
+                                            total_observe_failures,
+                                        );
+                                        consecutive_observe_failures = 0;
+                                    }
                                     let obs_key = (obs.tick, obs.server_time_ms);
                                     if last_obs_key != Some(obs_key) {
                                         resolve_local_spectator_assets(&mut obs, &recording_base_path);
@@ -1953,7 +1964,29 @@ fn run_game(
                                         last_obs_key = Some(obs_key);
                                     }
                                 }
-                                Err(_) => break,
+                                Err(err) => {
+                                    consecutive_observe_failures = consecutive_observe_failures.saturating_add(1);
+                                    total_observe_failures = total_observe_failures.saturating_add(1);
+
+                                    if consecutive_observe_failures == 1 || consecutive_observe_failures % 60 == 0 {
+                                        eprintln!(
+                                            "[recording] spectator observation failed for instance {} (consecutive={}, total={}): {}",
+                                            instance_id,
+                                            consecutive_observe_failures,
+                                            total_observe_failures,
+                                            err,
+                                        );
+                                    }
+
+                                    if consecutive_observe_failures >= 1800 {
+                                        eprintln!(
+                                            "[recording] stopping spectator recorder for instance {} after {} consecutive observation failures",
+                                            instance_id,
+                                            consecutive_observe_failures,
+                                        );
+                                        break;
+                                    }
+                                },
                             }
                         }
                     }
