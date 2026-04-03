@@ -192,6 +192,7 @@ if [[ -n "$SESSION_ID" ]]; then
   SKILL_CURL="curl -sS -H '${WORLD_SESSION_HEADER}: ${SESSION_ID}'"
 fi
 
+# TODO: don't say the workspace is your home!!, the world is your home, you can't leave it!
 cat >"$PROMPT_FILE" <<EOF
 Your name is ${WORLD_AGENT_NAME}.
 

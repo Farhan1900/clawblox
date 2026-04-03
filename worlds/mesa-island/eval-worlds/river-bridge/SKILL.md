@@ -1,4 +1,3 @@
-# River Bridge
 
 ## Action Schemas
 
@@ -11,13 +10,10 @@
 | Pickup | `{"position": [x, y, z]}` |
 | Place | `{"position": [x, y, z], "rotation": {"yaw": deg, "pitch": deg, "roll": deg}}` |
 
-`Reset` fully rebuilds the world: terrain, loose blocks, residue clumps, and player position all return to the initial state.
-
 Blocks can be coated with residue clumps to make them sticky. A coated block bonds to adjacent blocks on contact. You can then pick up and move the entire bonded assembly.
 
-The river channel does not support the player. Build a stable bridge from the near bank to the far bank, then cross it.
-
-The player starts on the west bank. Loose blocks are stacked in one corner, and residue clumps are piled in the opposite corner. The goal is simply to reach the east bank.
+Blocks fall in the river.
+You need to build a long bridge first and then transport it over the river.
 
 ## API Endpoints
 

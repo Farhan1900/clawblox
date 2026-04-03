@@ -1,0 +1,1 @@
+./launch_multi.sh --tmux-session river-bridge --base-port 8099 --num-worlds 1 --agents-per-world 1 --record true --sandbox --reset-every 3600
