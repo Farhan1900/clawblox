@@ -151,6 +151,7 @@ pub struct PartData {
     pub size_dirty: bool,
     pub anchored_dirty: bool,
     pub can_collide_dirty: bool,
+    pub interaction_dirty: bool,
     pub velocity_dirty: bool,
     pub angular_velocity_dirty: bool,
     pub shape_dirty: bool,
@@ -185,6 +186,7 @@ impl Default for PartData {
             size_dirty: false,
             anchored_dirty: false,
             can_collide_dirty: false,
+            interaction_dirty: false,
             velocity_dirty: false,
             angular_velocity_dirty: false,
             shape_dirty: false,
@@ -2040,6 +2042,7 @@ impl UserData for Instance {
             if let Some(part) = &mut data.part_data {
                 part.can_collide = can_collide;
                 part.can_collide_dirty = true;
+                part.interaction_dirty = true;
             }
             Ok(())
         });
@@ -2064,6 +2067,7 @@ impl UserData for Instance {
             let mut data = this.data.lock().unwrap();
             if let Some(part) = &mut data.part_data {
                 part.can_query = can_query;
+                part.interaction_dirty = true;
             }
             Ok(())
         });
@@ -2088,6 +2092,7 @@ impl UserData for Instance {
             let mut data = this.data.lock().unwrap();
             if let Some(part) = &mut data.part_data {
                 part.can_touch = can_touch;
+                part.interaction_dirty = true;
             }
             Ok(())
         });

@@ -131,34 +131,35 @@ impl CFrame {
     }
 
     pub fn inverse(&self) -> Self {
+        let basis = self.orthonormalized();
         let inv_rot = [
             [
-                self.rotation[0][0],
-                self.rotation[1][0],
-                self.rotation[2][0],
+                basis.rotation[0][0],
+                basis.rotation[1][0],
+                basis.rotation[2][0],
             ],
             [
-                self.rotation[0][1],
-                self.rotation[1][1],
-                self.rotation[2][1],
+                basis.rotation[0][1],
+                basis.rotation[1][1],
+                basis.rotation[2][1],
             ],
             [
-                self.rotation[0][2],
-                self.rotation[1][2],
-                self.rotation[2][2],
+                basis.rotation[0][2],
+                basis.rotation[1][2],
+                basis.rotation[2][2],
             ],
         ];
 
         let inv_pos = Vector3::new(
-            -(inv_rot[0][0] * self.position.x
-                + inv_rot[0][1] * self.position.y
-                + inv_rot[0][2] * self.position.z),
-            -(inv_rot[1][0] * self.position.x
-                + inv_rot[1][1] * self.position.y
-                + inv_rot[1][2] * self.position.z),
-            -(inv_rot[2][0] * self.position.x
-                + inv_rot[2][1] * self.position.y
-                + inv_rot[2][2] * self.position.z),
+            -(inv_rot[0][0] * basis.position.x
+                + inv_rot[0][1] * basis.position.y
+                + inv_rot[0][2] * basis.position.z),
+            -(inv_rot[1][0] * basis.position.x
+                + inv_rot[1][1] * basis.position.y
+                + inv_rot[1][2] * basis.position.z),
+            -(inv_rot[2][0] * basis.position.x
+                + inv_rot[2][1] * basis.position.y
+                + inv_rot[2][2] * basis.position.z),
         );
 
         Self {
@@ -168,26 +169,11 @@ impl CFrame {
     }
 
     pub fn lerp(&self, goal: &CFrame, alpha: f32) -> Self {
-        Self {
-            position: self.position.lerp(&goal.position, alpha),
-            rotation: [
-                [
-                    self.rotation[0][0] + (goal.rotation[0][0] - self.rotation[0][0]) * alpha,
-                    self.rotation[0][1] + (goal.rotation[0][1] - self.rotation[0][1]) * alpha,
-                    self.rotation[0][2] + (goal.rotation[0][2] - self.rotation[0][2]) * alpha,
-                ],
-                [
-                    self.rotation[1][0] + (goal.rotation[1][0] - self.rotation[1][0]) * alpha,
-                    self.rotation[1][1] + (goal.rotation[1][1] - self.rotation[1][1]) * alpha,
-                    self.rotation[1][2] + (goal.rotation[1][2] - self.rotation[1][2]) * alpha,
-                ],
-                [
-                    self.rotation[2][0] + (goal.rotation[2][0] - self.rotation[2][0]) * alpha,
-                    self.rotation[2][1] + (goal.rotation[2][1] - self.rotation[2][1]) * alpha,
-                    self.rotation[2][2] + (goal.rotation[2][2] - self.rotation[2][2]) * alpha,
-                ],
-            ],
-        }
+        let position = self.position.lerp(&goal.position, alpha);
+        let quat = slerp_quaternion(self.to_quaternion(), goal.to_quaternion(), alpha);
+        let mut result = Self::from_quaternion(quat);
+        result.position = position;
+        result.orthonormalized()
     }
 
     pub fn multiply(&self, other: &CFrame) -> Self {
@@ -219,6 +205,7 @@ impl CFrame {
             position: new_pos,
             rotation: new_rot,
         }
+        .orthonormalized()
     }
 
     pub fn point_to_world_space(&self, point: &Vector3) -> Vector3 {
@@ -285,7 +272,8 @@ impl CFrame {
 
     /// Extract orientation angles (YXZ decomposition), matching Roblox ToOrientation semantics.
     pub fn to_orientation(&self) -> (f32, f32, f32) {
-        let r = &self.rotation;
+        let basis = self.orthonormalized();
+        let r = &basis.rotation;
         let sx = (-r[1][2]).clamp(-1.0, 1.0);
         let rx = sx.asin();
         let cx = rx.cos();
@@ -304,7 +292,8 @@ impl CFrame {
 
     /// Convert rotation matrix to quaternion [x, y, z, w]
     pub fn to_quaternion(&self) -> [f32; 4] {
-        let r = &self.rotation;
+        let basis = self.orthonormalized();
+        let r = &basis.rotation;
         let trace = r[0][0] + r[1][1] + r[2][2];
 
         if trace > 0.0 {
@@ -340,7 +329,7 @@ impl CFrame {
 
     /// Create a CFrame from a quaternion [x, y, z, w]
     pub fn from_quaternion(quat: [f32; 4]) -> Self {
-        let [x, y, z, w] = quat;
+        let [x, y, z, w] = normalize_quaternion(quat);
         let xx = x * x;
         let yy = y * y;
         let zz = z * z;
@@ -357,6 +346,52 @@ impl CFrame {
                 [1.0 - 2.0 * (yy + zz), 2.0 * (xy - wz), 2.0 * (xz + wy)],
                 [2.0 * (xy + wz), 1.0 - 2.0 * (xx + zz), 2.0 * (yz - wx)],
                 [2.0 * (xz - wy), 2.0 * (yz + wx), 1.0 - 2.0 * (xx + yy)],
+            ],
+        }
+        .orthonormalized()
+    }
+
+    pub fn orthonormalized(&self) -> Self {
+        let mut right = self.right_vector().unit();
+        if right.magnitude() < 1e-6 {
+            right = Vector3::new(1.0, 0.0, 0.0);
+        }
+
+        let mut up = self.up_vector();
+        let right_up_proj = right.dot(&up);
+        up = Vector3::new(
+            up.x - right.x * right_up_proj,
+            up.y - right.y * right_up_proj,
+            up.z - right.z * right_up_proj,
+        );
+        up = up.unit();
+        if up.magnitude() < 1e-6 {
+            let fallback = if right.x.abs() < 0.9 {
+                Vector3::new(1.0, 0.0, 0.0)
+            } else {
+                Vector3::new(0.0, 1.0, 0.0)
+            };
+            let right_fallback_proj = right.dot(&fallback);
+            up = Vector3::new(
+                fallback.x - right.x * right_fallback_proj,
+                fallback.y - right.y * right_fallback_proj,
+                fallback.z - right.z * right_fallback_proj,
+            )
+            .unit();
+        }
+
+        let mut back = right.cross(&up).unit();
+        if back.magnitude() < 1e-6 {
+            back = Vector3::new(0.0, 0.0, 1.0);
+        }
+        up = back.cross(&right).unit();
+
+        Self {
+            position: self.position,
+            rotation: [
+                [right.x, up.x, back.x],
+                [right.y, up.y, back.y],
+                [right.z, up.z, back.z],
             ],
         }
     }
@@ -377,6 +412,49 @@ impl CFrame {
             self.rotation[2][2],
         ]
     }
+}
+
+fn normalize_quaternion([x, y, z, w]: [f32; 4]) -> [f32; 4] {
+    let mag = (x * x + y * y + z * z + w * w).sqrt();
+    if mag <= 1e-8 {
+        [0.0, 0.0, 0.0, 1.0]
+    } else {
+        [x / mag, y / mag, z / mag, w / mag]
+    }
+}
+
+fn slerp_quaternion(a: [f32; 4], b: [f32; 4], alpha: f32) -> [f32; 4] {
+    let a = normalize_quaternion(a);
+    let mut b = normalize_quaternion(b);
+    let mut dot = a[0] * b[0] + a[1] * b[1] + a[2] * b[2] + a[3] * b[3];
+
+    if dot < 0.0 {
+        b = [-b[0], -b[1], -b[2], -b[3]];
+        dot = -dot;
+    }
+
+    if dot > 0.9995 {
+        return normalize_quaternion([
+            a[0] + (b[0] - a[0]) * alpha,
+            a[1] + (b[1] - a[1]) * alpha,
+            a[2] + (b[2] - a[2]) * alpha,
+            a[3] + (b[3] - a[3]) * alpha,
+        ]);
+    }
+
+    let theta_0 = dot.clamp(-1.0, 1.0).acos();
+    let theta = theta_0 * alpha;
+    let sin_theta = theta.sin();
+    let sin_theta_0 = theta_0.sin();
+
+    let s0 = theta.cos() - dot * sin_theta / sin_theta_0;
+    let s1 = sin_theta / sin_theta_0;
+    normalize_quaternion([
+        s0 * a[0] + s1 * b[0],
+        s0 * a[1] + s1 * b[1],
+        s0 * a[2] + s1 * b[2],
+        s0 * a[3] + s1 * b[3],
+    ])
 }
 
 impl FromLua for CFrame {

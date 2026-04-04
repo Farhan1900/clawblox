@@ -500,7 +500,6 @@ impl GameInstance {
         }
 
         let dt = 1.0 / 60.0;
-
         // Process kick requests from Lua scripts (e.g., Player:Kick())
         self.process_kick_requests();
 
@@ -900,6 +899,8 @@ impl GameInstance {
                         [part_data.size.x, part_data.size.y, part_data.size.z],
                         part_data.anchored,
                         part_data.can_collide,
+                        part_data.can_touch,
+                        part_data.can_query,
                         part_data.shape,
                         Some(part_data.effective_physical_properties()),
                     );
@@ -930,6 +931,7 @@ impl GameInstance {
                     part_data.size_dirty = false;
                     part_data.anchored_dirty = false;
                     part_data.can_collide_dirty = false;
+                    part_data.interaction_dirty = false;
                     part_data.velocity_dirty = false;
                     part_data.angular_velocity_dirty = false;
                     part_data.shape_dirty = false;
@@ -950,6 +952,11 @@ impl GameInstance {
                     if part_data.can_collide_dirty {
                         self.physics.set_can_collide(lua_id, part_data.can_collide);
                         part_data.can_collide_dirty = false;
+                    }
+                    if part_data.interaction_dirty {
+                        self.physics.set_can_touch(lua_id, part_data.can_touch);
+                        self.physics.set_can_query(lua_id, part_data.can_query);
+                        part_data.interaction_dirty = false;
                     }
                     if part_data.velocity_dirty {
                         if let Some(handle) = self.physics.get_handle(lua_id) {
@@ -1334,6 +1341,10 @@ impl GameInstance {
                     let Some(handle1) = self.physics.get_handle(part1_id) else {
                         continue;
                     };
+                    if !self.physics.is_dynamic_body(handle0) && !self.physics.is_dynamic_body(handle1)
+                    {
+                        continue;
+                    }
                     self.physics.insert_fixed_joint(
                         handle0,
                         handle1,
@@ -1362,6 +1373,10 @@ impl GameInstance {
                     let Some(handle1) = self.physics.get_handle(part1_id) else {
                         continue;
                     };
+                    if !self.physics.is_dynamic_body(handle0) && !self.physics.is_dynamic_body(handle1)
+                    {
+                        continue;
+                    }
                     self.physics.insert_fixed_joint(
                         handle0,
                         handle1,

@@ -59,6 +59,7 @@ local RESIDUE_CLUMP_SIZE = Vector3.new(0.38, 0.38, 0.38)
 local RESIDUE_HOLD_OFFSET = Vector3.new(0, 3.1, 0)
 local RESIDUE_PLACE_RANGE = 1.2
 local RESIDUE_CONTACT_PADDING = 0.14
+local PLACEMENT_CONTACT_EPSILON = 0.04
 local RESIDUE_BOND_NAME = "SkuttlerBond"
 local ASSEMBLY_MODEL_NAME = "ConstructionAssembly"
 
@@ -588,6 +589,43 @@ local function getTargetRootCFrame(object, targetPosition, rotation)
     return CFrame.new(targetPosition) * rotationCFrame
 end
 
+local function getSupportAdjustedRootCFrame(object, targetPosition, rotation)
+    local rotationCFrame = getCurrentRootRotationCFrame(object)
+    if rotation ~= nil then
+        local pitch, yaw, roll = parseRotationDegrees(rotation)
+        if pitch == nil then
+            return nil
+        end
+        rotationCFrame = CFrame.fromOrientation(math.rad(pitch), math.rad(yaw), math.rad(roll))
+    end
+
+    local baseRootCFrame = CFrame.new(targetPosition) * rotationCFrame
+    if not baseRootCFrame then
+        return nil
+    end
+
+    local rootCFrame = object.CFrame
+    local assemblyParts = getAssemblyParts(object)
+    local minBottomY = nil
+    for _, member in ipairs(assemblyParts) do
+        if member and member.Parent then
+            local relativeCFrame = rootCFrame:ToObjectSpace(member.CFrame)
+            local projectedCFrame = baseRootCFrame * relativeCFrame
+            local memberBottomY = projectedCFrame.Position.Y - (member.Size.Y * 0.5)
+            if minBottomY == nil or memberBottomY < minBottomY then
+                minBottomY = memberBottomY
+            end
+        end
+    end
+
+    if minBottomY == nil then
+        return baseRootCFrame
+    end
+
+    local liftY = targetPosition.Y - minBottomY
+    return CFrame.new(targetPosition + Vector3.new(0, liftY, 0)) * rotationCFrame
+end
+
 local function resetFallenBlockGroup(block)
     local bondedBlocks = getBondedBlocks(block)
     if #bondedBlocks == 0 then
@@ -779,6 +817,8 @@ local function setResidueMetadata(clump)
     clump:SetAttribute("CarryKind", "Clump")
     clump:SetAttribute("PlacementDuration", 0.12)
     clump:SetAttribute("HoldOffset", RESIDUE_HOLD_OFFSET)
+    clump.CanTouch = true
+    clump.CanQuery = true
 end
 
 createSecretionClump = function(position)
@@ -825,6 +865,8 @@ setBlockMetadata = function(block, colorName)
     block:SetAttribute("CarryKind", "Block")
     block:SetAttribute("PlacementDuration", DEFAULT_PLACE_DURATION)
     block:SetAttribute("HoldOffset", DEFAULT_HOLD_OFFSET)
+    block.CanTouch = true
+    block.CanQuery = true
     local state = getHiddenBlockState(block)
     if state:GetAttribute("SpawnPos") == nil then
         state:SetAttribute("SpawnPos", block.Position)
@@ -1004,26 +1046,36 @@ local function getObjectPlacementDuration(object)
     return DEFAULT_PLACE_DURATION
 end
 
+local function setAssemblyInteractionState(object, canCollide, canTouch, canQuery)
+    for _, member in ipairs(getAssemblyParts(object)) do
+        if member and member.Parent then
+            member.CanCollide = canCollide
+            member.CanTouch = canTouch
+            member.CanQuery = canQuery
+        end
+    end
+end
+
 local function prepareObjectForHolding(object)
     ensureAssemblyModel(object)
     setAssemblyBondFrozenForObject(object, true)
     for _, member in ipairs(getAssemblyParts(object)) do
         if member and member.Parent then
             member.Anchored = true
-            member.CanCollide = false
             member.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
             member.AssemblyAngularVelocity = Vector3.new(0, 0, 0)
         end
     end
+    setAssemblyInteractionState(object, false, false, false)
 end
 
 local function restoreObjectAfterPlacement(object)
     for _, member in ipairs(getAssemblyParts(object)) do
         if member and member.Parent then
             member.Anchored = false
-            member.CanCollide = true
         end
     end
+    setAssemblyInteractionState(object, true, true, true)
 end
 
 local function dropHeldObject(player)
@@ -1242,7 +1294,7 @@ local function positionOccupied(player, targetRootCFrame, object)
     local assemblyParts = getAssemblyParts(object)
     local params = OverlapParams.new()
     params.FilterType = Enum.RaycastFilterType.Exclude
-    params.FilterDescendantsInstances = { player.Character }
+    params.FilterDescendantsInstances = {}
     for _, member in ipairs(assemblyParts) do
         table.insert(params.FilterDescendantsInstances, member)
     end
@@ -1250,9 +1302,14 @@ local function positionOccupied(player, targetRootCFrame, object)
     for _, member in ipairs(assemblyParts) do
         local relativeCFrame = rootCFrame:ToObjectSpace(member.CFrame)
         local projectedCFrame = targetRootCFrame * relativeCFrame
+        local querySize = Vector3.new(
+            math.max(member.Size.X - PLACEMENT_CONTACT_EPSILON, 0.001),
+            math.max(member.Size.Y - PLACEMENT_CONTACT_EPSILON, 0.001),
+            math.max(member.Size.Z - PLACEMENT_CONTACT_EPSILON, 0.001)
+        )
         local hits = Workspace:GetPartBoundsInBox(
             projectedCFrame,
-            member.Size,
+            querySize,
             params
         )
 
@@ -1283,7 +1340,7 @@ local function placeHeldObject(player, inputData)
         player:SetAttribute("LastActionResult", "PlaceFailed:InvalidPosition")
         return
     end
-    local targetRootCFrame = getTargetRootCFrame(object, targetPosition, inputData.rotation)
+    local targetRootCFrame = getSupportAdjustedRootCFrame(object, targetPosition, inputData.rotation)
     if not targetRootCFrame then
         player:SetAttribute("LastActionResult", "PlaceFailed:InvalidRotation")
         return
@@ -1312,11 +1369,11 @@ local function placeHeldObject(player, inputData)
     for _, member in ipairs(getAssemblyParts(object)) do
         if member and member.Parent then
             member.Anchored = true
-            member.CanCollide = false
             member.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
             member.AssemblyAngularVelocity = Vector3.new(0, 0, 0)
         end
     end
+    setAssemblyInteractionState(object, false, false, false)
     object.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
     object.AssemblyAngularVelocity = Vector3.new(0, 0, 0)
 

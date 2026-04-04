@@ -59,6 +59,19 @@ pub struct GroundKinematicSupport {
     pub distance: f32,
 }
 
+#[derive(Debug, Clone, Copy)]
+pub struct PartInteractionState {
+    pub can_collide: bool,
+    pub can_touch: bool,
+    pub can_query: bool,
+}
+
+impl PartInteractionState {
+    fn collider_enabled(self) -> bool {
+        self.can_collide || self.can_touch || self.can_query
+    }
+}
+
 /// Wrapper around Rapier3D physics world for game physics simulation.
 /// Syncs with Lua Workspace parts to simulate physics for non-anchored parts.
 pub struct PhysicsWorld {
@@ -83,6 +96,8 @@ pub struct PhysicsWorld {
     pub lua_to_shape: HashMap<u64, PartType>,
     /// Maps Lua instance ID to current collider physical properties.
     pub lua_to_physical_properties: HashMap<u64, Option<PhysicalProperties>>,
+    /// Maps Lua instance ID to current interaction flags used to configure colliders.
+    pub lua_to_interactions: HashMap<u64, PartInteractionState>,
     /// Character controllers for player movement
     pub character_controllers: HashMap<u64, CharacterControllerState>,
     /// Maps Rapier collider handle to Lua instance ID (for touch detection)
@@ -92,7 +107,12 @@ pub struct PhysicsWorld {
 }
 
 /// Builds a collider with the correct shape for a given PartType and size.
-fn build_collider(size: [f32; 3], shape: PartType, can_collide: bool) -> Collider {
+fn build_collider(
+    size: [f32; 3],
+    shape: PartType,
+    can_collide: bool,
+    interaction_state: PartInteractionState,
+) -> Collider {
     let [sx, sy, sz] = size;
     let shared_shape = match shape {
         PartType::Block => SharedShape::cuboid(sx / 2.0, sy / 2.0, sz / 2.0),
@@ -117,6 +137,7 @@ fn build_collider(size: [f32; 3], shape: PartType, can_collide: bool) -> Collide
         }
     };
     ColliderBuilder::new(shared_shape)
+        .enabled(interaction_state.collider_enabled())
         .sensor(!can_collide)
         .collision_groups(InteractionGroups::new(GROUP_STATIC, Group::ALL))
         .build()
@@ -125,11 +146,11 @@ fn build_collider(size: [f32; 3], shape: PartType, can_collide: bool) -> Collide
 fn build_collider_with_physical_properties(
     size: [f32; 3],
     shape: PartType,
-    can_collide: bool,
+    interaction_state: PartInteractionState,
     physical_properties: Option<PhysicalProperties>,
 ) -> Collider {
     let props = physical_properties.unwrap_or(PhysicalProperties::new(0.7, 0.3, 0.5, 1.0, 1.0));
-    let mut collider = build_collider(size, shape, can_collide);
+    let mut collider = build_collider(size, shape, interaction_state.can_collide, interaction_state);
     collider.set_friction(props.friction.max(0.0));
     collider.set_restitution(props.elasticity.max(0.0));
     collider.set_density(props.density.max(0.0));
@@ -137,6 +158,16 @@ fn build_collider_with_physical_properties(
 }
 
 impl PhysicsWorld {
+    fn queryable_collider_predicate(&self) -> impl Fn(ColliderHandle, &Collider) -> bool + '_ {
+        move |handle, _collider| {
+            self.collider_to_lua
+                .get(&handle)
+                .and_then(|lua_id| self.lua_to_interactions.get(lua_id))
+                .map(|state| state.can_query)
+                .unwrap_or(true)
+        }
+    }
+
     /// Creates a new physics world with default gravity
     pub fn new() -> Self {
         Self {
@@ -156,6 +187,7 @@ impl PhysicsWorld {
             body_to_lua: HashMap::new(),
             lua_to_shape: HashMap::new(),
             lua_to_physical_properties: HashMap::new(),
+            lua_to_interactions: HashMap::new(),
             character_controllers: HashMap::new(),
             collider_to_lua: HashMap::new(),
             kinematic_linear_velocities: HashMap::new(),
@@ -221,6 +253,8 @@ impl PhysicsWorld {
         size: [f32; 3],
         anchored: bool,
         can_collide: bool,
+        can_touch: bool,
+        can_query: bool,
         shape: PartType,
         physical_properties: Option<PhysicalProperties>,
     ) -> RigidBodyHandle {
@@ -238,11 +272,17 @@ impl PhysicsWorld {
 
         let handle = self.rigid_body_set.insert(body);
 
+        let interaction_state = PartInteractionState {
+            can_collide,
+            can_touch,
+            can_query,
+        };
+
         // Create collider with correct shape
         let collider = build_collider_with_physical_properties(
             size,
             shape,
-            can_collide,
+            interaction_state,
             physical_properties,
         );
 
@@ -256,6 +296,7 @@ impl PhysicsWorld {
         self.lua_to_shape.insert(lua_id, shape);
         self.lua_to_physical_properties
             .insert(lua_id, physical_properties);
+        self.lua_to_interactions.insert(lua_id, interaction_state);
         self.collider_to_lua.insert(collider_handle, lua_id);
 
         handle
@@ -271,6 +312,7 @@ impl PhysicsWorld {
             self.body_to_lua.remove(&handle);
             self.lua_to_shape.remove(&lua_id);
             self.lua_to_physical_properties.remove(&lua_id);
+            self.lua_to_interactions.remove(&lua_id);
             self.kinematic_linear_velocities.remove(&handle);
             // Remove collider->lua mappings before destroying the body
             if let Some(body) = self.rigid_body_set.get(handle) {
@@ -425,6 +467,13 @@ impl PhysicsWorld {
         self.lua_to_body.get(&lua_id).copied()
     }
 
+    pub fn is_dynamic_body(&self, handle: RigidBodyHandle) -> bool {
+        self.rigid_body_set
+            .get(handle)
+            .map(|body| body.is_dynamic())
+            .unwrap_or(false)
+    }
+
     /// Updates whether a part is anchored or dynamic
     pub fn set_anchored(&mut self, lua_id: u64, anchored: bool) {
         if let Some(&handle) = self.lua_to_body.get(&lua_id) {
@@ -453,16 +502,18 @@ impl PhysicsWorld {
             .get(&lua_id)
             .copied()
             .unwrap_or(None);
+        let interaction_state = self
+            .lua_to_interactions
+            .get(&lua_id)
+            .copied()
+            .unwrap_or(PartInteractionState {
+                can_collide: true,
+                can_touch: true,
+                can_query: true,
+            });
         if let Some(&handle) = self.lua_to_body.get(&lua_id) {
             if let Some(body) = self.rigid_body_set.get(handle) {
                 let colliders: Vec<_> = body.colliders().iter().cloned().collect();
-
-                // Read can_collide from existing collider before removing
-                let can_collide = colliders
-                    .first()
-                    .and_then(|&ch| self.collider_set.get(ch))
-                    .map(|c| !c.is_sensor())
-                    .unwrap_or(true);
 
                 for collider_handle in colliders {
                     self.collider_to_lua.remove(&collider_handle);
@@ -477,7 +528,7 @@ impl PhysicsWorld {
                 let collider = build_collider_with_physical_properties(
                     size,
                     shape,
-                    can_collide,
+                    interaction_state,
                     physical_properties,
                 );
                 let new_ch = self.collider_set.insert_with_parent(
@@ -492,12 +543,50 @@ impl PhysicsWorld {
 
     /// Toggles collider sensor mode (can_collide=false -> sensor, can_collide=true -> solid)
     pub fn set_can_collide(&mut self, lua_id: u64, can_collide: bool) {
+        let mut state = self.lua_to_interactions.get(&lua_id).copied().unwrap_or(
+            PartInteractionState {
+                can_collide,
+                can_touch: true,
+                can_query: true,
+            },
+        );
+        state.can_collide = can_collide;
+        self.set_interaction_state(lua_id, state);
+    }
+
+    pub fn set_can_touch(&mut self, lua_id: u64, can_touch: bool) {
+        let mut state = self.lua_to_interactions.get(&lua_id).copied().unwrap_or(
+            PartInteractionState {
+                can_collide: true,
+                can_touch,
+                can_query: true,
+            },
+        );
+        state.can_touch = can_touch;
+        self.set_interaction_state(lua_id, state);
+    }
+
+    pub fn set_can_query(&mut self, lua_id: u64, can_query: bool) {
+        let mut state = self.lua_to_interactions.get(&lua_id).copied().unwrap_or(
+            PartInteractionState {
+                can_collide: true,
+                can_touch: true,
+                can_query,
+            },
+        );
+        state.can_query = can_query;
+        self.set_interaction_state(lua_id, state);
+    }
+
+    fn set_interaction_state(&mut self, lua_id: u64, state: PartInteractionState) {
+        self.lua_to_interactions.insert(lua_id, state);
         if let Some(&handle) = self.lua_to_body.get(&lua_id) {
             if let Some(body) = self.rigid_body_set.get(handle) {
                 let colliders: Vec<_> = body.colliders().iter().cloned().collect();
                 for collider_handle in colliders {
                     if let Some(collider) = self.collider_set.get_mut(collider_handle) {
-                        collider.set_sensor(!can_collide);
+                        collider.set_sensor(!state.can_collide);
+                        collider.set_enabled(state.collider_enabled());
                     }
                 }
             }
@@ -512,15 +601,18 @@ impl PhysicsWorld {
             .get(&lua_id)
             .copied()
             .unwrap_or(None);
+        let interaction_state = self
+            .lua_to_interactions
+            .get(&lua_id)
+            .copied()
+            .unwrap_or(PartInteractionState {
+                can_collide: true,
+                can_touch: true,
+                can_query: true,
+            });
         if let Some(&handle) = self.lua_to_body.get(&lua_id) {
             if let Some(body) = self.rigid_body_set.get(handle) {
                 let colliders: Vec<_> = body.colliders().iter().cloned().collect();
-
-                let can_collide = colliders
-                    .first()
-                    .and_then(|&ch| self.collider_set.get(ch))
-                    .map(|c| !c.is_sensor())
-                    .unwrap_or(true);
 
                 for collider_handle in colliders {
                     self.collider_to_lua.remove(&collider_handle);
@@ -535,7 +627,7 @@ impl PhysicsWorld {
                 let collider = build_collider_with_physical_properties(
                     size,
                     shape,
-                    can_collide,
+                    interaction_state,
                     physical_properties,
                 );
                 let new_ch = self.collider_set.insert_with_parent(
@@ -570,6 +662,14 @@ impl PhysicsWorld {
                 }
             }
         }
+    }
+
+    #[cfg(test)]
+    fn collider_enabled_for_lua(&self, lua_id: u64) -> Option<bool> {
+        let handle = *self.lua_to_body.get(&lua_id)?;
+        let body = self.rigid_body_set.get(handle)?;
+        let collider_handle = *body.colliders().first()?;
+        Some(self.collider_set.get(collider_handle)?.is_enabled())
     }
 
     /// Adds a character controller for player movement
@@ -808,11 +908,13 @@ impl PhysicsWorld {
         let normalized = direction / max_dist;
         let ray = Ray::new(point![from[0], from[1], from[2]], normalized);
 
+        let can_query = self.queryable_collider_predicate();
         let filter = if let Some(body_handle) = exclude_body {
             QueryFilter::default().exclude_rigid_body(body_handle)
         } else {
             QueryFilter::default()
-        };
+        }
+        .predicate(&can_query);
 
         // Cast ray and check if we hit something before reaching the target.
         // For Roblox-style LOS we consider the target visible when the first hit
@@ -904,11 +1006,13 @@ impl PhysicsWorld {
             vector![0.0, -1.0, 0.0],
         );
 
+        let can_query = self.queryable_collider_predicate();
         let filter = if let Some(body_handle) = exclude_body {
             QueryFilter::default().exclude_rigid_body(body_handle)
         } else {
             QueryFilter::default()
-        };
+        }
+        .predicate(&can_query);
 
         if let Some((_, hit)) = self.query_pipeline.cast_ray(
             &self.rigid_body_set,
@@ -1136,6 +1240,8 @@ mod tests {
             [4.0, 1.0, 2.0],
             true, // anchored
             true, // can_collide
+            true,
+            true,
             PartType::Block,
             None,
         );
@@ -1155,6 +1261,8 @@ mod tests {
             &[[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
             [1.0, 1.0, 1.0],
             false, // not anchored - should fall
+            true,
+            true,
             true,
             PartType::Block,
             None,
@@ -1183,6 +1291,8 @@ mod tests {
             [0.0, 0.0, 0.0],
             &[[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
             [100.0, 1.0, 100.0],
+            true,
+            true,
             true,
             true,
             PartType::Block,
@@ -1243,6 +1353,8 @@ mod tests {
             [100.0, 1.0, 100.0],
             true,
             true,
+            true,
+            true,
             PartType::Block,
             None,
         );
@@ -1271,6 +1383,8 @@ mod tests {
             [0.0, -0.5, 0.0],
             &[[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
             [100.0, 1.0, 100.0],
+            true,
+            true,
             true,
             true,
             PartType::Block,
@@ -1321,6 +1435,8 @@ mod tests {
             [100.0, 1.0, 100.0],
             true,
             true,
+            true,
+            true,
             PartType::Block,
             None,
         );
@@ -1333,6 +1449,8 @@ mod tests {
             [8.0, 2.0, 8.0],
             true,
             false, // sensor
+            true,
+            true,
             PartType::Block,
             None,
         );
@@ -1365,6 +1483,8 @@ mod tests {
             [0.0, 0.0, 0.0],
             &[[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
             [10.0, 1.0, 10.0],
+            true,
+            true,
             true,
             true,
             PartType::Block,
@@ -1402,6 +1522,8 @@ mod tests {
             [0.0, 2.0, 0.0],
             &[[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
             [16.0, 4.0, 3.0],
+            true,
+            true,
             true,
             true,
             PartType::Block,
@@ -1446,6 +1568,8 @@ mod tests {
             [100.0, 2.0, 100.0], // top at Y=0
             true,
             true,
+            true,
+            true,
             PartType::Block,
             None,
         );
@@ -1456,6 +1580,8 @@ mod tests {
             [0.0, 0.1, 0.0], // center at Y=0.1
             &[[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
             [30.0, 0.2, 30.0], // top at Y=0.2
+            true,
+            true,
             true,
             true,
             PartType::Block,
@@ -1506,6 +1632,8 @@ mod tests {
             [0.0, -1.0, 0.0],
             &[[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
             [200.0, 2.0, 200.0],
+            true,
+            true,
             true,
             true,
             PartType::Block,
@@ -1600,6 +1728,8 @@ mod tests {
             [100.0, 1.0, 100.0], // top at Y=0
             true,
             true,
+            true,
+            true,
             PartType::Block,
             None,
         );
@@ -1610,6 +1740,8 @@ mod tests {
             [5.0, 0.15, 0.0], // center at Y=0.15
             &[[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
             [1.0, 0.3, 4.0], // top at Y=0.3
+            true,
+            true,
             true,
             true,
             PartType::Block,
@@ -1665,6 +1797,8 @@ mod tests {
             [100.0, 1.0, 100.0],
             true,
             true,
+            true,
+            true,
             PartType::Block,
             None,
         );
@@ -1675,6 +1809,8 @@ mod tests {
             [5.0, 0.5, 0.0],
             &[[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
             [1.0, 1.0, 4.0], // top at Y=1.0
+            true,
+            true,
             true,
             true,
             PartType::Block,
@@ -1719,6 +1855,8 @@ mod tests {
             [200.0, 1.0, 100.0], // top at Y=0, extends from X=-100 to X=100
             true,
             true,
+            true,
+            true,
             PartType::Block,
             None,
         );
@@ -1729,6 +1867,8 @@ mod tests {
             [50.0, 0.1, 0.0], // center at Y=0.1
             &[[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
             [100.0, 0.2, 100.0], // top at Y=0.2, bottom at Y=0, X from 0 to 100
+            true,
+            true,
             true,
             true,
             PartType::Block,
@@ -1789,6 +1929,8 @@ mod tests {
             [200.0, 1.0, 200.0],
             true,
             true,
+            true,
+            true,
             PartType::Block,
             None,
         );
@@ -1812,5 +1954,34 @@ mod tests {
         // If the assertion above is removed, the following would panic:
         // world.move_character(char_id, [1.0, 0.0, 0.0], 1.0 / 60.0);
         // world.step(1.0 / 60.0);
+    }
+
+    #[test]
+    fn test_inert_part_disables_collider_participation() {
+        let mut world = PhysicsWorld::new();
+
+        world.add_part(
+            1,
+            [0.0, 2.0, 0.0],
+            &[[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
+            [4.0, 4.0, 4.0],
+            true,
+            true,
+            true,
+            true,
+            PartType::Block,
+            None,
+        );
+
+        assert_eq!(world.collider_enabled_for_lua(1), Some(true));
+
+        world.set_can_collide(1, false);
+        assert_eq!(world.collider_enabled_for_lua(1), Some(true));
+
+        world.set_can_touch(1, false);
+        assert_eq!(world.collider_enabled_for_lua(1), Some(true));
+
+        world.set_can_query(1, false);
+        assert_eq!(world.collider_enabled_for_lua(1), Some(false));
     }
 }

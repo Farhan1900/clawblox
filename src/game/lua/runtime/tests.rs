@@ -520,6 +520,42 @@ fn test_cframe_from_orientation_matches_yxz_and_roundtrips() {
 }
 
 #[test]
+fn test_cframe_lerp_preserves_orthonormal_basis() {
+    let mut runtime = test_runtime();
+    runtime
+        .load_script(
+            r#"
+            local a = CFrame.Angles(0.2, -0.4, 0.1)
+            local b = CFrame.Angles(-0.3, 0.6, 0.5)
+            local cf = a:Lerp(b, 0.5)
+
+            _G.rmag = cf.RightVector.Magnitude
+            _G.umag = cf.UpVector.Magnitude
+            _G.lmag = cf.LookVector.Magnitude
+            _G.ru = math.abs(cf.RightVector:Dot(cf.UpVector))
+            _G.rl = math.abs(cf.RightVector:Dot(cf.LookVector))
+            _G.ul = math.abs(cf.UpVector:Dot(cf.LookVector))
+        "#,
+        )
+        .expect("Failed to load script");
+
+    let globals = runtime.lua().globals().get::<mlua::Table>("_G").unwrap();
+    let rmag: f64 = globals.get("rmag").unwrap();
+    let umag: f64 = globals.get("umag").unwrap();
+    let lmag: f64 = globals.get("lmag").unwrap();
+    let ru: f64 = globals.get("ru").unwrap();
+    let rl: f64 = globals.get("rl").unwrap();
+    let ul: f64 = globals.get("ul").unwrap();
+
+    assert!((rmag - 1.0).abs() < 1e-4);
+    assert!((umag - 1.0).abs() < 1e-4);
+    assert!((lmag - 1.0).abs() < 1e-4);
+    assert!(ru < 1e-4);
+    assert!(rl < 1e-4);
+    assert!(ul < 1e-4);
+}
+
+#[test]
 fn test_workspace_raycast_hits_rotated_thin_part() {
     let mut runtime = test_runtime();
     runtime
@@ -3105,4 +3141,59 @@ fn test_model_pivot_to_moves_descendant_parts_using_primary_part() {
     assert!((root_pos2.x - 20.0).abs() < 1e-6 && (root_pos2.y - 6.0).abs() < 1e-6);
     assert!((child_pos2.x - 22.0).abs() < 1e-6 && (child_pos2.y - 6.0).abs() < 1e-6);
     assert!((pivot_pos2.x - 20.0).abs() < 1e-6 && (pivot_pos2.y - 6.0).abs() < 1e-6);
+}
+
+#[test]
+fn test_model_repeated_pivot_to_preserves_rigid_part_basis() {
+    let mut runtime = test_runtime();
+    runtime
+        .load_script(
+            r#"
+            local model = Instance.new("Model")
+            model.Name = "Rig"
+            model.Parent = Workspace
+
+            local root = Instance.new("Part")
+            root.Name = "Root"
+            root.Size = Vector3.new(0.75, 0.75, 0.75)
+            root.CFrame = CFrame.new(0, 1, 0) * CFrame.fromOrientation(0.05, 0.2, -0.1)
+            root.Parent = model
+
+            local child = Instance.new("Part")
+            child.Name = "Child"
+            child.Size = Vector3.new(0.75, 0.75, 0.75)
+            child.CFrame = CFrame.new(0.8, 1.75, 0.0) * CFrame.fromOrientation(0.05, 0.2, -0.1)
+            child.Parent = model
+
+            model.PrimaryPart = root
+
+            for i = 1, 120 do
+                local rx, ry, rz = root.CFrame:ToOrientation()
+                model:PivotTo(CFrame.new(i * 0.05, 5, 0) * CFrame.fromOrientation(rx, ry, rz))
+            end
+
+            _G.rmag = root.CFrame.RightVector.Magnitude
+            _G.umag = root.CFrame.UpVector.Magnitude
+            _G.lmag = root.CFrame.LookVector.Magnitude
+            _G.ru = math.abs(root.CFrame.RightVector:Dot(root.CFrame.UpVector))
+            _G.rl = math.abs(root.CFrame.RightVector:Dot(root.CFrame.LookVector))
+            _G.ul = math.abs(root.CFrame.UpVector:Dot(root.CFrame.LookVector))
+        "#,
+        )
+        .expect("Failed to load script");
+
+    let globals = runtime.lua().globals().get::<mlua::Table>("_G").unwrap();
+    let rmag: f64 = globals.get("rmag").unwrap();
+    let umag: f64 = globals.get("umag").unwrap();
+    let lmag: f64 = globals.get("lmag").unwrap();
+    let ru: f64 = globals.get("ru").unwrap();
+    let rl: f64 = globals.get("rl").unwrap();
+    let ul: f64 = globals.get("ul").unwrap();
+
+    assert!((rmag - 1.0).abs() < 1e-3);
+    assert!((umag - 1.0).abs() < 1e-3);
+    assert!((lmag - 1.0).abs() < 1e-3);
+    assert!(ru < 1e-3);
+    assert!(rl < 1e-3);
+    assert!(ul < 1e-3);
 }
