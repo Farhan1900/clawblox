@@ -8,6 +8,7 @@ use super::lua::instance::{
     attributes_to_json, AttributeValue, ClassName, Instance, TextXAlignment, TextYAlignment,
 };
 use super::lua::services::AgentInput;
+use super::lua::types::CFrame;
 use super::lua::LuaRuntime;
 use super::physics::PhysicsWorld;
 use super::touch_events::compute_touch_transitions;
@@ -34,6 +35,23 @@ const MAX_RECENT_EVENTS_PER_OBSERVATION: usize = 128;
 #[inline]
 fn round_f32(v: f32) -> f32 {
     (v * 100.0).round() / 100.0
+}
+
+fn set_part_cframe_from_constraint(part: &Instance, cframe: CFrame) {
+    let mut data = part.data.lock().unwrap();
+    if let Some(part_data) = &mut data.part_data {
+        part_data.cframe = cframe;
+        part_data.position = cframe.position;
+        part_data.position_dirty = true;
+    }
+}
+
+fn attachment_target_part_cframe(
+    attachment0: &Instance,
+    target_attachment_world: CFrame,
+) -> Option<CFrame> {
+    let local_cframe = attachment0.attachment_local_cframe()?;
+    Some(target_attachment_world.multiply(&local_cframe.inverse()))
 }
 
 /// Round a position array to 2 decimal places
@@ -705,6 +723,123 @@ impl GameInstance {
         if let Some(runtime) = &self.lua_runtime {
             let gravity = runtime.workspace().data.lock().unwrap().gravity;
             self.physics.set_gravity(gravity);
+        }
+    }
+
+    /// Applies Roblox-style attachment constraints before Lua state is synced to physics.
+    fn apply_attachment_constraints(&mut self, dt: f32) {
+        let Some(runtime) = &self.lua_runtime else {
+            return;
+        };
+
+        for inst in runtime.workspace().get_descendants() {
+            let (align_position, align_orientation) = {
+                let data = inst.data.lock().unwrap();
+                (
+                    data.align_position_data.clone(),
+                    data.align_orientation_data.clone(),
+                )
+            };
+
+            if let Some(align) = align_position {
+                let Some(attachment0_ref) = align.attachment0.as_ref().and_then(|w| w.upgrade())
+                else {
+                    continue;
+                };
+                let attachment0 = Instance::from_ref(attachment0_ref);
+                let Some(parent_part) = attachment0.attachment_parent_part() else {
+                    continue;
+                };
+                let Some(current_attachment_world) = attachment0.attachment_world_cframe() else {
+                    continue;
+                };
+                let target_position = if let Some(attachment1_ref) =
+                    align.attachment1.as_ref().and_then(|w| w.upgrade())
+                {
+                    let attachment1 = Instance::from_ref(attachment1_ref);
+                    let Some(target_world) = attachment1.attachment_world_cframe() else {
+                        continue;
+                    };
+                    target_world.position
+                } else {
+                    align.position
+                };
+
+                let target_attachment_world = CFrame {
+                    position: target_position,
+                    rotation: current_attachment_world.rotation,
+                };
+                let Some(target_part_cframe) =
+                    attachment_target_part_cframe(&attachment0, target_attachment_world)
+                else {
+                    continue;
+                };
+
+                let alpha = if align.rigidity_enabled {
+                    1.0
+                } else {
+                    (dt * align.responsiveness.max(0.0)).clamp(0.0, 1.0)
+                };
+                let current_part_cframe = {
+                    let data = parent_part.data.lock().unwrap();
+                    let Some(part) = data.part_data.as_ref() else {
+                        continue;
+                    };
+                    part.cframe
+                };
+                let next_cframe = current_part_cframe.lerp(&target_part_cframe, alpha);
+                set_part_cframe_from_constraint(&parent_part, next_cframe);
+            }
+
+            if let Some(align) = align_orientation {
+                let Some(attachment0_ref) = align.attachment0.as_ref().and_then(|w| w.upgrade())
+                else {
+                    continue;
+                };
+                let attachment0 = Instance::from_ref(attachment0_ref);
+                let Some(parent_part) = attachment0.attachment_parent_part() else {
+                    continue;
+                };
+                let Some(current_attachment_world) = attachment0.attachment_world_cframe() else {
+                    continue;
+                };
+                let target_rotation = if let Some(attachment1_ref) =
+                    align.attachment1.as_ref().and_then(|w| w.upgrade())
+                {
+                    let attachment1 = Instance::from_ref(attachment1_ref);
+                    let Some(target_world) = attachment1.attachment_world_cframe() else {
+                        continue;
+                    };
+                    target_world.rotation
+                } else {
+                    current_attachment_world.rotation
+                };
+
+                let target_attachment_world = CFrame {
+                    position: current_attachment_world.position,
+                    rotation: target_rotation,
+                };
+                let Some(target_part_cframe) =
+                    attachment_target_part_cframe(&attachment0, target_attachment_world)
+                else {
+                    continue;
+                };
+
+                let alpha = if align.rigidity_enabled {
+                    1.0
+                } else {
+                    (dt * align.responsiveness.max(0.0)).clamp(0.0, 1.0)
+                };
+                let current_part_cframe = {
+                    let data = parent_part.data.lock().unwrap();
+                    let Some(part) = data.part_data.as_ref() else {
+                        continue;
+                    };
+                    part.cframe
+                };
+                let next_cframe = current_part_cframe.lerp(&target_part_cframe, alpha);
+                set_part_cframe_from_constraint(&parent_part, next_cframe);
+            }
         }
     }
 
@@ -2288,7 +2423,10 @@ mod tests {
             .expect("MoveByInput should exist");
 
         let data = moved.data.lock().unwrap();
-        let part = data.part_data.as_ref().expect("MoveByInput should be a part");
+        let part = data
+            .part_data
+            .as_ref()
+            .expect("MoveByInput should be a part");
         assert!(
             (part.position.x - 10.0).abs() < 1e-3,
             "Expected X≈10 after same-tick input, got {}",
@@ -4381,6 +4519,129 @@ mod tests {
         assert!(
             (spacing - 2.0).abs() < 0.25,
             "welded spacing should stay near 2 studs; got left_x={left_x}, right_x={right_x}, spacing={spacing}"
+        );
+    }
+
+    #[test]
+    fn test_align_position_moves_part_to_attachment_target() {
+        let mut instance = GameInstance::new(Uuid::new_v4(), None);
+
+        instance.load_script(
+            r#"
+            Workspace.Gravity = 0
+
+            local mover = Instance.new("Part")
+            mover.Name = "Mover"
+            mover.Position = Vector3.new(0, 5, 0)
+            mover.CanCollide = false
+            mover.Parent = Workspace
+
+            local target = Instance.new("Part")
+            target.Name = "Target"
+            target.Anchored = true
+            target.Position = Vector3.new(10, 8, 0)
+            target.CanCollide = false
+            target.Parent = Workspace
+
+            local a0 = Instance.new("Attachment")
+            a0.Parent = mover
+
+            local a1 = Instance.new("Attachment")
+            a1.Parent = target
+
+            local align = Instance.new("AlignPosition")
+            align.Attachment0 = a0
+            align.Attachment1 = a1
+            align.RigidityEnabled = true
+            align.Parent = Workspace
+        "#,
+        );
+
+        for _ in 0..10 {
+            instance.tick();
+        }
+
+        let runtime = instance.lua_runtime.as_ref().unwrap();
+        let descendants = runtime.workspace().get_descendants();
+        let mut mover_pos = None;
+        for inst in &descendants {
+            let data = inst.data.lock().unwrap();
+            if data.name == "Mover" {
+                mover_pos = data.part_data.as_ref().map(|part| part.position);
+            }
+        }
+
+        let mover_pos = mover_pos.expect("Mover part missing");
+        assert!(
+            (mover_pos.x - 10.0).abs() < 0.25 && (mover_pos.y - 8.0).abs() < 0.25,
+            "AlignPosition should move the attachment parent to the target; got ({}, {}, {})",
+            mover_pos.x,
+            mover_pos.y,
+            mover_pos.z
+        );
+    }
+
+    #[test]
+    fn test_align_orientation_matches_target_attachment_rotation() {
+        let mut instance = GameInstance::new(Uuid::new_v4(), None);
+
+        instance.load_script(
+            r#"
+            Workspace.Gravity = 0
+
+            local mover = Instance.new("Part")
+            mover.Name = "Mover"
+            mover.Position = Vector3.new(0, 5, 0)
+            mover.CanCollide = false
+            mover.Parent = Workspace
+
+            local target = Instance.new("Part")
+            target.Name = "Target"
+            target.Anchored = true
+            target.Position = Vector3.new(0, 5, 0)
+            target.CFrame = CFrame.Angles(0, math.rad(90), 0)
+            target.CanCollide = false
+            target.Parent = Workspace
+
+            local a0 = Instance.new("Attachment")
+            a0.Parent = mover
+
+            local a1 = Instance.new("Attachment")
+            a1.Parent = target
+
+            local align = Instance.new("AlignOrientation")
+            align.Attachment0 = a0
+            align.Attachment1 = a1
+            align.RigidityEnabled = true
+            align.Parent = Workspace
+        "#,
+        );
+
+        for _ in 0..10 {
+            instance.tick();
+        }
+
+        let runtime = instance.lua_runtime.as_ref().unwrap();
+        let descendants = runtime.workspace().get_descendants();
+        let mut mover_look_x = None;
+        let mut mover_look_z = None;
+        for inst in &descendants {
+            let data = inst.data.lock().unwrap();
+            if data.name == "Mover" {
+                if let Some(part) = data.part_data.as_ref() {
+                    mover_look_x = Some(-part.cframe.rotation[0][2]);
+                    mover_look_z = Some(-part.cframe.rotation[2][2]);
+                }
+            }
+        }
+
+        let mover_look_x = mover_look_x.expect("Mover part missing");
+        let mover_look_z = mover_look_z.expect("Mover part missing");
+        assert!(
+            mover_look_x < -0.7 && mover_look_z.abs() < 0.3,
+            "AlignOrientation should rotate the part toward the target attachment; got look=({}, {})",
+            mover_look_x,
+            mover_look_z
         );
     }
 

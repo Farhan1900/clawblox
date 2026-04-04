@@ -23,8 +23,6 @@ local RIVER_WIDTH_X = 8
 local BANK_CENTER_OFFSET_X = (RIVER_WIDTH_X * 0.5) + (BANK_WIDTH_X * 0.5)
 
 local trackedCarryables = {}
-local blockBondTargets = {}
-local heldAssemblyStates = {}
 local frozenBondBlocks = {}
 local activeMoveStates = {}
 local moveFeedbackConnections = {}
@@ -34,6 +32,7 @@ local findNearestCarryableObject
 local createSecretionClump
 local setupPlayer
 local resetPlayerToSpawn
+local hasResidueBondBetween
 local DEFAULT_HOLD_OFFSET = Vector3.new(0, 3.5, 0)
 local DEFAULT_PLACE_DURATION = 0.3
 
@@ -61,6 +60,7 @@ local RESIDUE_HOLD_OFFSET = Vector3.new(0, 3.1, 0)
 local RESIDUE_PLACE_RANGE = 1.2
 local RESIDUE_CONTACT_PADDING = 0.14
 local RESIDUE_BOND_NAME = "SkuttlerBond"
+local ASSEMBLY_MODEL_NAME = "ConstructionAssembly"
 
 local function getOrCreateChild(parent, className, name)
     local child = parent:FindFirstChild(name)
@@ -111,6 +111,8 @@ local function resetWorldState()
             if role == "Ground" or role == "Ocean" or role == "GlowBulb" or role == BLOCK_RENDER_ROLE or role == "Clump" then
                 inst:Destroy()
             end
+        elseif inst:IsA("Model") and inst:GetAttribute("IsConstructionAssembly") == true then
+            inst:Destroy()
         end
     end
 
@@ -325,75 +327,21 @@ local function getBlockBondKey(block)
 end
 
 local function getBlockBondTargets(block)
-    local key = getBlockBondKey(block)
-    local targetNames = key and blockBondTargets[key] or nil
-    if type(targetNames) ~= "table" then
+    if not isBlockPart(block) then
         return {}
     end
 
     local targets = {}
-    local dirty = false
-    for targetName, _ in pairs(targetNames) do
-        local target = Workspace:FindFirstChild(targetName)
+    for _, target in ipairs(block:GetConnectedParts(true)) do
         if isBlockPart(target) then
             table.insert(targets, target)
-        else
-            targetNames[targetName] = nil
-            dirty = true
         end
     end
-
-    if dirty and next(targetNames) == nil then
-        blockBondTargets[key] = nil
-    end
-
     return targets
 end
 
 local function hasBlockBondTarget(block, targetBlock)
-    local key = getBlockBondKey(block)
-    local targetKey = getBlockBondKey(targetBlock)
-    if not key or not targetKey then
-        return false
-    end
-    local targetNames = blockBondTargets[key]
-    return type(targetNames) == "table" and targetNames[targetKey] == true
-end
-
-local function addBlockBondTarget(block, targetBlock)
-    local key = getBlockBondKey(block)
-    local targetKey = getBlockBondKey(targetBlock)
-    if not key or not targetKey then
-        return
-    end
-
-    local targetNames = blockBondTargets[key]
-    if type(targetNames) ~= "table" then
-        targetNames = {}
-        blockBondTargets[key] = targetNames
-    end
-    targetNames[targetKey] = true
-end
-
-local function removeBlockBondTarget(block, targetBlock)
-    local key = getBlockBondKey(block)
-    local targetKey = getBlockBondKey(targetBlock)
-    if not key then
-        return
-    end
-
-    local targetNames = blockBondTargets[key]
-    if type(targetNames) ~= "table" then
-        return
-    end
-
-    if targetKey then
-        targetNames[targetKey] = nil
-    end
-
-    if next(targetNames) == nil then
-        blockBondTargets[key] = nil
-    end
+    return hasResidueBondBetween(block, targetBlock)
 end
 
 local function hasAnyBlockBondTargets(block)
@@ -418,12 +366,6 @@ local function isBlockBondFrozen(block)
     return key ~= nil and frozenBondBlocks[key] == true
 end
 
-local function setAssemblyBondFrozen(memberStates, frozen)
-    for _, memberState in ipairs(memberStates or {}) do
-        setBlockBondFrozen(memberState.object, frozen)
-    end
-end
-
 local function removeBlockBonds(block)
     if not block or not block.Parent then
         return
@@ -436,17 +378,12 @@ local function removeBlockBonds(block)
                     and child.Name == RESIDUE_BOND_NAME
                     and (child.Part0 == block or child.Part1 == block)
                 then
-                    local otherBlock = child.Part0 == block and child.Part1 or child.Part0
-                    if isBlockPart(otherBlock) then
-                        removeBlockBondTarget(otherBlock, block)
-                    end
                     child:Destroy()
                 end
             end
         end
     end
 
-    removeBlockBondTarget(block, nil)
     block.Anchored = false
 end
 
@@ -496,26 +433,12 @@ local function getBondedBlocks(rootBlock)
         return {}
     end
 
-    local blocks = {}
-    local visited = {}
-    local pending = { rootBlock }
-
-    while #pending > 0 do
-        local block = table.remove(pending)
-        local blockKey = getBlockBondKey(block)
-        if block and block.Parent and blockKey and not visited[blockKey] then
-            visited[blockKey] = true
+    local blocks = { rootBlock }
+    for _, block in ipairs(getBlockBondTargets(rootBlock)) do
+        if block ~= rootBlock then
             table.insert(blocks, block)
-
-            for _, target in ipairs(getBlockBondTargets(block)) do
-                local targetKey = getBlockBondKey(target)
-                if targetKey and not visited[targetKey] then
-                    table.insert(pending, target)
-                end
-            end
         end
     end
-
     return blocks
 end
 
@@ -549,43 +472,102 @@ local function getCarryRootObject(rootObject)
     return bondedBlocks[1]
 end
 
-local function captureAssemblyRelativeCFrames(rootObject)
-    local rootCFrame = rootObject.CFrame
-    local members = {}
-    for _, member in ipairs(getCarryAssemblyMembers(rootObject)) do
-        if member and member.Parent then
-            table.insert(members, {
-                object = member,
-                relativeCFrame = rootCFrame:ToObjectSpace(member.CFrame),
-            })
-        end
-    end
-    return members
+local function isAssemblyModel(inst)
+    return inst and inst:IsA("Model") and inst:GetAttribute("IsConstructionAssembly") == true
 end
 
-local function applyAssemblyRootCFrame(rootObject, rootCFrame, memberStates)
-    if memberStates then
-        for _, memberState in ipairs(memberStates) do
-            local member = memberState.object
-            if member and member.Parent then
-                member.CFrame = rootCFrame * memberState.relativeCFrame
-                member.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
-                member.AssemblyAngularVelocity = Vector3.new(0, 0, 0)
-            end
-        end
-    else
-        rootObject.CFrame = rootCFrame
-        rootObject.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
-        rootObject.AssemblyAngularVelocity = Vector3.new(0, 0, 0)
+local function getAssemblyPivotInstance(rootObject)
+    if rootObject and isAssemblyModel(rootObject.Parent) then
+        return rootObject.Parent
+    end
+    return rootObject
+end
 
-        local members = captureAssemblyRelativeCFrames(rootObject)
-        for _, memberState in ipairs(members) do
-            local member = memberState.object
-            if member and member.Parent and member ~= rootObject then
-                member.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
-                member.AssemblyAngularVelocity = Vector3.new(0, 0, 0)
+local function getAssemblyParts(rootObject)
+    local pivotInstance = getAssemblyPivotInstance(rootObject)
+    if pivotInstance and pivotInstance:IsA("Model") then
+        local parts = {}
+        for _, inst in ipairs(pivotInstance:GetDescendants()) do
+            if inst:IsA("Part") then
+                table.insert(parts, inst)
             end
         end
+        return parts
+    end
+    return rootObject and { rootObject } or {}
+end
+
+local function assemblyContainsObject(rootObject, targetObject)
+    for _, member in ipairs(getAssemblyParts(rootObject)) do
+        if member == targetObject then
+            return true
+        end
+    end
+    return false
+end
+
+local function ensureAssemblyModel(rootObject)
+    local members = getCarryAssemblyMembers(rootObject)
+    if #members <= 1 then
+        return nil
+    end
+
+    local pivotInstance = getAssemblyPivotInstance(rootObject)
+    if pivotInstance ~= rootObject then
+        pivotInstance.PrimaryPart = rootObject
+        return pivotInstance
+    end
+
+    local model = Instance.new("Model")
+    model.Name = ASSEMBLY_MODEL_NAME
+    model:SetAttribute("IsConstructionAssembly", true)
+    model.Parent = Workspace
+    for _, member in ipairs(members) do
+        member.Parent = model
+    end
+    model.PrimaryPart = rootObject
+    return model
+end
+
+local function cleanupAssemblyModel(rootOrModel)
+    local pivotInstance = rootOrModel
+    if not (pivotInstance and pivotInstance:IsA("Model")) then
+        pivotInstance = getAssemblyPivotInstance(rootOrModel)
+    end
+    if not (pivotInstance and pivotInstance:IsA("Model")) then
+        return
+    end
+
+    local hasPart = false
+    for _, inst in ipairs(pivotInstance:GetDescendants()) do
+        if inst:IsA("Part") then
+            hasPart = true
+            break
+        end
+    end
+    if not hasPart then
+        pivotInstance:Destroy()
+    end
+end
+
+local function clearAssemblyVelocities(rootObject)
+    for _, member in ipairs(getAssemblyParts(rootObject)) do
+        member.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
+        member.AssemblyAngularVelocity = Vector3.new(0, 0, 0)
+    end
+end
+
+local function setAssemblyBondFrozenForObject(rootObject, frozen)
+    for _, member in ipairs(getCarryAssemblyMembers(rootObject)) do
+        setBlockBondFrozen(member, frozen)
+    end
+end
+
+local function applyAssemblyRootCFrame(rootObject, rootCFrame)
+    local pivotInstance = getAssemblyPivotInstance(rootObject)
+    if pivotInstance then
+        pivotInstance:PivotTo(rootCFrame)
+        clearAssemblyVelocities(rootObject)
     end
 end
 
@@ -688,7 +670,7 @@ local function getBondTargets(block)
     return blockTargets, terrainHit
 end
 
-local function hasResidueBondBetween(blockA, blockB)
+hasResidueBondBetween = function(blockA, blockB)
     if not isBlockPart(blockA) or not isBlockPart(blockB) then
         return false
     end
@@ -746,8 +728,6 @@ local function trySetBlockBond(block)
                     bond.Part0 = bond_owner
                     bond.Part1 = bond_other
                     bond.Parent = bond_owner
-                    addBlockBondTarget(block, target)
-                    addBlockBondTarget(target, block)
                 end
                 createdBond = true
             end
@@ -873,7 +853,6 @@ end
 
 local function rebuildTrackedCarryables()
     trackedCarryables = {}
-    blockBondTargets = {}
     for _, inst in ipairs(Workspace:GetDescendants()) do
         if inst:IsA("Part") and inst:GetAttribute("IsPickupObject") then
             inst:SetAttribute("IsCarryable", true)
@@ -891,21 +870,6 @@ local function rebuildTrackedCarryables()
         end
         if isCarryableObject(inst) then
             trackedCarryables[inst] = true
-        end
-    end
-
-    for object, _ in pairs(trackedCarryables) do
-        if object.Parent and isBlockPart(object) then
-            for _, child in ipairs(object:GetChildren()) do
-                if child:IsA("WeldConstraint") and child.Name == RESIDUE_BOND_NAME then
-                    local part0 = child.Part0
-                    local part1 = child.Part1
-                    if isBlockPart(part0) and isBlockPart(part1) then
-                        addBlockBondTarget(part0, part1)
-                        addBlockBondTarget(part1, part0)
-                    end
-                end
-            end
         end
     end
 end
@@ -961,8 +925,6 @@ end
 local function fullResetWorld()
     resetWorldState()
     clearTable(trackedCarryables)
-    clearTable(blockBondTargets)
-    clearTable(heldAssemblyStates)
     clearTable(frozenBondBlocks)
     clearTable(activeMoveStates)
     initializeStaticWorld()
@@ -987,83 +949,9 @@ local function setHeldObjectForPlayer(player, object)
     heldObject.Value = object
 end
 
-local function getHeldAssemblyFolder(player)
-    local playerState = getOrCreatePlayerState(player)
-    return getOrCreateChild(playerState, "Folder", "HeldAssembly")
-end
-
-local function readStoredAssemblyMemberStates(folder)
-    local memberStates = {}
-    for _, memberFolder in ipairs(folder:GetChildren()) do
-        if memberFolder:IsA("Folder") then
-            local memberRef = memberFolder:FindFirstChild("Object")
-            local relativeCFrame = memberFolder:FindFirstChild("RelativeCFrame")
-            local member = memberRef and memberRef.Value or nil
-            if member and member.Parent and relativeCFrame then
-                table.insert(memberStates, {
-                    object = member,
-                    relativeCFrame = relativeCFrame.Value,
-                })
-            end
-        end
-    end
-    return memberStates
-end
-
-local function getHeldAssemblyState(player, object)
-    local folder = getHeldAssemblyFolder(player)
-    local objectRef = folder:FindFirstChild("Object")
-    local storedObject = objectRef and objectRef.Value or nil
-    if storedObject and storedObject.Parent and (object == nil or storedObject == object or object.Parent) then
-        return {
-            object = storedObject,
-            memberStates = readStoredAssemblyMemberStates(folder),
-        }
-    end
-    return nil
-end
-
-local function popHeldAssemblyState(player, object)
-    local state = getHeldAssemblyState(player, object)
-    if state then
-        local folder = getHeldAssemblyFolder(player)
-        for _, child in ipairs(folder:GetChildren()) do
-            child:Destroy()
-        end
-    end
-    return state
-end
-
-local function clearHeldAssemblyState(player)
-    local state = popHeldAssemblyState(player)
-    if state then
-        setAssemblyBondFrozen(state.memberStates, false)
-    end
-end
-
-local function setHeldAssemblyState(player, object, memberStates)
-    clearHeldAssemblyState(player)
-    local frozenStates = memberStates or captureAssemblyRelativeCFrames(object)
-    local folder = getHeldAssemblyFolder(player)
-    local objectRef = getOrCreateChild(folder, "ObjectValue", "Object")
-    objectRef.Value = object
-    for index, memberState in ipairs(frozenStates) do
-        local memberFolder = Instance.new("Folder")
-        memberFolder.Name = "Member_" .. index
-        memberFolder.Parent = folder
-        local memberRef = getOrCreateChild(memberFolder, "ObjectValue", "Object")
-        local relativeCFrame = getOrCreateChild(memberFolder, "CFrameValue", "RelativeCFrame")
-        memberRef.Value = memberState.object
-        relativeCFrame.Value = memberState.relativeCFrame
-    end
-    setAssemblyBondFrozen(frozenStates, true)
-    return frozenStates
-end
-
-local function reconcileBlockAssembly(memberStates)
+local function reconcileBlockAssembly(rootObject)
     local blocks = {}
-    for _, memberState in ipairs(memberStates or {}) do
-        local member = memberState.object
+    for _, member in ipairs(getCarryAssemblyMembers(rootObject)) do
         if member and member.Parent and isBlockPart(member) then
             table.insert(blocks, member)
         end
@@ -1081,30 +969,16 @@ local function reconcileBlockAssembly(memberStates)
     end
 end
 
-local function createPlacementState(object, startPos, targetPos, duration, memberStates)
+local function createPlacementState(object, startPos, targetPos, duration)
     local placementId = nextServerCounter("NextPlacementId")
     local folder = getOrCreateChild(serverPlacementState, "Folder", "Placement_" .. placementId)
     local objectRef = getOrCreateChild(folder, "ObjectValue", "Object")
     local startCFrameValue = getOrCreateChild(folder, "CFrameValue", "StartCFrame")
     local targetCFrameValue = getOrCreateChild(folder, "CFrameValue", "TargetCFrame")
-    local membersFolder = getOrCreateChild(folder, "Folder", "Members")
     objectRef.Value = object
     startCFrameValue.Value = startPos
     targetCFrameValue.Value = targetPos
-    for _, child in ipairs(membersFolder:GetChildren()) do
-        child:Destroy()
-    end
-    local frozenStates = memberStates or captureAssemblyRelativeCFrames(object)
-    setAssemblyBondFrozen(frozenStates, true)
-    for index, memberState in ipairs(frozenStates) do
-        local memberFolder = Instance.new("Folder")
-        memberFolder.Name = "Member_" .. index
-        memberFolder.Parent = membersFolder
-        local memberRef = getOrCreateChild(memberFolder, "ObjectValue", "Object")
-        local relativeCFrame = getOrCreateChild(memberFolder, "CFrameValue", "RelativeCFrame")
-        memberRef.Value = memberState.object
-        relativeCFrame.Value = memberState.relativeCFrame
-    end
+    setAssemblyBondFrozenForObject(object, true)
     folder:SetAttribute("Elapsed", 0)
     folder:SetAttribute("Duration", duration)
     return folder
@@ -1130,50 +1004,21 @@ local function getObjectPlacementDuration(object)
     return DEFAULT_PLACE_DURATION
 end
 
-local function getPlacementMemberStates(placement)
-    local membersFolder = placement:FindFirstChild("Members")
-    if not membersFolder then
-        local objectRef = getPlacementObjectRef(placement)
-        local object = objectRef and objectRef.Value or nil
-        if object and object.Parent then
-            return captureAssemblyRelativeCFrames(object)
-        end
-        return {}
-    end
-
-    local memberStates = {}
-    for _, memberFolder in ipairs(membersFolder:GetChildren()) do
-        local memberRef = memberFolder:FindFirstChild("Object")
-        local relativeCFrame = memberFolder:FindFirstChild("RelativeCFrame")
-        local member = memberRef and memberRef.Value or nil
-        if member and member.Parent and relativeCFrame then
-            table.insert(memberStates, {
-                object = member,
-                relativeCFrame = relativeCFrame.Value,
-            })
-        end
-    end
-    return memberStates
-end
-
-local function prepareObjectForHolding(object, memberStates)
-    object.Anchored = true
-    object.CanCollide = false
-    for _, memberState in ipairs(memberStates or captureAssemblyRelativeCFrames(object)) do
-        local member = memberState.object
+local function prepareObjectForHolding(object)
+    ensureAssemblyModel(object)
+    setAssemblyBondFrozenForObject(object, true)
+    for _, member in ipairs(getAssemblyParts(object)) do
         if member and member.Parent then
-            if member ~= object then
-                member.CanCollide = false
-            end
+            member.Anchored = true
+            member.CanCollide = false
             member.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
             member.AssemblyAngularVelocity = Vector3.new(0, 0, 0)
         end
     end
 end
 
-local function restoreObjectAfterPlacement(object, memberStates)
-    for _, memberState in ipairs(memberStates or captureAssemblyRelativeCFrames(object)) do
-        local member = memberState.object
+local function restoreObjectAfterPlacement(object)
+    for _, member in ipairs(getAssemblyParts(object)) do
         if member and member.Parent then
             member.Anchored = false
             member.CanCollide = true
@@ -1195,7 +1040,7 @@ local function dropHeldObject(player)
         )
     end
     restoreObjectAfterPlacement(heldObject)
-    clearHeldAssemblyState(player)
+    setAssemblyBondFrozenForObject(heldObject, false)
     setHeldObjectForPlayer(player, nil)
 end
 
@@ -1269,8 +1114,8 @@ end
 releaseHeldObjectReferences = function(object)
     for _, player in ipairs(Players:GetPlayers()) do
         local heldObject = getHeldObjectForPlayer(player)
-        if heldObject == object then
-            clearHeldAssemblyState(player)
+        if heldObject and assemblyContainsObject(heldObject, object) then
+            setAssemblyBondFrozenForObject(heldObject, false)
             setHeldObjectForPlayer(player, nil)
             player:SetAttribute("LastActionResult", "ResetAfterFall")
         end
@@ -1279,16 +1124,14 @@ releaseHeldObjectReferences = function(object)
     for _, placement in ipairs(serverPlacementState:GetChildren()) do
         local objectRef = getPlacementObjectRef(placement)
         local shouldDestroyPlacement = objectRef and objectRef.Value == object
-        if not shouldDestroyPlacement then
-            for _, memberState in ipairs(getPlacementMemberStates(placement)) do
-                if memberState.object == object then
-                    shouldDestroyPlacement = true
-                    break
-                end
-            end
+        local placementObject = objectRef and objectRef.Value or nil
+        if not shouldDestroyPlacement and placementObject then
+            shouldDestroyPlacement = assemblyContainsObject(placementObject, object)
         end
         if shouldDestroyPlacement then
-            setAssemblyBondFrozen(getPlacementMemberStates(placement), false)
+            if placementObject then
+                setAssemblyBondFrozenForObject(placementObject, false)
+            end
             placement:Destroy()
         end
     end
@@ -1298,6 +1141,7 @@ local function destroyCarryableObject(object)
     if not object.Parent then
         return
     end
+    local pivotInstance = getAssemblyPivotInstance(object)
     releaseHeldObjectReferences(object)
     trackedCarryables[object] = nil
     local blockState = isBlockPart(object) and serverBlockState:FindFirstChild(object.Name) or nil
@@ -1305,6 +1149,9 @@ local function destroyCarryableObject(object)
         blockState:Destroy()
     end
     object:Destroy()
+    if pivotInstance and pivotInstance ~= object then
+        cleanupAssemblyModel(pivotInstance)
+    end
 end
 
 --------------------------------------------------------------------------------
@@ -1385,26 +1232,24 @@ local function pickupObject(player, inputData)
     end
 
     local carryRoot = getCarryRootObject(object)
-    local memberStates = captureAssemblyRelativeCFrames(carryRoot)
-    prepareObjectForHolding(carryRoot, memberStates)
+    prepareObjectForHolding(carryRoot)
     setHeldObjectForPlayer(player, carryRoot)
-    setHeldAssemblyState(player, carryRoot, memberStates)
     player:SetAttribute("LastActionResult", "PickupSuccess")
 end
 
 local function positionOccupied(player, targetRootCFrame, object)
-    local heldState = getHeldAssemblyState(player, object)
-    local memberStates = heldState and heldState.memberStates or captureAssemblyRelativeCFrames(object)
+    local rootCFrame = object.CFrame
+    local assemblyParts = getAssemblyParts(object)
     local params = OverlapParams.new()
     params.FilterType = Enum.RaycastFilterType.Exclude
     params.FilterDescendantsInstances = { player.Character }
-    for _, memberState in ipairs(memberStates) do
-        table.insert(params.FilterDescendantsInstances, memberState.object)
+    for _, member in ipairs(assemblyParts) do
+        table.insert(params.FilterDescendantsInstances, member)
     end
 
-    for _, memberState in ipairs(memberStates) do
-        local projectedCFrame = targetRootCFrame * memberState.relativeCFrame
-        local member = memberState.object
+    for _, member in ipairs(assemblyParts) do
+        local relativeCFrame = rootCFrame:ToObjectSpace(member.CFrame)
+        local projectedCFrame = targetRootCFrame * relativeCFrame
         local hits = Workspace:GetPartBoundsInBox(
             projectedCFrame,
             member.Size,
@@ -1464,10 +1309,7 @@ local function placeHeldObject(player, inputData)
         return
     end
 
-    local heldState = popHeldAssemblyState(player, object)
-    local memberStates = heldState and heldState.memberStates or captureAssemblyRelativeCFrames(object)
-    for _, memberState in ipairs(memberStates) do
-        local member = memberState.object
+    for _, member in ipairs(getAssemblyParts(object)) do
         if member and member.Parent then
             member.Anchored = true
             member.CanCollide = false
@@ -1481,7 +1323,7 @@ local function placeHeldObject(player, inputData)
     local startRootCFrame = object.CFrame
     setHeldObjectForPlayer(player, nil)
 
-    createPlacementState(object, startRootCFrame, targetRootCFrame, getObjectPlacementDuration(object), memberStates)
+    createPlacementState(object, startRootCFrame, targetRootCFrame, getObjectPlacementDuration(object))
 
     player:SetAttribute("LastActionResult", "PlaceSuccess")
 end
@@ -1554,7 +1396,6 @@ RunService.Heartbeat:Connect(function(dt)
         local objectRef = getPlacementObjectRef(placement)
         local object = objectRef and objectRef.Value or nil
         if not object or not object.Parent then
-            setAssemblyBondFrozen(getPlacementMemberStates(placement), false)
             placement:Destroy()
         else
         local elapsed = (placement:GetAttribute("Elapsed") or 0) + dt
@@ -1566,20 +1407,18 @@ RunService.Heartbeat:Connect(function(dt)
         local alpha = math.min(elapsed / duration, 1)
         -- Smooth ease-out
         local t = 1 - (1 - alpha) * (1 - alpha)
-        applyAssemblyRootCFrame(object, startCFrame:Lerp(targetCFrame, t), getPlacementMemberStates(placement))
+        applyAssemblyRootCFrame(object, startCFrame:Lerp(targetCFrame, t))
 
         if alpha >= 1 then
-            local placementMemberStates = getPlacementMemberStates(placement)
-            restoreObjectAfterPlacement(object, placementMemberStates)
-            setAssemblyBondFrozen(placementMemberStates, false)
+            restoreObjectAfterPlacement(object)
+            setAssemblyBondFrozenForObject(object, false)
             if object:GetAttribute("CarryKind") == "Block" then
-                for _, memberState in ipairs(placementMemberStates) do
-                    local member = memberState.object
+                for _, member in ipairs(getCarryAssemblyMembers(object)) do
                     if member and member.Parent and member:GetAttribute("CarryKind") == "Block" then
                         setBlockMetadata(member, member:GetAttribute("ItemColorName"))
                     end
                 end
-                reconcileBlockAssembly(placementMemberStates)
+                reconcileBlockAssembly(object)
             end
             placement:Destroy()
         else

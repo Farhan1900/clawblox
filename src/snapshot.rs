@@ -5,15 +5,15 @@ use uuid::Uuid;
 
 use crate::game::instance::GameInstance;
 use crate::game::lua::instance::{
-    AttributeValue, BillboardGuiData, BodyAngularVelocityData, BodyForceData, BodyVelocityData,
-    CFrameValueData, ClassName, GuiObjectData, HumanoidData, Instance, InstanceData, ModelData, ObjectValueData,
-    PartData, ScriptData, TextXAlignment, TextYAlignment, UICornerData, WeldConstraintData, WeldData,
+    AlignOrientationData, AlignPositionData, AttachmentData, AttributeValue, BillboardGuiData,
+    BodyAngularVelocityData, BodyForceData, BodyVelocityData, CFrameValueData, ClassName,
+    GuiObjectData, HumanoidData, Instance, InstanceData, ModelData, ObjectValueData, PartData,
+    ScriptData, TextXAlignment, TextYAlignment, UICornerData, WeldConstraintData, WeldData,
 };
 use crate::game::lua::services::agent_input::AgentInput;
 use crate::game::lua::services::remote_event::ReplicatedEvent;
 use crate::game::lua::types::{
-    CFrame, Color3, HumanoidStateType, Material, PartType, PhysicalProperties, UDim, UDim2,
-    Vector3,
+    CFrame, Color3, HumanoidStateType, Material, PartType, PhysicalProperties, UDim, UDim2, Vector3,
 };
 
 const SNAPSHOT_SCHEMA_VERSION: u32 = 2;
@@ -132,6 +132,12 @@ pub struct InstanceSnapshot {
     #[serde(default)]
     pub body_angular_velocity: Option<BodyAngularVelocitySnapshot>,
     #[serde(default)]
+    pub attachment: Option<AttachmentSnapshot>,
+    #[serde(default)]
+    pub align_position: Option<AlignPositionSnapshot>,
+    #[serde(default)]
+    pub align_orientation: Option<AlignOrientationSnapshot>,
+    #[serde(default)]
     pub weld: Option<WeldSnapshot>,
     #[serde(default)]
     pub weld_constraint: Option<WeldConstraintSnapshot>,
@@ -249,6 +255,33 @@ pub struct WeldConstraintSnapshot {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AttachmentSnapshot {
+    pub cframe: SnapshotCFrame,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AlignPositionSnapshot {
+    #[serde(default)]
+    pub attachment0_id: Option<u64>,
+    #[serde(default)]
+    pub attachment1_id: Option<u64>,
+    pub position: [f32; 3],
+    pub responsiveness: f32,
+    pub rigidity_enabled: bool,
+    pub max_force: f32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AlignOrientationSnapshot {
+    #[serde(default)]
+    pub attachment0_id: Option<u64>,
+    #[serde(default)]
+    pub attachment1_id: Option<u64>,
+    pub responsiveness: f32,
+    pub rigidity_enabled: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BillboardGuiSnapshot {
     pub size: SnapshotUDim2,
     pub studs_offset: [f32; 3],
@@ -345,6 +378,10 @@ pub enum SnapshotAttributeValue {
 enum RefFixupKind {
     ObjectValue(Option<u64>),
     ModelPrimaryPart(Option<u64>),
+    AlignPositionAttachment0(Option<u64>),
+    AlignPositionAttachment1(Option<u64>),
+    AlignOrientationAttachment0(Option<u64>),
+    AlignOrientationAttachment1(Option<u64>),
     WeldPart0(Option<u64>),
     WeldPart1(Option<u64>),
     WeldConstraintPart0(Option<u64>),
@@ -449,11 +486,17 @@ pub fn restore_game_instance(
         ));
     }
 
-    let (workspace, server_storage, replicated_storage, players_service, agent_input_service, remote_event_service) = {
-        let runtime = instance
-            .lua_runtime
-            .as_ref()
-            .ok_or_else(|| "cannot restore instance without an initialized Lua runtime".to_string())?;
+    let (
+        workspace,
+        server_storage,
+        replicated_storage,
+        players_service,
+        agent_input_service,
+        remote_event_service,
+    ) = {
+        let runtime = instance.lua_runtime.as_ref().ok_or_else(|| {
+            "cannot restore instance without an initialized Lua runtime".to_string()
+        })?;
         (
             runtime.workspace(),
             runtime.game().server_storage(),
@@ -513,7 +556,10 @@ pub fn restore_game_instance(
                 .pending_inputs
                 .entry(input.user_id)
                 .or_insert_with(Vec::new)
-                .push(AgentInput::new(input.input_type.clone(), input.data.clone()));
+                .push(AgentInput::new(
+                    input.input_type.clone(),
+                    input.data.clone(),
+                ));
         }
     }
 
@@ -555,16 +601,37 @@ fn snapshot_instance(instance: Instance) -> Result<InstanceSnapshot, String> {
         number_value: data.number_value_data.as_ref().map(|v| v.value),
         bool_value: data.bool_value_data.as_ref().map(|v| v.value),
         string_value: data.string_value_data.as_ref().map(|v| v.value.clone()),
-        object_value: data.object_value_data.as_ref().map(snapshot_object_value_data),
-        cframe_value: data.cframe_value_data.as_ref().map(snapshot_cframe_value_data),
-        body_velocity: data.body_velocity_data.as_ref().map(snapshot_body_velocity_data),
+        object_value: data
+            .object_value_data
+            .as_ref()
+            .map(snapshot_object_value_data),
+        cframe_value: data
+            .cframe_value_data
+            .as_ref()
+            .map(snapshot_cframe_value_data),
+        body_velocity: data
+            .body_velocity_data
+            .as_ref()
+            .map(snapshot_body_velocity_data),
         body_force: data.body_force_data.as_ref().map(snapshot_body_force_data),
         body_angular_velocity: data
             .body_angular_velocity_data
             .as_ref()
             .map(snapshot_body_angular_velocity_data),
+        attachment: data.attachment_data.as_ref().map(snapshot_attachment_data),
+        align_position: data
+            .align_position_data
+            .as_ref()
+            .map(snapshot_align_position_data),
+        align_orientation: data
+            .align_orientation_data
+            .as_ref()
+            .map(snapshot_align_orientation_data),
         weld: data.weld_data.as_ref().map(snapshot_weld_data),
-        weld_constraint: data.weld_constraint_data.as_ref().map(snapshot_weld_constraint_data),
+        weld_constraint: data
+            .weld_constraint_data
+            .as_ref()
+            .map(snapshot_weld_constraint_data),
         billboard_gui: data
             .billboard_gui_data
             .as_ref()
@@ -782,7 +849,10 @@ fn restore_players(
                 let (radius, height, hrp_id) = {
                     let mut data = hrp.data.lock().unwrap();
                     let part = data.part_data.as_mut().ok_or_else(|| {
-                        format!("restored HumanoidRootPart missing part data for {}", player.name)
+                        format!(
+                            "restored HumanoidRootPart missing part data for {}",
+                            player.name
+                        )
                     })?;
                     let radius = (part.size.x.max(part.size.z)) * 0.5;
                     let height = part.size.y;
@@ -827,8 +897,7 @@ fn restore_players(
                         restore_vector3(h_snapshot.move_input_direction);
                     humanoid.running_speed = h_snapshot.running_speed;
                     humanoid.state = restore_humanoid_state(&h_snapshot.state)?;
-                    humanoid.move_to_target =
-                        h_snapshot.move_to_target.map(restore_vector3);
+                    humanoid.move_to_target = h_snapshot.move_to_target.map(restore_vector3);
                     humanoid.cancel_move_to = h_snapshot.cancel_move_to;
                 }
             }
@@ -892,8 +961,7 @@ fn apply_instance_snapshot(
             .map(|(key, value)| (key.clone(), restore_attribute_value(value)))
             .collect();
 
-        if let (Some(part), Some(part_snapshot)) =
-            (data.part_data.as_mut(), snapshot.part.as_ref())
+        if let (Some(part), Some(part_snapshot)) = (data.part_data.as_mut(), snapshot.part.as_ref())
         {
             apply_part_snapshot(part, part_snapshot)?;
         }
@@ -920,31 +988,40 @@ fn apply_instance_snapshot(
         if let (Some(value), Some(saved)) = (data.int_value_data.as_mut(), snapshot.int_value) {
             value.value = saved;
         }
-        if let (Some(value), Some(saved)) = (data.number_value_data.as_mut(), snapshot.number_value) {
+        if let (Some(value), Some(saved)) = (data.number_value_data.as_mut(), snapshot.number_value)
+        {
             value.value = saved;
         }
         if let (Some(value), Some(saved)) = (data.bool_value_data.as_mut(), snapshot.bool_value) {
             value.value = saved;
         }
-        if let (Some(value), Some(saved)) =
-            (data.string_value_data.as_mut(), snapshot.string_value.as_ref())
-        {
+        if let (Some(value), Some(saved)) = (
+            data.string_value_data.as_mut(),
+            snapshot.string_value.as_ref(),
+        ) {
             value.value = saved.clone();
         }
         if data.object_value_data.is_some() {
             fixups.push(RefFixup {
                 instance: instance.clone(),
                 kind: RefFixupKind::ObjectValue(
-                    snapshot.object_value.as_ref().and_then(|value| value.target_id),
+                    snapshot
+                        .object_value
+                        .as_ref()
+                        .and_then(|value| value.target_id),
                 ),
             });
         }
-        if let (Some(value), Some(saved)) = (data.cframe_value_data.as_mut(), snapshot.cframe_value.as_ref()) {
+        if let (Some(value), Some(saved)) = (
+            data.cframe_value_data.as_mut(),
+            snapshot.cframe_value.as_ref(),
+        ) {
             value.value = restore_cframe(saved);
         }
-        if let (Some(body_velocity), Some(saved)) =
-            (data.body_velocity_data.as_mut(), snapshot.body_velocity.as_ref())
-        {
+        if let (Some(body_velocity), Some(saved)) = (
+            data.body_velocity_data.as_mut(),
+            snapshot.body_velocity.as_ref(),
+        ) {
             body_velocity.velocity = restore_vector3(saved.velocity);
             body_velocity.max_force = restore_vector3(saved.max_force);
         }
@@ -959,6 +1036,47 @@ fn apply_instance_snapshot(
         ) {
             body_angular_velocity.angular_velocity = restore_vector3(saved.angular_velocity);
             body_angular_velocity.max_torque = restore_vector3(saved.max_torque);
+        }
+        if let (Some(attachment), Some(saved)) =
+            (data.attachment_data.as_mut(), snapshot.attachment.as_ref())
+        {
+            attachment.cframe = restore_cframe(&saved.cframe);
+        }
+        if let (Some(align), Some(saved)) = (
+            data.align_position_data.as_mut(),
+            snapshot.align_position.as_ref(),
+        ) {
+            align.position = restore_vector3(saved.position);
+            align.responsiveness = saved.responsiveness;
+            align.rigidity_enabled = saved.rigidity_enabled;
+            align.max_force = saved.max_force;
+            align.attachment0 = None;
+            align.attachment1 = None;
+            fixups.push(RefFixup {
+                instance: instance.clone(),
+                kind: RefFixupKind::AlignPositionAttachment0(saved.attachment0_id),
+            });
+            fixups.push(RefFixup {
+                instance: instance.clone(),
+                kind: RefFixupKind::AlignPositionAttachment1(saved.attachment1_id),
+            });
+        }
+        if let (Some(align), Some(saved)) = (
+            data.align_orientation_data.as_mut(),
+            snapshot.align_orientation.as_ref(),
+        ) {
+            align.responsiveness = saved.responsiveness;
+            align.rigidity_enabled = saved.rigidity_enabled;
+            align.attachment0 = None;
+            align.attachment1 = None;
+            fixups.push(RefFixup {
+                instance: instance.clone(),
+                kind: RefFixupKind::AlignOrientationAttachment0(saved.attachment0_id),
+            });
+            fixups.push(RefFixup {
+                instance: instance.clone(),
+                kind: RefFixupKind::AlignOrientationAttachment1(saved.attachment1_id),
+            });
         }
         if let (Some(weld), Some(saved)) = (data.weld_data.as_mut(), snapshot.weld.as_ref()) {
             weld.c0 = restore_cframe(&saved.c0);
@@ -975,16 +1093,21 @@ fn apply_instance_snapshot(
                 kind: RefFixupKind::WeldPart1(saved.part1_id),
             });
         }
-        if let (Some(wc), Some(saved)) = (data.weld_constraint_data.as_mut(), snapshot.weld_constraint.as_ref()) {
+        if let (Some(wc), Some(saved)) = (
+            data.weld_constraint_data.as_mut(),
+            snapshot.weld_constraint.as_ref(),
+        ) {
             wc.enabled = saved.enabled;
             wc.relative_cframe = saved
                 .relative_cframe
                 .as_ref()
                 .map(restore_cframe)
                 .or_else(|| {
-                    saved
-                        .offset
-                        .map(|o| CFrame::from_position(crate::game::lua::types::Vector3::new(o[0], o[1], o[2])))
+                    saved.offset.map(|o| {
+                        CFrame::from_position(crate::game::lua::types::Vector3::new(
+                            o[0], o[1], o[2],
+                        ))
+                    })
                 });
             wc.part0 = None;
             wc.part1 = None;
@@ -997,9 +1120,10 @@ fn apply_instance_snapshot(
                 kind: RefFixupKind::WeldConstraintPart1(saved.part1_id),
             });
         }
-        if let (Some(billboard), Some(saved)) =
-            (data.billboard_gui_data.as_mut(), snapshot.billboard_gui.as_ref())
-        {
+        if let (Some(billboard), Some(saved)) = (
+            data.billboard_gui_data.as_mut(),
+            snapshot.billboard_gui.as_ref(),
+        ) {
             billboard.size = restore_udim2(&saved.size);
             billboard.studs_offset = restore_vector3(saved.studs_offset);
             billboard.always_on_top = saved.always_on_top;
@@ -1027,6 +1151,10 @@ fn apply_ref_fixups(map: &HashMap<u64, Instance>, fixups: Vec<RefFixup>) {
         let target = match &fixup.kind {
             RefFixupKind::ObjectValue(id)
             | RefFixupKind::ModelPrimaryPart(id)
+            | RefFixupKind::AlignPositionAttachment0(id)
+            | RefFixupKind::AlignPositionAttachment1(id)
+            | RefFixupKind::AlignOrientationAttachment0(id)
+            | RefFixupKind::AlignOrientationAttachment1(id)
             | RefFixupKind::WeldPart0(id)
             | RefFixupKind::WeldPart1(id)
             | RefFixupKind::WeldConstraintPart0(id)
@@ -1038,12 +1166,38 @@ fn apply_ref_fixups(map: &HashMap<u64, Instance>, fixups: Vec<RefFixup>) {
         match fixup.kind {
             RefFixupKind::ObjectValue(_) => {
                 if let Some(object_value) = data.object_value_data.as_mut() {
-                    object_value.value = target.map(|instance| std::sync::Arc::downgrade(&instance.data));
+                    object_value.value =
+                        target.map(|instance| std::sync::Arc::downgrade(&instance.data));
                 }
             }
             RefFixupKind::ModelPrimaryPart(_) => {
                 if let Some(model) = data.model_data.as_mut() {
-                    model.primary_part = target.map(|instance| std::sync::Arc::downgrade(&instance.data));
+                    model.primary_part =
+                        target.map(|instance| std::sync::Arc::downgrade(&instance.data));
+                }
+            }
+            RefFixupKind::AlignPositionAttachment0(_) => {
+                if let Some(align) = data.align_position_data.as_mut() {
+                    align.attachment0 =
+                        target.map(|instance| std::sync::Arc::downgrade(&instance.data));
+                }
+            }
+            RefFixupKind::AlignPositionAttachment1(_) => {
+                if let Some(align) = data.align_position_data.as_mut() {
+                    align.attachment1 =
+                        target.map(|instance| std::sync::Arc::downgrade(&instance.data));
+                }
+            }
+            RefFixupKind::AlignOrientationAttachment0(_) => {
+                if let Some(align) = data.align_orientation_data.as_mut() {
+                    align.attachment0 =
+                        target.map(|instance| std::sync::Arc::downgrade(&instance.data));
+                }
+            }
+            RefFixupKind::AlignOrientationAttachment1(_) => {
+                if let Some(align) = data.align_orientation_data.as_mut() {
+                    align.attachment1 =
+                        target.map(|instance| std::sync::Arc::downgrade(&instance.data));
                 }
             }
             RefFixupKind::WeldPart0(_) => {
@@ -1068,7 +1222,8 @@ fn apply_ref_fixups(map: &HashMap<u64, Instance>, fixups: Vec<RefFixup>) {
             }
             RefFixupKind::BillboardAdornee(_) => {
                 if let Some(billboard) = data.billboard_gui_data.as_mut() {
-                    billboard.adornee = target.map(|instance| std::sync::Arc::downgrade(&instance.data));
+                    billboard.adornee =
+                        target.map(|instance| std::sync::Arc::downgrade(&instance.data));
                 }
             }
         }
@@ -1099,47 +1254,52 @@ fn create_instance_from_class_name(class_name: &str, name: &str) -> Result<Insta
         }
         "Folder" => Instance::new(ClassName::Folder, name),
         "Script" => Instance::from_data(crate::game::lua::instance::InstanceData::new_script(name)),
-        "ModuleScript" => {
-            Instance::from_data(crate::game::lua::instance::InstanceData::new_module_script(name))
-        }
-        "RemoteEvent" => {
-            Instance::from_data(crate::game::lua::instance::InstanceData::new_remote_event(name))
-        }
-        "IntValue" => {
-            Instance::from_data(crate::game::lua::instance::InstanceData::new_int_value(name))
-        }
-        "NumberValue" => {
-            Instance::from_data(crate::game::lua::instance::InstanceData::new_number_value(name))
-        }
-        "BoolValue" => {
-            Instance::from_data(crate::game::lua::instance::InstanceData::new_bool_value(name))
-        }
-        "StringValue" => {
-            Instance::from_data(crate::game::lua::instance::InstanceData::new_string_value(name))
-        }
-        "ObjectValue" => {
-            Instance::from_data(crate::game::lua::instance::InstanceData::new_object_value(name))
-        }
-        "CFrameValue" => {
-            Instance::from_data(crate::game::lua::instance::InstanceData::new_cframe_value(name))
-        }
+        "ModuleScript" => Instance::from_data(
+            crate::game::lua::instance::InstanceData::new_module_script(name),
+        ),
+        "RemoteEvent" => Instance::from_data(
+            crate::game::lua::instance::InstanceData::new_remote_event(name),
+        ),
+        "IntValue" => Instance::from_data(crate::game::lua::instance::InstanceData::new_int_value(
+            name,
+        )),
+        "NumberValue" => Instance::from_data(
+            crate::game::lua::instance::InstanceData::new_number_value(name),
+        ),
+        "BoolValue" => Instance::from_data(
+            crate::game::lua::instance::InstanceData::new_bool_value(name),
+        ),
+        "StringValue" => Instance::from_data(
+            crate::game::lua::instance::InstanceData::new_string_value(name),
+        ),
+        "ObjectValue" => Instance::from_data(
+            crate::game::lua::instance::InstanceData::new_object_value(name),
+        ),
+        "CFrameValue" => Instance::from_data(
+            crate::game::lua::instance::InstanceData::new_cframe_value(name),
+        ),
         "BodyVelocity" => Instance::from_data(
             crate::game::lua::instance::InstanceData::new_body_velocity(name),
         ),
-        "BodyForce" => {
-            Instance::from_data(crate::game::lua::instance::InstanceData::new_body_force(name))
-        }
+        "BodyForce" => Instance::from_data(
+            crate::game::lua::instance::InstanceData::new_body_force(name),
+        ),
         "BodyAngularVelocity" => Instance::from_data(
             crate::game::lua::instance::InstanceData::new_body_angular_velocity(name),
         ),
-        "Attachment" => {
-            Instance::from_data(crate::game::lua::instance::InstanceData::new_attachment(name))
+        "Attachment" => Instance::from_data(
+            crate::game::lua::instance::InstanceData::new_attachment(name),
+        ),
+        "AlignPosition" => {
+            Instance::from_data(crate::game::lua::instance::InstanceData::new_align_position(name))
         }
         "AlignOrientation" => Instance::from_data(
             crate::game::lua::instance::InstanceData::new_align_orientation(name),
         ),
         "Weld" => Instance::from_data(crate::game::lua::instance::InstanceData::new_weld(name)),
-        "WeldConstraint" => Instance::from_data(crate::game::lua::instance::InstanceData::new_weld_constraint(name)),
+        "WeldConstraint" => {
+            Instance::from_data(crate::game::lua::instance::InstanceData::new_weld_constraint(name))
+        }
         "BillboardGui" => Instance::from_data(
             crate::game::lua::instance::InstanceData::new_billboard_gui(name),
         ),
@@ -1149,9 +1309,7 @@ fn create_instance_from_class_name(class_name: &str, name: &str) -> Result<Insta
         "ScreenGui" => Instance::from_data(
             crate::game::lua::instance::InstanceData::new_screen_gui(name),
         ),
-        "Frame" => {
-            Instance::from_data(crate::game::lua::instance::InstanceData::new_frame(name))
-        }
+        "Frame" => Instance::from_data(crate::game::lua::instance::InstanceData::new_frame(name)),
         "TextLabel" => Instance::from_data(
             crate::game::lua::instance::InstanceData::new_text_label(name),
         ),
@@ -1164,12 +1322,10 @@ fn create_instance_from_class_name(class_name: &str, name: &str) -> Result<Insta
         "ImageButton" => Instance::from_data(
             crate::game::lua::instance::InstanceData::new_image_button(name),
         ),
-        "UICorner" => Instance::from_data(
-            crate::game::lua::instance::InstanceData::new_uicorner(name),
-        ),
-        "Sound" => {
-            Instance::from_data(crate::game::lua::instance::InstanceData::new_sound(name))
+        "UICorner" => {
+            Instance::from_data(crate::game::lua::instance::InstanceData::new_uicorner(name))
         }
+        "Sound" => Instance::from_data(crate::game::lua::instance::InstanceData::new_sound(name)),
         other => return Err(format!("unsupported snapshot class '{}'", other)),
     };
     {
@@ -1373,6 +1529,48 @@ fn snapshot_body_angular_velocity_data(
     }
 }
 
+fn snapshot_attachment_data(data: &AttachmentData) -> AttachmentSnapshot {
+    AttachmentSnapshot {
+        cframe: snapshot_cframe(data.cframe),
+    }
+}
+
+fn snapshot_align_position_data(data: &AlignPositionData) -> AlignPositionSnapshot {
+    AlignPositionSnapshot {
+        attachment0_id: data
+            .attachment0
+            .as_ref()
+            .and_then(|weak| weak.upgrade())
+            .map(|instance| instance.lock().unwrap().id.0),
+        attachment1_id: data
+            .attachment1
+            .as_ref()
+            .and_then(|weak| weak.upgrade())
+            .map(|instance| instance.lock().unwrap().id.0),
+        position: snapshot_vector3(data.position),
+        responsiveness: data.responsiveness,
+        rigidity_enabled: data.rigidity_enabled,
+        max_force: data.max_force,
+    }
+}
+
+fn snapshot_align_orientation_data(data: &AlignOrientationData) -> AlignOrientationSnapshot {
+    AlignOrientationSnapshot {
+        attachment0_id: data
+            .attachment0
+            .as_ref()
+            .and_then(|weak| weak.upgrade())
+            .map(|instance| instance.lock().unwrap().id.0),
+        attachment1_id: data
+            .attachment1
+            .as_ref()
+            .and_then(|weak| weak.upgrade())
+            .map(|instance| instance.lock().unwrap().id.0),
+        responsiveness: data.responsiveness,
+        rigidity_enabled: data.rigidity_enabled,
+    }
+}
+
 fn snapshot_weld_data(weld: &WeldData) -> WeldSnapshot {
     WeldSnapshot {
         part0_id: weld
@@ -1404,7 +1602,9 @@ fn snapshot_weld_constraint_data(wc: &WeldConstraintData) -> WeldConstraintSnaps
             .and_then(|weak| weak.upgrade())
             .map(|instance| instance.lock().unwrap().id.0),
         enabled: wc.enabled,
-        offset: wc.relative_cframe.map(|cf| [cf.position.x, cf.position.y, cf.position.z]),
+        offset: wc
+            .relative_cframe
+            .map(|cf| [cf.position.x, cf.position.y, cf.position.z]),
         relative_cframe: wc.relative_cframe.map(snapshot_cframe),
     }
 }
@@ -1667,7 +1867,12 @@ mod tests {
         instance.init_runtime();
 
         let workspace = instance.lua_runtime.as_ref().unwrap().workspace();
-        let server_storage = instance.lua_runtime.as_ref().unwrap().game().server_storage();
+        let server_storage = instance
+            .lua_runtime
+            .as_ref()
+            .unwrap()
+            .game()
+            .server_storage();
 
         let part = Instance::from_data(InstanceData::new_part("TrackedPart"));
         {
@@ -1683,17 +1888,63 @@ mod tests {
         }
         workspace.add_child(part.clone());
 
+        let target = Instance::from_data(InstanceData::new_part("ConstraintTarget"));
+        {
+            let mut data = target.data.lock().unwrap();
+            let part_data = data.part_data.as_mut().unwrap();
+            part_data.position = Vector3::new(20.0, 3.0, -4.0);
+            part_data.cframe =
+                CFrame::new(20.0, 3.0, -4.0).multiply(&CFrame::from_orientation(0.0, 1.57, 0.0));
+            part_data.anchored = true;
+        }
+        workspace.add_child(target.clone());
+
+        let attachment0 = Instance::from_data(InstanceData::new_attachment("TrackedAttachment"));
+        {
+            let mut data = attachment0.data.lock().unwrap();
+            data.attachment_data.as_mut().unwrap().cframe =
+                CFrame::from_position(Vector3::new(1.0, 0.0, 0.0));
+        }
+        attachment0.set_parent(Some(&part));
+
+        let attachment1 = Instance::from_data(InstanceData::new_attachment("TargetAttachment"));
+        attachment1.set_parent(Some(&target));
+
+        let align_position =
+            Instance::from_data(InstanceData::new_align_position("TrackedAlignPosition"));
+        {
+            let mut data = align_position.data.lock().unwrap();
+            let align = data.align_position_data.as_mut().unwrap();
+            align.attachment0 = Some(std::sync::Arc::downgrade(&attachment0.data));
+            align.attachment1 = Some(std::sync::Arc::downgrade(&attachment1.data));
+            align.rigidity_enabled = true;
+        }
+        workspace.add_child(align_position.clone());
+
+        let align_orientation = Instance::from_data(InstanceData::new_align_orientation(
+            "TrackedAlignOrientation",
+        ));
+        {
+            let mut data = align_orientation.data.lock().unwrap();
+            let align = data.align_orientation_data.as_mut().unwrap();
+            align.attachment0 = Some(std::sync::Arc::downgrade(&attachment0.data));
+            align.attachment1 = Some(std::sync::Arc::downgrade(&attachment1.data));
+            align.rigidity_enabled = true;
+        }
+        workspace.add_child(align_orientation.clone());
+
         let folder = Instance::new(ClassName::Folder, "HiddenState");
         folder.set_parent(Some(&server_storage));
         let object_value = Instance::from_data(InstanceData::new_object_value("TrackedRef"));
         {
             let mut data = object_value.data.lock().unwrap();
-            data.object_value_data.as_mut().unwrap().value = Some(std::sync::Arc::downgrade(&part.data));
+            data.object_value_data.as_mut().unwrap().value =
+                Some(std::sync::Arc::downgrade(&part.data));
         }
         object_value.set_parent(Some(&folder));
         let cframe_value = Instance::from_data(InstanceData::new_cframe_value("TrackedCFrame"));
-        let expected_cframe = CFrame::new(1.0, 2.0, 3.0)
-            .multiply(&CFrame::from_orientation(0.2, 0.4, 0.1));
+        let expected_cframe =
+            CFrame::new(1.0, 2.0, 3.0).multiply(&CFrame::from_orientation(0.2, 0.4, 0.1));
         {
             let mut data = cframe_value.data.lock().unwrap();
             data.cframe_value_data.as_mut().unwrap().value = expected_cframe;
@@ -1722,7 +1973,9 @@ mod tests {
             .and_then(|weak| weak.upgrade())
             .map(Instance::from_ref)
             .unwrap();
-        let hrp = character.find_first_child("HumanoidRootPart", false).unwrap();
+        let hrp = character
+            .find_first_child("HumanoidRootPart", false)
+            .unwrap();
         {
             let mut data = hrp.data.lock().unwrap();
             let part_data = data.part_data.as_mut().unwrap();
@@ -1752,6 +2005,69 @@ mod tests {
         assert_eq!(snapshot_vector3(restored_part_pos), [12.0, 3.0, -4.0]);
         drop(restored_part_data);
 
+        let restored_attachment = restored_runtime
+            .workspace()
+            .instance
+            .find_first_child("TrackedAttachment", true)
+            .unwrap();
+        let restored_attachment_data = restored_attachment.data.lock().unwrap();
+        let restored_attachment_cframe = restored_attachment_data
+            .attachment_data
+            .as_ref()
+            .map(|attachment| attachment.cframe)
+            .unwrap();
+        assert_eq!(
+            snapshot_cframe(restored_attachment_cframe).position,
+            [1.0, 0.0, 0.0]
+        );
+        drop(restored_attachment_data);
+
+        let restored_align_position = restored_runtime
+            .workspace()
+            .instance
+            .find_first_child("TrackedAlignPosition", true)
+            .unwrap();
+        let restored_align_position_data = restored_align_position.data.lock().unwrap();
+        let restored_align_position_state = restored_align_position_data
+            .align_position_data
+            .as_ref()
+            .unwrap();
+        assert!(restored_align_position_state
+            .attachment0
+            .as_ref()
+            .and_then(|w| w.upgrade())
+            .is_some());
+        assert!(restored_align_position_state
+            .attachment1
+            .as_ref()
+            .and_then(|w| w.upgrade())
+            .is_some());
+        assert!(restored_align_position_state.rigidity_enabled);
+        drop(restored_align_position_data);
+
+        let restored_align_orientation = restored_runtime
+            .workspace()
+            .instance
+            .find_first_child("TrackedAlignOrientation", true)
+            .unwrap();
+        let restored_align_orientation_data = restored_align_orientation.data.lock().unwrap();
+        let restored_align_orientation_state = restored_align_orientation_data
+            .align_orientation_data
+            .as_ref()
+            .unwrap();
+        assert!(restored_align_orientation_state
+            .attachment0
+            .as_ref()
+            .and_then(|w| w.upgrade())
+            .is_some());
+        assert!(restored_align_orientation_state
+            .attachment1
+            .as_ref()
+            .and_then(|w| w.upgrade())
+            .is_some());
+        assert!(restored_align_orientation_state.rigidity_enabled);
+        drop(restored_align_orientation_data);
+
         let restored_folder = restored_runtime
             .game()
             .server_storage()
@@ -1761,7 +2077,9 @@ mod tests {
             restored_folder.get_attribute("InternalCounter"),
             Some(AttributeValue::Number(value)) if (value - 42.0).abs() < f64::EPSILON
         ));
-        let restored_ref = restored_folder.find_first_child("TrackedRef", false).unwrap();
+        let restored_ref = restored_folder
+            .find_first_child("TrackedRef", false)
+            .unwrap();
         let target_name = restored_ref
             .data
             .lock()
@@ -1772,7 +2090,9 @@ mod tests {
             .and_then(|weak| weak.upgrade())
             .map(|instance| instance.lock().unwrap().name.clone());
         assert_eq!(target_name.as_deref(), Some("TrackedPart"));
-        let restored_cframe = restored_folder.find_first_child("TrackedCFrame", false).unwrap();
+        let restored_cframe = restored_folder
+            .find_first_child("TrackedCFrame", false)
+            .unwrap();
         let restored_value = restored_cframe
             .data
             .lock()
@@ -1811,8 +2131,14 @@ mod tests {
             .unwrap();
         let restored_hrp_data = restored_hrp.data.lock().unwrap();
         let restored_hrp_part = restored_hrp_data.part_data.as_ref().unwrap();
-        assert_eq!(snapshot_vector3(restored_hrp_part.position), [5.0, 6.5, 7.5]);
-        assert_eq!(snapshot_vector3(restored_hrp_part.velocity), [1.0, 2.0, 3.0]);
+        assert_eq!(
+            snapshot_vector3(restored_hrp_part.position),
+            [5.0, 6.5, 7.5]
+        );
+        assert_eq!(
+            snapshot_vector3(restored_hrp_part.velocity),
+            [1.0, 2.0, 3.0]
+        );
         drop(restored_hrp_data);
 
         let restored_character_models = restored_runtime

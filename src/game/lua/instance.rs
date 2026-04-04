@@ -75,6 +75,7 @@ pub struct InstanceData {
     pub body_force_data: Option<BodyForceData>,
     pub body_angular_velocity_data: Option<BodyAngularVelocityData>,
     pub attachment_data: Option<AttachmentData>,
+    pub align_position_data: Option<AlignPositionData>,
     pub align_orientation_data: Option<AlignOrientationData>,
     pub sound_data: Option<SoundData>,
     pub property_changed_signals: HashMap<String, RBXScriptSignal>,
@@ -321,6 +322,7 @@ impl PlayerData {
 #[derive(Debug, Clone)]
 pub struct ModelData {
     pub primary_part: Option<WeakInstanceRef>,
+    pub world_pivot: Option<CFrame>,
 }
 
 #[derive(Debug, Clone)]
@@ -343,7 +345,10 @@ pub struct AnimatorData {
 
 impl Default for ModelData {
     fn default() -> Self {
-        Self { primary_part: None }
+        Self {
+            primary_part: None,
+            world_pivot: None,
+        }
     }
 }
 
@@ -523,8 +528,41 @@ impl Default for BodyAngularVelocityData {
     }
 }
 
-#[derive(Debug, Clone, Default)]
-pub struct AttachmentData {}
+#[derive(Debug, Clone)]
+pub struct AttachmentData {
+    pub cframe: CFrame,
+}
+
+impl Default for AttachmentData {
+    fn default() -> Self {
+        Self {
+            cframe: CFrame::identity(),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct AlignPositionData {
+    pub attachment0: Option<WeakInstanceRef>,
+    pub attachment1: Option<WeakInstanceRef>,
+    pub position: Vector3,
+    pub responsiveness: f32,
+    pub rigidity_enabled: bool,
+    pub max_force: f32,
+}
+
+impl Default for AlignPositionData {
+    fn default() -> Self {
+        Self {
+            attachment0: None,
+            attachment1: None,
+            position: Vector3::zero(),
+            responsiveness: 10.0,
+            rigidity_enabled: false,
+            max_force: 10000.0,
+        }
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct AlignOrientationData {
@@ -850,6 +888,7 @@ impl InstanceData {
             body_force_data: None,
             body_angular_velocity_data: None,
             attachment_data: None,
+            align_position_data: None,
             align_orientation_data: None,
             sound_data: None,
             property_changed_signals: HashMap::new(),
@@ -1002,6 +1041,12 @@ impl InstanceData {
         inst
     }
 
+    pub fn new_align_position(name: &str) -> Self {
+        let mut inst = Self::new(ClassName::AlignPosition, name);
+        inst.align_position_data = Some(AlignPositionData::default());
+        inst
+    }
+
     pub fn new_align_orientation(name: &str) -> Self {
         let mut inst = Self::new(ClassName::AlignOrientation, name);
         inst.align_orientation_data = Some(AlignOrientationData::default());
@@ -1091,6 +1136,207 @@ fn compute_weld_constraint_relative_cframe(data: &mut InstanceData) {
 }
 
 impl Instance {
+    fn top_ancestor(&self) -> Instance {
+        let mut current = self.clone();
+        while let Some(parent) = current.parent() {
+            current = parent;
+        }
+        current
+    }
+
+    fn connected_parts_from_graph(&self, recursive: bool) -> Vec<Instance> {
+        if self.data.lock().unwrap().part_data.is_none() {
+            return Vec::new();
+        }
+
+        let root = self.top_ancestor();
+        let mut adjacency: HashMap<u64, Vec<Instance>> = HashMap::new();
+
+        let mut scan_instances = root.get_descendants();
+        scan_instances.push(root);
+
+        for inst in scan_instances {
+            let data = inst.data.lock().unwrap();
+
+            if let Some(weld) = &data.weld_data {
+                if !weld.enabled {
+                    continue;
+                }
+                let Some(part0) = weld.part0.as_ref().and_then(|w| w.upgrade()) else {
+                    continue;
+                };
+                let Some(part1) = weld.part1.as_ref().and_then(|w| w.upgrade()) else {
+                    continue;
+                };
+                let part0 = Instance::from_ref(part0);
+                let part1 = Instance::from_ref(part1);
+                if part0.data.lock().unwrap().part_data.is_some()
+                    && part1.data.lock().unwrap().part_data.is_some()
+                {
+                    adjacency
+                        .entry(part0.id().0)
+                        .or_default()
+                        .push(part1.clone());
+                    adjacency.entry(part1.id().0).or_default().push(part0);
+                }
+            }
+
+            if let Some(weld) = &data.weld_constraint_data {
+                if !weld.enabled {
+                    continue;
+                }
+                let Some(part0) = weld.part0.as_ref().and_then(|w| w.upgrade()) else {
+                    continue;
+                };
+                let Some(part1) = weld.part1.as_ref().and_then(|w| w.upgrade()) else {
+                    continue;
+                };
+                let part0 = Instance::from_ref(part0);
+                let part1 = Instance::from_ref(part1);
+                if part0.data.lock().unwrap().part_data.is_some()
+                    && part1.data.lock().unwrap().part_data.is_some()
+                {
+                    adjacency
+                        .entry(part0.id().0)
+                        .or_default()
+                        .push(part1.clone());
+                    adjacency.entry(part1.id().0).or_default().push(part0);
+                }
+            }
+        }
+
+        if !recursive {
+            let mut seen = HashSet::new();
+            return adjacency
+                .remove(&self.id().0)
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|part| seen.insert(part.id().0))
+                .collect();
+        }
+
+        let mut result = Vec::new();
+        let mut stack = adjacency.remove(&self.id().0).unwrap_or_default();
+        let mut visited = HashSet::from([self.id().0]);
+
+        while let Some(part) = stack.pop() {
+            if !visited.insert(part.id().0) {
+                continue;
+            }
+            if let Some(neighbors) = adjacency.get(&part.id().0) {
+                for neighbor in neighbors {
+                    if !visited.contains(&neighbor.id().0) {
+                        stack.push(neighbor.clone());
+                    }
+                }
+            }
+            result.push(part);
+        }
+
+        result
+    }
+
+    fn model_descendant_parts(&self) -> Vec<Instance> {
+        self.get_descendants()
+            .into_iter()
+            .filter(|inst| inst.data.lock().unwrap().part_data.is_some())
+            .collect()
+    }
+
+    pub fn attachment_parent_part(&self) -> Option<Instance> {
+        let parent = self.parent()?;
+        if parent.data.lock().unwrap().part_data.is_some() {
+            Some(parent)
+        } else {
+            None
+        }
+    }
+
+    pub fn attachment_local_cframe(&self) -> Option<CFrame> {
+        let data = self.data.lock().unwrap();
+        data.attachment_data
+            .as_ref()
+            .map(|attachment| attachment.cframe)
+    }
+
+    pub fn attachment_world_cframe(&self) -> Option<CFrame> {
+        let parent = self.attachment_parent_part()?;
+        let parent_cframe = {
+            let data = parent.data.lock().unwrap();
+            data.part_data.as_ref().map(|part| part.cframe)?
+        };
+        let local_cframe = self.attachment_local_cframe()?;
+        Some(parent_cframe.multiply(&local_cframe))
+    }
+
+    fn get_pivot_cframe(&self) -> Option<CFrame> {
+        let data = self.data.lock().unwrap();
+        if let Some(part) = &data.part_data {
+            return Some(part.cframe);
+        }
+
+        let Some(model) = &data.model_data else {
+            return None;
+        };
+
+        if let Some(primary) = &model.primary_part {
+            if let Some(primary_ref) = primary.upgrade() {
+                let primary_data = primary_ref.lock().unwrap();
+                if let Some(part) = &primary_data.part_data {
+                    return Some(part.cframe);
+                }
+            }
+        }
+
+        if let Some(world_pivot) = model.world_pivot {
+            return Some(world_pivot);
+        }
+        drop(data);
+
+        let parts = self.model_descendant_parts();
+        if parts.is_empty() {
+            return Some(CFrame::identity());
+        }
+
+        let first_cframe = {
+            let first = parts[0].data.lock().unwrap();
+            first.part_data.as_ref().map(|part| part.cframe)?
+        };
+        Some(first_cframe)
+    }
+
+    fn pivot_to_cframe(&self, target: CFrame) {
+        if self.data.lock().unwrap().part_data.is_some() {
+            let mut data = self.data.lock().unwrap();
+            if let Some(part) = &mut data.part_data {
+                part.cframe = target;
+                part.position = target.position;
+                part.position_dirty = true;
+            }
+            return;
+        }
+
+        let Some(old_pivot) = self.get_pivot_cframe() else {
+            return;
+        };
+        let offset = old_pivot.inverse().multiply(&target);
+        let parts = self.model_descendant_parts();
+
+        for part in &parts {
+            let mut data = part.data.lock().unwrap();
+            if let Some(part_data) = &mut data.part_data {
+                part_data.cframe = part_data.cframe.multiply(&offset);
+                part_data.position = part_data.cframe.position;
+                part_data.position_dirty = true;
+            }
+        }
+
+        let mut data = self.data.lock().unwrap();
+        if let Some(model) = &mut data.model_data {
+            model.world_pivot = Some(target);
+        }
+    }
+
     pub(crate) fn cached_userdata(lua: &Lua, instance: &Instance) -> Result<AnyUserData> {
         const CACHE_KEY: &str = "__clawblox_instance_userdata_cache";
         let cache = match lua.named_registry_value::<Table>(CACHE_KEY) {
@@ -1466,6 +1712,7 @@ impl Instance {
         new_data.body_force_data = data.body_force_data;
         new_data.body_angular_velocity_data = data.body_angular_velocity_data;
         new_data.attachment_data = data.attachment_data.clone();
+        new_data.align_position_data = data.align_position_data.clone();
         new_data.align_orientation_data = data.align_orientation_data.clone();
 
         // Clone GUI data but create fresh signals to avoid sharing handlers
@@ -1673,8 +1920,14 @@ impl UserData for Instance {
         // Position: Vector3 for Parts, UDim2 for GUI objects
         fields.add_field_method_get("Position", |lua, this| {
             let data = this.data.lock().unwrap();
-            if let Some(part) = &data.part_data {
+            if let Some(align) = &data.align_position_data {
+                Ok(Value::UserData(lua.create_userdata(align.position)?))
+            } else if let Some(part) = &data.part_data {
                 Ok(Value::UserData(lua.create_userdata(part.position)?))
+            } else if let Some(attachment) = &data.attachment_data {
+                Ok(Value::UserData(
+                    lua.create_userdata(attachment.cframe.position)?,
+                ))
             } else if let Some(gui) = &data.gui_data {
                 Ok(Value::UserData(lua.create_userdata(gui.position)?))
             } else {
@@ -1686,10 +1939,14 @@ impl UserData for Instance {
             match value {
                 Value::UserData(ud) => {
                     if let Ok(pos) = ud.borrow::<Vector3>() {
-                        if let Some(part) = &mut data.part_data {
+                        if let Some(align) = &mut data.align_position_data {
+                            align.position = *pos;
+                        } else if let Some(part) = &mut data.part_data {
                             part.position = *pos;
                             part.cframe.position = *pos;
                             part.position_dirty = true;
+                        } else if let Some(attachment) = &mut data.attachment_data {
+                            attachment.cframe.position = *pos;
                         }
                     } else if let Ok(pos) = ud.borrow::<UDim2>() {
                         if let Some(gui) = &mut data.gui_data {
@@ -1704,7 +1961,14 @@ impl UserData for Instance {
 
         fields.add_field_method_get("CFrame", |_, this| {
             let data = this.data.lock().unwrap();
-            Ok(data.part_data.as_ref().map(|p| p.cframe))
+            if let Some(part) = &data.part_data {
+                Ok(Some(part.cframe))
+            } else {
+                Ok(data
+                    .attachment_data
+                    .as_ref()
+                    .map(|attachment| attachment.cframe))
+            }
         });
         fields.add_field_method_set("CFrame", |_, this, cf: CFrame| {
             let mut data = this.data.lock().unwrap();
@@ -1712,9 +1976,16 @@ impl UserData for Instance {
                 part.cframe = cf;
                 part.position = cf.position;
                 part.position_dirty = true;
+            } else if let Some(attachment) = &mut data.attachment_data {
+                attachment.cframe = cf;
             }
             Ok(())
         });
+
+        fields.add_field_method_get("WorldPosition", |_, this| {
+            Ok(this.attachment_world_cframe().map(|cf| cf.position))
+        });
+        fields.add_field_method_get("WorldCFrame", |_, this| Ok(this.attachment_world_cframe()));
 
         // Size: Vector3 for Parts, UDim2 for GUI objects
         fields.add_field_method_get("Size", |lua, this| {
@@ -1938,7 +2209,10 @@ impl UserData for Instance {
         });
         fields.add_field_method_get("CurrentPhysicalProperties", |_, this| {
             let data = this.data.lock().unwrap();
-            Ok(data.part_data.as_ref().map(|p| p.current_physical_properties()))
+            Ok(data
+                .part_data
+                .as_ref()
+                .map(|p| p.current_physical_properties()))
         });
         fields.add_field_method_set(
             "CustomPhysicalProperties",
@@ -2119,14 +2393,22 @@ impl UserData for Instance {
         fields.add_field_method_get("Attachment0", |_, this| {
             let data = this.data.lock().unwrap();
             Ok(data
-                .align_orientation_data
+                .align_position_data
                 .as_ref()
                 .and_then(|a| a.attachment0.as_ref())
+                .or_else(|| {
+                    data.align_orientation_data
+                        .as_ref()
+                        .and_then(|a| a.attachment0.as_ref())
+                })
                 .and_then(|w| w.upgrade())
                 .map(Instance::from_ref))
         });
         fields.add_field_method_set("Attachment0", |_, this, attachment: Option<Instance>| {
             let mut data = this.data.lock().unwrap();
+            if let Some(align) = &mut data.align_position_data {
+                align.attachment0 = attachment.as_ref().map(|a| Arc::downgrade(&a.data));
+            }
             if let Some(align) = &mut data.align_orientation_data {
                 align.attachment0 = attachment.as_ref().map(|a| Arc::downgrade(&a.data));
             }
@@ -2136,14 +2418,22 @@ impl UserData for Instance {
         fields.add_field_method_get("Attachment1", |_, this| {
             let data = this.data.lock().unwrap();
             Ok(data
-                .align_orientation_data
+                .align_position_data
                 .as_ref()
                 .and_then(|a| a.attachment1.as_ref())
+                .or_else(|| {
+                    data.align_orientation_data
+                        .as_ref()
+                        .and_then(|a| a.attachment1.as_ref())
+                })
                 .and_then(|w| w.upgrade())
                 .map(Instance::from_ref))
         });
         fields.add_field_method_set("Attachment1", |_, this, attachment: Option<Instance>| {
             let mut data = this.data.lock().unwrap();
+            if let Some(align) = &mut data.align_position_data {
+                align.attachment1 = attachment.as_ref().map(|a| Arc::downgrade(&a.data));
+            }
             if let Some(align) = &mut data.align_orientation_data {
                 align.attachment1 = attachment.as_ref().map(|a| Arc::downgrade(&a.data));
             }
@@ -2153,12 +2443,20 @@ impl UserData for Instance {
         fields.add_field_method_get("Responsiveness", |_, this| {
             let data = this.data.lock().unwrap();
             Ok(data
-                .align_orientation_data
+                .align_position_data
                 .as_ref()
-                .map(|a| a.responsiveness))
+                .map(|a| a.responsiveness)
+                .or_else(|| {
+                    data.align_orientation_data
+                        .as_ref()
+                        .map(|a| a.responsiveness)
+                }))
         });
         fields.add_field_method_set("Responsiveness", |_, this, responsiveness: f32| {
             let mut data = this.data.lock().unwrap();
+            if let Some(align) = &mut data.align_position_data {
+                align.responsiveness = responsiveness;
+            }
             if let Some(align) = &mut data.align_orientation_data {
                 align.responsiveness = responsiveness;
             }
@@ -2168,14 +2466,34 @@ impl UserData for Instance {
         fields.add_field_method_get("RigidityEnabled", |_, this| {
             let data = this.data.lock().unwrap();
             Ok(data
-                .align_orientation_data
+                .align_position_data
                 .as_ref()
-                .map(|a| a.rigidity_enabled))
+                .map(|a| a.rigidity_enabled)
+                .or_else(|| {
+                    data.align_orientation_data
+                        .as_ref()
+                        .map(|a| a.rigidity_enabled)
+                }))
         });
         fields.add_field_method_set("RigidityEnabled", |_, this, enabled: bool| {
             let mut data = this.data.lock().unwrap();
+            if let Some(align) = &mut data.align_position_data {
+                align.rigidity_enabled = enabled;
+            }
             if let Some(align) = &mut data.align_orientation_data {
                 align.rigidity_enabled = enabled;
+            }
+            Ok(())
+        });
+
+        fields.add_field_method_get("MaxForce", |_, this| {
+            let data = this.data.lock().unwrap();
+            Ok(data.align_position_data.as_ref().map(|a| a.max_force))
+        });
+        fields.add_field_method_set("MaxForce", |_, this, max_force: f32| {
+            let mut data = this.data.lock().unwrap();
+            if let Some(align) = &mut data.align_position_data {
+                align.max_force = max_force;
             }
             Ok(())
         });
@@ -2196,14 +2514,17 @@ impl UserData for Instance {
             let data = this.data.lock().unwrap();
             Ok(data.part_data.as_ref().map(|p| p.angular_velocity))
         });
-        fields.add_field_method_set("AssemblyAngularVelocity", |_, this, angular_velocity: Vector3| {
-            let mut data = this.data.lock().unwrap();
-            if let Some(part) = &mut data.part_data {
-                part.angular_velocity = angular_velocity;
-                part.angular_velocity_dirty = true;
-            }
-            Ok(())
-        });
+        fields.add_field_method_set(
+            "AssemblyAngularVelocity",
+            |_, this, angular_velocity: Vector3| {
+                let mut data = this.data.lock().unwrap();
+                if let Some(part) = &mut data.part_data {
+                    part.angular_velocity = angular_velocity;
+                    part.angular_velocity_dirty = true;
+                }
+                Ok(())
+            },
+        );
 
         fields.add_field_method_get("Shape", |_, this| {
             let data = this.data.lock().unwrap();
@@ -3737,52 +4058,47 @@ impl UserData for Instance {
         });
 
         methods.add_method("GetPrimaryPartCFrame", |_, this, ()| {
-            let data = this.data.lock().unwrap();
-            if let Some(model) = &data.model_data {
-                if let Some(primary) = &model.primary_part {
-                    if let Some(primary_ref) = primary.upgrade() {
-                        let primary_data = primary_ref.lock().unwrap();
-                        if let Some(part) = &primary_data.part_data {
-                            return Ok(Some(part.cframe));
-                        }
-                    }
-                }
-            }
-            Ok(None)
+            Ok(this.get_pivot_cframe())
         });
 
         methods.add_method("SetPrimaryPartCFrame", |_, this, cframe: CFrame| {
-            let primary_cframe = {
-                let data = this.data.lock().unwrap();
-                if let Some(model) = &data.model_data {
-                    if let Some(primary) = &model.primary_part {
-                        if let Some(primary_ref) = primary.upgrade() {
-                            let primary_data = primary_ref.lock().unwrap();
-                            primary_data.part_data.as_ref().map(|p| p.cframe)
-                        } else {
-                            None
-                        }
-                    } else {
-                        None
-                    }
-                } else {
-                    None
-                }
-            };
-
-            if let Some(old_cframe) = primary_cframe {
-                let offset = old_cframe.inverse().multiply(&cframe);
-
-                for descendant in this.get_descendants() {
-                    let mut data = descendant.data.lock().unwrap();
-                    if let Some(part) = &mut data.part_data {
-                        part.cframe = part.cframe.multiply(&offset);
-                        part.position = part.cframe.position;
-                    }
-                }
-            }
+            this.pivot_to_cframe(cframe);
             Ok(())
         });
+
+        methods.add_method("GetPivot", |_, this, ()| {
+            if let Some(pivot) = this.get_pivot_cframe() {
+                Ok(pivot)
+            } else {
+                Err(mlua::Error::runtime(
+                    "GetPivot is only supported on PVInstance",
+                ))
+            }
+        });
+
+        methods.add_method("PivotTo", |_, this, cframe: CFrame| {
+            if this.data.lock().unwrap().part_data.is_none()
+                && this.data.lock().unwrap().model_data.is_none()
+            {
+                return Err(mlua::Error::runtime(
+                    "PivotTo is only supported on PVInstance",
+                ));
+            }
+            this.pivot_to_cframe(cframe);
+            Ok(())
+        });
+
+        methods.add_method(
+            "GetConnectedParts",
+            |_, this, recursive: Option<bool>| -> mlua::Result<Vec<Instance>> {
+                if this.data.lock().unwrap().part_data.is_none() {
+                    return Err(mlua::Error::runtime(
+                        "GetConnectedParts is only supported on BasePart",
+                    ));
+                }
+                Ok(this.connected_parts_from_graph(recursive.unwrap_or(false)))
+            },
+        );
 
         methods.add_method("GetMass", |_, this, ()| {
             let data = this.data.lock().unwrap();
@@ -3975,9 +4291,7 @@ pub fn register_instance(lua: &Lua) -> Result<()> {
                     "ServerScriptService" => {
                         Instance::from_data(InstanceData::new_server_script_service())
                     }
-                    "ServerStorage" => {
-                        Instance::from_data(InstanceData::new_server_storage())
-                    }
+                    "ServerStorage" => Instance::from_data(InstanceData::new_server_storage()),
                     "RemoteEvent" => {
                         Instance::from_data(InstanceData::new_remote_event("RemoteEvent"))
                     }
@@ -4003,12 +4317,17 @@ pub fn register_instance(lua: &Lua) -> Result<()> {
                         InstanceData::new_body_angular_velocity("BodyAngularVelocity"),
                     ),
                     "Attachment" => Instance::from_data(InstanceData::new_attachment("Attachment")),
+                    "AlignPosition" => {
+                        Instance::from_data(InstanceData::new_align_position("AlignPosition"))
+                    }
                     "AlignOrientation" => {
                         Instance::from_data(InstanceData::new_align_orientation("AlignOrientation"))
                     }
                     // Constraints
                     "Weld" => Instance::from_data(InstanceData::new_weld("Weld")),
-                    "WeldConstraint" => Instance::from_data(InstanceData::new_weld_constraint("WeldConstraint")),
+                    "WeldConstraint" => {
+                        Instance::from_data(InstanceData::new_weld_constraint("WeldConstraint"))
+                    }
                     // 3D GUI
                     "BillboardGui" => {
                         Instance::from_data(InstanceData::new_billboard_gui("BillboardGui"))

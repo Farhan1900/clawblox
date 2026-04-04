@@ -2331,13 +2331,26 @@ fn test_constraint_shim_classes_can_be_created_and_configured() {
             align.RigidityEnabled = true
             align.Parent = p
 
+            local alignPos = Instance.new("AlignPosition")
+            alignPos.Attachment0 = a0
+            alignPos.Attachment1 = a1
+            alignPos.Position = Vector3.new(1, 2, 3)
+            alignPos.MaxForce = 1234
+            alignPos.Parent = p
+
             local bav = Instance.new("BodyAngularVelocity")
             bav.AngularVelocity = Vector3.new(0, 1, 0)
             bav.MaxTorque = Vector3.new(0, 999, 0)
             bav.Parent = p
 
+            a0.Position = Vector3.new(0.5, 1.0, 0.0)
+
             _G.responsive = align.Responsiveness
             _G.rigid = align.RigidityEnabled
+            _G.posX = alignPos.Position.X
+            _G.maxForce = alignPos.MaxForce
+            _G.worldAttachmentX = a0.WorldPosition.X
+            _G.worldAttachmentY = a0.WorldPosition.Y
             _G.maxTorqueY = bav.MaxTorque.Y
         "#,
         )
@@ -2346,9 +2359,17 @@ fn test_constraint_shim_classes_can_be_created_and_configured() {
     let globals = runtime.lua().globals().get::<mlua::Table>("_G").unwrap();
     let responsive: f64 = globals.get("responsive").unwrap();
     let rigid: bool = globals.get("rigid").unwrap();
+    let pos_x: f64 = globals.get("posX").unwrap();
+    let max_force: f64 = globals.get("maxForce").unwrap();
+    let world_attachment_x: f64 = globals.get("worldAttachmentX").unwrap();
+    let world_attachment_y: f64 = globals.get("worldAttachmentY").unwrap();
     let max_torque_y: f64 = globals.get("maxTorqueY").unwrap();
     assert!((responsive - 200.0).abs() < 1e-6);
     assert!(rigid);
+    assert!((pos_x - 1.0).abs() < 1e-6);
+    assert!((max_force - 1234.0).abs() < 1e-6);
+    assert!((world_attachment_x - 0.5).abs() < 1e-6);
+    assert!((world_attachment_y - 1.0).abs() < 1e-6);
     assert!((max_torque_y - 999.0).abs() < 1e-6);
 }
 
@@ -2740,8 +2761,14 @@ fn test_sound_instance_new_and_properties() {
 
     let volume_high: f32 = globals.get("volumeHigh").unwrap();
     let volume_low: f32 = globals.get("volumeLow").unwrap();
-    assert!((volume_high - 1.0).abs() < 1e-6, "Volume should clamp to 1.0");
-    assert!((volume_low - 0.0).abs() < 1e-6, "Volume should clamp to 0.0");
+    assert!(
+        (volume_high - 1.0).abs() < 1e-6,
+        "Volume should clamp to 1.0"
+    );
+    assert!(
+        (volume_low - 0.0).abs() < 1e-6,
+        "Volume should clamp to 0.0"
+    );
 }
 
 #[test]
@@ -2962,4 +2989,120 @@ fn test_sound_ended_via_agent_input() {
         turn_released,
         "Ended signal should fire after AudioEnded agent input triggers MarkEnded"
     );
+}
+
+#[test]
+fn test_get_connected_parts_matches_weld_graph() {
+    let mut runtime = test_runtime();
+    runtime
+        .load_script(
+            r#"
+            local a = Instance.new("Part")
+            a.Name = "A"
+            a.Position = Vector3.new(0, 0, 0)
+            a.Parent = Workspace
+
+            local b = Instance.new("Part")
+            b.Name = "B"
+            b.Position = Vector3.new(2, 0, 0)
+            b.Parent = Workspace
+
+            local c = Instance.new("Part")
+            c.Name = "C"
+            c.Position = Vector3.new(4, 0, 0)
+            c.Parent = Workspace
+
+            local ab = Instance.new("WeldConstraint")
+            ab.Part0 = a
+            ab.Part1 = b
+            ab.Parent = Workspace
+
+            local bc = Instance.new("WeldConstraint")
+            bc.Part0 = b
+            bc.Part1 = c
+            bc.Parent = Workspace
+
+            local direct = a:GetConnectedParts()
+            local recursive = a:GetConnectedParts(true)
+
+            table.sort(direct, function(left, right)
+                return left.Name < right.Name
+            end)
+            table.sort(recursive, function(left, right)
+                return left.Name < right.Name
+            end)
+
+            _G.directCount = #direct
+            _G.directFirst = direct[1] and direct[1].Name or ""
+            _G.recursiveCount = #recursive
+            _G.recursiveFirst = recursive[1] and recursive[1].Name or ""
+            _G.recursiveSecond = recursive[2] and recursive[2].Name or ""
+        "#,
+        )
+        .expect("Failed to load script");
+
+    let globals = runtime.lua().globals().get::<mlua::Table>("_G").unwrap();
+    let direct_count: i64 = globals.get("directCount").unwrap();
+    let direct_first: String = globals.get("directFirst").unwrap();
+    let recursive_count: i64 = globals.get("recursiveCount").unwrap();
+    let recursive_first: String = globals.get("recursiveFirst").unwrap();
+    let recursive_second: String = globals.get("recursiveSecond").unwrap();
+
+    assert_eq!(direct_count, 1);
+    assert_eq!(direct_first, "B");
+    assert_eq!(recursive_count, 2);
+    assert_eq!(recursive_first, "B");
+    assert_eq!(recursive_second, "C");
+}
+
+#[test]
+fn test_model_pivot_to_moves_descendant_parts_using_primary_part() {
+    let mut runtime = test_runtime();
+    runtime
+        .load_script(
+            r#"
+            local model = Instance.new("Model")
+            model.Name = "Rig"
+            model.Parent = Workspace
+
+            local root = Instance.new("Part")
+            root.Name = "Root"
+            root.Position = Vector3.new(0, 1, 0)
+            root.Parent = model
+
+            local child = Instance.new("Part")
+            child.Name = "Child"
+            child.Position = Vector3.new(2, 1, 0)
+            child.Parent = model
+
+            model.PrimaryPart = root
+            model:PivotTo(CFrame.new(10, 5, 0))
+
+            _G.rootPos = root.Position
+            _G.childPos = child.Position
+            _G.pivotPos = model:GetPivot().Position
+
+            model:SetPrimaryPartCFrame(CFrame.new(20, 6, 1))
+            _G.rootPos2 = root.Position
+            _G.childPos2 = child.Position
+            _G.pivotPos2 = model:GetPivot().Position
+        "#,
+        )
+        .expect("Failed to load script");
+
+    let globals = runtime.lua().globals().get::<mlua::Table>("_G").unwrap();
+    let root_pos: crate::game::lua::types::Vector3 = globals.get("rootPos").unwrap();
+    let child_pos: crate::game::lua::types::Vector3 = globals.get("childPos").unwrap();
+    let pivot_pos: crate::game::lua::types::Vector3 = globals.get("pivotPos").unwrap();
+    let root_pos2: crate::game::lua::types::Vector3 = globals.get("rootPos2").unwrap();
+    let child_pos2: crate::game::lua::types::Vector3 = globals.get("childPos2").unwrap();
+    let pivot_pos2: crate::game::lua::types::Vector3 = globals.get("pivotPos2").unwrap();
+
+    assert!((root_pos.x - 10.0).abs() < 1e-6 && (root_pos.y - 5.0).abs() < 1e-6);
+    assert!((child_pos.x - 12.0).abs() < 1e-6 && (child_pos.y - 5.0).abs() < 1e-6);
+    assert!((pivot_pos.x - 10.0).abs() < 1e-6 && (pivot_pos.y - 5.0).abs() < 1e-6);
+
+    assert!((root_pos2.x - 20.0).abs() < 1e-6 && (root_pos2.y - 6.0).abs() < 1e-6);
+    assert!((child_pos2.x - 22.0).abs() < 1e-6 && (child_pos2.y - 6.0).abs() < 1e-6);
+    assert!((pivot_pos2.x - 20.0).abs() < 1e-6 && (pivot_pos2.y - 6.0).abs() < 1e-6);
 }

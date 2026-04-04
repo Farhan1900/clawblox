@@ -20,6 +20,9 @@ pub(super) fn run_tick_phases(instance: &mut GameInstance, dt: f32) {
         }
     }
 
+    // Resolve attachment-driven constraints from script state before syncing parts to physics.
+    instance.apply_attachment_constraints(dt);
+
     // Sync new/changed Lua parts to physics (skip character-controlled parts).
     instance.sync_lua_to_physics(dt);
 
@@ -46,5 +49,4 @@ pub(super) fn run_tick_phases(instance: &mut GameInstance, dt: f32) {
 
     // Sync physics results back to Lua (for Anchored=false parts and characters).
     instance.sync_physics_to_lua();
-
 }

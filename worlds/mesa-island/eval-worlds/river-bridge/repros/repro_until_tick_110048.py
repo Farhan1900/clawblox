@@ -2544,9 +2544,10 @@ ACTIONS = [
     }
 ]
 
-# Keep the initial block-placement sequence, skip the dead-end middle attempts,
-# then resume at the useful post-probing clump sequence.
-ACTIONS = [dict(item) for item in (ACTIONS[:48] + ACTIONS[116:])]
+# Reduced repro:
+# keep the opening bridge-build sequence, drop the dead clump probe loop, then
+# resume at the first movement back into the useful clump transport sequence.
+ACTIONS = [dict(item) for item in (ACTIONS[:48] + ACTIONS[117:])]
 ACTIONS[48]["delay_s"] = 0.0
 
 
@@ -2554,6 +2555,20 @@ def port_from_base_url(base_url):
     if not base_url.startswith("http://localhost:") and not base_url.startswith("http://127.0.0.1:"):
         raise ValueError(f"only localhost base URLs are supported, got {base_url}")
     return int(base_url.rsplit(":", 1)[1].rstrip("/"))
+
+
+def find_repo_clawblox_bin():
+    current = Path(__file__).resolve()
+    for parent in current.parents:
+        cargo_toml = parent / "Cargo.toml"
+        debug_bin = parent / "target" / "debug" / "clawblox"
+        release_bin = parent / "target" / "release" / "clawblox"
+        if cargo_toml.exists():
+            if debug_bin.exists():
+                return debug_bin
+            if release_bin.exists():
+                return release_bin
+    return None
 
 
 def can_connect():
@@ -2582,9 +2597,12 @@ def start_world():
     if can_connect():
         print("world", f"reusing existing server at {BASE}")
         return None
-    clawblox_bin = os.environ.get("CLAWBLOX_BIN", "clawblox")
+    clawblox_bin = os.environ.get("CLAWBLOX_BIN")
+    if not clawblox_bin:
+        repo_bin = find_repo_clawblox_bin()
+        clawblox_bin = str(repo_bin) if repo_bin is not None else "clawblox"
     port = port_from_base_url(BASE)
-    print("world", f"starting local server at {BASE}")
+    print("world", f"starting local server at {BASE} using {clawblox_bin}")
     process = subprocess.Popen(
         [clawblox_bin, "run", str(WORLD_DIR), "--port", str(port)],
         stdout=subprocess.DEVNULL,
@@ -2647,21 +2665,59 @@ def wait_for_result(session, predicate, timeout_s=ACTION_TIMEOUT_S):
     raise RuntimeError(f"timeout waiting for action result, last={last!r}")
 
 
-def wait_for_action_completion(session, action_type, immediate_result):
+def wait_for_action_transition(session, previous_result, timeout_s=ACTION_TIMEOUT_S):
+    if previous_result is None:
+        return observe(session)
+    return wait_for_result(session, lambda result: result != previous_result, timeout_s=timeout_s)
+
+
+def wait_for_action_completion(session, action_type, previous_result, immediate_result):
     if action_type == "MoveTo":
-        if isinstance(immediate_result, str) and immediate_result.startswith("MoveToFinished"):
-            return observe(session)
-        return wait_for_result(session, lambda result: isinstance(result, str) and result.startswith("MoveToFinished"))
+        if previous_result is None:
+            if isinstance(immediate_result, str) and immediate_result.startswith("MoveToFinished"):
+                return observe(session)
+            return wait_for_result(
+                session,
+                lambda result: isinstance(result, str) and result.startswith("MoveToFinished"),
+            )
+        transitioned_obs = wait_for_action_transition(session, previous_result)
+        transitioned_result = last_action_result(transitioned_obs)
+        if isinstance(transitioned_result, str) and transitioned_result.startswith("MoveToFinished"):
+            return transitioned_obs
+        return wait_for_result(
+            session,
+            lambda result: isinstance(result, str) and result.startswith("MoveToFinished"),
+        )
     if action_type == "Pickup":
-        if isinstance(immediate_result, str) and immediate_result.startswith("Pickup"):
-            return observe(session)
-        return wait_for_result(session, lambda result: isinstance(result, str) and result.startswith("Pickup"))
+        if previous_result is None:
+            if isinstance(immediate_result, str) and immediate_result.startswith("Pickup"):
+                return observe(session)
+            return wait_for_result(session, lambda result: isinstance(result, str) and result.startswith("Pickup"))
+        transitioned_obs = wait_for_action_transition(session, previous_result)
+        transitioned_result = last_action_result(transitioned_obs)
+        if isinstance(transitioned_result, str) and transitioned_result.startswith("Pickup"):
+            return transitioned_obs
+        return wait_for_result(
+            session,
+            lambda result: isinstance(result, str) and result.startswith("Pickup"),
+        )
     if action_type == "Place":
-        if isinstance(immediate_result, str) and immediate_result.startswith("Place"):
-            return observe(session)
-        return wait_for_result(session, lambda result: isinstance(result, str) and result.startswith("Place"))
+        if previous_result is None:
+            if isinstance(immediate_result, str) and immediate_result.startswith("Place"):
+                return observe(session)
+            return wait_for_result(session, lambda result: isinstance(result, str) and result.startswith("Place"))
+        transitioned_obs = wait_for_action_transition(session, previous_result)
+        transitioned_result = last_action_result(transitioned_obs)
+        if isinstance(transitioned_result, str) and transitioned_result.startswith("Place"):
+            return transitioned_obs
+        return wait_for_result(
+            session,
+            lambda result: isinstance(result, str) and result.startswith("Place"),
+        )
     if action_type == "Reset":
-        return wait_for_result(session, lambda result: result == "ResetSuccess")
+        if previous_result is None:
+            return wait_for_result(session, lambda result: result == "ResetSuccess")
+        return wait_for_result(session, lambda result: result == "ResetSuccess" and result != previous_result)
     return observe(session)
 
 
@@ -2728,14 +2784,16 @@ def main():
         print("sequence_end", {"tick": SOURCE_CUTOFF_TICK, "time_s": SOURCE_CUTOFF_TIME_S})
         print("actions", len(ACTIONS))
 
+        previous_result = None
         for index, item in enumerate(ACTIONS, start=1):
             delay_s = item["delay_s"] * args.delay_scale
             if delay_s > 0:
                 time.sleep(delay_s)
             action_obs = action(session, item["type"], item["data"])
             immediate_result = last_action_result(action_obs)
-            completed_obs = wait_for_action_completion(session, item["type"], immediate_result)
+            completed_obs = wait_for_action_completion(session, item["type"], previous_result, immediate_result)
             result = last_action_result(completed_obs)
+            previous_result = result
             print(
                 "step",
                 index,

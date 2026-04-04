@@ -32,6 +32,7 @@ pub enum ClassName {
     BodyForce,
     BodyAngularVelocity,
     Attachment,
+    AlignPosition,
     AlignOrientation,
     // GUI classes
     BillboardGui,
@@ -80,6 +81,7 @@ impl ClassName {
             ClassName::BodyForce => "BodyForce",
             ClassName::BodyAngularVelocity => "BodyAngularVelocity",
             ClassName::Attachment => "Attachment",
+            ClassName::AlignPosition => "AlignPosition",
             ClassName::AlignOrientation => "AlignOrientation",
             ClassName::BillboardGui => "BillboardGui",
             ClassName::PlayerGui => "PlayerGui",
@@ -130,7 +132,13 @@ impl ClassName {
                     | ClassName::CFrameValue
             ),
             // Constraints
-            "Constraint" => matches!(self, ClassName::Weld | ClassName::WeldConstraint),
+            "Constraint" => matches!(
+                self,
+                ClassName::Weld
+                    | ClassName::WeldConstraint
+                    | ClassName::AlignPosition
+                    | ClassName::AlignOrientation
+            ),
             "Weld" => matches!(self, ClassName::Weld),
             "WeldConstraint" => matches!(self, ClassName::WeldConstraint),
             "RemoteEvent" => matches!(self, ClassName::RemoteEvent),
@@ -138,6 +146,7 @@ impl ClassName {
             "BodyForce" => matches!(self, ClassName::BodyForce),
             "BodyAngularVelocity" => matches!(self, ClassName::BodyAngularVelocity),
             "Attachment" => matches!(self, ClassName::Attachment),
+            "AlignPosition" => matches!(self, ClassName::AlignPosition),
             "AlignOrientation" => matches!(self, ClassName::AlignOrientation),
             "BodyMover" => matches!(
                 self,
