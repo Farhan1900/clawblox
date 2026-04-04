@@ -16,11 +16,16 @@ local PLAYER_SPAWN_POSITION = Vector3.new(-16, SPAWN_HEIGHT, 0)
 local OUT_OF_BOUNDS_Y = -25
 local BLOCK_OUT_OF_BOUNDS_MODE = "destroy" -- "destroy" or "respawn"
 
-local BANK_LENGTH_Z = 40
-local BANK_WIDTH_X = 22
+local BANK_LENGTH_Z = 64
+local BANK_WIDTH_X = 40
 local BANK_HEIGHT = 10
-local RIVER_WIDTH_X = 8
+local RIVER_WIDTH_X = 24
 local BANK_CENTER_OFFSET_X = (RIVER_WIDTH_X * 0.5) + (BANK_WIDTH_X * 0.5)
+local OCEAN_MARGIN_X = 96
+local OCEAN_MARGIN_Z = 96
+local WATER_HEIGHT = 3
+local BLOCK_COUNT = 352
+local CLUMP_COUNT = 192
 
 local trackedCarryables = {}
 local frozenBondBlocks = {}
@@ -109,7 +114,7 @@ local function resetWorldState()
     for _, inst in ipairs(Workspace:GetChildren()) do
         if inst:IsA("Part") then
             local role = inst:GetAttribute("RenderRole")
-            if role == "Ground" or role == "Ocean" or role == "GlowBulb" or role == BLOCK_RENDER_ROLE or role == "Clump" then
+            if role == "Ground" or role == "Ocean" or role == BLOCK_RENDER_ROLE or role == "Clump" then
                 inst:Destroy()
             end
         elseif inst:IsA("Model") and inst:GetAttribute("IsConstructionAssembly") == true then
@@ -140,6 +145,22 @@ local function initializeStaticWorld()
     westBank:SetAttribute("RenderRole", "Ground")
     westBank.Parent = Workspace
 
+    local ocean = Instance.new("Part")
+    ocean.Name = "Ocean"
+    ocean.Size = Vector3.new(
+        (BANK_WIDTH_X * 2) + RIVER_WIDTH_X + (OCEAN_MARGIN_X * 2),
+        WATER_HEIGHT,
+        BANK_LENGTH_Z + (OCEAN_MARGIN_Z * 2)
+    )
+    ocean.Position = Vector3.new(0, -WATER_HEIGHT * 0.5, 0)
+    ocean.Anchored = true
+    ocean.CanCollide = false
+    ocean.Color = Color3.fromRGB(56, 138, 194)
+    ocean.Material = Enum.Material.SmoothPlastic
+    ocean.Transparency = 0.12
+    ocean:SetAttribute("RenderRole", "Ocean")
+    ocean.Parent = Workspace
+
     local eastBank = Instance.new("Part")
     eastBank.Name = "EastBank"
     eastBank.Size = Vector3.new(BANK_WIDTH_X, BANK_HEIGHT, BANK_LENGTH_Z)
@@ -148,29 +169,6 @@ local function initializeStaticWorld()
     eastBank.Color = Color3.fromRGB(85, 239, 196)
     eastBank:SetAttribute("RenderRole", "Ground")
     eastBank.Parent = Workspace
-
-    local river = Instance.new("Part")
-    river.Name = "River"
-    river.Size = Vector3.new(RIVER_WIDTH_X, 3, BANK_LENGTH_Z)
-    river.Position = Vector3.new(0, -1.5, 0)
-    river.Anchored = true
-    river.CanCollide = false
-    river.Color = Color3.fromRGB(61, 168, 212)
-    river.Material = Enum.Material.SmoothPlastic
-    river.Transparency = 0.2
-    river:SetAttribute("RenderRole", "Ocean")
-    river.Parent = Workspace
-
-    local goalMarker = Instance.new("Part")
-    goalMarker.Name = "GoalMarker"
-    goalMarker.Size = Vector3.new(2.5, 1.0, 2.5)
-    goalMarker.Position = Vector3.new(16, 0.5, 0)
-    goalMarker.Anchored = true
-    goalMarker.CanCollide = false
-    goalMarker.Color = Color3.fromRGB(245, 214, 87)
-    goalMarker.Material = Enum.Material.Neon
-    goalMarker:SetAttribute("RenderRole", "GlowBulb")
-    goalMarker.Parent = Workspace
 
     serverGlobals:SetAttribute("StaticWorldInitialized", true)
 end
@@ -922,43 +920,66 @@ local function initializeBlocks()
     end
 
     local blockIndex = 0
-    local blockPileOrigin = Vector3.new(-22, 0.5, -14)
     local blockPileSpacing = BLOCK_SIZE + 0.05
-    for layer = 0, 2 do
-        for row = 0, 2 do
-            for col = 0, 2 do
-                if layer < 2 or (row < 2 and col < 2) then
-                    blockIndex = blockIndex + 1
-                    createBlock(
-                        "Block_" .. blockIndex,
-                        blockPileOrigin + Vector3.new(
-                            col * blockPileSpacing,
-                            layer * blockPileSpacing,
-                            row * blockPileSpacing
-                        ),
-                        BLOCK_TYPE_NAME
-                    )
-                end
-            end
+    local blockCols = 5
+    local blockRows = 5
+    local blocksPerLayer = blockCols * blockRows
+    local blockPileOrigins = {
+        Vector3.new(-44, 0.5, -28),
+        Vector3.new(-38, 0.5, -28),
+        Vector3.new(-44, 0.5, -20),
+    }
+    local blocksRemaining = BLOCK_COUNT
+    for pileIndex, blockPileOrigin in ipairs(blockPileOrigins) do
+        local pilesLeft = (#blockPileOrigins - pileIndex) + 1
+        local pileCount = math.floor((blocksRemaining + pilesLeft - 1) / pilesLeft)
+        for localIndex = 0, pileCount - 1 do
+            local indexInLayer = localIndex % blocksPerLayer
+            local layer = math.floor(localIndex / blocksPerLayer)
+            local row = math.floor(indexInLayer / blockCols)
+            local col = indexInLayer % blockCols
+            blockIndex = blockIndex + 1
+            createBlock(
+                "Block_" .. blockIndex,
+                blockPileOrigin + Vector3.new(
+                    col * blockPileSpacing,
+                    layer * blockPileSpacing,
+                    row * blockPileSpacing
+                ),
+                BLOCK_TYPE_NAME
+            )
         end
+        blocksRemaining = blocksRemaining - pileCount
     end
 
-    local clumpPileOrigin = Vector3.new(-8.5, 0.25, 14)
-    for layer = 0, 1 do
-        for row = 0, 2 do
-            for col = 0, 2 do
-                local shouldSpawn = not (layer == 1 and row == 2 and col > 0)
-                if shouldSpawn then
-                    createSecretionClump(
-                        clumpPileOrigin + Vector3.new(
-                            col * 0.5,
-                            layer * 0.35,
-                            row * 0.5
-                        )
-                    )
-                end
-            end
+    local clumpIndex = 0
+    local clumpCols = 4
+    local clumpRows = 4
+    local clumpsPerLayer = clumpCols * clumpRows
+    local clumpPileOrigins = {
+        Vector3.new(-44.5, 0.25, 20),
+        Vector3.new(-38.5, 0.25, 20),
+        Vector3.new(-44.5, 0.25, 28),
+    }
+    local clumpsRemaining = CLUMP_COUNT
+    for pileIndex, clumpPileOrigin in ipairs(clumpPileOrigins) do
+        local pilesLeft = (#clumpPileOrigins - pileIndex) + 1
+        local pileCount = math.floor((clumpsRemaining + pilesLeft - 1) / pilesLeft)
+        for localIndex = 0, pileCount - 1 do
+            local indexInLayer = localIndex % clumpsPerLayer
+            local layer = math.floor(localIndex / clumpsPerLayer)
+            local row = math.floor(indexInLayer / clumpCols)
+            local col = indexInLayer % clumpCols
+            clumpIndex = clumpIndex + 1
+            createSecretionClump(
+                clumpPileOrigin + Vector3.new(
+                    col * 0.5,
+                    layer * 0.35,
+                    row * 0.5
+                )
+            )
         end
+        clumpsRemaining = clumpsRemaining - pileCount
     end
 
     serverGlobals:SetAttribute("BlocksInitialized", true)

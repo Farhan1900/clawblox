@@ -49,4 +49,7 @@ pub(super) fn run_tick_phases(instance: &mut GameInstance, dt: f32) {
 
     // Sync physics results back to Lua (for Anchored=false parts and characters).
     instance.sync_physics_to_lua();
+
+    // Remove bodies only after the solver has consumed all modified-body state.
+    instance.physics.flush_pending_removals();
 }

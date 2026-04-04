@@ -104,6 +104,8 @@ pub struct PhysicsWorld {
     pub collider_to_lua: HashMap<ColliderHandle, u64>,
     /// Script-driven kinematic linear velocity sampled from per-tick target translation.
     pub kinematic_linear_velocities: HashMap<RigidBodyHandle, [f32; 3]>,
+    /// Bodies queued for removal after the current physics step finishes.
+    pending_body_removals: Vec<RigidBodyHandle>,
 }
 
 /// Builds a collider with the correct shape for a given PartType and size.
@@ -191,6 +193,7 @@ impl PhysicsWorld {
             character_controllers: HashMap::new(),
             collider_to_lua: HashMap::new(),
             kinematic_linear_velocities: HashMap::new(),
+            pending_body_removals: Vec::new(),
         }
     }
 
@@ -314,13 +317,40 @@ impl PhysicsWorld {
             self.lua_to_physical_properties.remove(&lua_id);
             self.lua_to_interactions.remove(&lua_id);
             self.kinematic_linear_velocities.remove(&handle);
-            // Remove collider->lua mappings before destroying the body
+            // Remove collider->lua mappings before disabling and queuing the body.
             if let Some(body) = self.rigid_body_set.get(handle) {
                 for &ch in body.colliders() {
                     self.collider_to_lua.remove(&ch);
                 }
             }
-            self.rigid_body_set.remove(
+            self.queue_body_removal(handle);
+            true
+        } else {
+            false
+        }
+    }
+
+    fn queue_body_removal(&mut self, handle: RigidBodyHandle) {
+        if let Some(body) = self.rigid_body_set.get_mut(handle) {
+            body.set_enabled(false);
+            let colliders: Vec<_> = body.colliders().iter().copied().collect();
+            for collider_handle in colliders {
+                if let Some(collider) = self.collider_set.get_mut(collider_handle) {
+                    collider.set_enabled(false);
+                }
+            }
+        }
+
+        if !self.pending_body_removals.contains(&handle) {
+            self.pending_body_removals.push(handle);
+        }
+    }
+
+    /// Finalize body removals that were deferred until after the physics step.
+    pub fn flush_pending_removals(&mut self) {
+        let pending = std::mem::take(&mut self.pending_body_removals);
+        for handle in pending {
+            let _ = self.rigid_body_set.remove(
                 handle,
                 &mut self.island_manager,
                 &mut self.collider_set,
@@ -328,9 +358,6 @@ impl PhysicsWorld {
                 &mut self.multibody_joint_set,
                 true,
             );
-            true
-        } else {
-            false
         }
     }
 
@@ -870,14 +897,8 @@ impl PhysicsWorld {
             self.lua_to_body.remove(&lua_id);
             self.body_to_lua.remove(&state.body_handle);
             self.collider_to_lua.remove(&state.collider_handle);
-            self.rigid_body_set.remove(
-                state.body_handle,
-                &mut self.island_manager,
-                &mut self.collider_set,
-                &mut self.impulse_joint_set,
-                &mut self.multibody_joint_set,
-                true,
-            );
+            self.kinematic_linear_velocities.remove(&state.body_handle);
+            self.queue_body_removal(state.body_handle);
             true
         } else {
             false
@@ -1954,6 +1975,79 @@ mod tests {
         // If the assertion above is removed, the following would panic:
         // world.move_character(char_id, [1.0, 0.0, 0.0], 1.0 / 60.0);
         // world.step(1.0 / 60.0);
+    }
+
+    #[test]
+    fn test_remove_part_after_same_frame_mutation_does_not_panic_on_step() {
+        let mut world = PhysicsWorld::new();
+
+        let lua_id = 1;
+        let handle = world.add_part(
+            lua_id,
+            [0.0, 1.0, 0.0],
+            &[[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
+            [1.0, 1.0, 1.0],
+            false,
+            true,
+            true,
+            true,
+            PartType::Block,
+            None,
+        );
+
+        world.set_dynamic_position(handle, [1.0, 2.0, 3.0]);
+        assert!(world.remove_part(lua_id));
+
+        world.step(1.0 / 60.0);
+        world.flush_pending_removals();
+
+        assert!(!world.has_part(lua_id));
+        assert!(world.get_handle(lua_id).is_none());
+    }
+
+    #[test]
+    fn test_remove_character_after_same_frame_mutation_does_not_panic_on_step() {
+        let mut world = PhysicsWorld::new();
+
+        let lua_id = 100;
+        world.add_character(lua_id, [0.0, 3.0, 0.0], 1.0, 5.0);
+        world.set_character_position(lua_id, [2.0, 4.0, 0.0]);
+        assert!(world.remove_character(lua_id));
+
+        world.step(1.0 / 60.0);
+        world.flush_pending_removals();
+
+        assert!(!world.has_character(lua_id));
+        assert!(world.get_handle(lua_id).is_none());
+    }
+
+    #[test]
+    fn test_remove_part_after_same_frame_collider_rebuild_does_not_panic_on_step() {
+        let mut world = PhysicsWorld::new();
+
+        let lua_id = 7;
+        world.add_part(
+            lua_id,
+            [0.0, 1.0, 0.0],
+            &[[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
+            [1.0, 1.0, 1.0],
+            false,
+            true,
+            true,
+            true,
+            PartType::Block,
+            None,
+        );
+
+        world.set_size(lua_id, [2.0, 2.0, 2.0]);
+        world.set_shape(lua_id, PartType::Ball, [2.0, 2.0, 2.0]);
+        assert!(world.remove_part(lua_id));
+
+        world.step(1.0 / 60.0);
+        world.flush_pending_removals();
+
+        assert!(!world.has_part(lua_id));
+        assert!(world.get_handle(lua_id).is_none());
     }
 
     #[test]
