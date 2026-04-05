@@ -40,3 +40,10 @@ uv run python analysis/plot_eval_naive_vs_experienced.py /storage/nacloos/projec
 
 random actions:
 bash ./launch_parallel_evals.sh --experiment-dir /storage/nacloos/projects/clawblox/worlds/mesa-opaque-actions-world/results/genexp-20260317T214525Z --template-workspace /storage/nacloos/projects/clawblox/worlds/mesa-opaque-actions-world/results/genexp-20260317T214525Z/runs/genexp-20260317T214525Z-g010/worlds/world-0/agents/mesa-rgenexp-20260317T214525Z-g010-w0-a0/workspace --duration 1h
+
+
+---
+
+claude code:
+
+ ./launch_multi_claude.sh --sandbox --tmux-session mesa --base-port 8090 --num-worlds 1 --agents-per-world 1 --world-dir worlds/mesa-opaque-actions-world --template agent/template --record true --reset-every 3600

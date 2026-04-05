@@ -359,6 +359,8 @@ impl PhysicsWorld {
                 true,
             );
         }
+        self.island_manager
+            .cleanup_removed_rigid_bodies(&mut self.rigid_body_set);
     }
 
     /// Updates the position of an anchored (kinematic) part
