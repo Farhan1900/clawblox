@@ -54,6 +54,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--template", type=Path, default=DEFAULT_TEMPLATE, help="Agent template dir")
     p.add_argument("--system-prompt", type=Path, default=WORLD_DIR / "system_prompt.md", help="System prompt template")
     p.add_argument("--model", default="claude-opus-4-6", help="Claude model (default: claude-opus-4-6)")
+    p.add_argument("--api-key", default=None, help="Anthropic API/OAuth key (overrides default auth)")
     return p.parse_args()
 
 
@@ -70,6 +71,20 @@ def _parse_duration_minutes(duration: str) -> float:
 
 def exp_dir(args: argparse.Namespace) -> Path:
     return WORLD_DIR / "results" / "eval_naive_vs_experienced" / f"exp_{args.exp}"
+
+
+def _launch_env(args: argparse.Namespace) -> dict[str, str] | None:
+    if args.api_key:
+        import os
+        env = {**os.environ, "ANTHROPIC_API_KEY": args.api_key}
+        return env
+    return None
+
+
+def _launch_extra_args(args: argparse.Namespace) -> list[str]:
+    if args.api_key:
+        return ["--use-env-auth"]
+    return []
 
 
 def run_cmd(cmd: list[str], **kwargs) -> subprocess.CompletedProcess:
@@ -313,7 +328,8 @@ def run_training(args: argparse.Namespace) -> Path:
         "--run-id", "run",
         "--duration", args.train_duration,
         "--tmux-session", f"train-exp-{args.exp}",
-    ])
+        *_launch_extra_args(args),
+    ], env=_launch_env(args))
 
     session = f"train-exp-{args.exp}"
     print(f"Waiting for training session '{session}' to finish...")
@@ -365,7 +381,8 @@ def run_evals(args: argparse.Namespace, trained_workspace: Path) -> None:
                     "--duration", args.eval_duration,
                     "--tmux-session", session,
                     "--goal", goal_cfg["text"],
-                ])
+                    *_launch_extra_args(args),
+                ], env=_launch_env(args))
 
     if not sessions:
         print("All evals already done.")

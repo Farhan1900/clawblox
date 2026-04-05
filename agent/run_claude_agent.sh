@@ -103,8 +103,6 @@ LOG_DIR="$AGENT_DIR/logs"
 RUNTIME_DIR="$AGENT_DIR/runtime"
 PROMPT_FILE="$RUNTIME_DIR/system_prompt.md"
 HOOK_METADATA_FILE="$RUNTIME_DIR/hook_session.env"
-STOP_STATE_FILE="$RUNTIME_DIR/stop_state.txt"
-CHECKPOINT_STATE_FILE="$RUNTIME_DIR/checkpoint_state.txt"
 PLUGIN_DIR="${PLUGIN_DIR-$SCRIPT_DIR/claude-plugin}"
 SANDBOX_HOME_DIR="$AGENT_DIR/sandbox-home"
 SANDBOX_WORKSPACE_DIR="$WORKSPACE_DIR"
@@ -305,9 +303,7 @@ if [[ "$SANDBOX" == "1" ]]; then
     CLAWBLOX_CLAUDE_AGENT_DIR="/workspace"
     CLAWBLOX_CLAUDE_LOG_DIR="$SANDBOX_LOG_DIR"
     CLAWBLOX_CLAUDE_METADATA_FILE="$SANDBOX_RUNTIME_DIR/$(basename "$HOOK_METADATA_FILE")"
-    CLAWBLOX_CLAUDE_STOP_STATE_FILE="$SANDBOX_RUNTIME_DIR/$(basename "$STOP_STATE_FILE")"
-    CLAWBLOX_CLAUDE_CHECKPOINT_STATE_FILE="$SANDBOX_RUNTIME_DIR/$(basename "$CHECKPOINT_STATE_FILE")"
-    CLAWBLOX_CLAUDE_STOP_BLOCKS="${CLAWBLOX_CLAUDE_STOP_BLOCKS:-0}"
+    CLAWBLOX_CLAUDE_AUTO_LOOP="${CLAWBLOX_CLAUDE_AUTO_LOOP:-1}"
   )
 else
   claude_env_args=(
@@ -317,9 +313,7 @@ else
     CLAWBLOX_CLAUDE_AGENT_DIR="$AGENT_DIR"
     CLAWBLOX_CLAUDE_LOG_DIR="$LOG_DIR"
     CLAWBLOX_CLAUDE_METADATA_FILE="$HOOK_METADATA_FILE"
-    CLAWBLOX_CLAUDE_STOP_STATE_FILE="$STOP_STATE_FILE"
-    CLAWBLOX_CLAUDE_CHECKPOINT_STATE_FILE="$CHECKPOINT_STATE_FILE"
-    CLAWBLOX_CLAUDE_STOP_BLOCKS="${CLAWBLOX_CLAUDE_STOP_BLOCKS:-0}"
+    CLAWBLOX_CLAUDE_AUTO_LOOP="${CLAWBLOX_CLAUDE_AUTO_LOOP:-1}"
   )
 fi
 
@@ -386,7 +380,6 @@ if [[ -z "$RESET_EVERY" && -z "${DURATION_SECONDS:-}" ]]; then
     session_flag=(--session-id "$CLAUDE_SESSION_ID")
   fi
   exec env "${claude_env_args[@]}" \
-    AGENT_CHECKPOINT_AT_EPOCH="" AGENT_CHECKPOINT_PROMPT="" \
     "${bwrap_prefix[@]}" "$CLAUDE_CMD" "${claude_base_args[@]}" "${session_flag[@]}" "$CLAUDE_INITIAL_PROMPT"
 fi
 
@@ -402,7 +395,6 @@ if [[ -z "$RESET_EVERY" && -n "${DURATION_SECONDS:-}" ]]; then
   set +e
   timeout --foreground --signal=TERM "$DURATION_SECONDS" \
     env "${claude_env_args[@]}" \
-    AGENT_CHECKPOINT_AT_EPOCH="" AGENT_CHECKPOINT_PROMPT="" \
     "${bwrap_prefix[@]}" "$CLAUDE_CMD" "${claude_base_args[@]}" "${session_flag[@]}" "$CLAUDE_INITIAL_PROMPT"
   main_status=$?
   set -e
@@ -416,7 +408,6 @@ if [[ -z "$RESET_EVERY" && -n "${DURATION_SECONDS:-}" ]]; then
   set +e
   timeout --foreground --signal=TERM "$CHECKPOINT_WARNING_SECONDS" \
     env "${claude_env_args[@]}" \
-    AGENT_CHECKPOINT_AT_EPOCH="" AGENT_CHECKPOINT_PROMPT="" \
     "${bwrap_prefix[@]}" "$CLAUDE_CMD" "${claude_base_args[@]}" --continue "$CHECKPOINT_WARNING_PROMPT"
   set -e
   exit 0
@@ -439,7 +430,6 @@ while true; do
   set +e
   timeout --foreground --signal=TERM "$RESET_EVERY" \
     env "${claude_env_args[@]}" \
-    AGENT_CHECKPOINT_AT_EPOCH="" AGENT_CHECKPOINT_PROMPT="" \
     "${bwrap_prefix[@]}" "$CLAUDE_CMD" "${claude_base_args[@]}" "${session_args[@]}" "$CLAUDE_INITIAL_PROMPT"
   main_status=$?
   set -e
@@ -454,7 +444,6 @@ while true; do
   set +e
   timeout --foreground --signal=TERM "$CHECKPOINT_WARNING_SECONDS" \
     env "${claude_env_args[@]}" \
-    AGENT_CHECKPOINT_AT_EPOCH="" AGENT_CHECKPOINT_PROMPT="" \
     "${bwrap_prefix[@]}" "$CLAUDE_CMD" "${claude_base_args[@]}" --continue "$CHECKPOINT_WARNING_PROMPT"
   set -e
 

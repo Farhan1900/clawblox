@@ -32,7 +32,6 @@ CLAUDE_MODEL="${CLAUDE_MODEL:-claude-opus-4-6}"
 CLAUDE_PERMISSION_MODE="${CLAUDE_PERMISSION_MODE:-bypassPermissions}"
 CLAUDE_BARE="${CLAUDE_BARE:-0}"
 CLAUDE_EXTRA_ARGS="${CLAUDE_EXTRA_ARGS:-}"
-CLAWBLOX_CLAUDE_STOP_BLOCKS="${CLAWBLOX_CLAUDE_STOP_BLOCKS:-0}"
 CLAUDE_USE_ENV_AUTH="${CLAUDE_USE_ENV_AUTH:-0}"
 SANDBOX="${SANDBOX:-0}"
 declare -a AGENT_TEMPLATE_DIRS=()
@@ -345,7 +344,6 @@ while [[ $# -gt 0 ]]; do
     --model) require_value "$1" "${2:-}"; CLAUDE_MODEL="$2"; shift 2 ;;
     --permission-mode) require_value "$1" "${2:-}"; CLAUDE_PERMISSION_MODE="$2"; shift 2 ;;
     --claude-extra-args) require_value "$1" "${2:-}"; CLAUDE_EXTRA_ARGS="$2"; shift 2 ;;
-    --stop-blocks) require_value "$1" "${2:-}"; CLAWBLOX_CLAUDE_STOP_BLOCKS="$2"; shift 2 ;;
     --use-env-auth) CLAUDE_USE_ENV_AUTH=1; shift ;;
     --sandbox) SANDBOX=1; shift ;;
     --template|--template-dir) require_value "$1" "${2:-}"; TEMPLATE_DIR="$2"; shift 2 ;;
@@ -608,7 +606,7 @@ for ((i = 0; i < NUM_WORLDS; i++)); do
 
     tmux pipe-pane -o -t "$pane_target" "cat >> '$(printf "%q" "$agent_log_file")'"
     tmux send-keys -t "$pane_target" \
-      "cd '$ROOT_DIR' && ${auth_env_prefix}WORLD_BASE_URL='$url' WORLD_AGENT_NAME='$agent_display_name' AGENT_DIR='$agent_dir' WORKSPACE_DIR='$agent_workspace' SESSION_ID_FILE='$agent_session_file' WORLD_SESSION_FILE='$agent_world_session_file' RESET_EVERY=$(printf '%q' "$RESET_EVERY") DURATION_SECONDS=$(printf '%q' "$DURATION_SECONDS") CLAUDE_MODEL=$(printf '%q' "$CLAUDE_MODEL") CLAUDE_PERMISSION_MODE=$(printf '%q' "$CLAUDE_PERMISSION_MODE") CLAUDE_BARE=$(printf '%q' "$CLAUDE_BARE") CLAUDE_EXTRA_ARGS=$(printf '%q' "$CLAUDE_EXTRA_ARGS") CLAWBLOX_CLAUDE_STOP_BLOCKS=$(printf '%q' "$CLAWBLOX_CLAUDE_STOP_BLOCKS") ${sandbox_env_prefix}${template_env_prefix}${startup_env_prefix}${reset_wrapper_prefix}" Enter
+      "cd '$ROOT_DIR' && ${auth_env_prefix}WORLD_BASE_URL='$url' WORLD_AGENT_NAME='$agent_display_name' AGENT_DIR='$agent_dir' WORKSPACE_DIR='$agent_workspace' SESSION_ID_FILE='$agent_session_file' WORLD_SESSION_FILE='$agent_world_session_file' RESET_EVERY=$(printf '%q' "$RESET_EVERY") DURATION_SECONDS=$(printf '%q' "$DURATION_SECONDS") CLAUDE_MODEL=$(printf '%q' "$CLAUDE_MODEL") CLAUDE_PERMISSION_MODE=$(printf '%q' "$CLAUDE_PERMISSION_MODE") CLAUDE_BARE=$(printf '%q' "$CLAUDE_BARE") CLAUDE_EXTRA_ARGS=$(printf '%q' "$CLAUDE_EXTRA_ARGS") ${sandbox_env_prefix}${template_env_prefix}${startup_env_prefix}${reset_wrapper_prefix}" Enter
   done
 done
 
