@@ -47,3 +47,7 @@ bash ./launch_parallel_evals.sh --experiment-dir /storage/nacloos/projects/clawb
 claude code:
 
  ./launch_multi_claude.sh --sandbox --tmux-session mesa --base-port 8090 --num-worlds 1 --agents-per-world 1 --world-dir worlds/mesa-opaque-actions-world --template agent/template --record true --reset-every 3600
+
+
+
+./agent/launch_multi_claude.sh --sandbox --tmux-session mesa --base-port 8090 --num-worlds 1 --agents-per-world 1 --world-dir worlds/mesa-opaque-actions-world --template worlds/mesa-island/agent-template --record true --reset-every 3600      

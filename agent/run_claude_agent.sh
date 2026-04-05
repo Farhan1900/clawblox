@@ -2,7 +2,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-ROOT_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
+ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 WORLD_BASE_URL="${WORLD_BASE_URL-http://localhost:8080}"
 WORLD_JOIN_PATH="${WORLD_JOIN_PATH-/join}"
 WORLD_LEAVE_PATH="${WORLD_LEAVE_PATH-}"
@@ -25,7 +25,7 @@ CLAUDE_INITIAL_PROMPT="${CLAUDE_INITIAL_PROMPT-Begin}"
 RESET_EVERY="${RESET_EVERY-}"
 SANDBOX="${SANDBOX-0}"
 CHECKPOINT_WARNING_SECONDS=300
-CHECKPOINT_WARNING_PROMPT="You will be reset in 5 minutes."
+CHECKPOINT_WARNING_PROMPT="You will be reset in 5 minutes. Update your workspace memory files now."
 
 generate_agent_name() {
   local -a first_parts=(Brisk Cozy Daring Fuzzy Jolly Lunar Nova Pixel Sunny Swift)
@@ -105,7 +105,7 @@ PROMPT_FILE="$RUNTIME_DIR/system_prompt.md"
 HOOK_METADATA_FILE="$RUNTIME_DIR/hook_session.env"
 STOP_STATE_FILE="$RUNTIME_DIR/stop_state.txt"
 CHECKPOINT_STATE_FILE="$RUNTIME_DIR/checkpoint_state.txt"
-PLUGIN_DIR="$SCRIPT_DIR/claude-plugin"
+PLUGIN_DIR="${PLUGIN_DIR-$SCRIPT_DIR/claude-plugin}"
 SANDBOX_HOME_DIR="$AGENT_DIR/sandbox-home"
 SANDBOX_WORKSPACE_DIR="$WORKSPACE_DIR"
 SANDBOX_LOG_DIR="$LOG_DIR"
@@ -160,6 +160,19 @@ fi
 cleanup() {
   if [[ -n "$WORLD_SESSION_ID" && -n "$WORLD_LEAVE_PATH" ]]; then
     curl -fsS -X POST -H "${WORLD_SESSION_HEADER}: ${WORLD_SESSION_ID}" "${WORLD_BASE_URL%/}${WORLD_LEAVE_PATH}" >/dev/null 2>&1 || true
+  fi
+  # Copy transcript to agent_dir/session/ to match pi agent convention
+  if [[ -f "$HOOK_METADATA_FILE" ]]; then
+    # shellcheck disable=SC1090
+    source "$HOOK_METADATA_FILE"
+    local src="${TRANSCRIPT_PATH:-}"
+    if [[ -n "$src" && "$SANDBOX" == "1" ]]; then
+      src="${SANDBOX_HOME_DIR}${src#/home/agent}"
+    fi
+    if [[ -n "$src" && -f "$src" ]]; then
+      mkdir -p "$AGENT_DIR/session"
+      cp "$src" "$AGENT_DIR/session/" 2>/dev/null || true
+    fi
   fi
 }
 trap cleanup EXIT INT TERM
@@ -232,27 +245,24 @@ PY
   SANDBOX_CLAUDE_BIN="/sandbox-bin/claude"
 fi
 
-cat >"$PROMPT_FILE" <<EOF
-You are a being living in your world.
-Your workspace is ${SANDBOX_WORKSPACE_DIR:-$WORKSPACE_DIR}. Only work inside this directory.
-Make sure to keep your workspace clean and well organized.
-The files in your workspace are yours to evolve. 
-These files are your memory that persists across sessions. Anything not in your workspace will be forgotten.
+SESSION_LINE=""
+if [[ -n "$WORLD_SESSION_ID" ]]; then
+  SESSION_LINE="${WORLD_SESSION_HEADER}: ${WORLD_SESSION_ID}"
+fi
+SKILL_URL="${WORLD_BASE_URL%/}${WORLD_SKILL_PATH}"
+PROMPT_WORKSPACE_DIR="${SANDBOX_WORKSPACE_DIR:-$WORKSPACE_DIR}"
 
-Among your workspace, you have two memory files:
-- EPISODIC_MEMORY.md is append-only: add new entries, do not rewrite or delete old ones.
-- SEMANTIC_MEMORY.md is for all the detailed techniques and knowledge you have learned.
+export WORLD_AGENT_NAME SESSION_LINE WORLD_BASE_URL SKILL_CURL SKILL_URL
 
-When starting a new session, start by reading the files in your workspace to refresh your memory.
-
-IMPORTANT: Periodically take a step back and update your workspace and memory files. You don't want to forget what you have experienced and learned.
-
-World base URL: ${WORLD_BASE_URL}
-$(if [[ -n "$WORLD_SESSION_ID" ]]; then printf 'Session header: %s\nSession key: %s\n' "$WORLD_SESSION_HEADER" "$WORLD_SESSION_ID"; fi)
-At startup:
-Fully examine all of your workspace (read ALL the files).
-Fetch capabilities with: ${SKILL_CURL} ${WORLD_BASE_URL%/}${WORLD_SKILL_PATH}
-EOF
+SYSTEM_PROMPT_TEMPLATE="${SYSTEM_PROMPT_TEMPLATE-$SCRIPT_DIR/system_prompt.md}"
+if [[ -f "$SYSTEM_PROMPT_TEMPLATE" ]]; then
+  WORKSPACE_DIR="$PROMPT_WORKSPACE_DIR" \
+    envsubst '${WORLD_AGENT_NAME} ${WORKSPACE_DIR} ${SESSION_LINE} ${WORLD_BASE_URL} ${SKILL_CURL} ${SKILL_URL}' \
+    < "$SYSTEM_PROMPT_TEMPLATE" > "$PROMPT_FILE"
+else
+  echo "Error: system prompt template not found at $SYSTEM_PROMPT_TEMPLATE" >&2
+  exit 1
+fi
 
 append_prompt_workspace_files "$PROMPT_FILE" "$WORKSPACE_DIR"
 
@@ -263,53 +273,61 @@ if [[ -n "$WORLD_STARTUP_INSTRUCTIONS" ]]; then
   } >>"$PROMPT_FILE"
 fi
 
-checkpoint_at_epoch=""
 if [[ -n "$RESET_EVERY" ]]; then
   if [[ ! "$RESET_EVERY" =~ ^[1-9][0-9]*$ ]]; then
     echo "Error: RESET_EVERY must be a positive integer in seconds." >&2
     exit 1
   fi
-  if (( RESET_EVERY > CHECKPOINT_WARNING_SECONDS )); then
-    checkpoint_at_epoch="$(( $(date +%s) + RESET_EVERY - CHECKPOINT_WARNING_SECONDS ))"
-  fi
 fi
 
-declare -a claude_args=(
+# Build base claude args (session-specific args added per invocation)
+declare -a claude_base_args=(
   --plugin-dir "$SANDBOX_PLUGIN_DIR"
   --append-system-prompt-file "$SANDBOX_PROMPT_FILE"
   --permission-mode "$CLAUDE_PERMISSION_MODE"
   --model "$CLAUDE_MODEL"
 )
-
 if [[ "$CLAUDE_BARE" == "1" ]]; then
-  claude_args=(--bare "${claude_args[@]}")
+  claude_base_args=(--bare "${claude_base_args[@]}")
 fi
-
-if [[ "$CLAUDE_RESUME_MODE" == "resume" || ( "$CLAUDE_RESUME_MODE" == "auto" && -f "$HOOK_METADATA_FILE" ) ]]; then
-  claude_args+=(--continue)
-else
-  claude_args+=(--session-id "$CLAUDE_SESSION_ID")
-fi
-
 if [[ -n "$CLAUDE_EXTRA_ARGS" ]]; then
   # shellcheck disable=SC2206
-  extra_args=( $CLAUDE_EXTRA_ARGS )
-  claude_args+=("${extra_args[@]}")
+  claude_base_args+=( $CLAUDE_EXTRA_ARGS )
 fi
 
-echo "Agent name: $WORLD_AGENT_NAME"
-echo "Workspace: $WORKSPACE_DIR"
-echo "Claude session id: $CLAUDE_SESSION_ID"
-if [[ -n "$WORLD_SESSION_ID" ]]; then
-  echo "World session id: $WORLD_SESSION_ID"
-fi
+# Build env vars for claude process
+declare -a claude_env_args=()
 if [[ "$SANDBOX" == "1" ]]; then
-  echo "Sandbox: enabled (bwrap)"
+  claude_env_args=(
+    WORLD_BASE_URL="$WORLD_BASE_URL"
+    WORLD_SESSION_ID="$WORLD_SESSION_ID"
+    WORLD_AGENT_NAME="$WORLD_AGENT_NAME"
+    CLAWBLOX_CLAUDE_AGENT_DIR="/workspace"
+    CLAWBLOX_CLAUDE_LOG_DIR="$SANDBOX_LOG_DIR"
+    CLAWBLOX_CLAUDE_METADATA_FILE="$SANDBOX_RUNTIME_DIR/$(basename "$HOOK_METADATA_FILE")"
+    CLAWBLOX_CLAUDE_STOP_STATE_FILE="$SANDBOX_RUNTIME_DIR/$(basename "$STOP_STATE_FILE")"
+    CLAWBLOX_CLAUDE_CHECKPOINT_STATE_FILE="$SANDBOX_RUNTIME_DIR/$(basename "$CHECKPOINT_STATE_FILE")"
+    CLAWBLOX_CLAUDE_STOP_BLOCKS="${CLAWBLOX_CLAUDE_STOP_BLOCKS:-0}"
+  )
+else
+  claude_env_args=(
+    WORLD_BASE_URL="$WORLD_BASE_URL"
+    WORLD_SESSION_ID="$WORLD_SESSION_ID"
+    WORLD_AGENT_NAME="$WORLD_AGENT_NAME"
+    CLAWBLOX_CLAUDE_AGENT_DIR="$AGENT_DIR"
+    CLAWBLOX_CLAUDE_LOG_DIR="$LOG_DIR"
+    CLAWBLOX_CLAUDE_METADATA_FILE="$HOOK_METADATA_FILE"
+    CLAWBLOX_CLAUDE_STOP_STATE_FILE="$STOP_STATE_FILE"
+    CLAWBLOX_CLAUDE_CHECKPOINT_STATE_FILE="$CHECKPOINT_STATE_FILE"
+    CLAWBLOX_CLAUDE_STOP_BLOCKS="${CLAWBLOX_CLAUDE_STOP_BLOCKS:-0}"
+  )
 fi
 
-cd "$WORKSPACE_DIR"
+# Build bwrap prefix for sandbox mode
+declare -a bwrap_prefix=()
+CLAUDE_CMD="claude"
 if [[ "$SANDBOX" == "1" ]]; then
-  declare -a bwrap_args=(
+  bwrap_prefix=(
     bwrap
     --ro-bind /usr /usr
     --ro-bind /bin /bin
@@ -340,35 +358,106 @@ if [[ "$SANDBOX" == "1" ]]; then
     --chdir /workspace
     --die-with-parent
   )
-  [[ -d /lib64 ]] && bwrap_args+=(--ro-bind /lib64 /lib64)
-  [[ -d /mnt/wsl ]] && bwrap_args+=(--ro-bind /mnt/wsl /mnt/wsl)
-  bwrap_args+=(--)
-
-  exec env \
-    WORLD_BASE_URL="$WORLD_BASE_URL" \
-    WORLD_SESSION_ID="$WORLD_SESSION_ID" \
-    WORLD_AGENT_NAME="$WORLD_AGENT_NAME" \
-    CLAWBLOX_CLAUDE_AGENT_DIR="/workspace" \
-    CLAWBLOX_CLAUDE_LOG_DIR="$SANDBOX_LOG_DIR" \
-    CLAWBLOX_CLAUDE_METADATA_FILE="$SANDBOX_RUNTIME_DIR/$(basename "$HOOK_METADATA_FILE")" \
-    CLAWBLOX_CLAUDE_STOP_STATE_FILE="$SANDBOX_RUNTIME_DIR/$(basename "$STOP_STATE_FILE")" \
-    CLAWBLOX_CLAUDE_CHECKPOINT_STATE_FILE="$SANDBOX_RUNTIME_DIR/$(basename "$CHECKPOINT_STATE_FILE")" \
-    CLAWBLOX_CLAUDE_STOP_BLOCKS="${CLAWBLOX_CLAUDE_STOP_BLOCKS:-0}" \
-    AGENT_CHECKPOINT_AT_EPOCH="$checkpoint_at_epoch" \
-    AGENT_CHECKPOINT_PROMPT="$CHECKPOINT_WARNING_PROMPT" \
-    "${bwrap_args[@]}" "$SANDBOX_CLAUDE_BIN" "${claude_args[@]}" "$CLAUDE_INITIAL_PROMPT"
+  [[ -d /lib64 ]] && bwrap_prefix+=(--ro-bind /lib64 /lib64)
+  # Mount only resolv.conf for DNS — do NOT mount all of /mnt/wsl, which
+  # exposes the host filesystem via Docker bind mounts.
+  [[ -f /mnt/wsl/resolv.conf ]] && bwrap_prefix+=(--ro-bind /mnt/wsl/resolv.conf /mnt/wsl/resolv.conf)
+  bwrap_prefix+=(--)
+  CLAUDE_CMD="$SANDBOX_CLAUDE_BIN"
 fi
 
-exec env \
-  WORLD_BASE_URL="$WORLD_BASE_URL" \
-  WORLD_SESSION_ID="$WORLD_SESSION_ID" \
-  WORLD_AGENT_NAME="$WORLD_AGENT_NAME" \
-  CLAWBLOX_CLAUDE_AGENT_DIR="$AGENT_DIR" \
-  CLAWBLOX_CLAUDE_LOG_DIR="$LOG_DIR" \
-  CLAWBLOX_CLAUDE_METADATA_FILE="$HOOK_METADATA_FILE" \
-  CLAWBLOX_CLAUDE_STOP_STATE_FILE="$STOP_STATE_FILE" \
-  CLAWBLOX_CLAUDE_CHECKPOINT_STATE_FILE="$CHECKPOINT_STATE_FILE" \
-  CLAWBLOX_CLAUDE_STOP_BLOCKS="${CLAWBLOX_CLAUDE_STOP_BLOCKS:-0}" \
-  AGENT_CHECKPOINT_AT_EPOCH="$checkpoint_at_epoch" \
-  AGENT_CHECKPOINT_PROMPT="$CHECKPOINT_WARNING_PROMPT" \
-  claude "${claude_args[@]}" "$CLAUDE_INITIAL_PROMPT"
+echo "Agent name: $WORLD_AGENT_NAME"
+echo "Workspace: $WORKSPACE_DIR"
+echo "Claude session id: $CLAUDE_SESSION_ID"
+if [[ -n "$WORLD_SESSION_ID" ]]; then
+  echo "World session id: $WORLD_SESSION_ID"
+fi
+if [[ "$SANDBOX" == "1" ]]; then
+  echo "Sandbox: enabled (bwrap)"
+fi
+
+cd "$WORKSPACE_DIR"
+
+# --- No reset, no duration: single session, exec into claude ---
+if [[ -z "$RESET_EVERY" && -z "${DURATION_SECONDS:-}" ]]; then
+  if [[ "$CLAUDE_RESUME_MODE" == "resume" || ( "$CLAUDE_RESUME_MODE" == "auto" && -f "$HOOK_METADATA_FILE" ) ]]; then
+    session_flag=(--continue)
+  else
+    session_flag=(--session-id "$CLAUDE_SESSION_ID")
+  fi
+  exec env "${claude_env_args[@]}" \
+    AGENT_CHECKPOINT_AT_EPOCH="" AGENT_CHECKPOINT_PROMPT="" \
+    "${bwrap_prefix[@]}" "$CLAUDE_CMD" "${claude_base_args[@]}" "${session_flag[@]}" "$CLAUDE_INITIAL_PROMPT"
+fi
+
+# --- Duration only (no reset): run for full duration, then warning session ---
+if [[ -z "$RESET_EVERY" && -n "${DURATION_SECONDS:-}" ]]; then
+  if [[ "$CLAUDE_RESUME_MODE" == "resume" || ( "$CLAUDE_RESUME_MODE" == "auto" && -f "$HOOK_METADATA_FILE" ) ]]; then
+    session_flag=(--continue)
+  else
+    session_flag=(--session-id "$CLAUDE_SESSION_ID")
+  fi
+
+  # Main session: run for the full duration
+  set +e
+  timeout --foreground --signal=TERM "$DURATION_SECONDS" \
+    env "${claude_env_args[@]}" \
+    AGENT_CHECKPOINT_AT_EPOCH="" AGENT_CHECKPOINT_PROMPT="" \
+    "${bwrap_prefix[@]}" "$CLAUDE_CMD" "${claude_base_args[@]}" "${session_flag[@]}" "$CLAUDE_INITIAL_PROMPT"
+  main_status=$?
+  set -e
+
+  if [[ "$main_status" -ne 124 && "$main_status" -ne 143 ]]; then
+    exit "$main_status"
+  fi
+
+  # Warning session: continue with checkpoint prompt, extra time to save
+  echo "Sending shutdown warning..."
+  set +e
+  timeout --foreground --signal=TERM "$CHECKPOINT_WARNING_SECONDS" \
+    env "${claude_env_args[@]}" \
+    AGENT_CHECKPOINT_AT_EPOCH="" AGENT_CHECKPOINT_PROMPT="" \
+    "${bwrap_prefix[@]}" "$CLAUDE_CMD" "${claude_base_args[@]}" --continue "$CHECKPOINT_WARNING_PROMPT"
+  set -e
+  exit 0
+fi
+
+# --- Reset loop: full session → warning → fresh session ---
+reset_index=0
+while true; do
+  echo "--- Reset cycle $reset_index ---"
+
+  # Choose session args: first run or fresh session after reset
+  if (( reset_index == 0 )) && [[ "$CLAUDE_RESUME_MODE" == "resume" || ( "$CLAUDE_RESUME_MODE" == "auto" && -f "$HOOK_METADATA_FILE" ) ]]; then
+    session_args=(--continue)
+  else
+    new_session_id="$(uuidgen)"
+    session_args=(--session-id "$new_session_id")
+  fi
+
+  # Main session: run for full RESET_EVERY duration
+  set +e
+  timeout --foreground --signal=TERM "$RESET_EVERY" \
+    env "${claude_env_args[@]}" \
+    AGENT_CHECKPOINT_AT_EPOCH="" AGENT_CHECKPOINT_PROMPT="" \
+    "${bwrap_prefix[@]}" "$CLAUDE_CMD" "${claude_base_args[@]}" "${session_args[@]}" "$CLAUDE_INITIAL_PROMPT"
+  main_status=$?
+  set -e
+
+  # If claude exited on its own (not timeout), stop
+  if [[ "$main_status" -ne 124 && "$main_status" -ne 143 ]]; then
+    exit "$main_status"
+  fi
+
+  # Warning session: continue the same session with checkpoint prompt
+  echo "Sending checkpoint warning..."
+  set +e
+  timeout --foreground --signal=TERM "$CHECKPOINT_WARNING_SECONDS" \
+    env "${claude_env_args[@]}" \
+    AGENT_CHECKPOINT_AT_EPOCH="" AGENT_CHECKPOINT_PROMPT="" \
+    "${bwrap_prefix[@]}" "$CLAUDE_CMD" "${claude_base_args[@]}" --continue "$CHECKPOINT_WARNING_PROMPT"
+  set -e
+
+  reset_index=$((reset_index + 1))
+  echo "Claude agent reset after ${RESET_EVERY}s (cycle $reset_index)"
+done

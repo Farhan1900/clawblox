@@ -2,7 +2,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-ROOT_DIR="$(cd "$SCRIPT_DIR/../../../.." && pwd)"
+ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 if [[ -f "$ROOT_DIR/.env" ]]; then
   set -a
@@ -12,13 +12,13 @@ fi
 
 NUM_WORLDS="${NUM_WORLDS:-1}"
 AGENTS_PER_WORLD="${AGENTS_PER_WORLD:-1}"
-BASE_PORT="${BASE_PORT:-8099}"
-TMUX_SESSION="${TMUX_SESSION:-river-bridge-claude}"
+BASE_PORT="${BASE_PORT:-8080}"
+TMUX_SESSION="${TMUX_SESSION:-clawblox-claude}"
 RECORD="${RECORD:-true}"
-WORLD_DIR="${WORLD_DIR:-$SCRIPT_DIR}"
+WORLD_DIR="${WORLD_DIR:-}"
 HEALTH_TIMEOUT="${HEALTH_TIMEOUT:-30}"
 RUN_ID="${RUN_ID:-$(date -u +%Y%m%dT%H%M%SZ)}"
-AGENT_NAME_PREFIX="${AGENT_NAME_PREFIX:-river}"
+AGENT_NAME_PREFIX="${AGENT_NAME_PREFIX:-agent}"
 STOP_GRACE_SECONDS="${STOP_GRACE_SECONDS:-10}"
 GOAL="${GOAL:-}"
 TEMPLATE_DIR="${TEMPLATE_DIR:-$ROOT_DIR/worlds/mesa-island/agent-template}"
@@ -26,6 +26,7 @@ RESULTS_ROOT="${RESULTS_ROOT:-}"
 PORT_WAIT_SECONDS="${PORT_WAIT_SECONDS:-120}"
 RESUME_PATH="${RESUME_PATH:-}"
 RESET_EVERY="${RESET_EVERY:-}"
+DURATION="${DURATION:-}"
 CHECKPOINT_INTERVAL="${CHECKPOINT_INTERVAL:-1800}"
 CLAUDE_MODEL="${CLAUDE_MODEL:-claude-opus-4-6}"
 CLAUDE_PERMISSION_MODE="${CLAUDE_PERMISSION_MODE:-bypassPermissions}"
@@ -41,6 +42,30 @@ if [[ ! -f "$AGENT_SCRIPT" ]]; then
   echo "Error: Claude agent runner not found at $AGENT_SCRIPT"
   exit 1
 fi
+
+parse_duration_seconds() {
+  local input="$1"
+  if [[ "$input" =~ ^[0-9]+$ ]]; then
+    printf '%s' "$input"
+    return 0
+  fi
+  local total=0 rest="$input"
+  while [[ -n "$rest" ]]; do
+    if [[ "$rest" =~ ^([0-9]+)([hms]) ]]; then
+      local val="${BASH_REMATCH[1]}" unit="${BASH_REMATCH[2]}"
+      case "$unit" in
+        h) total=$((total + val * 3600)) ;;
+        m) total=$((total + val * 60)) ;;
+        s) total=$((total + val)) ;;
+      esac
+      rest="${rest#"${BASH_REMATCH[0]}"}"
+    else
+      echo "Error: invalid duration format '$input' (use e.g. 2h, 30m, 1h30m, or seconds)" >&2
+      return 1
+    fi
+  done
+  printf '%s' "$total"
+}
 
 sanitize_name() {
   printf '%s' "$1" | tr -c 'A-Za-z0-9._-' '_'
@@ -104,7 +129,7 @@ usage() {
   cat <<EOF
 Usage: $(basename "$0") [--stop|--status] [options]
 
-Launch the river-bridge eval world with Claude Code agents in tmux.
+Launch a clawblox world with Claude Code agents in tmux.
 EOF
 }
 
@@ -178,8 +203,12 @@ do_stop() {
           fi
         done
         if ((snapshot_failed != 0)); then
-          echo "Snapshot capture failed. Aborting shutdown so the live run remains resumable." >&2
-          exit 1
+          if ((FORCE == 1)); then
+            echo "Warning: snapshot capture failed, continuing with --force." >&2
+          else
+            echo "Snapshot capture failed. Aborting shutdown so the live run remains resumable." >&2
+            exit 1
+          fi
         fi
       fi
     fi
@@ -312,6 +341,7 @@ while [[ $# -gt 0 ]]; do
     --clawblox-bin) require_value "$1" "${2:-}"; CLAWBLOX_BIN="$2"; CLI_CLAWBLOX_BIN=1; shift 2 ;;
     --goal) require_value "$1" "${2:-}"; GOAL="$2"; shift 2 ;;
     --reset-every) require_value "$1" "${2:-}"; RESET_EVERY="$2"; CLI_RESET_EVERY=1; shift 2 ;;
+    --duration) require_value "$1" "${2:-}"; DURATION="$2"; shift 2 ;;
     --model) require_value "$1" "${2:-}"; CLAUDE_MODEL="$2"; shift 2 ;;
     --permission-mode) require_value "$1" "${2:-}"; CLAUDE_PERMISSION_MODE="$2"; shift 2 ;;
     --claude-extra-args) require_value "$1" "${2:-}"; CLAUDE_EXTRA_ARGS="$2"; shift 2 ;;
@@ -319,6 +349,7 @@ while [[ $# -gt 0 ]]; do
     --use-env-auth) CLAUDE_USE_ENV_AUTH=1; shift ;;
     --sandbox) SANDBOX=1; shift ;;
     --template|--template-dir) require_value "$1" "${2:-}"; TEMPLATE_DIR="$2"; shift 2 ;;
+    --system-prompt) require_value "$1" "${2:-}"; SYSTEM_PROMPT_TEMPLATE="$2"; shift 2 ;;
     --agent-template) require_value "$1" "${2:-}"; AGENT_TEMPLATE_DIRS+=("$2"); shift 2 ;;
     --results-root) require_value "$1" "${2:-}"; RESULTS_ROOT="$2"; shift 2 ;;
     --resume) require_value "$1" "${2:-}"; RESUME_PATH="$2"; shift 2 ;;
@@ -400,6 +431,10 @@ if [[ -n "$RESUME_PATH" ]]; then
     fi
   done
 else
+  if [[ -z "$WORLD_DIR" ]]; then
+    echo "Error: --world-dir is required"
+    exit 1
+  fi
   if [[ "$WORLD_DIR" = /* ]]; then
     WORLD_ABS_DIR="$WORLD_DIR"
   else
@@ -415,6 +450,17 @@ fi
 TEMPLATE_ABS_DIR="$TEMPLATE_DIR"
 if [[ "$TEMPLATE_ABS_DIR" != /* ]]; then
   TEMPLATE_ABS_DIR="$ROOT_DIR/$TEMPLATE_ABS_DIR"
+fi
+
+if [[ -z "${SYSTEM_PROMPT_TEMPLATE:-}" ]]; then
+  if [[ -f "$WORLD_ABS_DIR/system_prompt.md" ]]; then
+    SYSTEM_PROMPT_TEMPLATE="$WORLD_ABS_DIR/system_prompt.md"
+  elif [[ -f "$TEMPLATE_ABS_DIR/system_prompt.md" ]]; then
+    SYSTEM_PROMPT_TEMPLATE="$TEMPLATE_ABS_DIR/system_prompt.md"
+  else
+    echo "Error: no system_prompt.md found in world dir ($WORLD_ABS_DIR) or template dir ($TEMPLATE_ABS_DIR)" >&2
+    exit 1
+  fi
 fi
 
 RUN_SAFE_ID="$(sanitize_name "$RUN_ID")"
@@ -467,7 +513,7 @@ printf '%s\n' "$RUN_DIR" >"$RESULTS_ABS_ROOT/latest_run.txt"
 write_run_metadata "$RUN_DIR/run.env"
 write_run_metadata "$(session_meta_file)"
 
-echo "Starting $NUM_WORLDS river-bridge world servers..."
+echo "Starting $NUM_WORLDS world servers..."
 tmux new-session -d -s "$TMUX_SESSION" -n "world-0"
 tmux set-option -t "$TMUX_SESSION" remain-on-exit on
 
@@ -508,6 +554,11 @@ for ((i = 0; i < NUM_WORLDS; i++)); do
   fi
 done
 
+DURATION_SECONDS=""
+if [[ -n "$DURATION" ]]; then
+  DURATION_SECONDS="$(parse_duration_seconds "$DURATION")"
+fi
+
 echo "Launching $AGENTS_PER_WORLD Claude agents per world..."
 for ((i = 0; i < NUM_WORLDS; i++)); do
   port=$((BASE_PORT + i))
@@ -536,19 +587,14 @@ for ((i = 0; i < NUM_WORLDS; i++)); do
     agent_world_session_file="$agent_dir/world_session.txt"
     mkdir -p "$agent_log_dir" "$agent_workspace"
 
-    template_env_prefix="TEMPLATE_DIR=$(printf '%q' "$TEMPLATE_ABS_DIR") "
+    template_env_prefix="TEMPLATE_DIR=$(printf '%q' "$TEMPLATE_ABS_DIR") SYSTEM_PROMPT_TEMPLATE=$(printf '%q' "$SYSTEM_PROMPT_TEMPLATE") "
     startup_env_prefix=""
     if [[ -n "$startup_instructions" ]]; then
       startup_instructions_q="$(printf '%q' "$startup_instructions")"
       startup_env_prefix="WORLD_STARTUP_INSTRUCTIONS=${startup_instructions_q} "
     fi
 
-    reset_wrapper_prefix=""
-    if [[ -n "$RESET_EVERY" ]]; then
-      reset_wrapper_prefix="bash -lc $(printf '%q' "while true; do timeout --foreground --signal=TERM '$RESET_EVERY' bash '$AGENT_SCRIPT'; status=\$?; if [[ \$status -eq 124 || \$status -eq 143 ]]; then echo 'Claude agent reset after ${RESET_EVERY}s'; continue; fi; exit \$status; done")"
-    else
-      reset_wrapper_prefix="bash '$AGENT_SCRIPT'"
-    fi
+    reset_wrapper_prefix="bash '$AGENT_SCRIPT'"
 
     auth_env_prefix="unset ANTHROPIC_API_KEY ANTHROPIC_OAUTH_TOKEN; "
     if [[ "$CLAUDE_USE_ENV_AUTH" == "1" ]]; then
@@ -562,8 +608,22 @@ for ((i = 0; i < NUM_WORLDS; i++)); do
 
     tmux pipe-pane -o -t "$pane_target" "cat >> '$(printf "%q" "$agent_log_file")'"
     tmux send-keys -t "$pane_target" \
-      "cd '$ROOT_DIR' && ${auth_env_prefix}WORLD_BASE_URL='$url' WORLD_AGENT_NAME='$agent_display_name' AGENT_DIR='$agent_dir' WORKSPACE_DIR='$agent_workspace' SESSION_ID_FILE='$agent_session_file' WORLD_SESSION_FILE='$agent_world_session_file' RESET_EVERY=$(printf '%q' "$RESET_EVERY") CLAUDE_MODEL=$(printf '%q' "$CLAUDE_MODEL") CLAUDE_PERMISSION_MODE=$(printf '%q' "$CLAUDE_PERMISSION_MODE") CLAUDE_BARE=$(printf '%q' "$CLAUDE_BARE") CLAUDE_EXTRA_ARGS=$(printf '%q' "$CLAUDE_EXTRA_ARGS") CLAWBLOX_CLAUDE_STOP_BLOCKS=$(printf '%q' "$CLAWBLOX_CLAUDE_STOP_BLOCKS") ${sandbox_env_prefix}${template_env_prefix}${startup_env_prefix}${reset_wrapper_prefix}" Enter
+      "cd '$ROOT_DIR' && ${auth_env_prefix}WORLD_BASE_URL='$url' WORLD_AGENT_NAME='$agent_display_name' AGENT_DIR='$agent_dir' WORKSPACE_DIR='$agent_workspace' SESSION_ID_FILE='$agent_session_file' WORLD_SESSION_FILE='$agent_world_session_file' RESET_EVERY=$(printf '%q' "$RESET_EVERY") DURATION_SECONDS=$(printf '%q' "$DURATION_SECONDS") CLAUDE_MODEL=$(printf '%q' "$CLAUDE_MODEL") CLAUDE_PERMISSION_MODE=$(printf '%q' "$CLAUDE_PERMISSION_MODE") CLAUDE_BARE=$(printf '%q' "$CLAUDE_BARE") CLAUDE_EXTRA_ARGS=$(printf '%q' "$CLAUDE_EXTRA_ARGS") CLAWBLOX_CLAUDE_STOP_BLOCKS=$(printf '%q' "$CLAWBLOX_CLAUDE_STOP_BLOCKS") ${sandbox_env_prefix}${template_env_prefix}${startup_env_prefix}${reset_wrapper_prefix}" Enter
   done
 done
+
+CHECKPOINT_WARNING_SECONDS="${CHECKPOINT_WARNING_SECONDS:-300}"
+if [[ -n "$DURATION" ]]; then
+  duration_secs="$(parse_duration_seconds "$DURATION")"
+  # Agent gets duration + warning time to save workspace
+  total_wait=$(( duration_secs + CHECKPOINT_WARNING_SECONDS + 30 ))
+  echo "Run will auto-stop after ${DURATION} (${duration_secs}s + ${CHECKPOINT_WARNING_SECONDS}s warning)..."
+  (
+    sleep "$total_wait"
+    echo "Duration ${DURATION} + warning elapsed. Stopping..."
+    bash "$0" --stop --tmux-session "$TMUX_SESSION"
+  ) &
+  disown
+fi
 
 echo "tmux attach -t $TMUX_SESSION"
