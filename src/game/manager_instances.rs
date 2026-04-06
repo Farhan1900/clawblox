@@ -73,13 +73,12 @@ pub fn insert_instance(state: &GameManagerHandle, instance: GameInstance) -> Uui
         .push(instance_id);
 
     for agent_id in player_ids {
-        state.player_instances.insert((agent_id, game_id), instance_id);
+        state
+            .player_instances
+            .insert((agent_id, game_id), instance_id);
     }
 
-    eprintln!(
-        "[Instance] Restored {} for game {}",
-        instance_id, game_id
-    );
+    eprintln!("[Instance] Restored {} for game {}", instance_id, game_id);
 
     instance_id
 }

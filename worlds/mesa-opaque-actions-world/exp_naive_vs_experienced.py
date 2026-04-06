@@ -45,17 +45,21 @@ GOALS = {
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("--exp", required=True, help="Experiment id (e.g. 001)")
+    p.add_argument("--exp", required=True, help="Experiment id (e.g. 001). Ports are auto-assigned: 8000 + exp*20")
     p.add_argument("--train-duration", default="1h", help="Training run duration (default: 1h)")
     p.add_argument("--eval-duration", default="1h", help="Per-eval run duration (default: 1h)")
+    p.add_argument("--reset-every", default=None, help="Session reset interval (e.g. 1h, disabled by default)")
     p.add_argument("--repeats", type=int, default=1, help="Eval repeats per cohort (default: 1)")
-    p.add_argument("--base-port", type=int, default=8090, help="Base port for training run (default: 8090)")
-    p.add_argument("--eval-base-port", type=int, default=8100, help="First port for eval runs (default: 8100)")
     p.add_argument("--template", type=Path, default=DEFAULT_TEMPLATE, help="Agent template dir")
     p.add_argument("--system-prompt", type=Path, default=WORLD_DIR / "system_prompt.md", help="System prompt template")
     p.add_argument("--model", default="claude-opus-4-6", help="Claude model (default: claude-opus-4-6)")
-    p.add_argument("--api-key", default=None, help="Anthropic API/OAuth key (overrides default auth)")
-    return p.parse_args()
+    p.add_argument("--oauth-token", default=None, help="Anthropic OAuth token (overrides default auth)")
+    args = p.parse_args()
+    # Auto-assign ports: each experiment gets a block of 20 ports
+    exp_num = int(args.exp)
+    args.base_port = 8000 + exp_num * 20
+    args.eval_base_port = args.base_port + 1
+    return args
 
 
 def _parse_duration_minutes(duration: str) -> float:
@@ -74,15 +78,14 @@ def exp_dir(args: argparse.Namespace) -> Path:
 
 
 def _launch_env(args: argparse.Namespace) -> dict[str, str] | None:
-    if args.api_key:
+    if args.oauth_token:
         import os
-        env = {**os.environ, "ANTHROPIC_API_KEY": args.api_key}
-        return env
+        return {**os.environ, "ANTHROPIC_OAUTH_TOKEN": args.oauth_token}
     return None
 
 
 def _launch_extra_args(args: argparse.Namespace) -> list[str]:
-    if args.api_key:
+    if args.oauth_token:
         return ["--use-env-auth"]
     return []
 
@@ -328,6 +331,7 @@ def run_training(args: argparse.Namespace) -> Path:
         "--run-id", "run",
         "--duration", args.train_duration,
         "--tmux-session", f"train-exp-{args.exp}",
+        *(["--reset-every", args.reset_every] if args.reset_every else []),
         *_launch_extra_args(args),
     ], env=_launch_env(args))
 
@@ -381,6 +385,7 @@ def run_evals(args: argparse.Namespace, trained_workspace: Path) -> None:
                     "--duration", args.eval_duration,
                     "--tmux-session", session,
                     "--goal", goal_cfg["text"],
+                    *(["--reset-every", args.reset_every] if args.reset_every else []),
                     *_launch_extra_args(args),
                 ], env=_launch_env(args))
 

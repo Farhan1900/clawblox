@@ -96,11 +96,9 @@ impl RecordingWriter {
             .connect_with(opts)
             .await?;
 
-        sqlx::query(
-            "CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT)",
-        )
-        .execute(&pool)
-        .await?;
+        sqlx::query("CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT)")
+            .execute(&pool)
+            .await?;
 
         sqlx::query(
             "CREATE TABLE IF NOT EXISTS checkpoints (
@@ -206,7 +204,10 @@ impl RecordingWriter {
 
         if is_checkpoint {
             if let Err(e) = self.write_checkpoint(tick, time_ms, obs).await {
-                eprintln!("Warning: failed to write checkpoint at tick {}: {}", tick, e);
+                eprintln!(
+                    "Warning: failed to write checkpoint at tick {}: {}",
+                    tick, e
+                );
             }
             self.last_checkpoint_obs = Some(obs.clone());
             self.last_checkpoint_tick = tick;
@@ -304,7 +305,9 @@ impl RecordingWriter {
     pub async fn close(&mut self, total_ticks: u64, duration_ms: u64) {
         let final_ticks = total_ticks.max(self.latest_tick);
         let final_duration_ms = duration_ms.max(self.latest_time_ms);
-        let _ = self.upsert_progress_meta(final_ticks, final_duration_ms).await;
+        let _ = self
+            .upsert_progress_meta(final_ticks, final_duration_ms)
+            .await;
         let _ = sqlx::query("PRAGMA wal_checkpoint(TRUNCATE)")
             .execute(&self.pool)
             .await;
@@ -314,7 +317,11 @@ impl RecordingWriter {
         self.pool.close().await;
     }
 
-    async fn upsert_progress_meta(&self, total_ticks: u64, duration_ms: u64) -> Result<(), sqlx::Error> {
+    async fn upsert_progress_meta(
+        &self,
+        total_ticks: u64,
+        duration_ms: u64,
+    ) -> Result<(), sqlx::Error> {
         for (k, v) in [
             ("total_ticks", total_ticks.to_string()),
             ("duration_ms", duration_ms.to_string()),
@@ -492,7 +499,10 @@ impl RecordingReader {
         let rows = sqlx::query("SELECT tick FROM checkpoints ORDER BY tick")
             .fetch_all(&pool)
             .await?;
-        let checkpoint_ticks: Vec<u64> = rows.iter().map(|r| r.get::<i64, _>("tick") as u64).collect();
+        let checkpoint_ticks: Vec<u64> = rows
+            .iter()
+            .map(|r| r.get::<i64, _>("tick") as u64)
+            .collect();
 
         Ok(Self {
             pool,
@@ -588,13 +598,12 @@ impl RecordingReader {
         }
 
         // Apply deltas from cp_tick+1 to tick
-        let delta_rows = sqlx::query(
-            "SELECT data FROM deltas WHERE tick > ? AND tick <= ? ORDER BY tick",
-        )
-        .bind(cp_tick as i64)
-        .bind(tick as i64)
-        .fetch_all(&self.pool)
-        .await?;
+        let delta_rows =
+            sqlx::query("SELECT data FROM deltas WHERE tick > ? AND tick <= ? ORDER BY tick")
+                .bind(cp_tick as i64)
+                .bind(tick as i64)
+                .fetch_all(&self.pool)
+                .await?;
 
         for delta_row in &delta_rows {
             let compressed: Vec<u8> = delta_row.get("data");
@@ -619,8 +628,14 @@ impl RecordingReader {
         let has_heard_by = self.chat_messages_has_column("heard_by").await?;
         let has_audibility = self.chat_messages_has_column("audibility").await?;
 
-        let mut select_fields =
-            vec!["tick", "time_ms", "message_id", "agent_id", "agent_name", "content"];
+        let mut select_fields = vec![
+            "tick",
+            "time_ms",
+            "message_id",
+            "agent_id",
+            "agent_name",
+            "content",
+        ];
         if has_created_at {
             select_fields.push("created_at");
         }
@@ -645,10 +660,10 @@ impl RecordingReader {
             select_fields.join(", ")
         );
         let rows = sqlx::query(&query)
-        .bind(start_tick as i64)
-        .bind(end_tick as i64)
-        .fetch_all(&self.pool)
-        .await?;
+            .bind(start_tick as i64)
+            .bind(end_tick as i64)
+            .fetch_all(&self.pool)
+            .await?;
 
         Ok(rows
             .iter()
@@ -692,9 +707,7 @@ impl RecordingReader {
         let rows = sqlx::query("PRAGMA table_info(chat_messages)")
             .fetch_all(&self.pool)
             .await?;
-        Ok(rows
-            .iter()
-            .any(|row| row.get::<String, _>("name") == name))
+        Ok(rows.iter().any(|row| row.get::<String, _>("name") == name))
     }
 }
 
@@ -712,7 +725,10 @@ pub struct RecordedChatMessage {
     pub audibility: Vec<RecordedChatAudibilityEntry>,
 }
 
-async fn ensure_chat_messages_column(pool: &SqlitePool, column_def: &str) -> Result<(), sqlx::Error> {
+async fn ensure_chat_messages_column(
+    pool: &SqlitePool,
+    column_def: &str,
+) -> Result<(), sqlx::Error> {
     let query = format!("ALTER TABLE chat_messages ADD COLUMN {}", column_def);
     match sqlx::query(&query).execute(pool).await {
         Ok(_) => Ok(()),
@@ -762,18 +778,16 @@ fn apply_delta(obs: &mut SpectatorObservation, delta: &FrameDelta) {
 
     // Replace sounds if delta has any
     if !delta.sounds.is_empty() {
-        if let Ok(sounds) = serde_json::from_value(serde_json::Value::Array(
-            delta.sounds.clone(),
-        )) {
+        if let Ok(sounds) = serde_json::from_value(serde_json::Value::Array(delta.sounds.clone())) {
             obs.sounds = sounds;
         }
     }
 
     // Replace recent_events
     if !delta.recent_events.is_empty() {
-        if let Ok(events) = serde_json::from_value(serde_json::Value::Array(
-            delta.recent_events.clone(),
-        )) {
+        if let Ok(events) =
+            serde_json::from_value(serde_json::Value::Array(delta.recent_events.clone()))
+        {
             obs.recent_events = events;
         }
     } else {

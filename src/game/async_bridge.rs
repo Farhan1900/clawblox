@@ -138,8 +138,8 @@ impl AsyncBridge {
                         limit,
                         response_tx,
                     } => {
-                        let result = Self::db_get_sorted(&db, game_id, &store_name, ascending, limit)
-                            .await;
+                        let result =
+                            Self::db_get_sorted(&db, game_id, &store_name, ascending, limit).await;
                         // Ignore send error - receiver may have been dropped (coroutine cancelled)
                         let _ = response_tx.send(result);
                     }
@@ -190,8 +190,10 @@ impl AsyncBridge {
 
                 match result {
                     Some((value_text,)) => {
-                        let value: serde_json::Value = serde_json::from_str(&value_text)
-                            .map_err(|e| format!("Invalid JSON value in sqlite datastore: {}", e))?;
+                        let value: serde_json::Value =
+                            serde_json::from_str(&value_text).map_err(|e| {
+                                format!("Invalid JSON value in sqlite datastore: {}", e)
+                            })?;
                         Ok(Some(value))
                     }
                     None => Ok(None),
@@ -227,8 +229,9 @@ impl AsyncBridge {
                 .map_err(|e| format!("Database error in SetAsync: {}", e))?;
             }
             DataStoreDb::Sqlite(pool) => {
-                let value_text = serde_json::to_string(value)
-                    .map_err(|e| format!("Failed to serialize value for sqlite datastore: {}", e))?;
+                let value_text = serde_json::to_string(value).map_err(|e| {
+                    format!("Failed to serialize value for sqlite datastore: {}", e)
+                })?;
                 sqlx::query(
                     r#"
                     INSERT INTO data_stores (game_id, store_name, key, value)

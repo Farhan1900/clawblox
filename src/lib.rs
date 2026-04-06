@@ -7,7 +7,7 @@ pub mod config;
 pub mod db;
 pub mod game;
 pub mod r2;
-pub mod replay;
 pub mod recording;
+pub mod replay;
 pub mod replay_agent_log;
 pub mod snapshot;

@@ -4,12 +4,6 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 
-if [[ -f "$ROOT_DIR/.env" ]]; then
-  set -a
-  source "$ROOT_DIR/.env"
-  set +a
-fi
-
 NUM_WORLDS="${NUM_WORLDS:-1}"
 AGENTS_PER_WORLD="${AGENTS_PER_WORLD:-1}"
 BASE_PORT="${BASE_PORT:-8080}"
@@ -70,6 +64,15 @@ sanitize_name() {
   printf '%s' "$1" | tr -c 'A-Za-z0-9._-' '_'
 }
 
+archive_existing_run_dir() {
+  local run_dir="$1"
+  local ts archive_dir
+  ts="$(date -u +%Y%m%dT%H%M%SZ)"
+  archive_dir="${run_dir}.preforce-${ts}"
+  mv "$run_dir" "$archive_dir"
+  echo "Archived existing run directory to: $archive_dir"
+}
+
 agent_display_name_for_index() {
   local idx="$1"
   local -a creature_names=(Eko Moa Rua Tavi Oni Zev Ika Pala Sori Nyx)
@@ -103,15 +106,74 @@ TMUX_SESSION=$(printf '%q' "$TMUX_SESSION")
 EOF
 }
 
+world_root_for_index() {
+  local world_index="$1"
+  printf '%s/worlds/world-%s' "$RUN_DIR" "$world_index"
+}
+
+world_log_for_index() {
+  local world_index="$1"
+  printf '%s/logs/world.log' "$(world_root_for_index "$world_index")"
+}
+
+world_spectator_token_file() {
+  local world_index="$1"
+  printf '%s/spectator_token.txt' "$(world_root_for_index "$world_index")"
+}
+
+extract_spectator_token_from_log() {
+  local world_log="$1"
+  [[ -f "$world_log" ]] || return 1
+  sed -n 's|^Spectator frontend: .*spectator_token=\([A-Za-z0-9-][A-Za-z0-9-]*\)$|\1|p' "$world_log" | tail -n 1
+}
+
+extract_spectator_token_from_tmux_pane() {
+  local world_index="$1"
+  tmux capture-pane -J -p -S -2000 -t "${TMUX_SESSION}:world-${world_index}" 2>/dev/null \
+    | sed -n 's|^Spectator frontend: .*spectator_token=\([A-Za-z0-9-][A-Za-z0-9-]*\)$|\1|p' \
+    | tail -n 1
+}
+
+cache_world_spectator_token() {
+  local world_index="$1"
+  local token_file
+  local token
+  token_file="$(world_spectator_token_file "$world_index")"
+  token="$(extract_spectator_token_from_log "$(world_log_for_index "$world_index")")" || true
+  if [[ -z "$token" ]]; then
+    token="$(extract_spectator_token_from_tmux_pane "$world_index")" || return 1
+  fi
+  [[ -n "$token" ]] || return 1
+  printf '%s\n' "$token" >"$token_file"
+}
+
+load_world_spectator_token() {
+  local world_index="$1"
+  local token_file
+  token_file="$(world_spectator_token_file "$world_index")"
+  if [[ -f "$token_file" ]]; then
+    tr -d '[:space:]' <"$token_file"
+    return 0
+  fi
+  cache_world_spectator_token "$world_index" >/dev/null 2>&1 || return 1
+  tr -d '[:space:]' <"$token_file"
+}
+
 save_world_snapshot() {
   local world_index="$1"
   local port="$2"
-  local world_root="$RUN_DIR/worlds/world-$world_index"
+  local world_root
+  local spectator_token=""
+  local -a curl_args=()
+  world_root="$(world_root_for_index "$world_index")"
   local resume_dir="$world_root/resume"
   local snapshot_file="$resume_dir/latest.json"
   local tmp_file="$snapshot_file.tmp"
   mkdir -p "$resume_dir"
-  if curl -fsS "http://localhost:${port}/snapshot" >"$tmp_file"; then
+  if spectator_token="$(load_world_spectator_token "$world_index" 2>/dev/null)"; then
+    curl_args=(-H "X-Spectator-Token: $spectator_token")
+  fi
+  if curl -fsS "${curl_args[@]}" "http://localhost:${port}/snapshot" >"$tmp_file"; then
     local ts
     ts="$(date -u +%Y%m%dT%H%M%SZ)"
     cp "$tmp_file" "$resume_dir/checkpoint_${ts}.json"
@@ -500,9 +562,13 @@ if [[ -n "$RESUME_PATH" ]]; then
 fi
 
 if [[ -z "$RESUME_PATH" && -e "$RUN_DIR" ]]; then
-  echo "Error: run directory already exists: $RUN_DIR"
-  echo "Set RUN_ID to a unique value and retry."
-  exit 1
+  if ((FORCE == 1)); then
+    archive_existing_run_dir "$RUN_DIR"
+  else
+    echo "Error: run directory already exists: $RUN_DIR"
+    echo "Set RUN_ID to a unique value and retry."
+    exit 1
+  fi
 fi
 
 ensure_ports_available
@@ -546,6 +612,7 @@ for ((i = 0; i < NUM_WORLDS; i++)); do
   port=$((BASE_PORT + i))
   printf "  world-%d (port %d)... " "$i" "$port"
   if wait_for_server "$port"; then
+    cache_world_spectator_token "$i" >/dev/null 2>&1 || true
     echo "ready"
   else
     echo "TIMEOUT (${HEALTH_TIMEOUT}s)"
@@ -555,6 +622,11 @@ done
 DURATION_SECONDS=""
 if [[ -n "$DURATION" ]]; then
   DURATION_SECONDS="$(parse_duration_seconds "$DURATION")"
+fi
+
+RESET_EVERY_SECONDS=""
+if [[ -n "$RESET_EVERY" ]]; then
+  RESET_EVERY_SECONDS="$(parse_duration_seconds "$RESET_EVERY")"
 fi
 
 echo "Launching $AGENTS_PER_WORLD Claude agents per world..."
@@ -597,6 +669,9 @@ for ((i = 0; i < NUM_WORLDS; i++)); do
     auth_env_prefix="unset ANTHROPIC_API_KEY ANTHROPIC_OAUTH_TOKEN; "
     if [[ "$CLAUDE_USE_ENV_AUTH" == "1" ]]; then
       auth_env_prefix=""
+      if [[ -n "${ANTHROPIC_OAUTH_TOKEN:-}" ]]; then
+        auth_env_prefix="ANTHROPIC_OAUTH_TOKEN=$(printf '%q' "$ANTHROPIC_OAUTH_TOKEN") "
+      fi
     fi
 
     sandbox_env_prefix=""
@@ -606,7 +681,7 @@ for ((i = 0; i < NUM_WORLDS; i++)); do
 
     tmux pipe-pane -o -t "$pane_target" "cat >> '$(printf "%q" "$agent_log_file")'"
     tmux send-keys -t "$pane_target" \
-      "cd '$ROOT_DIR' && ${auth_env_prefix}WORLD_BASE_URL='$url' WORLD_AGENT_NAME='$agent_display_name' AGENT_DIR='$agent_dir' WORKSPACE_DIR='$agent_workspace' SESSION_ID_FILE='$agent_session_file' WORLD_SESSION_FILE='$agent_world_session_file' RESET_EVERY=$(printf '%q' "$RESET_EVERY") DURATION_SECONDS=$(printf '%q' "$DURATION_SECONDS") CLAUDE_MODEL=$(printf '%q' "$CLAUDE_MODEL") CLAUDE_PERMISSION_MODE=$(printf '%q' "$CLAUDE_PERMISSION_MODE") CLAUDE_BARE=$(printf '%q' "$CLAUDE_BARE") CLAUDE_EXTRA_ARGS=$(printf '%q' "$CLAUDE_EXTRA_ARGS") ${sandbox_env_prefix}${template_env_prefix}${startup_env_prefix}${reset_wrapper_prefix}" Enter
+      "cd '$ROOT_DIR' && ${auth_env_prefix}WORLD_BASE_URL='$url' WORLD_AGENT_NAME='$agent_display_name' AGENT_DIR='$agent_dir' WORKSPACE_DIR='$agent_workspace' SESSION_ID_FILE='$agent_session_file' WORLD_SESSION_FILE='$agent_world_session_file' RESET_EVERY=$(printf '%q' "$RESET_EVERY_SECONDS") DURATION_SECONDS=$(printf '%q' "$DURATION_SECONDS") CLAUDE_MODEL=$(printf '%q' "$CLAUDE_MODEL") CLAUDE_PERMISSION_MODE=$(printf '%q' "$CLAUDE_PERMISSION_MODE") CLAUDE_BARE=$(printf '%q' "$CLAUDE_BARE") CLAUDE_EXTRA_ARGS=$(printf '%q' "$CLAUDE_EXTRA_ARGS") ${sandbox_env_prefix}${template_env_prefix}${startup_env_prefix}${reset_wrapper_prefix}" Enter
   done
 done
 

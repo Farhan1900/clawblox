@@ -1341,7 +1341,8 @@ impl GameInstance {
                     let Some(handle1) = self.physics.get_handle(part1_id) else {
                         continue;
                     };
-                    if !self.physics.is_dynamic_body(handle0) && !self.physics.is_dynamic_body(handle1)
+                    if !self.physics.is_dynamic_body(handle0)
+                        && !self.physics.is_dynamic_body(handle1)
                     {
                         continue;
                     }
@@ -1373,7 +1374,8 @@ impl GameInstance {
                     let Some(handle1) = self.physics.get_handle(part1_id) else {
                         continue;
                     };
-                    if !self.physics.is_dynamic_body(handle0) && !self.physics.is_dynamic_body(handle1)
+                    if !self.physics.is_dynamic_body(handle0)
+                        && !self.physics.is_dynamic_body(handle1)
                     {
                         continue;
                     }

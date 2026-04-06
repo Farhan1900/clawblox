@@ -425,8 +425,7 @@ impl LuaRuntime {
         lua.globals()
             .set("ServerScriptService", game.server_script_service())?;
         lua.globals().set("ServerStorage", game.server_storage())?;
-        lua.globals()
-            .set("serverStorage", game.server_storage())?;
+        lua.globals().set("serverStorage", game.server_storage())?;
 
         let print_fn = lua.create_function(|_, args: MultiValue| {
             let msg: Vec<String> = args
@@ -877,7 +876,12 @@ impl LuaRuntime {
         for (player, inputs) in to_process {
             for input in &inputs {
                 if input.input_type == "Jump" {
-                    let conn_count = agent_input_service.data.lock().unwrap().input_received.connection_count();
+                    let conn_count = agent_input_service
+                        .data
+                        .lock()
+                        .unwrap()
+                        .input_received
+                        .connection_count();
                     eprintln!("[InputFire] Firing Jump event (connections={})", conn_count);
                 }
             }

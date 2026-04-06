@@ -66,7 +66,10 @@ impl AgentInputService {
         let signal = self.data.lock().unwrap().input_received.clone();
 
         if input_type == "Jump" {
-            eprintln!("[InputReceived] Firing Jump, signal connections={}", signal.connection_count());
+            eprintln!(
+                "[InputReceived] Firing Jump, signal connections={}",
+                signal.connection_count()
+            );
         }
 
         // Convert serde_json::Value to Lua table
@@ -83,7 +86,10 @@ impl AgentInputService {
         )?;
 
         if input_type == "Jump" {
-            eprintln!("[InputReceived] Jump fire_as_coroutines returned {} threads", threads.len());
+            eprintln!(
+                "[InputReceived] Jump fire_as_coroutines returned {} threads",
+                threads.len()
+            );
         }
         track_yielded_threads(lua, threads)?;
 

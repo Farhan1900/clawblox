@@ -3,7 +3,8 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "start": "node agent.mjs"
+    "start": "node agent.mjs",
+    "usage": "node claude_usage_report.mjs"
   },
   "dependencies": {
     "@mariozechner/pi-agent-core": "^0.52.9",

@@ -76,7 +76,10 @@ fn mesa_island_coated_block_bond_moves_as_one_assembly() {
         (phase, has_bond)
     };
 
-    assert_eq!(phase, "Set", "coated block should set once bonding succeeds");
+    assert_eq!(
+        phase, "Set",
+        "coated block should set once bonding succeeds"
+    );
     assert!(has_bond, "mesa-island should create the residue bond weld");
 
     {
@@ -367,7 +370,10 @@ fn mesa_island_place_checks_full_bonded_assembly_occupancy() {
     };
 
     assert_eq!(place_result, "PlaceFailed:Occupied");
-    assert!(still_holding, "occupied placement should keep the bonded assembly in hand");
+    assert!(
+        still_holding,
+        "occupied placement should keep the bonded assembly in hand"
+    );
 }
 
 #[test]
@@ -486,7 +492,10 @@ fn mesa_island_rotated_bonded_placement_rotates_the_full_assembly() {
     let partner_dz = (target_z_after - block_z_after).abs();
 
     assert_eq!(place_result, "PlaceSuccess");
-    assert!(still_bonded, "rotated placement should preserve the bonded assembly");
+    assert!(
+        still_bonded,
+        "rotated placement should preserve the bonded assembly"
+    );
     assert!(
         root_dx < 0.25 && root_dz < 0.25,
         "placed root block should land near the requested root position; got ({block_x_after}, {block_z_after}) vs ({place_x}, {place_z})"
@@ -628,7 +637,10 @@ fn mesa_island_rotated_bonded_placement_checks_rotated_partner_occupancy() {
     };
 
     assert_eq!(place_result, "PlaceFailed:Occupied");
-    assert!(still_holding, "rotated occupied placement should keep the bonded assembly in hand");
+    assert!(
+        still_holding,
+        "rotated occupied placement should keep the bonded assembly in hand"
+    );
 }
 
 #[test]
@@ -708,7 +720,10 @@ fn mesa_island_plain_block_on_set_block_bonds_and_pickup_moves_both() {
     };
 
     assert_eq!(sticky_phase, "Set");
-    assert!(sticky_has_bond, "sticky block should own the bond when a plain block attaches to it");
+    assert!(
+        sticky_has_bond,
+        "sticky block should own the bond when a plain block attaches to it"
+    );
 
     instance.queue_agent_input(
         user_id,
@@ -868,7 +883,10 @@ fn mesa_island_out_of_bounds_bonded_blocks_reset_to_spawn_and_clear_bonds() {
         dx2 < 0.25 && dy2 < 0.75 && dz2 < 0.25,
         "Block_2 should reset near spawn; got ({block2x}, {block2y}, {block2z}) vs ({spawn2x}, {spawn2y}, {spawn2z})"
     );
-    assert_eq!(phase, "Bare", "reset should clear the coating/bond treatment");
+    assert_eq!(
+        phase, "Bare",
+        "reset should clear the coating/bond treatment"
+    );
     assert!(!still_bonded, "reset should remove residue bond welds");
 }
 
@@ -1002,6 +1020,12 @@ fn mesa_island_resume_rebuilds_bond_groups_for_out_of_bounds_reset() {
         dx2 < 0.25 && dy2 < 0.75 && dz2 < 0.25,
         "restored Block_2 should reset near spawn; got ({block2x}, {block2y}, {block2z}) vs ({spawn2x}, {spawn2y}, {spawn2z})"
     );
-    assert_eq!(phase, "Bare", "restored reset should clear the coating/bond treatment");
-    assert!(!still_bonded, "restored reset should remove residue bond welds");
+    assert_eq!(
+        phase, "Bare",
+        "restored reset should clear the coating/bond treatment"
+    );
+    assert!(
+        !still_bonded,
+        "restored reset should remove residue bond welds"
+    );
 }

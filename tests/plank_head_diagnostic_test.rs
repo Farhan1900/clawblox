@@ -52,7 +52,11 @@ fn approx_on_head(hrp: [f32; 3], plank_pos: [f32; 3], plank_size: [f32; 3]) -> b
     let head_contact_threshold = 0.7 * world_scale;
 
     let head_center = [hrp[0], hrp[1] + head_y_offset, hrp[2]];
-    let half = [plank_size[0] / 2.0, plank_size[1] / 2.0, plank_size[2] / 2.0];
+    let half = [
+        plank_size[0] / 2.0,
+        plank_size[1] / 2.0,
+        plank_size[2] / 2.0,
+    ];
     let clamped = [
         head_center[0].clamp(plank_pos[0] - half[0], plank_pos[0] + half[0]),
         head_center[1].clamp(plank_pos[1] - half[1], plank_pos[1] + half[1]),
@@ -150,7 +154,10 @@ fn diagnostic_welded_head_platform_lua_vs_physics() {
     let moved_x = end_pos[0] - start_pos[0];
     assert!(moved_x > 2.0, "Character should move in diagnostic run");
 
-    let runtime = instance.lua_runtime.as_ref().expect("Lua runtime should exist");
+    let runtime = instance
+        .lua_runtime
+        .as_ref()
+        .expect("Lua runtime should exist");
     let head = runtime
         .workspace()
         .get_descendants()
@@ -160,7 +167,10 @@ fn diagnostic_welded_head_platform_lua_vs_physics() {
 
     let (head_lua_pos, head_lua_id) = {
         let data = head.data.lock().unwrap();
-        let part = data.part_data.as_ref().expect("HeadPlatform should be a part");
+        let part = data
+            .part_data
+            .as_ref()
+            .expect("HeadPlatform should be a part");
         (
             [part.position.x, part.position.y, part.position.z],
             data.id.0,
@@ -184,7 +194,10 @@ fn diagnostic_welded_head_platform_lua_vs_physics() {
     );
 
     // This confirms the desync that likely contributes to flaky head-carry behavior.
-    assert!(delta_mag > 5.0, "Expected large Lua-vs-physics desync for welded head");
+    assert!(
+        delta_mag > 5.0,
+        "Expected large Lua-vs-physics desync for welded head"
+    );
 }
 
 #[test]
@@ -272,5 +285,8 @@ fn diagnostic_main_luau_find_on_head_then_measure_movement() {
         found_success, found_on_head, chosen_y, chosen_move_x
     );
 
-    assert!(found_success, "At least one PlaceObject attempt should succeed");
+    assert!(
+        found_success,
+        "At least one PlaceObject attempt should succeed"
+    );
 }

@@ -9,18 +9,18 @@ use axum::{
     routing::{get, post},
     Json, Router,
 };
+use chrono::{SecondsFormat, Utc};
 use clap::{Parser, Subcommand, ValueEnum};
 use dashmap::DashMap;
 use flate2::{write::GzEncoder, Compression};
 use futures_util::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
-use chrono::{SecondsFormat, Utc};
+use std::collections::{HashMap, VecDeque};
+use std::fs::OpenOptions;
+use std::io::Write;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::fs::OpenOptions;
-use std::io::Write;
-use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -39,22 +39,22 @@ use tower_http::services::ServeDir;
 use clawblox::{
     config::{SpeechConfig, SpeechMode},
     db,
-    recording, replay,
-    replay_agent_log::{load_agent_timeline, ReplayAgentMessage, ReplayAgentTimeline},
-    snapshot::GameInstanceSnapshot,
     game::{
+        self,
+        async_bridge::AsyncBridge,
         constants::audio::{
             DEFAULT_BYTES_PER_SAMPLE, DEFAULT_CHANNELS, DEFAULT_PLAYBACK_SPEED,
             DEFAULT_SAMPLE_RATE_HZ, MIN_PLAYBACK_SPEED, MIN_POSITIVE_U16, MIN_POSITIVE_U32,
             SERVER_PREDICTED_END_REASON, STREAM_TTL_SECS,
         },
-        self,
-        async_bridge::AsyncBridge,
         find_or_create_instance,
         instance::{ErrorMode, GameInstance, PlayerObservation, SpectatorObservation},
         script_bundle::load_world_and_entry_script,
         GameManager, GameManagerHandle,
     },
+    recording, replay,
+    replay_agent_log::{load_agent_timeline, ReplayAgentMessage, ReplayAgentTimeline},
+    snapshot::GameInstanceSnapshot,
 };
 
 static DOCS_DIR: Dir = include_dir!("$CARGO_MANIFEST_DIR/docs");
@@ -213,14 +213,7 @@ fn main() {
             record_dir,
             resume,
         } => run_game(
-            path,
-            port,
-            &base_path,
-            daemon,
-            datastore,
-            record,
-            record_dir,
-            resume,
+            path, port, &base_path, daemon, datastore, record, record_dir, resume,
         ),
         Commands::Replay {
             file,
@@ -1499,13 +1492,15 @@ fn maybe_build_renderer_package(
         );
     };
 
-    let metadata = package.clawblox_renderer.unwrap_or(RendererPackageMetadata {
-        api_version: None,
-        name: None,
-        entry: None,
-        capabilities: vec![],
-        out_file: None,
-    });
+    let metadata = package
+        .clawblox_renderer
+        .unwrap_or(RendererPackageMetadata {
+            api_version: None,
+            name: None,
+            entry: None,
+            capabilities: vec![],
+            out_file: None,
+        });
 
     let entry_rel = metadata
         .entry
@@ -1565,8 +1560,13 @@ fn maybe_build_renderer_package(
         ));
     }
 
-    let built_source = std::fs::read_to_string(&output_path)
-        .map_err(|e| format!("Failed reading renderer output {}: {}", output_path.display(), e))?;
+    let built_source = std::fs::read_to_string(&output_path).map_err(|e| {
+        format!(
+            "Failed reading renderer output {}: {}",
+            output_path.display(),
+            e
+        )
+    })?;
     if !built_source.contains("createRenderer") {
         return Err(format!(
             "Renderer output {} does not appear to export createRenderer.",
@@ -1595,7 +1595,10 @@ fn maybe_build_renderer_package(
         api_version,
         name,
         mode: "module".to_string(),
-        entry_url: Some(join_base_path(base_path, &format!("/renderer-files/{}", out_rel))),
+        entry_url: Some(join_base_path(
+            base_path,
+            &format!("/renderer-files/{}", out_rel),
+        )),
         capabilities,
     })
 }
@@ -1670,10 +1673,11 @@ fn run_game(
         .skill
         .as_ref()
         .and_then(|skill_file| std::fs::read_to_string(path.join(skill_file)).ok());
-    let renderer_manifest = maybe_build_renderer_package(&path, &config.renderer, &base_path).unwrap_or_else(|e| {
-        eprintln!("Error: {}", e);
-        std::process::exit(1);
-    });
+    let renderer_manifest = maybe_build_renderer_package(&path, &config.renderer, &base_path)
+        .unwrap_or_else(|e| {
+            eprintln!("Error: {}", e);
+            std::process::exit(1);
+        });
     let resume_snapshot = resume.as_ref().map(|resume_path| {
         let resume_path = if resume_path.is_absolute() {
             resume_path.clone()
@@ -1777,12 +1781,11 @@ fn run_game(
         );
         instance.instance_id = snapshot.instance.instance_id;
         instance.init_runtime();
-        clawblox::snapshot::restore_game_instance(&mut instance, &snapshot.instance).unwrap_or_else(
-            |e| {
+        clawblox::snapshot::restore_game_instance(&mut instance, &snapshot.instance)
+            .unwrap_or_else(|e| {
                 eprintln!("Error: failed to restore snapshot state: {}", e);
                 std::process::exit(1);
-            },
-        );
+            });
         instance.load_script(&script);
         game::insert_instance(&game_handle, instance)
     } else {
@@ -1803,13 +1806,10 @@ fn run_game(
     }
 
     let initial_instance_snapshot = {
-        let handle = game_handle
-            .instances
-            .get(&instance_id)
-            .unwrap_or_else(|| {
-                eprintln!("Error: missing instance {} after startup", instance_id);
-                std::process::exit(1);
-            });
+        let handle = game_handle.instances.get(&instance_id).unwrap_or_else(|| {
+            eprintln!("Error: missing instance {} after startup", instance_id);
+            std::process::exit(1);
+        });
         let instance = handle.read();
         Arc::new(
             clawblox::snapshot::capture_game_instance(&instance).unwrap_or_else(|e| {
@@ -1868,6 +1868,7 @@ fn run_game(
         let (speech_progress_tx, _) = broadcast::channel::<SpeechProgressEvent>(128);
         let (playback_done_tx, _) = broadcast::channel::<PlaybackDoneEvent>(64);
         let (chat_tx, _) = broadcast::channel::<LocalChatMessage>(128);
+        let spectator_token = Uuid::new_v4().to_string();
         let state = LocalState {
             game_id,
             instance_id,
@@ -1880,6 +1881,7 @@ fn run_game(
             error_mode: ErrorMode::Halt,
             started_at: Instant::now(),
             base_path: base_path.clone(),
+            spectator_token: spectator_token.clone(),
             skill_md,
             renderer_manifest,
             sessions: Arc::new(DashMap::new()),
@@ -2026,6 +2028,12 @@ fn run_game(
         println!();
         println!("Server running on http://localhost:{}", port);
         println!("Local frontend: http://localhost:{}{}", port, join_base_path(&base_path, "/"));
+        println!(
+            "Spectator frontend: http://localhost:{}{}?spectator_token={}",
+            port,
+            join_base_path(&base_path, "/"),
+            spectator_token
+        );
         if !daemon {
             println!("Mode: foreground (press Ctrl+C to stop)");
         }
@@ -2446,18 +2454,21 @@ fn run_external_runtime(
         .skill
         .as_ref()
         .and_then(|skill_file| std::fs::read_to_string(path.join(skill_file)).ok());
-    let renderer_manifest = maybe_build_renderer_package(&path, &config.renderer, &base_path).unwrap_or_else(|e| {
-        eprintln!("Error: {}", e);
-        std::process::exit(1);
-    });
+    let renderer_manifest = maybe_build_renderer_package(&path, &config.renderer, &base_path)
+        .unwrap_or_else(|e| {
+            eprintln!("Error: {}", e);
+            std::process::exit(1);
+        });
     let pid_file = pid_path(port);
 
     println!("Starting {} (external runtime mode)", config.name);
 
     let rt = tokio::runtime::Runtime::new().unwrap();
     rt.block_on(async {
+        let spectator_token = Uuid::new_v4().to_string();
         let state = ExternalLocalState {
             base_path: base_path.clone(),
+            spectator_token: spectator_token.clone(),
             renderer_manifest,
             skill_md,
             started_at: Instant::now(),
@@ -2468,24 +2479,37 @@ fn run_external_runtime(
             .allow_methods(Any)
             .allow_headers(Any);
 
-        let app = mount_router_at_base_path(Router::new()
-            .route("/", get(external_ui_index))
-            .route("/ui", get(external_ui_index))
-            .route("/ui/{*path}", get(local_ui_file))
-            .route("/renderer/manifest", get(external_renderer_manifest))
-            .route("/spectate", get(external_spectate))
-            .route("/spectate/ws", get(external_spectate_ws))
-            .route("/skill.md", get(external_skill))
-            .nest_service("/renderer-files", ServeDir::new(path.join("renderer")))
-            .nest_service("/assets", ServeDir::new(path.join("assets")))
-            .nest_service("/static", ServeDir::new(path.join("static")))
-            .with_state(state)
-            .layer(cors), &base_path);
+        let app = mount_router_at_base_path(
+            Router::new()
+                .route("/", get(external_ui_index))
+                .route("/ui", get(external_ui_index))
+                .route("/ui/{*path}", get(local_ui_file))
+                .route("/renderer/manifest", get(external_renderer_manifest))
+                .route("/spectate", get(external_spectate))
+                .route("/spectate/ws", get(external_spectate_ws))
+                .route("/skill.md", get(external_skill))
+                .nest_service("/renderer-files", ServeDir::new(path.join("renderer")))
+                .nest_service("/assets", ServeDir::new(path.join("assets")))
+                .nest_service("/static", ServeDir::new(path.join("static")))
+                .with_state(state)
+                .layer(cors),
+            &base_path,
+        );
 
         let addr = SocketAddr::from(([0, 0, 0, 0], port));
         println!();
         println!("Server running on http://localhost:{}", port);
-        println!("Local frontend: http://localhost:{}{}", port, join_base_path(&base_path, "/"));
+        println!(
+            "Local frontend: http://localhost:{}{}",
+            port,
+            join_base_path(&base_path, "/")
+        );
+        println!(
+            "Spectator frontend: http://localhost:{}{}?spectator_token={}",
+            port,
+            join_base_path(&base_path, "/"),
+            spectator_token
+        );
         if !daemon {
             println!("Mode: foreground (press Ctrl+C to stop)");
         }
@@ -2545,7 +2569,10 @@ fn run_external_world_command(path: &Path, command: &[String], port: u16) {
         .env("CLAWBLOX_BIN", current_exe)
         .status()
         .unwrap_or_else(|e| {
-            eprintln!("Error: failed to start run.command executable '{}': {}", executable, e);
+            eprintln!(
+                "Error: failed to start run.command executable '{}': {}",
+                executable, e
+            );
             std::process::exit(1);
         });
 
@@ -2712,6 +2739,7 @@ struct ChatMessagesQuery {
     instance_id: Option<Uuid>,
     after: Option<String>,
     limit: Option<usize>,
+    spectator_token: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -2854,6 +2882,7 @@ struct LocalState {
     error_mode: ErrorMode,
     started_at: Instant,
     base_path: String,
+    spectator_token: String,
     skill_md: Option<String>,
     renderer_manifest: LocalRendererManifest,
     sessions: Arc<DashMap<String, (Uuid, String)>>, // token -> (agent_id, name)
@@ -2882,6 +2911,7 @@ struct LocalState {
 #[derive(Clone)]
 struct ExternalLocalState {
     base_path: String,
+    spectator_token: String,
     renderer_manifest: LocalRendererManifest,
     skill_md: Option<String>,
     started_at: Instant,
@@ -2933,7 +2963,12 @@ fn base64_decoded_len(data: &str) -> Option<usize> {
         return None;
     }
 
-    let pad = data.as_bytes().iter().rev().take_while(|b| **b == b'=').count();
+    let pad = data
+        .as_bytes()
+        .iter()
+        .rev()
+        .take_while(|b| **b == b'=')
+        .count();
     if pad > 2 {
         return None;
     }
@@ -2986,15 +3021,15 @@ fn complete_audio_stream(state: &LocalState, stream_id: &str, reason: &str) {
         &state.log_file,
         &format!(
             "[audio] complete stream={} speaker={} reason={} lag_vs_estimate_ms={} total_bytes={}",
-            stream_id, stream_state.speaker, reason, expected_lag_ms, stream_state.total_audio_bytes
+            stream_id,
+            stream_state.speaker,
+            reason,
+            expected_lag_ms,
+            stream_state.total_audio_bytes
         ),
     );
 
-    push_playback_done_event(
-        state,
-        stream_state.speaker.clone(),
-        stream_id.to_string(),
-    );
+    push_playback_done_event(state, stream_state.speaker.clone(), stream_id.to_string());
 
     let speech_text = state.audio_speech_text.lock().unwrap().remove(stream_id);
 
@@ -3035,7 +3070,11 @@ fn complete_audio_stream(state: &LocalState, stream_id: &str, reason: &str) {
     }
 }
 
-fn schedule_audio_stream_completion(state: LocalState, stream_id: String, expected_end_at: Instant) {
+fn schedule_audio_stream_completion(
+    state: LocalState,
+    stream_id: String,
+    expected_end_at: Instant,
+) {
     tokio::spawn(async move {
         tokio::time::sleep_until(tokio::time::Instant::from_std(expected_end_at)).await;
         complete_audio_stream(&state, &stream_id, SERVER_PREDICTED_END_REASON);
@@ -3090,7 +3129,12 @@ fn maybe_publish_authoritative_speech_events(
     }
 }
 
-fn push_speech_progress_event(state: &LocalState, speaker: String, stream_id: String, text: String) {
+fn push_speech_progress_event(
+    state: &LocalState,
+    speaker: String,
+    stream_id: String,
+    text: String,
+) {
     let seq = {
         let mut seq = state.speech_progress_seq.lock().unwrap();
         let next = *seq;
@@ -3216,7 +3260,10 @@ fn build_chat_audibility(
         });
     }
 
-    if !audibility.iter().any(|entry| entry.agent_id == speaker_agent_id) {
+    if !audibility
+        .iter()
+        .any(|entry| entry.agent_id == speaker_agent_id)
+    {
         heard_by.push(speaker_agent_id);
         audibility.push(ChatAudibilityEntry {
             agent_id: speaker_agent_id,
@@ -3281,8 +3328,16 @@ fn embedded_ui_index_response(base_path: &str) -> axum::response::Response {
     };
     let mut html = String::from_utf8_lossy(file.contents()).into_owned();
     let base_href = format!("{}/", normalize_base_path(base_path).trim_end_matches('/'));
-    let base_href = if base_href == "/" { "/".to_string() } else { base_href };
-    html = html.replacen("<head>", &format!("<head>\n    <base href=\"{}\" />", base_href), 1);
+    let base_href = if base_href == "/" {
+        "/".to_string()
+    } else {
+        base_href
+    };
+    html = html.replacen(
+        "<head>",
+        &format!("<head>\n    <base href=\"{}\" />", base_href),
+        1,
+    );
     (
         axum::http::StatusCode::OK,
         [("content-type", "text/html; charset=utf-8")],
@@ -3377,10 +3432,10 @@ fn reset_local_instance(state: &LocalState) -> Result<(), String> {
     let spectator_obs = instance.get_spectator_observation();
 
     clear_local_instance_caches(state);
-    state
-        .game_handle
-        .instances
-        .insert(state.instance_id, Arc::new(parking_lot::RwLock::new(instance)));
+    state.game_handle.instances.insert(
+        state.instance_id,
+        Arc::new(parking_lot::RwLock::new(instance)),
+    );
     state
         .game_handle
         .spectator_cache
@@ -3438,9 +3493,10 @@ fn perform_engine_reset_for_session(
     state: &LocalState,
     agent_id: Uuid,
 ) -> Result<PlayerObservation, (axum::http::StatusCode, String)> {
-    let source_tick = game::get_spectator_observation_for_instance(&state.game_handle, state.instance_id)
-        .map(|obs| obs.tick)
-        .unwrap_or(0);
+    let source_tick =
+        game::get_spectator_observation_for_instance(&state.game_handle, state.instance_id)
+            .map(|obs| obs.tick)
+            .unwrap_or(0);
     record_local_input(
         state,
         agent_id,
@@ -3448,9 +3504,12 @@ fn perform_engine_reset_for_session(
         serde_json::json!({}),
         source_tick,
     );
-    state.recording_timeline.lock().unwrap().note_reset_boundary();
-    reset_local_instance(state)
-        .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    state
+        .recording_timeline
+        .lock()
+        .unwrap()
+        .note_reset_boundary();
+    reset_local_instance(state).map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e))?;
     build_local_player_observation(state, agent_id)
 }
 
@@ -3495,10 +3554,17 @@ fn capture_local_runtime_snapshot(state: &LocalState) -> Result<LocalRuntimeSnap
 
 async fn local_snapshot(
     State(state): State<LocalState>,
+    headers: axum::http::HeaderMap,
+    Query(query): Query<SpectatorAccessQuery>,
 ) -> Result<Json<LocalRuntimeSnapshot>, (axum::http::StatusCode, String)> {
     if let Some(err) = check_halted(&state) {
         return Err((axum::http::StatusCode::SERVICE_UNAVAILABLE, err));
     }
+    require_spectator_access(
+        &state.spectator_token,
+        &headers,
+        query.spectator_token.as_deref(),
+    )?;
 
     let snapshot = capture_local_runtime_snapshot(&state)
         .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e))?;
@@ -3511,8 +3577,17 @@ async fn external_renderer_manifest(
     Json(state.renderer_manifest)
 }
 
-async fn external_spectate(State(state): State<ExternalLocalState>) -> Json<serde_json::Value> {
-    Json(external_snapshot(&state))
+async fn external_spectate(
+    State(state): State<ExternalLocalState>,
+    headers: axum::http::HeaderMap,
+    Query(query): Query<SpectatorAccessQuery>,
+) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, String)> {
+    require_spectator_access(
+        &state.spectator_token,
+        &headers,
+        query.spectator_token.as_deref(),
+    )?;
+    Ok(Json(external_snapshot(&state)))
 }
 
 async fn external_skill(State(state): State<ExternalLocalState>) -> impl IntoResponse {
@@ -3532,9 +3607,16 @@ async fn external_skill(State(state): State<ExternalLocalState>) -> impl IntoRes
 
 async fn external_spectate_ws(
     State(state): State<ExternalLocalState>,
+    Query(query): Query<SpectatorAccessQuery>,
+    headers: axum::http::HeaderMap,
     ws: WebSocketUpgrade,
-) -> impl IntoResponse {
-    ws.on_upgrade(move |socket| handle_external_spectate_ws(socket, state))
+) -> Result<impl IntoResponse, (axum::http::StatusCode, String)> {
+    require_spectator_access(
+        &state.spectator_token,
+        &headers,
+        query.spectator_token.as_deref(),
+    )?;
+    Ok(ws.on_upgrade(move |socket| handle_external_spectate_ws(socket, state)))
 }
 
 async fn handle_external_spectate_ws(socket: WebSocket, state: ExternalLocalState) {
@@ -3660,6 +3742,32 @@ fn get_session(
 }
 
 #[derive(Deserialize)]
+struct SpectatorAccessQuery {
+    spectator_token: Option<String>,
+}
+
+fn require_spectator_access(
+    expected_token: &str,
+    headers: &axum::http::HeaderMap,
+    query_token: Option<&str>,
+) -> Result<(), (axum::http::StatusCode, String)> {
+    let provided = headers
+        .get("X-Spectator-Token")
+        .and_then(|h| h.to_str().ok())
+        .or(query_token)
+        .map(str::trim)
+        .filter(|token| !token.is_empty());
+
+    match provided {
+        Some(token) if token == expected_token => Ok(()),
+        _ => Err((
+            axum::http::StatusCode::UNAUTHORIZED,
+            "Missing or invalid spectator token".to_string(),
+        )),
+    }
+}
+
+#[derive(Deserialize)]
 struct AudioChunkRequest {
     stream_id: String,
     seq: u32,
@@ -3693,7 +3801,10 @@ async fn local_audio(
         .sample_rate_hz
         .unwrap_or(DEFAULT_SAMPLE_RATE_HZ)
         .max(MIN_POSITIVE_U32);
-    let channels = body.channels.unwrap_or(DEFAULT_CHANNELS).max(MIN_POSITIVE_U16);
+    let channels = body
+        .channels
+        .unwrap_or(DEFAULT_CHANNELS)
+        .max(MIN_POSITIVE_U16);
     let bytes_per_sample = body
         .bytes_per_sample
         .unwrap_or(DEFAULT_BYTES_PER_SAMPLE)
@@ -3846,12 +3957,10 @@ async fn local_chat(
     // Record chat message if recording is enabled
     if let Some(ref writer) = state.recording_writer {
         let time_ms = state.started_at.elapsed().as_millis() as u64;
-        let source_tick = game::get_spectator_observation_for_instance(
-            &state.game_handle,
-            state.instance_id,
-        )
-        .map(|obs| obs.tick)
-        .unwrap_or(0);
+        let source_tick =
+            game::get_spectator_observation_for_instance(&state.game_handle, state.instance_id)
+                .map(|obs| obs.tick)
+                .unwrap_or(0);
         let recording_tick = remap_recording_tick(&state, source_tick);
         let writer = writer.clone();
         let msg_id = msg.id.clone();
@@ -3860,7 +3969,11 @@ async fn local_chat(
         let created_at = msg.created_at.clone();
         let delivery_mode = msg.delivery_mode.clone();
         let hearing_radius = msg.hearing_radius;
-        let heard_by = msg.heard_by.iter().map(ToString::to_string).collect::<Vec<_>>();
+        let heard_by = msg
+            .heard_by
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>();
         let audibility = msg
             .audibility
             .iter()
@@ -3911,7 +4024,11 @@ async fn local_chat_messages(
         .limit
         .unwrap_or(LOCAL_CHAT_DEFAULT_LIMIT)
         .clamp(1, LOCAL_CHAT_MAX_LIMIT);
-    let after = query.after.as_deref().map(str::trim).filter(|s| !s.is_empty());
+    let after = query
+        .after
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
 
     let messages = {
         let chat = state.chat_state.lock().unwrap();
@@ -4095,7 +4212,8 @@ fn resolve_local_model_url_attr(
 ) {
     if let Some(value) = attrs.get_mut("ModelUrl") {
         if let Some(path) = value.as_str().and_then(|url| url.strip_prefix("asset://")) {
-            *value = serde_json::Value::String(join_base_path(base_path, &format!("/assets/{}", path)));
+            *value =
+                serde_json::Value::String(join_base_path(base_path, &format!("/assets/{}", path)));
         }
     }
 }
@@ -4120,10 +4238,17 @@ fn resolve_local_player_assets(obs: &mut PlayerObservation, base_path: &str) {
 
 async fn local_spectate(
     State(state): State<LocalState>,
+    headers: axum::http::HeaderMap,
+    Query(query): Query<SpectatorAccessQuery>,
 ) -> Result<Json<SpectatorObservation>, (axum::http::StatusCode, String)> {
     if let Some(err) = check_halted(&state) {
         return Err((axum::http::StatusCode::SERVICE_UNAVAILABLE, err));
     }
+    require_spectator_access(
+        &state.spectator_token,
+        &headers,
+        query.spectator_token.as_deref(),
+    )?;
 
     let mut observation =
         game::get_spectator_observation_for_instance(&state.game_handle, state.instance_id)
@@ -4136,18 +4261,28 @@ async fn local_spectate(
 
 async fn local_spectate_chat_messages(
     State(state): State<LocalState>,
+    headers: axum::http::HeaderMap,
     Query(query): Query<ChatMessagesQuery>,
 ) -> Result<Json<ChatMessagesResponse>, (axum::http::StatusCode, String)> {
     if let Some(err) = check_halted(&state) {
         return Err((axum::http::StatusCode::SERVICE_UNAVAILABLE, err));
     }
+    require_spectator_access(
+        &state.spectator_token,
+        &headers,
+        query.spectator_token.as_deref(),
+    )?;
 
     let instance_id = query.instance_id.unwrap_or(state.instance_id);
     let limit = query
         .limit
         .unwrap_or(LOCAL_CHAT_DEFAULT_LIMIT)
         .clamp(1, LOCAL_CHAT_MAX_LIMIT);
-    let after = query.after.as_deref().map(str::trim).filter(|s| !s.is_empty());
+    let after = query
+        .after
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
 
     let messages = {
         let chat = state.chat_state.lock().unwrap();
@@ -4179,15 +4314,22 @@ async fn local_renderer_manifest(State(state): State<LocalState>) -> Json<LocalR
 async fn local_spectate_ws(
     State(state): State<LocalState>,
     Query(params): Query<SpectateWsQuery>,
+    headers: axum::http::HeaderMap,
     ws: WebSocketUpgrade,
-) -> impl IntoResponse {
+) -> Result<impl IntoResponse, (axum::http::StatusCode, String)> {
+    require_spectator_access(
+        &state.spectator_token,
+        &headers,
+        params.spectator_token.as_deref(),
+    )?;
     let role = SpectateRole::from_param(params.role.as_deref());
-    ws.on_upgrade(move |socket| handle_spectate_ws(socket, state, role))
+    Ok(ws.on_upgrade(move |socket| handle_spectate_ws(socket, state, role)))
 }
 
 #[derive(Debug, Deserialize)]
 struct SpectateWsQuery {
     role: Option<String>,
+    spectator_token: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

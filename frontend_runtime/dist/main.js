@@ -20,6 +20,17 @@ function withBasePath(path) {
   return `${BASE_PATH}${value}` || value
 }
 
+const SPECTATOR_TOKEN = (() => {
+  const token = new URLSearchParams(window.location.search).get('spectator_token')
+  return token ? token.trim() : ''
+})()
+
+function withSpectatorToken(path) {
+  const url = new URL(withBasePath(path), window.location.origin)
+  if (SPECTATOR_TOKEN) url.searchParams.set('spectator_token', SPECTATOR_TOKEN)
+  return `${url.pathname}${url.search}${url.hash}`
+}
+
 const statusEl = document.getElementById('status')
 const metaEl = document.getElementById('meta')
 const canvas = document.getElementById('stage')
@@ -650,7 +661,7 @@ function renderChatFeed() {
 async function loadChatHistory() {
   if (replayState.enabled) return  // In replay mode, chat comes via WebSocket
   try {
-    const resp = await fetch(withBasePath('/spectate/chat/messages?limit=50'))
+    const resp = await fetch(withSpectatorToken('/spectate/chat/messages?limit=50'))
     if (!resp.ok) throw new Error(`history HTTP ${resp.status}`)
     const data = await resp.json()
     const messages = Array.isArray(data?.messages) ? data.messages : []
@@ -1284,7 +1295,7 @@ async function bootstrap() {
 
   const wsStats = { frames: 0, lastTick: 0 }
   const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
-  const ws = new WebSocket(`${protocol}//${window.location.host}${withBasePath('/spectate/ws')}`)
+  const ws = new WebSocket(`${protocol}//${window.location.host}${withSpectatorToken('/spectate/ws')}`)
   ws.binaryType = 'arraybuffer'
   spectateWs = ws
 

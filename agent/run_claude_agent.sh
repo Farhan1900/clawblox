@@ -3,6 +3,9 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+
+# Prevent stray API keys from triggering Claude's key detection prompt
+unset ANTHROPIC_API_KEY 2>/dev/null || true
 WORLD_BASE_URL="${WORLD_BASE_URL-http://localhost:8080}"
 WORLD_JOIN_PATH="${WORLD_JOIN_PATH-/join}"
 WORLD_LEAVE_PATH="${WORLD_LEAVE_PATH-}"
@@ -26,6 +29,29 @@ RESET_EVERY="${RESET_EVERY-}"
 SANDBOX="${SANDBOX-0}"
 CHECKPOINT_WARNING_SECONDS=300
 CHECKPOINT_WARNING_PROMPT="You will be reset in 5 minutes. Update your workspace memory files now."
+
+parse_duration_seconds() {
+  local input="$1"
+  if [[ "$input" =~ ^[0-9]+$ ]]; then
+    printf '%s' "$input"
+    return 0
+  fi
+  local total=0 rest="$input"
+  while [[ -n "$rest" ]]; do
+    if [[ "$rest" =~ ^([0-9]+)([hms]) ]]; then
+      local val="${BASH_REMATCH[1]}" unit="${BASH_REMATCH[2]}"
+      case "$unit" in
+        h) total=$((total + val * 3600)) ;;
+        m) total=$((total + val * 60)) ;;
+        s) total=$((total + val)) ;;
+      esac
+      rest="${rest#"${BASH_REMATCH[0]}"}"
+    else
+      return 1
+    fi
+  done
+  printf '%s' "$total"
+}
 
 generate_agent_name() {
   local -a first_parts=(Brisk Cozy Daring Fuzzy Jolly Lunar Nova Pixel Sunny Swift)
@@ -204,7 +230,12 @@ if [[ "$SANDBOX" == "1" ]]; then
     "$SANDBOX_HOME_DIR/.claude/plans" \
     "$SANDBOX_HOME_DIR/.claude/shell-snapshots"
 
-  if [[ -f "$HOME/.claude/.credentials.json" ]]; then
+  if [[ -n "${ANTHROPIC_OAUTH_TOKEN:-}" ]]; then
+    # Use the provided OAuth token instead of host credentials
+    printf '{"claudeAiOauth":{"accessToken":"%s"}}' "$ANTHROPIC_OAUTH_TOKEN" \
+      > "$SANDBOX_HOME_DIR/.claude/.credentials.json"
+    chmod 600 "$SANDBOX_HOME_DIR/.claude/.credentials.json"
+  elif [[ -f "$HOME/.claude/.credentials.json" ]]; then
     cp "$HOME/.claude/.credentials.json" "$SANDBOX_HOME_DIR/.claude/.credentials.json"
     chmod 600 "$SANDBOX_HOME_DIR/.claude/.credentials.json"
   fi
@@ -272,8 +303,12 @@ if [[ -n "$WORLD_STARTUP_INSTRUCTIONS" ]]; then
 fi
 
 if [[ -n "$RESET_EVERY" ]]; then
+  if ! RESET_EVERY="$(parse_duration_seconds "$RESET_EVERY")"; then
+    echo "Error: RESET_EVERY must be a positive integer in seconds or a duration like 1h, 30m, or 90s." >&2
+    exit 1
+  fi
   if [[ ! "$RESET_EVERY" =~ ^[1-9][0-9]*$ ]]; then
-    echo "Error: RESET_EVERY must be a positive integer in seconds." >&2
+    echo "Error: RESET_EVERY must resolve to a positive integer in seconds." >&2
     exit 1
   fi
 fi

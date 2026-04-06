@@ -16,7 +16,8 @@ fn river_bridge_script_path() -> PathBuf {
 #[test]
 fn river_bridge_pickup_moves_bonded_blocks_as_one_assembly() {
     let mut instance = GameInstance::new(Uuid::new_v4(), None);
-    let source = fs::read_to_string(river_bridge_script_path()).expect("failed to read river-bridge");
+    let source =
+        fs::read_to_string(river_bridge_script_path()).expect("failed to read river-bridge");
     instance.load_script(&source);
 
     let agent_id = Uuid::new_v4();
@@ -128,7 +129,8 @@ fn river_bridge_pickup_moves_bonded_blocks_as_one_assembly() {
 #[test]
 fn river_bridge_place_allows_ground_contact_for_bonded_assembly() {
     let mut instance = GameInstance::new(Uuid::new_v4(), None);
-    let source = fs::read_to_string(river_bridge_script_path()).expect("failed to read river-bridge");
+    let source =
+        fs::read_to_string(river_bridge_script_path()).expect("failed to read river-bridge");
     instance.load_script(&source);
 
     let agent_id = Uuid::new_v4();
@@ -264,7 +266,8 @@ fn river_bridge_place_allows_ground_contact_for_bonded_assembly() {
 #[test]
 fn river_bridge_place_rejects_overlap_with_player() {
     let mut instance = GameInstance::new(Uuid::new_v4(), None);
-    let source = fs::read_to_string(river_bridge_script_path()).expect("failed to read river-bridge");
+    let source =
+        fs::read_to_string(river_bridge_script_path()).expect("failed to read river-bridge");
     instance.load_script(&source);
 
     let agent_id = Uuid::new_v4();

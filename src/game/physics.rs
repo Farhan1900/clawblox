@@ -152,7 +152,12 @@ fn build_collider_with_physical_properties(
     physical_properties: Option<PhysicalProperties>,
 ) -> Collider {
     let props = physical_properties.unwrap_or(PhysicalProperties::new(0.7, 0.3, 0.5, 1.0, 1.0));
-    let mut collider = build_collider(size, shape, interaction_state.can_collide, interaction_state);
+    let mut collider = build_collider(
+        size,
+        shape,
+        interaction_state.can_collide,
+        interaction_state,
+    );
     collider.set_friction(props.friction.max(0.0));
     collider.set_restitution(props.elasticity.max(0.0));
     collider.set_density(props.density.max(0.0));
@@ -224,7 +229,11 @@ impl PhysicsWorld {
 
     /// Removes all impulse joints. Constraints are rebuilt from Lua every tick.
     pub fn clear_impulse_joints(&mut self) {
-        let handles: Vec<_> = self.impulse_joint_set.iter().map(|(handle, _)| handle).collect();
+        let handles: Vec<_> = self
+            .impulse_joint_set
+            .iter()
+            .map(|(handle, _)| handle)
+            .collect();
         for handle in handles {
             self.impulse_joint_set.remove(handle, true);
         }
@@ -435,7 +444,11 @@ impl PhysicsWorld {
         if let Some(body) = self.rigid_body_set.get_mut(handle) {
             if body.is_dynamic() {
                 body.set_angvel(
-                    vector![angular_velocity[0], angular_velocity[1], angular_velocity[2]],
+                    vector![
+                        angular_velocity[0],
+                        angular_velocity[1],
+                        angular_velocity[2]
+                    ],
                     true,
                 );
             }
@@ -531,15 +544,15 @@ impl PhysicsWorld {
             .get(&lua_id)
             .copied()
             .unwrap_or(None);
-        let interaction_state = self
-            .lua_to_interactions
-            .get(&lua_id)
-            .copied()
-            .unwrap_or(PartInteractionState {
-                can_collide: true,
-                can_touch: true,
-                can_query: true,
-            });
+        let interaction_state =
+            self.lua_to_interactions
+                .get(&lua_id)
+                .copied()
+                .unwrap_or(PartInteractionState {
+                    can_collide: true,
+                    can_touch: true,
+                    can_query: true,
+                });
         if let Some(&handle) = self.lua_to_body.get(&lua_id) {
             if let Some(body) = self.rigid_body_set.get(handle) {
                 let colliders: Vec<_> = body.colliders().iter().cloned().collect();
@@ -572,37 +585,43 @@ impl PhysicsWorld {
 
     /// Toggles collider sensor mode (can_collide=false -> sensor, can_collide=true -> solid)
     pub fn set_can_collide(&mut self, lua_id: u64, can_collide: bool) {
-        let mut state = self.lua_to_interactions.get(&lua_id).copied().unwrap_or(
-            PartInteractionState {
-                can_collide,
-                can_touch: true,
-                can_query: true,
-            },
-        );
+        let mut state =
+            self.lua_to_interactions
+                .get(&lua_id)
+                .copied()
+                .unwrap_or(PartInteractionState {
+                    can_collide,
+                    can_touch: true,
+                    can_query: true,
+                });
         state.can_collide = can_collide;
         self.set_interaction_state(lua_id, state);
     }
 
     pub fn set_can_touch(&mut self, lua_id: u64, can_touch: bool) {
-        let mut state = self.lua_to_interactions.get(&lua_id).copied().unwrap_or(
-            PartInteractionState {
-                can_collide: true,
-                can_touch,
-                can_query: true,
-            },
-        );
+        let mut state =
+            self.lua_to_interactions
+                .get(&lua_id)
+                .copied()
+                .unwrap_or(PartInteractionState {
+                    can_collide: true,
+                    can_touch,
+                    can_query: true,
+                });
         state.can_touch = can_touch;
         self.set_interaction_state(lua_id, state);
     }
 
     pub fn set_can_query(&mut self, lua_id: u64, can_query: bool) {
-        let mut state = self.lua_to_interactions.get(&lua_id).copied().unwrap_or(
-            PartInteractionState {
-                can_collide: true,
-                can_touch: true,
-                can_query,
-            },
-        );
+        let mut state =
+            self.lua_to_interactions
+                .get(&lua_id)
+                .copied()
+                .unwrap_or(PartInteractionState {
+                    can_collide: true,
+                    can_touch: true,
+                    can_query,
+                });
         state.can_query = can_query;
         self.set_interaction_state(lua_id, state);
     }
@@ -630,15 +649,15 @@ impl PhysicsWorld {
             .get(&lua_id)
             .copied()
             .unwrap_or(None);
-        let interaction_state = self
-            .lua_to_interactions
-            .get(&lua_id)
-            .copied()
-            .unwrap_or(PartInteractionState {
-                can_collide: true,
-                can_touch: true,
-                can_query: true,
-            });
+        let interaction_state =
+            self.lua_to_interactions
+                .get(&lua_id)
+                .copied()
+                .unwrap_or(PartInteractionState {
+                    can_collide: true,
+                    can_touch: true,
+                    can_query: true,
+                });
         if let Some(&handle) = self.lua_to_body.get(&lua_id) {
             if let Some(body) = self.rigid_body_set.get(handle) {
                 let colliders: Vec<_> = body.colliders().iter().cloned().collect();
@@ -679,8 +698,8 @@ impl PhysicsWorld {
             .insert(lua_id, physical_properties);
         if let Some(&handle) = self.lua_to_body.get(&lua_id) {
             if let Some(body) = self.rigid_body_set.get(handle) {
-                let props = physical_properties
-                    .unwrap_or(PhysicalProperties::new(0.7, 0.3, 0.5, 1.0, 1.0));
+                let props =
+                    physical_properties.unwrap_or(PhysicalProperties::new(0.7, 0.3, 0.5, 1.0, 1.0));
                 let colliders: Vec<_> = body.colliders().iter().cloned().collect();
                 for collider_handle in colliders {
                     if let Some(collider) = self.collider_set.get_mut(collider_handle) {

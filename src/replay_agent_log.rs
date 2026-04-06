@@ -50,7 +50,12 @@ pub fn load_agent_timeline(path: &Path, tick_rate: u32) -> Result<ReplayAgentTim
         let Ok(value) = serde_json::from_str::<Value>(trimmed) else {
             continue;
         };
-        if value.get("type").and_then(|v| v.as_str()).unwrap_or_default() != "message" {
+        if value
+            .get("type")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            != "message"
+        {
             continue;
         }
 
@@ -159,7 +164,10 @@ fn extract_replay_agent_message_text(message: &Value) -> String {
     let mut parts: Vec<String> = Vec::new();
 
     for item in content {
-        let item_type = item.get("type").and_then(|v| v.as_str()).unwrap_or_default();
+        let item_type = item
+            .get("type")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default();
         match item_type {
             "text" => {
                 let text = item
@@ -233,7 +241,11 @@ fn extract_tick_from_text(text: &str) -> Option<u64> {
     }
 }
 
-fn infer_tick_from_anchors(ts_ms: i64, anchors: &[TickAnchor], fallback_ticks_per_ms: f64) -> (f64, bool) {
+fn infer_tick_from_anchors(
+    ts_ms: i64,
+    anchors: &[TickAnchor],
+    fallback_ticks_per_ms: f64,
+) -> (f64, bool) {
     if anchors.is_empty() {
         return (0.0, true);
     }
