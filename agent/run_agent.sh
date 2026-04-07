@@ -59,9 +59,9 @@ if [[ -z "$SYSTEM_PROMPT_SNAPSHOT_FILE" ]]; then
   SYSTEM_PROMPT_SNAPSHOT_FILE="$SESSION_DIR/system_prompt.txt"
 fi
 
-if [[ -z "${ANTHROPIC_API_KEY:-}" ]]; then
-  echo "Error: ANTHROPIC_API_KEY is not set." >&2
-  echo "Set it in environment or in $ROOT_DIR/.env before running agents." >&2
+if [[ -z "${ANTHROPIC_API_KEY:-}" && -z "$PI_PROVIDER" ]]; then
+  echo "Error: ANTHROPIC_API_KEY is not set and no PI_PROVIDER specified." >&2
+  echo "Set ANTHROPIC_API_KEY in environment or in $ROOT_DIR/.env, or set PI_PROVIDER to use another backend." >&2
   exit 1
 fi
 
