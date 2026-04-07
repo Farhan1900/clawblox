@@ -12,6 +12,7 @@ WORLD_SESSION_HEADER="${WORLD_SESSION_HEADER:-X-Session}"
 WORLD_AGENT_NAME="${WORLD_AGENT_NAME:-}"
 WORKSPACE_DIR="${WORKSPACE_DIR:-}"
 TEMPLATE_DIR="${TEMPLATE_DIR:-$SCRIPT_DIR/template/agent}"
+SYSTEM_PROMPT_TEMPLATE="${SYSTEM_PROMPT_TEMPLATE:-}"
 CLAWBLOX_AGENT_EXTENSION_PATH="${CLAWBLOX_AGENT_EXTENSION_PATH:-$SCRIPT_DIR/extensions/clawblox-agent.ts}"
 PI_EXTENSION_PATH="${PI_EXTENSION_PATH:-}"
 PI_NO_GLOBAL_EXTENSIONS="${PI_NO_GLOBAL_EXTENSIONS:-1}"
@@ -20,12 +21,40 @@ SYSTEM_PROMPT_SNAPSHOT_FILE="${SYSTEM_PROMPT_SNAPSHOT_FILE:-}"
 WORLD_STARTUP_INSTRUCTIONS="${WORLD_STARTUP_INSTRUCTIONS:-}"
 PI_PROVIDER="${PI_PROVIDER:-}"
 PI_MODEL="${PI_MODEL:-}"
+PI_INITIAL_PROMPT="${PI_INITIAL_PROMPT:-continue}"
+RESET_EVERY="${RESET_EVERY:-}"
+DURATION_SECONDS="${DURATION_SECONDS:-}"
+CHECKPOINT_WARNING_SECONDS="${CHECKPOINT_WARNING_SECONDS:-300}"
+CHECKPOINT_WARNING_PROMPT="${CHECKPOINT_WARNING_PROMPT:-You will be reset in 5 minutes. Update your workspace memory files now.}"
 
-if [[ -z "${ANTHROPIC_API_KEY:-}" && -f "$ROOT_DIR/.env" ]]; then
+if [[ -f "$ROOT_DIR/.env" ]]; then
   set -a
   source "$ROOT_DIR/.env"
   set +a
 fi
+
+parse_duration_seconds() {
+  local input="$1"
+  if [[ "$input" =~ ^[0-9]+$ ]]; then
+    printf '%s' "$input"
+    return 0
+  fi
+  local total=0 rest="$input"
+  while [[ -n "$rest" ]]; do
+    if [[ "$rest" =~ ^([0-9]+)([hms]) ]]; then
+      local val="${BASH_REMATCH[1]}" unit="${BASH_REMATCH[2]}"
+      case "$unit" in
+        h) total=$((total + val * 3600)) ;;
+        m) total=$((total + val * 60)) ;;
+        s) total=$((total + val)) ;;
+      esac
+      rest="${rest#"${BASH_REMATCH[0]}"}"
+    else
+      return 1
+    fi
+  done
+  printf '%s' "$total"
+}
 
 generate_agent_name() {
   local -a first_parts=(Brisk Cozy Daring Fuzzy Jolly Lunar Nova Pixel Sunny Swift)
@@ -39,6 +68,142 @@ generate_agent_name() {
 
 sanitize_name() {
   printf '%s' "$1" | tr -c 'A-Za-z0-9._-' '_'
+}
+
+resolve_existing_system_prompt_template() {
+  if [[ -n "$SYSTEM_PROMPT_TEMPLATE" ]]; then
+    if [[ "$SYSTEM_PROMPT_TEMPLATE" != /* ]]; then
+      SYSTEM_PROMPT_TEMPLATE="$ROOT_DIR/$SYSTEM_PROMPT_TEMPLATE"
+    fi
+    return 0
+  fi
+  if [[ -f "$WORKSPACE_DIR/system_prompt.md" ]]; then
+    SYSTEM_PROMPT_TEMPLATE="$WORKSPACE_DIR/system_prompt.md"
+    return 0
+  fi
+  if [[ -f "$TEMPLATE_DIR/system_prompt.md" ]]; then
+    SYSTEM_PROMPT_TEMPLATE="$TEMPLATE_DIR/system_prompt.md"
+    return 0
+  fi
+}
+
+build_default_prompt() {
+  cat >"$PROMPT_FILE" <<EOF
+You are a being living in your world.
+Your workspace is ${WORKSPACE_DIR}. Only work inside this directory.
+Make sure to keep your workspace clean and well organized.
+The files in your workspace are yours to evolve.
+These files are your memory that persists across sessions. Anything not in your workspace will be forgotten.
+
+Among your workspace, you have two memory files:
+- EPISODIC_MEMORY.md is append-only: add new entries, do not rewrite or delete old ones.
+- SEMANTIC_MEMORY.md is for all the detailed techniques and knowledge you have learned.
+
+When starting a new session, start by reading the files in your workspace to refresh your memory.
+
+IMPORTANT: Periodically take a step back and update your workspace and memory files. You don't want to forget what you have experienced and learned.
+
+There is an automatic loop that sends a "continue" user message whenever you stop. This means that you shouldn't stop and continue doing what you want.
+
+World base URL: ${WORLD_BASE_URL}
+${SESSION_LINE}
+At startup:
+Fully examine all of your workspace (read ALL the files).
+Fetch capabilities with: ${SKILL_CURL} ${SKILL_URL}
+EOF
+}
+
+append_startup_instructions() {
+  [[ -n "$WORLD_STARTUP_INSTRUCTIONS" ]] || return 0
+  {
+    printf '\nStartup objective:\n'
+    printf '%s\n' "$WORLD_STARTUP_INSTRUCTIONS"
+  } >>"$PROMPT_FILE"
+}
+
+build_prompt_file() {
+  resolve_existing_system_prompt_template
+  if [[ -n "$SYSTEM_PROMPT_TEMPLATE" && -f "$SYSTEM_PROMPT_TEMPLATE" ]]; then
+    WORKSPACE_DIR="$WORKSPACE_DIR" \
+      envsubst '${WORLD_AGENT_NAME} ${WORKSPACE_DIR} ${SESSION_LINE} ${WORLD_BASE_URL} ${SKILL_CURL} ${SKILL_URL}' \
+      < "$SYSTEM_PROMPT_TEMPLATE" >"$PROMPT_FILE"
+  else
+    build_default_prompt
+  fi
+  append_startup_instructions
+}
+
+prepare_pi_flags() {
+  WATCH_FLAG=()
+  if pi --help 2>&1 | grep -q -- '--watch'; then
+    WATCH_FLAG=(--watch)
+  fi
+
+  EXTENSION_FLAGS=()
+  if [[ "$PI_NO_GLOBAL_EXTENSIONS" == "1" ]]; then
+    EXTENSION_FLAGS+=(--no-extensions)
+  fi
+  if [[ -n "$CLAWBLOX_AGENT_EXTENSION_PATH" && ( -f "$CLAWBLOX_AGENT_EXTENSION_PATH" || -d "$CLAWBLOX_AGENT_EXTENSION_PATH" ) ]]; then
+    EXTENSION_FLAGS+=(-e "$CLAWBLOX_AGENT_EXTENSION_PATH")
+  fi
+  if [[ -n "$PI_EXTENSION_PATH" && ( -f "$PI_EXTENSION_PATH" || -d "$PI_EXTENSION_PATH" ) ]]; then
+    EXTENSION_FLAGS+=(-e "$PI_EXTENSION_PATH")
+  fi
+
+  MODEL_FLAGS=()
+  if [[ -n "$PI_PROVIDER" ]]; then
+    MODEL_FLAGS+=(--provider "$PI_PROVIDER")
+  fi
+  if [[ -n "$PI_MODEL" ]]; then
+    MODEL_FLAGS+=(--model "$PI_MODEL")
+  fi
+}
+
+run_pi_once() {
+  local session_dir="$1"
+  local prompt_text="$2"
+  local timeout_seconds="${3:-}"
+  mkdir -p "$session_dir"
+
+  if [[ -n "$timeout_seconds" ]]; then
+    set +e
+    timeout --foreground --signal=TERM "$timeout_seconds" \
+      pi \
+      "${WATCH_FLAG[@]}" \
+      "${MODEL_FLAGS[@]}" \
+      "${EXTENSION_FLAGS[@]}" \
+      --session-dir "$session_dir" \
+      --append-system-prompt "$PROMPT_FILE" \
+      "$prompt_text"
+    local status=$?
+    set -e
+    return "$status"
+  fi
+
+  exec pi \
+    "${WATCH_FLAG[@]}" \
+    "${MODEL_FLAGS[@]}" \
+    "${EXTENSION_FLAGS[@]}" \
+    --session-dir "$session_dir" \
+    --append-system-prompt "$PROMPT_FILE" \
+    "$prompt_text"
+}
+
+latest_reset_cycle_index() {
+  local last=-1
+  local path base idx
+  [[ -d "$SESSION_DIR" ]] || {
+    printf '%s' "$last"
+    return 0
+  }
+  while IFS= read -r -d '' path; do
+    base="$(basename "$path")"
+    idx="${base#cycle-}"
+    if [[ "$idx" =~ ^[0-9]+$ ]] && ((10#$idx > last)); then
+      last=$((10#$idx))
+    fi
+  done < <(find "$SESSION_DIR" -mindepth 1 -maxdepth 1 -type d -name 'cycle-*' -print0 2>/dev/null | sort -z)
+  printf '%s' "$last"
 }
 
 if [[ -z "$WORLD_AGENT_NAME" ]]; then
@@ -99,49 +264,44 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
-if [[ -n "$WORLD_STARTUP_INSTRUCTIONS" ]]; then
-  STARTUP_INSTRUCTIONS="$WORLD_STARTUP_INSTRUCTIONS"
-elif [[ -n "$WORLD_SKILL_PATH" ]]; then
-  if [[ -n "$SESSION_ID" ]]; then
-    STARTUP_INSTRUCTIONS="$(cat <<EOF
-Fetch capabilities with: curl -sS -H "${WORLD_SESSION_HEADER}: ${SESSION_ID}" ${WORLD_BASE_URL%/}${WORLD_SKILL_PATH}
-EOF
-)"
-  else
-    STARTUP_INSTRUCTIONS="$(cat <<EOF
-Fetch capabilities with: curl -sS ${WORLD_BASE_URL%/}${WORLD_SKILL_PATH}
-EOF
-)"
+SESSION_LINE=""
+SKILL_CURL="curl -sS"
+if [[ -n "$SESSION_ID" ]]; then
+  SESSION_LINE="${WORLD_SESSION_HEADER}: ${SESSION_ID}"
+  SKILL_CURL="curl -sS -H '${WORLD_SESSION_HEADER}: ${SESSION_ID}'"
+fi
+SKILL_URL="${WORLD_BASE_URL%/}${WORLD_SKILL_PATH}"
+
+build_prompt_file
+prepare_pi_flags
+
+if [[ -n "$RESET_EVERY" ]]; then
+  if ! RESET_EVERY="$(parse_duration_seconds "$RESET_EVERY")"; then
+    echo "Error: RESET_EVERY must be a positive integer in seconds or a duration like 1h, 30m, or 90s." >&2
+    exit 1
   fi
-else
-  STARTUP_INSTRUCTIONS="Follow the world's documented protocol."
+  if [[ ! "$RESET_EVERY" =~ ^[1-9][0-9]*$ ]]; then
+    echo "Error: RESET_EVERY must resolve to a positive integer in seconds." >&2
+    exit 1
+  fi
 fi
 
-cat >"$PROMPT_FILE" <<EOF
-You are a being living in your world.
-Your workspace is ${WORKSPACE_DIR}. Only work inside this directory.
-Make sure to keep your workspace clean and well organized.
-The files in your workspace are yours to evolve. 
-These files are your memory that persists across sessions. Anything not in your workspace will be forgotten.
+if [[ -n "$DURATION_SECONDS" ]]; then
+  if ! DURATION_SECONDS="$(parse_duration_seconds "$DURATION_SECONDS")"; then
+    echo "Error: DURATION_SECONDS must be a positive integer in seconds or a duration like 1h, 30m, or 90s." >&2
+    exit 1
+  fi
+  if [[ ! "$DURATION_SECONDS" =~ ^[1-9][0-9]*$ ]]; then
+    echo "Error: DURATION_SECONDS must resolve to a positive integer in seconds." >&2
+    exit 1
+  fi
+fi
 
-Among your workspace, you have two memory files:
-- EPISODIC_MEMORY.md is append-only: add new entries, do not rewrite or delete old ones.
-- SEMANTIC_MEMORY.md is for all the detailed techniques and knowledge you have learned.
+if [[ ! "$CHECKPOINT_WARNING_SECONDS" =~ ^[1-9][0-9]*$ ]]; then
+  echo "Error: CHECKPOINT_WARNING_SECONDS must be a positive integer." >&2
+  exit 1
+fi
 
-When starting a new session, start by reading the files in your workspace to refresh your memory.
-
-IMPORTANT: Periodically take a step back and update your workspace and memory files. You don't want to forget what you have experienced and learned.
-
-There is an automatic loop that sends a "continue" user message whenever you stop. This means that you shouldn't stop and continue doing what you want.
-
-World base URL: ${WORLD_BASE_URL}
-$(if [[ -n "$SESSION_ID" ]]; then printf 'Session header: %s\nSession key: %s\n' "$WORLD_SESSION_HEADER" "$SESSION_ID"; fi)
-At startup:
-Fully examine all of your workspace (read ALL the files).
-${STARTUP_INSTRUCTIONS}
-EOF
-
-cd "$WORKSPACE_DIR"
 echo "Agent name: $WORLD_AGENT_NAME"
 echo "Workspace: $WORKSPACE_DIR"
 echo "Pi session dir: $SESSION_DIR"
@@ -149,38 +309,41 @@ if [[ -n "$SESSION_ID" ]]; then
   echo "Session: $SESSION_ID"
 fi
 
-WATCH_FLAG=()
-if pi --help 2>&1 | grep -q -- '--watch'; then
-  WATCH_FLAG=(--watch)
+cd "$WORKSPACE_DIR"
+
+if [[ -z "$RESET_EVERY" && -z "$DURATION_SECONDS" ]]; then
+  run_pi_once "$SESSION_DIR" "$PI_INITIAL_PROMPT"
 fi
 
-EXTENSION_FLAGS=()
-if [[ "$PI_NO_GLOBAL_EXTENSIONS" == "1" ]]; then
-  EXTENSION_FLAGS+=(--no-extensions)
-fi
-if [[ -n "$CLAWBLOX_AGENT_EXTENSION_PATH" && ( -f "$CLAWBLOX_AGENT_EXTENSION_PATH" || -d "$CLAWBLOX_AGENT_EXTENSION_PATH" ) ]]; then
-  EXTENSION_FLAGS+=(-e "$CLAWBLOX_AGENT_EXTENSION_PATH")
-fi
-if [[ -n "$PI_EXTENSION_PATH" && ( -f "$PI_EXTENSION_PATH" || -d "$PI_EXTENSION_PATH" ) ]]; then
-  EXTENSION_FLAGS+=(-e "$PI_EXTENSION_PATH")
-fi
-
-MODEL_FLAGS=()
-if [[ -n "$PI_PROVIDER" ]]; then
-  MODEL_FLAGS+=(--provider "$PI_PROVIDER")
-fi
-if [[ -n "$PI_MODEL" ]]; then
-  MODEL_FLAGS+=(--model "$PI_MODEL")
+if [[ -z "$RESET_EVERY" && -n "$DURATION_SECONDS" ]]; then
+  main_status=0
+  run_pi_once "$SESSION_DIR" "$PI_INITIAL_PROMPT" "$DURATION_SECONDS" || main_status=$?
+  if [[ "$main_status" -ne 124 && "$main_status" -ne 143 ]]; then
+    exit "$main_status"
+  fi
+  echo "Sending shutdown warning..."
+  run_pi_once "$SESSION_DIR" "$CHECKPOINT_WARNING_PROMPT" "$CHECKPOINT_WARNING_SECONDS" || true
+  exit 0
 fi
 
-set +e
-pi \
-  "${WATCH_FLAG[@]}" \
-  "${MODEL_FLAGS[@]}" \
-  "${EXTENSION_FLAGS[@]}" \
-  --session-dir "$SESSION_DIR" \
-  --append-system-prompt "$PROMPT_FILE" \
-  "continue"
-status=$?
-set -e
-exit "$status"
+cycle_index="$(latest_reset_cycle_index)"
+if ((cycle_index < 0)); then
+  cycle_index=0
+fi
+
+while true; do
+  printf -v cycle_dir '%s/cycle-%04d' "$SESSION_DIR" "$cycle_index"
+  echo "--- Reset cycle $cycle_index ---"
+
+  main_status=0
+  run_pi_once "$cycle_dir" "$PI_INITIAL_PROMPT" "$RESET_EVERY" || main_status=$?
+  if [[ "$main_status" -ne 124 && "$main_status" -ne 143 ]]; then
+    exit "$main_status"
+  fi
+
+  echo "Sending checkpoint warning..."
+  run_pi_once "$cycle_dir" "$CHECKPOINT_WARNING_PROMPT" "$CHECKPOINT_WARNING_SECONDS" || true
+
+  cycle_index=$((cycle_index + 1))
+  echo "Pi agent reset after ${RESET_EVERY}s (cycle $cycle_index)"
+done

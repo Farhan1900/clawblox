@@ -78,15 +78,74 @@ TMUX_SESSION=$(printf '%q' "$TMUX_SESSION")
 EOF
 }
 
+world_root_for_index() {
+  local world_index="$1"
+  printf '%s/worlds/world-%s' "$RUN_DIR" "$world_index"
+}
+
+world_log_for_index() {
+  local world_index="$1"
+  printf '%s/logs/world.log' "$(world_root_for_index "$world_index")"
+}
+
+world_spectator_token_file() {
+  local world_index="$1"
+  printf '%s/spectator_token.txt' "$(world_root_for_index "$world_index")"
+}
+
+extract_spectator_token_from_log() {
+  local world_log="$1"
+  [[ -f "$world_log" ]] || return 1
+  sed -n 's|^Spectator frontend: .*spectator_token=\([A-Za-z0-9-][A-Za-z0-9-]*\)$|\1|p' "$world_log" | tail -n 1
+}
+
+extract_spectator_token_from_tmux_pane() {
+  local world_index="$1"
+  tmux capture-pane -J -p -S -2000 -t "${TMUX_SESSION}:world-${world_index}" 2>/dev/null \
+    | sed -n 's|^Spectator frontend: .*spectator_token=\([A-Za-z0-9-][A-Za-z0-9-]*\)$|\1|p' \
+    | tail -n 1
+}
+
+cache_world_spectator_token() {
+  local world_index="$1"
+  local token_file
+  local token
+  token_file="$(world_spectator_token_file "$world_index")"
+  token="$(extract_spectator_token_from_log "$(world_log_for_index "$world_index")")" || true
+  if [[ -z "$token" ]]; then
+    token="$(extract_spectator_token_from_tmux_pane "$world_index")" || return 1
+  fi
+  [[ -n "$token" ]] || return 1
+  printf '%s\n' "$token" >"$token_file"
+}
+
+load_world_spectator_token() {
+  local world_index="$1"
+  local token_file
+  token_file="$(world_spectator_token_file "$world_index")"
+  if [[ -f "$token_file" ]]; then
+    tr -d '[:space:]' <"$token_file"
+    return 0
+  fi
+  cache_world_spectator_token "$world_index" >/dev/null 2>&1 || return 1
+  tr -d '[:space:]' <"$token_file"
+}
+
 save_world_snapshot() {
   local world_index="$1"
   local port="$2"
-  local world_root="$RUN_DIR/worlds/world-$world_index"
+  local world_root
+  local spectator_token=""
+  local -a curl_args=()
+  world_root="$(world_root_for_index "$world_index")"
   local resume_dir="$world_root/resume"
   local snapshot_file="$resume_dir/latest.json"
   local tmp_file="$snapshot_file.tmp"
   mkdir -p "$resume_dir"
-  if curl -fsS "http://localhost:${port}/snapshot" >"$tmp_file"; then
+  if spectator_token="$(load_world_spectator_token "$world_index" 2>/dev/null)"; then
+    curl_args=(-H "X-Spectator-Token: $spectator_token")
+  fi
+  if curl -fsS "${curl_args[@]}" "http://localhost:${port}/snapshot" >"$tmp_file"; then
     local ts
     ts="$(date -u +%Y%m%dT%H%M%SZ)"
     cp "$tmp_file" "$resume_dir/checkpoint_${ts}.json"
@@ -744,6 +803,7 @@ for ((i = 0; i < NUM_WORLDS; i++)); do
   port=$((BASE_PORT + i))
   printf "  world-%d (port %d)... " "$i" "$port"
   if wait_for_server "$port"; then
+    cache_world_spectator_token "$i" >/dev/null 2>&1 || true
     echo "ready"
   else
     echo "TIMEOUT (${HEALTH_TIMEOUT}s)"

@@ -10,6 +10,8 @@ from pathlib import Path
 from statistics import median
 
 import matplotlib.pyplot as plt
+from matplotlib.colors import Normalize
+from matplotlib.colors import LinearSegmentedColormap
 import zstandard as zstd
 
 
@@ -106,6 +108,58 @@ def is_block_entity(entity: dict) -> bool:
     if render.get("role") == "Block":
         return True
     return False
+
+
+def is_visible_world_part(entity: dict) -> bool:
+    if entity.get("type") != "part":
+        return False
+    pos = entity.get("position")
+    size = entity.get("size")
+    render = entity.get("render") or {}
+    if not pos or len(pos) < 3 or not size or len(size) < 3:
+        return False
+    if render.get("kind") != "primitive":
+        return False
+    if render.get("visible") is False:
+        return False
+    if render.get("role") in {"Ocean", "Sky", "Cloud"}:
+        return False
+    try:
+        sx = float(size[0])
+        sz = float(size[2])
+    except Exception:
+        return False
+    return sx > 0 and sz > 0
+
+
+def entity_xz_bounds(entity: dict) -> tuple[float, float, float, float] | None:
+    pos = entity.get("position")
+    size = entity.get("size")
+    if not pos or len(pos) < 3 or not size or len(size) < 3:
+        return None
+    try:
+        x = float(pos[0])
+        z = float(pos[2])
+        sx = float(size[0])
+        sz = float(size[2])
+    except Exception:
+        return None
+    half_x = sx * 0.5
+    half_z = sz * 0.5
+    return (x - half_x, x + half_x, z - half_z, z + half_z)
+
+
+def entity_ground_height(entity: dict) -> float | None:
+    pos = entity.get("position")
+    size = entity.get("size")
+    if not pos or len(pos) < 2 or not size or len(size) < 2:
+        return None
+    try:
+        y = float(pos[1])
+        sy = float(size[1])
+    except Exception:
+        return None
+    return y + sy * 0.5
 
 
 def compute_max_stack(observation: dict, explicit_bin_size: float | None) -> tuple[int, int]:
@@ -215,6 +269,32 @@ def choose_agent(players: list[dict], explicit_name: str | None, explicit_id: st
     return chosen.get("id"), chosen.get("name", chosen.get("id"))
 
 
+def get_agent_position(player: dict, entities: list[dict]) -> tuple[float, float, float]:
+    player_id = player.get("id", "unknown")
+    root_part_id = player.get("root_part_id")
+    if not isinstance(root_part_id, int):
+        raise RuntimeError(f"Player {player_id} is missing integer root_part_id: {root_part_id!r}")
+
+    root_entity = next((ent for ent in entities if ent.get("id") == root_part_id), None)
+    if root_entity is None:
+        raise RuntimeError(f"Player {player_id} root_part_id={root_part_id} not found in entities")
+
+    pos = root_entity.get("position")
+    if not isinstance(pos, list) or len(pos) < 3:
+        raise RuntimeError(
+            f"Player {player_id} root entity {root_part_id} has invalid position payload: {pos!r}"
+        )
+
+    x = float(pos[0])
+    y = float(pos[1])
+    z = float(pos[2])
+    if not (math.isfinite(x) and math.isfinite(y) and math.isfinite(z)):
+        raise RuntimeError(
+            f"Player {player_id} root entity {root_part_id} position is non-finite: {pos!r}"
+        )
+    return x, y, z
+
+
 def plot_series(
     x_values: list[float],
     y_values: list[float],
@@ -231,6 +311,115 @@ def plot_series(
     plt.tight_layout()
     plt.savefig(output_png, dpi=150)
     plt.close()
+
+
+def interpolate_series(values: list[float]) -> list[float]:
+    if not values:
+        return []
+
+    out = list(values)
+    finite_indices = [i for i, value in enumerate(values) if math.isfinite(value)]
+    if len(finite_indices) < 2:
+        return out
+
+    for left_idx, right_idx in zip(finite_indices, finite_indices[1:]):
+        left_value = values[left_idx]
+        right_value = values[right_idx]
+        gap = right_idx - left_idx
+        if gap <= 1:
+            continue
+        step = (right_value - left_value) / gap
+        for offset in range(1, gap):
+            out[left_idx + offset] = left_value + step * offset
+
+    return out
+
+
+def plot_top_down_trajectory(
+    x_values: list[float],
+    z_values: list[float],
+    y_values: list[float],
+    map_parts: list[dict],
+    title: str,
+    output_png: Path,
+):
+    fig, ax = plt.subplots(figsize=(9, 9))
+
+    map_min_x = None
+    map_max_x = None
+    map_min_z = None
+    map_max_z = None
+    part_heights = [h for h in (entity_ground_height(part) for part in map_parts) if h is not None]
+    ground_norm = Normalize(
+        vmin=min(part_heights) if part_heights else 0.0,
+        vmax=max(part_heights) if part_heights and max(part_heights) > min(part_heights) else (min(part_heights) + 1e-6 if part_heights else 1.0),
+    )
+    ground_cmap = LinearSegmentedColormap.from_list(
+        "earthy_gray",
+        ["#d2c6b8", "#bda88f", "#a2896f", "#89705a"],
+    )
+
+    for part in map_parts:
+        bounds = entity_xz_bounds(part)
+        if bounds is None:
+            continue
+        min_x, max_x, min_z, max_z = bounds
+        height = entity_ground_height(part)
+        facecolor = ground_cmap(ground_norm(height if height is not None else ground_norm.vmin))
+        rect = plt.Rectangle(
+            (min_x, min_z),
+            max_x - min_x,
+            max_z - min_z,
+            facecolor=facecolor,
+            edgecolor="none",
+            linewidth=0,
+            alpha=1.0,
+            zorder=1,
+        )
+        ax.add_patch(rect)
+        map_min_x = min_x if map_min_x is None else min(map_min_x, min_x)
+        map_max_x = max_x if map_max_x is None else max(map_max_x, max_x)
+        map_min_z = min_z if map_min_z is None else min(map_min_z, min_z)
+        map_max_z = max_z if map_max_z is None else max(map_max_z, max_z)
+
+    finite_samples = [
+        (x, z, y)
+        for x, z, y in zip(x_values, z_values, y_values)
+        if math.isfinite(x) and math.isfinite(z) and math.isfinite(y)
+    ]
+    if len(finite_samples) < 2:
+        raise ValueError("Need at least two finite X/Z/Y samples to plot a trajectory gradient.")
+
+    xs = [sample[0] for sample in finite_samples]
+    zs = [sample[1] for sample in finite_samples]
+    ys = [sample[2] for sample in finite_samples]
+
+    ax.plot(xs, zs, color="#111111", linewidth=1.8, alpha=0.95, zorder=3)
+    ax.scatter([xs[0]], [zs[0]], color="#2ca02c", s=40, zorder=4)
+    ax.scatter([xs[-1]], [zs[-1]], color="#1f77b4", s=40, zorder=4)
+    path_min_x = min(xs)
+    path_max_x = max(xs)
+    path_min_z = min(zs)
+    path_max_z = max(zs)
+
+    min_x = path_min_x if map_min_x is None else min(path_min_x, map_min_x)
+    max_x = path_max_x if map_max_x is None else max(path_max_x, map_max_x)
+    min_z = path_min_z if map_min_z is None else min(path_min_z, map_min_z)
+    max_z = path_max_z if map_max_z is None else max(path_max_z, map_max_z)
+
+    span_x = max(max_x - min_x, 1.0)
+    span_z = max(max_z - min_z, 1.0)
+    pad_x = span_x * 0.05
+    pad_z = span_z * 0.05
+    ax.set_xlim(min_x - pad_x, max_x + pad_x)
+    ax.set_ylim(min_z - pad_z, max_z + pad_z)
+    ax.set_aspect("equal", adjustable="box")
+    ax.set_title("")
+    ax.grid(False)
+    ax.set_axis_off()
+    fig.tight_layout()
+    fig.savefig(output_png, dpi=180)
+    plt.close(fig)
 
 
 def compute_sustained_max_y_series(
@@ -323,16 +512,24 @@ def main():
     y_sustained_csv = out_dir / "agent_max_y_sustained.csv"
     y_sustained_plot_png = out_dir / "agent_max_y_sustained.png"
     stack_plot_png = out_dir / "max_stack.png"
+    trajectory_csv = out_dir / "agent_trajectory.csv"
+    trajectory_plot_png = out_dir / "agent_trajectory_map.png"
     summary_json = out_dir / "summary.json"
 
     sustained_hold_s = 1.0
     y_times = []
     y_vals = []
+    x_vals = []
+    z_vals = []
     agent_sample_ticks = []
     agent_sample_times = []
     agent_sample_y = []
+    agent_sample_x = []
+    agent_sample_z = []
     stack_times = []
     stack_vals = []
+    static_map_parts = []
+    map_part_ids = set()
 
     selected_agent_id = args.agent_id
     selected_agent_name = args.agent_name
@@ -343,11 +540,17 @@ def main():
     max_y_seen = None
     max_y_tick = None
 
-    with agent_csv.open("w", newline="") as f_agent, stack_csv.open("w", newline="") as f_stack:
+    with (
+        agent_csv.open("w", newline="") as f_agent,
+        stack_csv.open("w", newline="") as f_stack,
+        trajectory_csv.open("w", newline="") as f_traj,
+    ):
         agent_writer = csv.writer(f_agent)
         stack_writer = csv.writer(f_stack)
+        traj_writer = csv.writer(f_traj)
         agent_writer.writerow(["tick", "time_s", "agent_id", "agent_name", "agent_y"])
         stack_writer.writerow(["tick", "time_s", "max_stacked_blocks", "num_blocks"])
+        traj_writer.writerow(["tick", "time_s", "agent_id", "agent_name", "agent_x", "agent_z", "agent_y"])
 
         for idx, cp_tick in enumerate(cp_ticks):
             if cp_tick > end_tick:
@@ -368,6 +571,13 @@ def main():
             if max_end_time_ms is not None and time_ms > max_end_time_ms:
                 break
             observation = decode_blob(cp_row["data"])
+            for ent in observation.get("entities", []):
+                ent_id = ent.get("id")
+                if ent_id in map_part_ids:
+                    continue
+                if is_visible_world_part(ent):
+                    static_map_parts.append(ent)
+                    map_part_ids.add(ent_id)
 
             def sample_now(tick: int, ms: int, obs: dict):
                 nonlocal selected_agent_id, selected_agent_name
@@ -391,12 +601,15 @@ def main():
                             auto_select_announced = True
 
                 agent_y = None
+                agent_x = None
+                agent_z = None
                 if selected_agent_id:
                     for p in players:
                         if p.get("id") == selected_agent_id:
-                            pos = p.get("position") or []
-                            if len(pos) >= 2:
-                                agent_y = float(pos[1])
+                            agent_x, agent_y, agent_z = get_agent_position(
+                                p,
+                                obs.get("entities", []),
+                            )
                             break
 
                 max_stack, num_blocks = compute_max_stack(obs, args.stack_bin_size)
@@ -404,6 +617,8 @@ def main():
                 agent_sample_ticks.append(tick)
                 agent_sample_times.append(t_s)
                 agent_sample_y.append(math.nan if agent_y is None else agent_y)
+                agent_sample_x.append(math.nan if agent_x is None else agent_x)
+                agent_sample_z.append(math.nan if agent_z is None else agent_z)
 
                 agent_writer.writerow(
                     [
@@ -411,6 +626,17 @@ def main():
                         f"{t_s:.6f}",
                         selected_agent_id or "",
                         selected_agent_name or "",
+                        "" if agent_y is None else f"{agent_y:.6f}",
+                    ]
+                )
+                traj_writer.writerow(
+                    [
+                        tick,
+                        f"{t_s:.6f}",
+                        selected_agent_id or "",
+                        selected_agent_name or "",
+                        "" if agent_x is None else f"{agent_x:.6f}",
+                        "" if agent_z is None else f"{agent_z:.6f}",
                         "" if agent_y is None else f"{agent_y:.6f}",
                     ]
                 )
@@ -422,6 +648,9 @@ def main():
                     if max_y_seen is None or agent_y > max_y_seen:
                         max_y_seen = agent_y
                         max_y_tick = tick
+                if agent_x is not None and agent_z is not None:
+                    x_vals.append(agent_x)
+                    z_vals.append(agent_z)
 
                 stack_times.append(t_s)
                 stack_vals.append(float(max_stack))
@@ -457,6 +686,9 @@ def main():
         agent_sample_y,
         hold_seconds=sustained_hold_s,
     )
+    interpolated_agent_x = interpolate_series(agent_sample_x)
+    interpolated_agent_y = interpolate_series(agent_sample_y)
+    interpolated_agent_z = interpolate_series(agent_sample_z)
     with y_sustained_csv.open("w", newline="") as f_sustained:
         sustained_writer = csv.writer(f_sustained)
         sustained_writer.writerow(["tick", "time_s", "max_agent_y_sustained_2s"])
@@ -497,6 +729,18 @@ def main():
     else:
         print("[warn] No stack samples found; max_stack.png not generated.")
 
+    if x_vals and z_vals:
+        plot_top_down_trajectory(
+            interpolated_agent_x,
+            interpolated_agent_z,
+            interpolated_agent_y,
+            map_parts=static_map_parts,
+            title=f"Top-Down Agent Trajectory ({selected_agent_name or 'agent'})",
+            output_png=trajectory_plot_png,
+        )
+    else:
+        print("[warn] No agent X/Z samples found; agent_trajectory_map.png not generated.")
+
     max_sustained_y = None
     max_sustained_y_tick = None
     for tick, value in zip(agent_sample_ticks, sustained_max_values):
@@ -515,6 +759,8 @@ def main():
         "max_duration_s": args.max_duration,
         "agent_id": selected_agent_id,
         "agent_name": selected_agent_name,
+        "trajectory_samples": len(x_vals),
+        "map_part_count": len(static_map_parts),
         "max_agent_y": max_y_seen,
         "max_agent_y_tick": max_y_tick,
         "max_agent_y_sustained_hold_s": sustained_hold_s,

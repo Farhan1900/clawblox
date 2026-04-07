@@ -301,8 +301,8 @@ export function createCameraModeController(THREE, camera, options = {}) {
   const overviewCfg = {
     panSpeed: options.overviewPanSpeed ?? 55,
     zoomSpeed: options.overviewZoomSpeed ?? 0.001,
-    minZoom: options.minOverviewZoom ?? 0.2,
-    maxZoom: options.maxOverviewZoom ?? 3.2,
+    minZoom: options.minOverviewZoom ?? 0.1,
+    maxZoom: options.maxOverviewZoom ?? 8,
     touchPanSpeed: options.touchPanSpeed ?? 0.08,
     panDragSign: options.invertOverviewPanDrag === false ? 1 : -1,
     boundsPadding: options.spectatorBoundsPadding ?? -5,
