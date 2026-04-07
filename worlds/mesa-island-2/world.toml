@@ -1,0 +1,22 @@
+name = "Mesa Island"
+description = "A mysterious island with alien flora and hidden secrets."
+max_players = 10
+afk_timeout = 0
+
+[scripts]
+main = "main.lua"
+skill = "SKILL.md"
+
+[renderer]
+name = "Mesa Island Renderer"
+mode = "module"
+api_version = 1
+entry = "dist/renderer.bundle.js"
+capabilities = ["three-sdk"]
+
+[observation]
+radius = 80
+
+[speech]
+mode = "proximity"
+hearing_radius = 30

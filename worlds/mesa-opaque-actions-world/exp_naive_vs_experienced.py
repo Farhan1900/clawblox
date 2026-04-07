@@ -24,9 +24,9 @@ import pandas as pd
 import seaborn as sns
 import zstandard as zstd
 
-WORLD_DIR = Path(__file__).resolve().parent
-ROOT_DIR = WORLD_DIR.parent.parent
-LAUNCH_SCRIPT = ROOT_DIR / "agent" / "launch_multi_claude.sh"
+SCRIPT_DIR = Path(__file__).resolve().parent
+ROOT_DIR = SCRIPT_DIR.parent.parent
+LAUNCH_SCRIPT = ROOT_DIR / "agent" / "launch_multi_agent.sh"
 DEFAULT_TEMPLATE = ROOT_DIR / "worlds" / "mesa-island" / "agent-template"
 
 GOALS = {
@@ -46,15 +46,23 @@ GOALS = {
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--exp", required=True, help="Experiment id (e.g. 001). Ports are auto-assigned: 8000 + exp*20")
+    p.add_argument("--backend", choices=("claude", "pi"), default="claude", help="Agent backend to launch")
+    p.add_argument("--world-dir", type=Path, default=SCRIPT_DIR, help="Target world directory to run the experiment against")
     p.add_argument("--train-duration", default="1h", help="Training run duration (default: 1h)")
     p.add_argument("--eval-duration", default="1h", help="Per-eval run duration (default: 1h)")
     p.add_argument("--reset-every", default=None, help="Session reset interval (e.g. 1h, disabled by default)")
     p.add_argument("--repeats", type=int, default=1, help="Eval repeats per cohort (default: 1)")
     p.add_argument("--template", type=Path, default=DEFAULT_TEMPLATE, help="Agent template dir")
-    p.add_argument("--system-prompt", type=Path, default=WORLD_DIR / "system_prompt.md", help="System prompt template")
-    p.add_argument("--model", default="claude-opus-4-6", help="Claude model (default: claude-opus-4-6)")
-    p.add_argument("--oauth-token", default=None, help="Anthropic OAuth token (overrides default auth)")
+    p.add_argument("--system-prompt", type=Path, default=None, help="System prompt template (defaults to <world-dir>/system_prompt.md)")
+    p.add_argument("--model", default="claude-opus-4-6", help="Backend model name")
+    p.add_argument("--provider", default=None, help="Pi provider override (used when --backend=pi)")
+    p.add_argument("--oauth-token", default=None, help="Anthropic OAuth token override (used when --backend=claude)")
     args = p.parse_args()
+    args.world_dir = args.world_dir.resolve()
+    if args.system_prompt is None:
+        args.system_prompt = args.world_dir / "system_prompt.md"
+    else:
+        args.system_prompt = args.system_prompt.resolve()
     # Auto-assign ports: each experiment gets a block of 20 ports
     exp_num = int(args.exp)
     args.base_port = 8000 + exp_num * 20
@@ -74,20 +82,59 @@ def _parse_duration_minutes(duration: str) -> float:
 
 
 def exp_dir(args: argparse.Namespace) -> Path:
-    return WORLD_DIR / "results" / "eval_naive_vs_experienced" / f"exp_{args.exp}"
+    return args.world_dir / "results" / "eval_naive_vs_experienced" / f"exp_{args.exp}"
 
 
 def _launch_env(args: argparse.Namespace) -> dict[str, str] | None:
-    if args.oauth_token:
+    if args.backend == "claude" and args.oauth_token:
         import os
         return {**os.environ, "ANTHROPIC_OAUTH_TOKEN": args.oauth_token}
     return None
 
 
-def _launch_extra_args(args: argparse.Namespace) -> list[str]:
-    if args.oauth_token:
-        return ["--use-env-auth"]
-    return []
+def _backend_launch_args(args: argparse.Namespace) -> list[str]:
+    extra = ["--backend", args.backend, "--model", args.model]
+    if args.backend == "claude":
+        extra.append("--sandbox")
+        if args.oauth_token:
+            extra.append("--use-env-auth")
+    elif args.provider:
+        extra.extend(["--provider", args.provider])
+    return extra
+
+
+def build_launch_cmd(
+    args: argparse.Namespace,
+    *,
+    base_port: int,
+    template: str,
+    results_root: Path,
+    run_id: str,
+    tmux_session: str,
+    duration: str,
+    goal: str | None = None,
+) -> list[str]:
+    cmd = [
+        "bash", str(LAUNCH_SCRIPT),
+        "--force",
+        "--num-worlds", "1",
+        "--agents-per-world", "1",
+        "--base-port", str(base_port),
+        "--world-dir", str(args.world_dir),
+        "--template", template,
+        "--system-prompt", str(args.system_prompt),
+        "--record", "true",
+        "--results-root", str(results_root),
+        "--run-id", run_id,
+        "--duration", duration,
+        "--tmux-session", tmux_session,
+        *_backend_launch_args(args),
+    ]
+    if args.reset_every:
+        cmd.extend(["--reset-every", args.reset_every])
+    if goal:
+        cmd.extend(["--goal", goal])
+    return cmd
 
 
 def run_cmd(cmd: list[str], **kwargs) -> subprocess.CompletedProcess:
@@ -317,23 +364,18 @@ def run_training(args: argparse.Namespace) -> Path:
         return ws
 
     training_dir.mkdir(parents=True, exist_ok=True)
-    run_cmd([
-        "bash", str(LAUNCH_SCRIPT),
-        "--sandbox", "--force",
-        "--num-worlds", "1", "--agents-per-world", "1",
-        "--base-port", str(args.base_port),
-        "--world-dir", str(WORLD_DIR),
-        "--template", str(args.template),
-        "--system-prompt", str(args.system_prompt.resolve()),
-        "--model", args.model,
-        "--record", "true",
-        "--results-root", str(training_dir),
-        "--run-id", "run",
-        "--duration", args.train_duration,
-        "--tmux-session", f"train-exp-{args.exp}",
-        *(["--reset-every", args.reset_every] if args.reset_every else []),
-        *_launch_extra_args(args),
-    ], env=_launch_env(args))
+    run_cmd(
+        build_launch_cmd(
+            args,
+            base_port=args.base_port,
+            template=str(args.template),
+            results_root=training_dir,
+            run_id="run",
+            tmux_session=f"train-exp-{args.exp}",
+            duration=args.train_duration,
+        ),
+        env=_launch_env(args),
+    )
 
     session = f"train-exp-{args.exp}"
     print(f"Waiting for training session '{session}' to finish...")
@@ -370,24 +412,19 @@ def run_evals(args: argparse.Namespace, trained_workspace: Path) -> None:
                 session = f"eval-{args.exp}-{goal_name}-{cohort}-r{i:02d}"
                 sessions.append(session)
 
-                run_cmd([
-                    "bash", str(LAUNCH_SCRIPT),
-                    "--sandbox", "--force",
-                    "--num-worlds", "1", "--agents-per-world", "1",
-                    "--base-port", str(port),
-                    "--world-dir", str(WORLD_DIR),
-                    "--template", template,
-                    "--system-prompt", str(args.system_prompt.resolve()),
-                    "--model", args.model,
-                    "--record", "true",
-                    "--results-root", str(evals_dir / goal_name / cohort),
-                    "--run-id", run_id,
-                    "--duration", args.eval_duration,
-                    "--tmux-session", session,
-                    "--goal", goal_cfg["text"],
-                    *(["--reset-every", args.reset_every] if args.reset_every else []),
-                    *_launch_extra_args(args),
-                ], env=_launch_env(args))
+                run_cmd(
+                    build_launch_cmd(
+                        args,
+                        base_port=port,
+                        template=template,
+                        results_root=evals_dir / goal_name / cohort,
+                        run_id=run_id,
+                        tmux_session=session,
+                        duration=args.eval_duration,
+                        goal=goal_cfg["text"],
+                    ),
+                    env=_launch_env(args),
+                )
 
     if not sessions:
         print("All evals already done.")
@@ -504,11 +541,11 @@ def analyze_and_plot(args: argparse.Namespace) -> None:
               f"sustained_y={row['max_y_sustained']}  stack={row['max_stack']}")
 
 
-def stop_session(session: str) -> None:
+def stop_session(session: str, args: argparse.Namespace) -> None:
     """Stop a tmux session via the launch script."""
     if subprocess.run(["tmux", "has-session", "-t", session], capture_output=True).returncode == 0:
         subprocess.run(
-            ["bash", str(LAUNCH_SCRIPT), "--stop", "--tmux-session", session],
+            ["bash", str(LAUNCH_SCRIPT), "--backend", args.backend, "--stop", "--tmux-session", session],
             capture_output=True,
         )
 
@@ -526,7 +563,7 @@ def all_sessions(args: argparse.Namespace) -> list[str]:
 def cleanup(args: argparse.Namespace) -> None:
     print("\nCleaning up sessions...")
     for session in all_sessions(args):
-        stop_session(session)
+        stop_session(session, args)
 
 
 def main() -> None:

@@ -15,7 +15,7 @@ export function createRenderer(ctx) {
   })
 
   const firePattern = /(^|[:/_-])fire([:_-]|$)/i
-  const FREE_ZOOM_MIN = 0.35
+  const FREE_ZOOM_MIN = 0.02
   const FREE_ZOOM_MAX = 4
   const FREE_WHEEL_ZOOM_SPEED = 0.0015
   const FREE_KEYBOARD_PAN_SPEED = 26
