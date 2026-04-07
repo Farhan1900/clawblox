@@ -3,7 +3,7 @@
 use axum::{
     extract::{
         ws::{Message, WebSocket, WebSocketUpgrade},
-        Path as AxumPath, Query, State,
+        OriginalUri, Path as AxumPath, Query, State,
     },
     response::IntoResponse,
     routing::{get, post},
@@ -59,6 +59,9 @@ use clawblox::{
 
 static DOCS_DIR: Dir = include_dir!("$CARGO_MANIFEST_DIR/docs");
 static LOCAL_RUNTIME_UI_DIR: Dir = include_dir!("$CARGO_MANIFEST_DIR/frontend_runtime/dist");
+
+#[path = "../app_browser.rs"]
+mod app_browser;
 
 #[derive(Copy, Clone, Debug, ValueEnum)]
 enum LocalDatastore {
@@ -139,6 +142,18 @@ enum Commands {
         /// Path to agent JSONL log file (from agent/logs/*/*.jsonl)
         #[arg(long)]
         agent: Option<PathBuf>,
+    },
+    /// Browse project recordings and open them in the replay UI
+    App {
+        /// Path to project directory
+        #[arg(default_value = ".")]
+        path: PathBuf,
+        /// Port to run the app server on
+        #[arg(short, long, default_value = "8080")]
+        port: u16,
+        /// URL base path to mount the app under
+        #[arg(long, default_value = "/")]
+        base_path: String,
     },
     /// Start a game locally in background (daemon mode)
     Start {
@@ -223,6 +238,11 @@ fn main() {
             world_dir,
             agent,
         } => run_replay(file, speed, port, &base_path, world_dir, agent),
+        Commands::App {
+            path,
+            port,
+            base_path,
+        } => app_browser::run_app(path, port, &base_path),
         Commands::Start {
             path,
             port,
@@ -2180,6 +2200,7 @@ fn run_replay(
             base_path: base_path.clone(),
             renderer_manifest,
             agent_timeline,
+            world_dir: world_dir.clone(),
         };
 
         let cors = CorsLayer::new()
@@ -2234,6 +2255,7 @@ struct ReplayState {
     base_path: String,
     renderer_manifest: LocalRendererManifest,
     agent_timeline: Option<Arc<ReplayAgentTimeline>>,
+    world_dir: PathBuf,
 }
 
 async fn replay_spectate_ws(
@@ -2293,7 +2315,8 @@ async fn handle_replay_ws(socket: WebSocket, state: ReplayState) {
                 last_tick = tick;
 
                 match state.reader.get_state_at(tick).await {
-                    Ok(obs) => {
+                    Ok(mut obs) => {
+                        resolve_local_spectator_assets(&mut obs, &state.base_path);
                         if let Ok(json) = serde_json::to_vec(&obs) {
                             let msg = Message::Text(String::from_utf8_lossy(&json).into_owned().into());
                             if sender.send(msg).await.is_err() { break; }
@@ -2342,7 +2365,10 @@ async fn replay_state_at(
         pb.current_tick()
     };
     match state.reader.get_state_at(tick).await {
-        Ok(obs) => Ok(Json(obs)),
+        Ok(mut obs) => {
+            resolve_local_spectator_assets(&mut obs, &state.base_path);
+            Ok(Json(obs))
+        }
         Err(err) => Err((
             axum::http::StatusCode::BAD_REQUEST,
             format!("Failed to load replay state at tick {}: {}", tick, err),
@@ -3322,9 +3348,9 @@ fn embedded_ui_file_response(path: &str) -> axum::response::Response {
         .into_response()
 }
 
-fn embedded_ui_index_response(base_path: &str) -> axum::response::Response {
-    let Some(file) = LOCAL_RUNTIME_UI_DIR.get_file("index.html") else {
-        return embedded_ui_file_response("index.html");
+fn embedded_index_response(index_path: &str, base_path: &str) -> axum::response::Response {
+    let Some(file) = LOCAL_RUNTIME_UI_DIR.get_file(index_path) else {
+        return embedded_ui_file_response(index_path);
     };
     let mut html = String::from_utf8_lossy(file.contents()).into_owned();
     let base_href = format!("{}/", normalize_base_path(base_path).trim_end_matches('/'));
@@ -3344,6 +3370,10 @@ fn embedded_ui_index_response(base_path: &str) -> axum::response::Response {
         html,
     )
         .into_response()
+}
+
+fn embedded_ui_index_response(base_path: &str) -> axum::response::Response {
+    embedded_index_response("index.html", base_path)
 }
 
 async fn local_ui_index(State(state): State<LocalState>) -> impl IntoResponse {
@@ -3652,6 +3682,28 @@ async fn local_ui_file(AxumPath(path): AxumPath<String>) -> impl IntoResponse {
         return embedded_ui_file_response("index.html");
     }
     embedded_ui_file_response(req_path)
+}
+
+#[derive(Deserialize)]
+struct SessionUiFilePath {
+    #[allow(dead_code)]
+    id: String,
+    path: String,
+}
+
+async fn session_ui_file(AxumPath(params): AxumPath<SessionUiFilePath>) -> impl IntoResponse {
+    let req_path = params.path.trim_start_matches('/');
+    if req_path.is_empty() {
+        return embedded_ui_file_response("index.html");
+    }
+    embedded_ui_file_response(req_path)
+}
+
+#[derive(Deserialize)]
+struct SessionWorldFilePath {
+    #[allow(dead_code)]
+    id: String,
+    path: String,
 }
 
 #[derive(Deserialize)]
@@ -4203,6 +4255,10 @@ async fn local_observe(
 fn resolve_local_asset_url(url: &mut String, base_path: &str) {
     if let Some(path) = url.strip_prefix("asset://") {
         *url = join_base_path(base_path, &format!("/assets/{}", path));
+        return;
+    }
+    if url.starts_with("/assets/") {
+        *url = join_base_path(base_path, url);
     }
 }
 
