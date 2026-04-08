@@ -120,8 +120,11 @@ function updateSelectedUi(path) {
 }
 
 function shortMeta(payload) {
+  const parts = []
   const world = String(payload.world_dir || '').split('/').filter(Boolean).pop() || ''
-  return world
+  if (world) parts.push(world)
+  if (payload.agent_log) parts.push('agent linked')
+  return parts.join(' · ')
 }
 
 async function openReplay(path) {
