@@ -1,4 +1,4 @@
-# Mesa World
+# Mesa World 2
 
 ## Action Schemas
 
@@ -9,6 +9,7 @@
 | Stop | `{}` |
 | Pickup | `{"position": [x, y, z]}` |
 | Place | `{"position": [x, y, z]}` |
+| Throw | `{"direction": [x, y, z], "speed": n}` |
 
 
 ## API Endpoints

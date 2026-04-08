@@ -1,5 +1,5 @@
-name = "Mesa World"
-description = "A simple mesa world with a player and ground."
+name = "Mesa World 2"
+description = ""
 max_players = 2
 
 [scripts]
@@ -7,7 +7,7 @@ main = "main.lua"
 skill = "SKILL.md"
 
 [renderer]
-name = "Mesa World Renderer"
+name = "Mesa World 2 Renderer"
 mode = "module"
 api_version = 1
 entry = "dist/renderer.bundle.js"
