@@ -8,6 +8,8 @@ local AgentInputService = game:GetService("AgentInputService")
 Workspace.Gravity = 10
 
 local BLOCK_SIZE = 0.75
+local BALL_SIZE = 1.5
+local PLANK_SIZE = Vector3.new(9, 0.45, 1.8)
 local PICKUP_RANGE = 6
 local PLACE_RANGE = 7
 local HOLD_OFFSET = Vector3.new(0, 3.5, 0)
@@ -21,6 +23,9 @@ local MIN_THROW_SPEED = 0
 local MAX_THROW_SPEED = 40
 local PLAYER_SPAWN_POSITION = Vector3.new(0, 5, 0)
 local OUT_OF_BOUNDS_Y = -200
+local WORLD_BOUNDARY_HALF_EXTENT = 50
+local WORLD_BOUNDARY_HEIGHT = 80
+local WORLD_BOUNDARY_THICKNESS = 6
 
 local heldBlocksByPlayer = {}
 local placingBlocks = {} -- { block, startPos, targetPos, elapsed, duration }
@@ -30,6 +35,7 @@ local trackedBlocks = {}
 local blockColors = {
     Sand = Color3.fromRGB(214, 186, 128),
     Slate = Color3.fromRGB(148, 136, 124),
+    Wood = Color3.fromRGB(156, 110, 72),
 }
 
 local blockPhysics = PhysicalProperties.new(
@@ -52,6 +58,42 @@ ground.Anchored = true
 ground.Color = Color3.fromRGB(85, 239, 196)
 ground:SetAttribute("RenderRole", "Ground")
 ground.Parent = Workspace
+
+local invisibleWalls = {
+    {
+        name = "BoundaryNorth",
+        size = Vector3.new(WORLD_BOUNDARY_HALF_EXTENT * 2, WORLD_BOUNDARY_HEIGHT, WORLD_BOUNDARY_THICKNESS),
+        pos = Vector3.new(0, WORLD_BOUNDARY_HEIGHT / 2, WORLD_BOUNDARY_HALF_EXTENT + WORLD_BOUNDARY_THICKNESS / 2),
+    },
+    {
+        name = "BoundarySouth",
+        size = Vector3.new(WORLD_BOUNDARY_HALF_EXTENT * 2, WORLD_BOUNDARY_HEIGHT, WORLD_BOUNDARY_THICKNESS),
+        pos = Vector3.new(0, WORLD_BOUNDARY_HEIGHT / 2, -WORLD_BOUNDARY_HALF_EXTENT - WORLD_BOUNDARY_THICKNESS / 2),
+    },
+    {
+        name = "BoundaryEast",
+        size = Vector3.new(WORLD_BOUNDARY_THICKNESS, WORLD_BOUNDARY_HEIGHT, WORLD_BOUNDARY_HALF_EXTENT * 2),
+        pos = Vector3.new(WORLD_BOUNDARY_HALF_EXTENT + WORLD_BOUNDARY_THICKNESS / 2, WORLD_BOUNDARY_HEIGHT / 2, 0),
+    },
+    {
+        name = "BoundaryWest",
+        size = Vector3.new(WORLD_BOUNDARY_THICKNESS, WORLD_BOUNDARY_HEIGHT, WORLD_BOUNDARY_HALF_EXTENT * 2),
+        pos = Vector3.new(-WORLD_BOUNDARY_HALF_EXTENT - WORLD_BOUNDARY_THICKNESS / 2, WORLD_BOUNDARY_HEIGHT / 2, 0),
+    },
+}
+
+for _, wallDef in ipairs(invisibleWalls) do
+    local wall = Instance.new("Part")
+    wall.Name = wallDef.name
+    wall.Size = wallDef.size
+    wall.Position = wallDef.pos
+    wall.Anchored = true
+    wall.Transparency = 1
+    wall.CanCollide = true
+    wall.CanQuery = false
+    wall.CanTouch = false
+    wall.Parent = Workspace
+end
 
 local mesas = {
     -- Ground-level formations
@@ -85,8 +127,8 @@ end
 -- BLOCKS
 --------------------------------------------------------------------------------
 
-local function setBlockMetadata(block, colorName)
-    block:SetAttribute("RenderRole", "PickupObject")
+local function setPickupMetadata(block, colorName, renderRole)
+    block:SetAttribute("RenderRole", renderRole or "PickupObject")
     block:SetAttribute("ItemColorName", colorName)
     block:SetAttribute("IsPickupObject", true)
 end
@@ -100,13 +142,57 @@ local function createBlock(name, position, colorName)
     block.Material = Enum.Material.SmoothPlastic
     block.Color = blockColors[colorName]
     block.CustomPhysicalProperties = blockPhysics
-    setBlockMetadata(block, colorName)
+    setPickupMetadata(block, colorName, "PickupObject")
     block.Parent = Workspace
     trackedBlocks[block] = true
     return block
 end
 
-local blockPile = {
+local function createBall(name, position)
+    local ball = Instance.new("Part")
+    ball.Name = name
+    ball.Shape = Enum.PartType.Ball
+    ball.Size = Vector3.new(BALL_SIZE, BALL_SIZE, BALL_SIZE)
+    ball.Position = position
+    ball.Anchored = false
+    ball.Material = Enum.Material.SmoothPlastic
+    ball.Color = Color3.fromRGB(255, 99, 72)
+    ball.CustomPhysicalProperties = PhysicalProperties.new(
+        0.8,
+        0.6,
+        0.7,
+        1.0,
+        1.0
+    )
+    ball:SetAttribute("RenderRole", "Ball")
+    ball:SetAttribute("RenderPrimitive", "sphere")
+    ball.Parent = Workspace
+    trackedBlocks[ball] = true
+    return ball
+end
+
+local function createPlank(name, position, colorName)
+    local plank = Instance.new("Part")
+    plank.Name = name
+    plank.Size = PLANK_SIZE
+    plank.CFrame = CFrame.new(position) * CFrame.Angles(0, math.rad(24), 0)
+    plank.Anchored = false
+    plank.Material = Enum.Material.Wood
+    plank.Color = blockColors[colorName]
+    plank.CustomPhysicalProperties = PhysicalProperties.new(
+        0.5,
+        0.8,
+        0.05,
+        1.0,
+        1.0
+    )
+    setPickupMetadata(plank, colorName, "Plank")
+    plank.Parent = Workspace
+    trackedBlocks[plank] = true
+    return plank
+end
+
+local baseBlockPile = {
     { pos = Vector3.new(14.5, 6.5, -1.9), color = "Sand" },
     { pos = Vector3.new(15.2, 6.9, -1.3), color = "Slate" },
     { pos = Vector3.new(15.8, 7.3, -1.8), color = "Sand" },
@@ -121,9 +207,31 @@ local blockPile = {
     { pos = Vector3.new(15.4, 11.4, -1.0), color = "Sand" },
 }
 
-for index, blockDef in ipairs(blockPile) do
+for index, blockDef in ipairs(baseBlockPile) do
     createBlock("Block_" .. index, blockDef.pos, blockDef.color)
 end
+
+local originalPileBase = baseBlockPile[1].pos
+
+local function createBlockPile(namePrefix, basePosition, startingIndex)
+    local nextIndex = startingIndex
+    for _, blockDef in ipairs(baseBlockPile) do
+        local offset = blockDef.pos - originalPileBase
+        local position = basePosition + offset
+        createBlock(namePrefix .. nextIndex, position, blockDef.color)
+        nextIndex = nextIndex + 1
+    end
+    return nextIndex
+end
+
+local nextBlockIndex = #baseBlockPile + 1
+nextBlockIndex = createBlockPile("Block_", Vector3.new(32.0, 0.6, -34.0), nextBlockIndex)
+nextBlockIndex = createBlockPile("Block_", Vector3.new(34.5, 0.6, -32.8), nextBlockIndex)
+nextBlockIndex = createBlockPile("Block_", Vector3.new(30.4, 0.6, -36.6), nextBlockIndex)
+nextBlockIndex = createBlockPile("Block_", Vector3.new(33.6, 0.6, -37.8), nextBlockIndex)
+
+createBall("Ball_1", Vector3.new(-31.1, 2.75, 26.6))
+createPlank("Plank_1", Vector3.new(25.5, 0.9, -45.5), "Wood")
 
 --------------------------------------------------------------------------------
 -- PLAYER
@@ -505,7 +613,11 @@ RunService.Heartbeat:Connect(function(dt)
         if alpha >= 1 then
             p.block.Anchored = false
             p.block.CanCollide = true
-            setBlockMetadata(p.block, p.block:GetAttribute("ItemColorName"))
+            setPickupMetadata(
+                p.block,
+                p.block:GetAttribute("ItemColorName"),
+                p.block:GetAttribute("RenderRole")
+            )
             table.remove(placingBlocks, i)
         else
             i = i + 1

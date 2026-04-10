@@ -140,6 +140,32 @@ function createEntityVisual(entity) {
     return group
   }
 
+  if (role === 'Plank') {
+    const group = new THREE.Group()
+
+    const body = new THREE.Mesh(
+      new THREE.BoxGeometry(size[0], size[1], size[2]),
+      new THREE.MeshStandardMaterial({ color: 0x9c6e48, roughness: 0.92, metalness: 0.0 }),
+    )
+    body.castShadow = true
+    body.receiveShadow = true
+    group.add(body)
+
+    const slatOffsets = [-0.28, 0, 0.28]
+    for (const zFrac of slatOffsets) {
+      const groove = new THREE.Mesh(
+        new THREE.BoxGeometry(size[0] * 0.96, size[1] * 0.12, size[2] * 0.08),
+        new THREE.MeshStandardMaterial({ color: 0x6f4a2c, roughness: 1.0, metalness: 0.0 }),
+      )
+      groove.position.set(0, size[1] * 0.18, size[2] * zFrac)
+      groove.castShadow = true
+      groove.receiveShadow = true
+      group.add(groove)
+    }
+
+    return group
+  }
+
   // Default: box with entity color
   const color = entity.render && entity.render.color
     ? (Math.round(entity.render.color[0] * 255) << 16) |
@@ -188,7 +214,7 @@ export function createRenderer(ctx) {
   dirLight.shadow.camera.bottom = -80
   dirLight.shadow.camera.near = 1
   dirLight.shadow.camera.far = 200
-  dirLight.shadow.bias = -0.001
+  dirLight.shadow.bias = -0.00005
   scene.add(dirLight)
   scene.add(dirLight.target)
 
