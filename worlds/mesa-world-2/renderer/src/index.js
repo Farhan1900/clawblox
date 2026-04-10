@@ -25,6 +25,7 @@ function resolveEntityModelUrl(entity) {
 function resolveEntityColorHex(entity) {
   const color = entity?.render?.color
   if (!Array.isArray(color) || color.length < 3) {
+    console.warn(`Entity ${entity?.id ?? '?'} (role=${entity?.render?.role ?? '?'}) missing render.color`)
     return 0xff00ff
   }
   return (Math.round(color[0] * 255) << 16) |
@@ -35,6 +36,7 @@ function resolveEntityColorHex(entity) {
 function resolveEntityColor(entity) {
   const color = entity?.render?.color
   if (!Array.isArray(color) || color.length < 3) {
+    console.warn(`Entity ${entity?.id ?? '?'} (role=${entity?.render?.role ?? '?'}) missing render.color`)
     return new THREE.Color(0xff00ff)
   }
   return new THREE.Color(color[0], color[1], color[2])
@@ -230,7 +232,6 @@ function createEntityVisual(entity) {
     )
     core.castShadow = true
     group.add(core)
-
     group.userData.isGlowBulb = true
     group.userData.dynamicRole = 'GlowBulb'
     applyEntityAppearance(group, entity)
@@ -247,13 +248,8 @@ function createEntityVisual(entity) {
     mesh.userData.dynamicRole = 'PickupObject'
     return mesh
   }
-
   // Default: box with entity color
-  const color = entity.render && entity.render.color
-    ? (Math.round(entity.render.color[0] * 255) << 16) |
-      (Math.round(entity.render.color[1] * 255) << 8) |
-      Math.round(entity.render.color[2] * 255)
-    : 0x999999
+  const color = resolveEntityColorHex(entity)
 
   let geometry
   const primitive = entity.render && entity.render.primitive
