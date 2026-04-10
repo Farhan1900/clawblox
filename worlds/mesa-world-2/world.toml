@@ -1,6 +1,7 @@
 name = "Mesa World 2"
 description = ""
 max_players = 2
+afk_timeout = 0
 
 [scripts]
 main = "main.lua"
@@ -14,4 +15,4 @@ entry = "dist/renderer.bundle.js"
 capabilities = ["three-sdk"]
 
 [observation]
-radius = 40
+radius = 400000

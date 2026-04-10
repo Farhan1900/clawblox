@@ -30,7 +30,10 @@ fi
 AGENT_NAME_PREFIX="${AGENT_NAME_PREFIX:-mesa}"
 GOAL="${GOAL:-}"
 INITIAL_TEMPLATE="${INITIAL_TEMPLATE:-}"
+SYSTEM_PROMPT_TEMPLATE="${SYSTEM_PROMPT_TEMPLATE:-}"
 CLAWBLOX_BIN="${CLAWBLOX_BIN:-}"
+PI_PROVIDER="${PI_PROVIDER:-}"
+PI_MODEL="${PI_MODEL:-}"
 declare -a CURRENT_TEMPLATES=()
 
 sanitize_name() {
@@ -176,7 +179,10 @@ Options:
   --save-prompt TEXT            Prompt sent by clawblox-agent extension at save window start
   --agent-name-prefix PREFIX    Agent name prefix forwarded to launch_multi.sh
   --goal TEXT                   Objective forwarded to launch_multi.sh
+  --provider PROVIDER          Provider forwarded to launch_multi.sh
+  --model MODEL_ID             Model id forwarded to launch_multi.sh
   --template PATH               Initial template directory for generation 1
+  --system-prompt PATH          System prompt forwarded to launch_multi.sh
   --resume                      Resume an existing experiment id from generation_chain.csv
   --resume-prune-partial        With --resume, delete existing run dir for next generation before relaunch
   --clawblox-bin PATH           CLAWBLOX_BIN forwarded to launch_multi.sh
@@ -186,7 +192,7 @@ Environment overrides:
   GENERATIONS, GENERATION_DURATION, EXPERIMENT_ID, RUN_PREFIX, TMUX_PREFIX,
   WORLD_DIR, BASE_PORT, AGENTS_PER_WORLD, RECORD, HEALTH_TIMEOUT, STOP_GRACE_SECONDS,
   PORT_WAIT_SECONDS, SAVE_GRACE_SECONDS, SAVE_PROMPT, AGENT_NAME_PREFIX, GOAL,
-  INITIAL_TEMPLATE, CLAWBLOX_BIN
+  PI_PROVIDER, PI_MODEL, INITIAL_TEMPLATE, SYSTEM_PROMPT_TEMPLATE, CLAWBLOX_BIN
 EOF
 }
 
@@ -283,9 +289,24 @@ while [[ $# -gt 0 ]]; do
       GOAL="$2"
       shift 2
       ;;
+    --provider)
+      require_value "$1" "${2:-}"
+      PI_PROVIDER="$2"
+      shift 2
+      ;;
+    --model)
+      require_value "$1" "${2:-}"
+      PI_MODEL="$2"
+      shift 2
+      ;;
     --template|--initial-template)
       require_value "$1" "${2:-}"
       INITIAL_TEMPLATE="$2"
+      shift 2
+      ;;
+    --system-prompt)
+      require_value "$1" "${2:-}"
+      SYSTEM_PROMPT_TEMPLATE="$2"
       shift 2
       ;;
     --resume)
@@ -590,6 +611,15 @@ for ((gen = START_GENERATION; gen <= GENERATIONS; gen++)); do
   )
   if [[ -n "$GOAL" ]]; then
     launch_cmd+=(--goal "$GOAL")
+  fi
+  if [[ -n "$PI_PROVIDER" ]]; then
+    launch_cmd+=(--provider "$PI_PROVIDER")
+  fi
+  if [[ -n "$PI_MODEL" ]]; then
+    launch_cmd+=(--model "$PI_MODEL")
+  fi
+  if [[ -n "$SYSTEM_PROMPT_TEMPLATE" ]]; then
+    launch_cmd+=(--system-prompt "$SYSTEM_PROMPT_TEMPLATE")
   fi
   if [[ -n "$CLAWBLOX_BIN" ]]; then
     launch_cmd+=(--clawblox-bin "$CLAWBLOX_BIN")

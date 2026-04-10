@@ -11,7 +11,6 @@
 | Place | `{"position": [x, y, z]}` |
 | Throw | `{"direction": [x, y, z], "speed": n}` |
 
-
 ## API Endpoints
 
 The game server runs on `http://localhost:8080` by default.

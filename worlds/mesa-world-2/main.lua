@@ -22,10 +22,14 @@ local MAX_THROW_SPEED = 40
 local PLAYER_SPAWN_POSITION = Vector3.new(0, 5, 0)
 local OUT_OF_BOUNDS_Y = -200
 
-local heldBlocksByPlayer = {}
-local placingBlocks = {} -- { block, startPos, targetPos, elapsed, duration }
-local thrownBlocks = {} -- { block, elapsed, duration }
-local trackedBlocks = {}
+local heldObjectsByPlayer = {}
+local placingObjects = {} -- { object, startPos, targetPos, elapsed, duration }
+local thrownObjects = {} -- { object, elapsed, duration }
+local trackedCarryables = {}
+
+local ROCK_COLOR = Color3.fromRGB(52, 49, 44)
+local ORB_COLOR = Color3.fromRGB(0, 220, 200)
+local ORB_BASE_SIZE = Vector3.new(0.9, 0.9, 0.9)
 
 local blockColors = {
     Sand = Color3.fromRGB(214, 186, 128),
@@ -46,7 +50,7 @@ local blockPhysics = PhysicalProperties.new(
 
 local ground = Instance.new("Part")
 ground.Name = "Ground"
-ground.Size = Vector3.new(100, 10, 100)
+ground.Size = Vector3.new(180, 10, 180)
 ground.Position = Vector3.new(0, -5, 0)
 ground.Anchored = true
 ground.Color = Color3.fromRGB(85, 239, 196)
@@ -54,20 +58,20 @@ ground:SetAttribute("RenderRole", "Ground")
 ground.Parent = Workspace
 
 local mesas = {
-    -- Ground-level formations
-    { name = "LowStep",       size = {8, 2, 10},     pos = {8, 1, 18} },
-    { name = "LargeMesa",     size = {20, 4, 16},    pos = {20, 2, 20} },
-    { name = "SmallPlateau",  size = {10, 2, 8},     pos = {-30, 1, 28} },
-    { name = "SteppingStone", size = {8, 2.5, 8},    pos = {-18, 1.25, -12} },
-    { name = "Ridge",         size = {6, 3, 25},     pos = {35, 1.5, -10} },
-    { name = "TallMesa",      size = {12, 6, 10},    pos = {-25, 3, -20} },
-    -- NE climbing path: large mesa (4) -> high shelf (7) -> peak (11)
-    { name = "HighShelf",     size = {10, 7, 8},     pos = {25, 3.5, 28} },
-    { name = "Peak",          size = {5, 11, 5},     pos = {28, 5.5, 32} },
-    -- SW climbing path: tall mesa (6) -> tower base (7) -> summit (10) -> spire (20)
-    { name = "TowerBase",     size = {8, 7, 8},      pos = {-28, 3.5, -26} },
-    { name = "Summit",        size = {6, 10, 6},     pos = {-28, 5, -30} },
-    { name = "Spire",         size = {4, 20, 4},     pos = {-30, 10, -33} },
+    -- Spread out so the larger world has distinct regions while the center stays traversable.
+    { name = "LowStep",       size = {10, 2, 12},    pos = {18, 1, 28} },
+    { name = "LargeMesa",     size = {24, 4, 20},    pos = {34, 2, 30} },
+    { name = "SmallPlateau",  size = {12, 2, 10},    pos = {-50, 1, 38} },
+    { name = "SteppingStone", size = {12, 2.5, 12},  pos = {-35, 1.25, -27} },
+    { name = "Ridge",         size = {8, 3, 40},     pos = {60, 1.5, -18} },
+    { name = "TallMesa",      size = {14, 6, 12},    pos = {-42, 3, -34} },
+    { name = "HighShelf",     size = {14, 7, 12},    pos = {46, 3.5, 46} },
+    { name = "Peak",          size = {8, 11, 8},     pos = {54, 5.5, 56} },
+    { name = "TowerBase",     size = {10, 7, 10},    pos = {-46, 3.5, -42} },
+    { name = "Summit",        size = {8, 10, 8},     pos = {-46, 5, -50} },
+    { name = "Spire",         size = {5, 20, 5},     pos = {-50, 10, -56} },
+    { name = "NorthStone",    size = {14, 3, 12},    pos = {-24, 1.5, 64} },
+    { name = "NorthStone2",   size = {10, 4, 10},    pos = {-40, 2, 76} },
 }
 
 for _, m in ipairs(mesas) do
@@ -81,6 +85,138 @@ for _, m in ipairs(mesas) do
     mesa.Parent = Workspace
 end
 
+local function isWithinFootprint(def, x, z, padding)
+    local extra = padding or 0
+    local px = def.pos[1]
+    local pz = def.pos[3]
+    local halfWidth = def.size[1] / 2 + extra
+    local halfDepth = def.size[3] / 2 + extra
+    return x >= px - halfWidth and x <= px + halfWidth and z >= pz - halfDepth and z <= pz + halfDepth
+end
+
+local function isInsideMesaFootprint(x, z, padding)
+    for _, mesa in ipairs(mesas) do
+        if isWithinFootprint(mesa, x, z, padding) then
+            return true
+        end
+    end
+    return false
+end
+
+--------------------------------------------------------------------------------
+-- ROCKS
+--------------------------------------------------------------------------------
+
+local rockSeed = 9999
+local function rockRandom()
+    rockSeed = (rockSeed * 16807) % 2147483647
+    return (rockSeed - 1) / 2147483646
+end
+
+local rockClusters = {
+    { cx = 44, cz = -56, n = 3 },
+    { cx = -54, cz = 16, n = 3 },
+    { cx = 12, cz = 74, n = 2 },
+    { cx = 72, cz = 28, n = 2 },
+    { cx = -8, cz = -72, n = 3 },
+}
+
+local rockIndex = 0
+for _, cluster in ipairs(rockClusters) do
+    local clusterCreated = 0
+    local attempts = 0
+    while clusterCreated < cluster.n and attempts < 32 do
+        attempts = attempts + 1
+        local ox = (rockRandom() - 0.5) * 8
+        local oz = (rockRandom() - 0.5) * 8
+        local x = cluster.cx + ox
+        local z = cluster.cz + oz
+        if not isInsideMesaFootprint(x, z, 1.5) then
+            clusterCreated = clusterCreated + 1
+            rockIndex = rockIndex + 1
+
+            local radius = 1.2 + rockRandom() * 1.2
+            local sx = radius * 2 * (1.0 + rockRandom() * 0.5)
+            local sy = radius * 2 * (0.5 + rockRandom() * 0.5)
+            local sz = radius * 2 * (1.0 + rockRandom() * 0.5)
+
+            local rock = Instance.new("Part")
+            rock.Name = "Rock_" .. rockIndex
+            rock.Size = Vector3.new(sx, sy, sz)
+            rock.Position = Vector3.new(x, sy / 2, z)
+            rock.Anchored = false
+            rock.Color = ROCK_COLOR
+            rock.CustomPhysicalProperties = PhysicalProperties.new(
+                8.0,
+                0.9,
+                0.0,
+                1.0,
+                1.0
+            )
+            rock:SetAttribute("RenderRole", "Rock")
+            rock.Parent = Workspace
+        end
+    end
+end
+
+--------------------------------------------------------------------------------
+-- ORBS
+--------------------------------------------------------------------------------
+
+local orbSeed = 4242
+local function orbRandom()
+    orbSeed = (orbSeed * 48271) % 2147483647
+    return (orbSeed - 1) / 2147483646
+end
+
+local function createOrb(name, position, scale)
+    local orb = Instance.new("Part")
+    orb.Name = name
+    orb.Shape = Enum.PartType.Ball
+    orb.Size = ORB_BASE_SIZE * scale
+    orb.Position = position
+    orb.Anchored = true
+    orb.CanCollide = false
+    orb.Color = ORB_COLOR
+    orb.Material = Enum.Material.Neon
+    orb:SetAttribute("RenderRole", "GlowBulb")
+    orb:SetAttribute("IsCarryable", true)
+    orb:SetAttribute("CarryKind", "Orb")
+    orb:SetAttribute("CarryCollisionEnabled", true)
+    orb.Parent = Workspace
+    trackedCarryables[orb] = true
+end
+
+local orbClusters = {
+    { cx = 22, cz = 18, n = 3 },
+    { cx = 56, cz = 42, n = 3 },
+    { cx = -36, cz = -26, n = 2 },
+    { cx = 54, cz = -42, n = 2 },
+    { cx = -20, cz = 68, n = 3 },
+}
+
+local orbIndex = 0
+for _, cluster in ipairs(orbClusters) do
+    local clusterCreated = 0
+    local attempts = 0
+    while clusterCreated < cluster.n and attempts < 24 do
+        attempts = attempts + 1
+        local ox = (orbRandom() - 0.5) * 6
+        local oz = (orbRandom() - 0.5) * 6
+        local x = cluster.cx + ox
+        local z = cluster.cz + oz
+        if not isInsideMesaFootprint(x, z, 0.5) then
+            clusterCreated = clusterCreated + 1
+            orbIndex = orbIndex + 1
+            createOrb(
+                "Orb_" .. orbIndex,
+                Vector3.new(x, 0.55, z),
+                0.85 + orbRandom() * 0.35
+            )
+        end
+    end
+end
+
 --------------------------------------------------------------------------------
 -- BLOCKS
 --------------------------------------------------------------------------------
@@ -89,6 +225,9 @@ local function setBlockMetadata(block, colorName)
     block:SetAttribute("RenderRole", "PickupObject")
     block:SetAttribute("ItemColorName", colorName)
     block:SetAttribute("IsPickupObject", true)
+    block:SetAttribute("IsCarryable", true)
+    block:SetAttribute("CarryKind", "Block")
+    block:SetAttribute("CarryCollisionEnabled", true)
 end
 
 local function createBlock(name, position, colorName)
@@ -102,27 +241,68 @@ local function createBlock(name, position, colorName)
     block.CustomPhysicalProperties = blockPhysics
     setBlockMetadata(block, colorName)
     block.Parent = Workspace
-    trackedBlocks[block] = true
+    trackedCarryables[block] = true
     return block
 end
 
-local blockPile = {
-    { pos = Vector3.new(14.5, 6.5, -1.9), color = "Sand" },
-    { pos = Vector3.new(15.2, 6.9, -1.3), color = "Slate" },
-    { pos = Vector3.new(15.8, 7.3, -1.8), color = "Sand" },
-    { pos = Vector3.new(14.8, 7.8, -0.9), color = "Slate" },
-    { pos = Vector3.new(15.5, 8.2, -1.2), color = "Slate" },
-    { pos = Vector3.new(15.0, 8.7, -1.6), color = "Sand" },
-    { pos = Vector3.new(14.7, 9.1, -1.1), color = "Slate" },
-    { pos = Vector3.new(15.6, 9.6, -1.5), color = "Sand" },
-    { pos = Vector3.new(15.1, 10.0, -0.8), color = "Slate" },
-    { pos = Vector3.new(15.3, 10.5, -1.3), color = "Sand" },
-    { pos = Vector3.new(14.9, 11.0, -1.7), color = "Slate" },
-    { pos = Vector3.new(15.4, 11.4, -1.0), color = "Sand" },
+-- Place a lot of pickup cubes in small stacks across the larger map.
+local blockClusters = {
+    { cx = 44, cz = -56, n = 28, spread = 4.4 },
+    { cx = -54, cz = 16, n = 28, spread = 4.4 },
+    { cx = 12, cz = 74, n = 28, spread = 4.4 },
+    { cx = 72, cz = 28, n = 28, spread = 4.4 },
+    { cx = -8, cz = -72, n = 28, spread = 4.4 },
 }
 
-for index, blockDef in ipairs(blockPile) do
-    createBlock("Block_" .. index, blockDef.pos, blockDef.color)
+local blockSeed = 20240408
+local function blockRandom()
+    blockSeed = (blockSeed * 48271) % 2147483647
+    return (blockSeed - 1) / 2147483646
+end
+
+local blockIndex = 0
+for _, cluster in ipairs(blockClusters) do
+    local lobeCenters = {}
+    for _ = 1, 3 do
+        local lobeAngle = blockRandom() * math.pi * 2
+        local lobeRadius = math.sqrt(blockRandom()) * cluster.spread * 0.45
+        table.insert(lobeCenters, {
+            x = math.cos(lobeAngle) * lobeRadius,
+            z = math.sin(lobeAngle) * lobeRadius,
+        })
+    end
+
+    for j = 1, cluster.n do
+        blockIndex = blockIndex + 1
+        local layer = math.floor((j - 1) / 7)
+        local ox, oz
+        local placed = false
+        for _ = 1, 24 do
+            local lobe = lobeCenters[math.floor(blockRandom() * #lobeCenters) + 1]
+            local angle = blockRandom() * math.pi * 2
+            local radius = math.sqrt(blockRandom()) * cluster.spread * 0.7
+            local stretch = 0.7 + blockRandom() * 0.6
+            ox = lobe.x + math.cos(angle) * radius * stretch
+            oz = lobe.z + math.sin(angle) * radius * (1.7 - stretch)
+            local x = cluster.cx + ox
+            local z = cluster.cz + oz
+            if not isInsideMesaFootprint(x, z, 0.5) then
+                placed = true
+                break
+            end
+        end
+        if not placed then
+            ox = 0
+            oz = 0
+        end
+        local oy = BLOCK_SIZE * 0.5 + layer * (BLOCK_SIZE * 1.05) + blockRandom() * 0.08
+        local colorName = (j % 2 == 0) and "Slate" or "Sand"
+        createBlock(
+            "Block_" .. blockIndex,
+            Vector3.new(cluster.cx + ox, oy, cluster.cz + oz),
+            colorName
+        )
+    end
 end
 
 --------------------------------------------------------------------------------
@@ -137,7 +317,7 @@ local function getHumanoidRootPart(player)
     return nil
 end
 
-local function setPlayerBlockState(player, block)
+local function setPlayerCarryState(player, object)
     -- Intentionally keep pickup/held state implicit in observations.
     -- Agents can infer state from world changes and LastActionResult.
 end
@@ -169,10 +349,10 @@ local function setupPlayer(player)
 end
 
 local function cleanupPlayer(player)
-    local heldBlock = heldBlocksByPlayer[player]
-    if heldBlock then
-        heldBlock:Destroy()
-        heldBlocksByPlayer[player] = nil
+    local heldObject = heldObjectsByPlayer[player]
+    if heldObject then
+        heldObject:Destroy()
+        heldObjectsByPlayer[player] = nil
     end
 end
 
@@ -194,41 +374,41 @@ local function resetPlayerToSpawn(player)
     end
 end
 
-local function releaseBlockReferences(block)
-    for player, heldBlock in pairs(heldBlocksByPlayer) do
-        if heldBlock == block then
-            heldBlocksByPlayer[player] = nil
-            setPlayerBlockState(player, nil)
+local function releaseCarryReferences(object)
+    for player, heldObject in pairs(heldObjectsByPlayer) do
+        if heldObject == object then
+            heldObjectsByPlayer[player] = nil
+            setPlayerCarryState(player, nil)
             player:SetAttribute("LastActionResult", "ResetAfterFall")
         end
     end
 
     local i = 1
-    while i <= #placingBlocks do
-        if placingBlocks[i].block == block then
-            table.remove(placingBlocks, i)
+    while i <= #placingObjects do
+        if placingObjects[i].object == object then
+            table.remove(placingObjects, i)
         else
             i = i + 1
         end
     end
 
     local thrownIndex = 1
-    while thrownIndex <= #thrownBlocks do
-        if thrownBlocks[thrownIndex].block == block then
-            table.remove(thrownBlocks, thrownIndex)
+    while thrownIndex <= #thrownObjects do
+        if thrownObjects[thrownIndex].object == object then
+            table.remove(thrownObjects, thrownIndex)
         else
             thrownIndex = thrownIndex + 1
         end
     end
 end
 
-local function destroyBlock(block)
-    if not block.Parent then
+local function destroyCarryable(object)
+    if not object.Parent then
         return
     end
-    releaseBlockReferences(block)
-    trackedBlocks[block] = nil
-    block:Destroy()
+    releaseCarryReferences(object)
+    trackedCarryables[object] = nil
+    object:Destroy()
 end
 
 --------------------------------------------------------------------------------
@@ -243,21 +423,25 @@ local function getHumanoid(player)
     return nil
 end
 
-local function findNearestBlock(targetPosition, maxDistance)
-    local closestBlock = nil
+local function isCarryableObject(inst)
+    return inst:IsA("Part") and (inst:GetAttribute("IsCarryable") or inst:GetAttribute("IsPickupObject"))
+end
+
+local function findNearestCarryableObject(targetPosition, maxDistance)
+    local closestObject = nil
     local closestDistance = maxDistance
 
     for _, inst in ipairs(Workspace:GetDescendants()) do
-        if inst:IsA("Part") and inst:GetAttribute("IsPickupObject") then
+        if isCarryableObject(inst) then
             local distance = (inst.Position - targetPosition).Magnitude
             if distance <= closestDistance then
-                closestBlock = inst
+                closestObject = inst
                 closestDistance = distance
             end
         end
     end
 
-    return closestBlock
+    return closestObject
 end
 
 local function normalizeOrNil(vector)
@@ -276,19 +460,19 @@ local function canReach(player, worldPosition, maxDistance)
     return (hrp.Position - worldPosition).Magnitude <= maxDistance
 end
 
-local function releaseHeldBlock(player)
-    local block = heldBlocksByPlayer[player]
-    if not block then
+local function releaseHeldObject(player)
+    local object = heldObjectsByPlayer[player]
+    if not object then
         return nil
     end
 
-    heldBlocksByPlayer[player] = nil
-    setPlayerBlockState(player, nil)
-    return block
+    heldObjectsByPlayer[player] = nil
+    setPlayerCarryState(player, nil)
+    return object
 end
 
-local function pickupBlock(player, inputData)
-    if heldBlocksByPlayer[player] then
+local function pickupObject(player, inputData)
+    if heldObjectsByPlayer[player] then
         player:SetAttribute("LastActionResult", "PickupFailed:AlreadyHolding")
         return
     end
@@ -305,29 +489,31 @@ local function pickupBlock(player, inputData)
         return
     end
 
-    local block = findNearestBlock(targetPosition, 1.5)
-    if not block then
-        player:SetAttribute("LastActionResult", "PickupFailed:NoBlock")
+    local object = findNearestCarryableObject(targetPosition, 1.5)
+    if not object then
+        player:SetAttribute("LastActionResult", "PickupFailed:NoObject")
         return
     end
 
-    heldBlocksByPlayer[player] = block
-    block.Anchored = false
-    block.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
-    block.AssemblyAngularVelocity = Vector3.new(0, 0, 0)
-    block.CanCollide = false
-    setPlayerBlockState(player, block)
+    heldObjectsByPlayer[player] = object
+    object.Anchored = false
+    object.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
+    object.AssemblyAngularVelocity = Vector3.new(0, 0, 0)
+    object.CanCollide = false
+    setPlayerCarryState(player, object)
     player:SetAttribute("LastActionResult", "PickupSuccess")
 end
 
-local function positionOccupied(player, targetPosition)
+local function positionOccupied(player, targetPosition, heldObject)
     local params = OverlapParams.new()
     params.FilterType = Enum.RaycastFilterType.Exclude
-    params.FilterDescendantsInstances = { player.Character, heldBlocksByPlayer[player] }
+    params.FilterDescendantsInstances = { player.Character, heldObject }
+
+    local size = heldObject and heldObject.Size or Vector3.new(BLOCK_SIZE, BLOCK_SIZE, BLOCK_SIZE)
 
     local hits = Workspace:GetPartBoundsInBox(
         CFrame.new(targetPosition),
-        Vector3.new(BLOCK_SIZE, BLOCK_SIZE, BLOCK_SIZE),
+        size,
         params
     )
 
@@ -340,9 +526,9 @@ local function positionOccupied(player, targetPosition)
     return false
 end
 
-local function placeBlock(player, inputData)
-    local block = heldBlocksByPlayer[player]
-    if not block then
+local function placeObject(player, inputData)
+    local object = heldObjectsByPlayer[player]
+    if not object then
         player:SetAttribute("LastActionResult", "PlaceFailed:EmptyHands")
         return
     end
@@ -359,18 +545,18 @@ local function placeBlock(player, inputData)
         return
     end
 
-    if positionOccupied(player, targetPosition) then
+    if positionOccupied(player, targetPosition, object) then
         player:SetAttribute("LastActionResult", "PlaceFailed:Occupied")
         return
     end
 
-    local startPos = block.Position
-    block.Anchored = true
-    block.CanCollide = false
-    releaseHeldBlock(player)
+    local startPos = object.Position
+    object.Anchored = true
+    object.CanCollide = false
+    releaseHeldObject(player)
 
-    table.insert(placingBlocks, {
-        block = block,
+    table.insert(placingObjects, {
+        object = object,
         startPos = startPos,
         targetPos = targetPosition,
         elapsed = 0,
@@ -401,10 +587,10 @@ local function getThrowSpeed(inputData)
     return clamp(tonumber(inputData.speed) or THROW_SPEED, MIN_THROW_SPEED, MAX_THROW_SPEED)
 end
 
-local function throwBlock(player, inputData)
+local function throwObject(player, inputData)
     local hrp = getHumanoidRootPart(player)
-    local block = heldBlocksByPlayer[player]
-    if not hrp or not block then
+    local object = heldObjectsByPlayer[player]
+    if not hrp or not object then
         player:SetAttribute("LastActionResult", "ThrowFailed:EmptyHands")
         return
     end
@@ -422,25 +608,25 @@ local function throwBlock(player, inputData)
 
     local throwSpeed = getThrowSpeed(inputData)
 
-    local blockToThrow = releaseHeldBlock(player)
-    if not blockToThrow then
+    local objectToThrow = releaseHeldObject(player)
+    if not objectToThrow then
         player:SetAttribute("LastActionResult", "ThrowFailed:EmptyHands")
         return
     end
 
-    blockToThrow.Anchored = false
-    blockToThrow.CanCollide = false
-    blockToThrow.Position = hrp.Position
+    objectToThrow.Anchored = false
+    objectToThrow.CanCollide = false
+    objectToThrow.Position = hrp.Position
         + Vector3.new(0, THROW_SPAWN_OFFSET_Y, 0)
         + throwDirection * THROW_FORWARD_OFFSET
-    blockToThrow.AssemblyLinearVelocity = throwDirection * throwSpeed
+    objectToThrow.AssemblyLinearVelocity = throwDirection * throwSpeed
         + Vector3.new(0, THROW_UPWARD_SPEED, 0)
         + hrp.AssemblyLinearVelocity * THROW_CARRY_VELOCITY_FACTOR
-    blockToThrow.AssemblyAngularVelocity = Vector3.new(0, 8, 0)
-    blockToThrow:SetNetworkOwner(nil)
+    objectToThrow.AssemblyAngularVelocity = Vector3.new(0, 8, 0)
+    objectToThrow:SetNetworkOwner(nil)
 
-    table.insert(thrownBlocks, {
-        block = blockToThrow,
+    table.insert(thrownObjects, {
+        object = objectToThrow,
         elapsed = 0,
         duration = THROW_COLLISION_GRACE_PERIOD,
     })
@@ -461,11 +647,11 @@ if AgentInputService then
         elseif inputType == "Jump" then
             humanoid.Jump = true
         elseif inputType == "Pickup" then
-            pickupBlock(player, inputData)
+            pickupObject(player, inputData)
         elseif inputType == "Place" then
-            placeBlock(player, inputData)
+            placeObject(player, inputData)
         elseif inputType == "Throw" then
-            throwBlock(player, inputData)
+            throwObject(player, inputData)
         end
     end)
 end
@@ -482,57 +668,56 @@ RunService.Heartbeat:Connect(function(dt)
         end
     end
 
-    -- Update held blocks
-    for player, heldBlock in pairs(heldBlocksByPlayer) do
+    -- Update held carryables
+    for player, heldObject in pairs(heldObjectsByPlayer) do
         local hrp = getHumanoidRootPart(player)
-        if hrp and heldBlock then
-            heldBlock.Position = hrp.Position + HOLD_OFFSET
-            heldBlock.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
-            heldBlock.AssemblyAngularVelocity = Vector3.new(0, 0, 0)
+        if hrp and heldObject then
+            heldObject.Position = hrp.Position + HOLD_OFFSET
+            heldObject.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
+            heldObject.AssemblyAngularVelocity = Vector3.new(0, 0, 0)
         end
     end
 
-    -- Animate placing blocks
+    -- Animate placing carryables
     local i = 1
-    while i <= #placingBlocks do
-        local p = placingBlocks[i]
+    while i <= #placingObjects do
+        local p = placingObjects[i]
         p.elapsed = p.elapsed + dt
         local alpha = math.min(p.elapsed / p.duration, 1)
         -- Smooth ease-out
         local t = 1 - (1 - alpha) * (1 - alpha)
-        p.block.Position = p.startPos:Lerp(p.targetPos, t)
+        p.object.Position = p.startPos:Lerp(p.targetPos, t)
 
         if alpha >= 1 then
-            p.block.Anchored = false
-            p.block.CanCollide = true
-            setBlockMetadata(p.block, p.block:GetAttribute("ItemColorName"))
-            table.remove(placingBlocks, i)
+            p.object.Anchored = false
+            p.object.CanCollide = p.object:GetAttribute("CarryCollisionEnabled") == true
+            table.remove(placingObjects, i)
         else
             i = i + 1
         end
     end
 
     local thrownIndex = 1
-    while thrownIndex <= #thrownBlocks do
-        local thrown = thrownBlocks[thrownIndex]
-        if not thrown.block.Parent then
-            table.remove(thrownBlocks, thrownIndex)
+    while thrownIndex <= #thrownObjects do
+        local thrown = thrownObjects[thrownIndex]
+        if not thrown.object.Parent then
+            table.remove(thrownObjects, thrownIndex)
         else
             thrown.elapsed = thrown.elapsed + dt
             if thrown.elapsed >= thrown.duration then
-                thrown.block.CanCollide = true
-                table.remove(thrownBlocks, thrownIndex)
+                thrown.object.CanCollide = thrown.object:GetAttribute("CarryCollisionEnabled") == true
+                table.remove(thrownObjects, thrownIndex)
             else
                 thrownIndex = thrownIndex + 1
             end
         end
     end
 
-    for block, _ in pairs(trackedBlocks) do
-        if not block.Parent then
-            trackedBlocks[block] = nil
-        elseif block.Position.Y < OUT_OF_BOUNDS_Y then
-            destroyBlock(block)
+    for object, _ in pairs(trackedCarryables) do
+        if not object.Parent then
+            trackedCarryables[object] = nil
+        elseif object.Position.Y < OUT_OF_BOUNDS_Y then
+            destroyCarryable(object)
         end
     end
 end)

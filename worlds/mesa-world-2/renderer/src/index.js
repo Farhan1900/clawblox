@@ -22,6 +22,54 @@ function resolveEntityModelUrl(entity) {
   return null
 }
 
+function resolveEntityColorHex(entity) {
+  const color = entity?.render?.color
+  if (!Array.isArray(color) || color.length < 3) {
+    return 0xff00ff
+  }
+  return (Math.round(color[0] * 255) << 16) |
+    (Math.round(color[1] * 255) << 8) |
+    Math.round(color[2] * 255)
+}
+
+function resolveEntityColor(entity) {
+  const color = entity?.render?.color
+  if (!Array.isArray(color) || color.length < 3) {
+    return new THREE.Color(0xff00ff)
+  }
+  return new THREE.Color(color[0], color[1], color[2])
+}
+
+function createRockLikeMaterial(color) {
+  return new THREE.MeshStandardMaterial({
+    color,
+    roughness: 0.95,
+    metalness: 0.0,
+    flatShading: true,
+  })
+}
+
+function applyEntityAppearance(obj, entity) {
+  if (!obj?.userData) return
+
+  if (obj.userData.dynamicRole === 'GlowBulb') {
+    const size = entity.size || [0.9, 0.9, 0.9]
+    obj.scale.set(
+      (size[0] || 0.9) / 0.9,
+      (size[1] || 0.9) / 0.9,
+      (size[2] || 0.9) / 0.9,
+    )
+  }
+
+  if (obj.userData.dynamicRole === 'Rock' && obj.material) {
+    obj.material.color.copy(resolveEntityColor(entity))
+  }
+
+  if (obj.userData.dynamicRole === 'PickupObject' && obj.material) {
+    obj.material.color.setHex(resolveEntityColorHex(entity))
+  }
+}
+
 function buildSky(scene) {
   const skyMat = new THREE.ShaderMaterial({
     uniforms: {
@@ -140,6 +188,66 @@ function createEntityVisual(entity) {
     return group
   }
 
+  if (role === 'Rock') {
+    const mesh = new THREE.Mesh(
+      new THREE.DodecahedronGeometry(Math.max(size[0], size[1], size[2]) / 2, 0),
+      createRockLikeMaterial(resolveEntityColor(entity)),
+    )
+    mesh.castShadow = true
+    mesh.receiveShadow = true
+    mesh.userData.dynamicRole = 'Rock'
+    return mesh
+  }
+
+  if (role === 'GlowBulb') {
+    const group = new THREE.Group()
+    const radius = 0.35
+
+    const glow = new THREE.Mesh(
+      new THREE.SphereGeometry(radius * 1.6, 16, 16),
+      new THREE.MeshStandardMaterial({
+        color: 0x00dcc8,
+        emissive: 0x00dcc8,
+        emissiveIntensity: 0.6,
+        transparent: true,
+        opacity: 0.5,
+        roughness: 0.2,
+        metalness: 0.0,
+      }),
+    )
+    glow.userData.isGlow = true
+    group.add(glow)
+
+    const core = new THREE.Mesh(
+      new THREE.SphereGeometry(radius, 16, 16),
+      new THREE.MeshStandardMaterial({
+        color: 0x00ffee,
+        emissive: 0x00ffee,
+        emissiveIntensity: 1.0,
+        roughness: 0.1,
+        metalness: 0.0,
+      }),
+    )
+    core.castShadow = true
+    group.add(core)
+
+    group.userData.isGlowBulb = true
+    group.userData.dynamicRole = 'GlowBulb'
+    applyEntityAppearance(group, entity)
+    return group
+  }
+
+  if (role === 'PickupObject') {
+    const mesh = new THREE.Mesh(
+      new THREE.BoxGeometry(size[0], size[1], size[2]),
+      createRockLikeMaterial(resolveEntityColor(entity)),
+    )
+    mesh.castShadow = true
+    mesh.receiveShadow = true
+    mesh.userData.dynamicRole = 'PickupObject'
+    return mesh
+  }
+
   // Default: box with entity color
   const color = entity.render && entity.render.color
     ? (Math.round(entity.render.color[0] * 255) << 16) |
@@ -181,14 +289,14 @@ export function createRenderer(ctx) {
   const dirLight = new THREE.DirectionalLight(0xffffff, 1.2)
   dirLight.position.set(30, 50, 20)
   dirLight.castShadow = true
-  dirLight.shadow.mapSize.set(2048, 2048)
-  dirLight.shadow.camera.left = -80
-  dirLight.shadow.camera.right = 80
-  dirLight.shadow.camera.top = 80
-  dirLight.shadow.camera.bottom = -80
+  dirLight.shadow.mapSize.set(4096, 4096)
+  dirLight.shadow.camera.left = -180
+  dirLight.shadow.camera.right = 180
+  dirLight.shadow.camera.top = 180
+  dirLight.shadow.camera.bottom = -180
   dirLight.shadow.camera.near = 1
-  dirLight.shadow.camera.far = 200
-  dirLight.shadow.bias = -0.001
+  dirLight.shadow.camera.far = 400
+  dirLight.shadow.bias = -0.00005
   scene.add(dirLight)
   scene.add(dirLight.target)
 
@@ -234,6 +342,7 @@ export function createRenderer(ctx) {
   const tmpForward = new THREE.Vector3(0, 0, 1)
   const anchorPos = new THREE.Vector3(0, 4, 0)
   const clock = new THREE.Clock()
+  let elapsed = 0
 
   function computeAnchorPosition(obs) {
     let count = 0
@@ -278,6 +387,7 @@ export function createRenderer(ctx) {
       obj.position.set(entity.position[0], entity.position[1], entity.position[2])
       if (entity.rotation) obj.quaternion.copy(rotationToQuaternion(entity.rotation))
       obj.visible = !(entity.render && entity.render.visible === false)
+      applyEntityAppearance(obj, entity)
 
       const prev = obj.userData.prevPos
       let speed = 0
@@ -336,6 +446,19 @@ export function createRenderer(ctx) {
 
     dirLight.position.set(cameraTarget.x + 30, 50, cameraTarget.z + 20)
     dirLight.target.position.copy(cameraTarget)
+
+    elapsed += dt
+    for (const obj of entityObjects.values()) {
+      if (!obj?.userData?.isGlowBulb) continue
+      obj.traverse((child) => {
+        if (child.userData?.isGlow && child.material) {
+          const pulse = 0.3 + 0.3 * Math.sin(elapsed * 2.5)
+          child.material.opacity = pulse
+          child.material.emissiveIntensity = 0.3 + 0.5 * Math.sin(elapsed * 2.5)
+        }
+      })
+      obj.position.y += Math.sin(elapsed * 1.5) * 0.003
+    }
   }
 
   return {
