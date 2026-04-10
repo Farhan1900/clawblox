@@ -10,11 +10,21 @@ Workspace.Gravity = 10
 local BLOCK_SIZE = 0.75
 local PICKUP_RANGE = 6
 local PLACE_RANGE = 7
+local HOLD_OFFSET = Vector3.new(0, 3.5, 0)
+local THROW_SPAWN_OFFSET_Y = 2.5
+local THROW_FORWARD_OFFSET = 1.75
+local THROW_SPEED = 24
+local THROW_UPWARD_SPEED = 6
+local THROW_CARRY_VELOCITY_FACTOR = 0.35
+local THROW_COLLISION_GRACE_PERIOD = 0.18
+local MIN_THROW_SPEED = 0
+local MAX_THROW_SPEED = 40
 local PLAYER_SPAWN_POSITION = Vector3.new(0, 5, 0)
 local OUT_OF_BOUNDS_Y = -200
 
 local heldBlocksByPlayer = {}
 local placingBlocks = {} -- { block, startPos, targetPos, elapsed, duration }
+local thrownBlocks = {} -- { block, elapsed, duration }
 local trackedBlocks = {}
 
 local blockColors = {
@@ -201,6 +211,15 @@ local function releaseBlockReferences(block)
             i = i + 1
         end
     end
+
+    local thrownIndex = 1
+    while thrownIndex <= #thrownBlocks do
+        if thrownBlocks[thrownIndex].block == block then
+            table.remove(thrownBlocks, thrownIndex)
+        else
+            thrownIndex = thrownIndex + 1
+        end
+    end
 end
 
 local function destroyBlock(block)
@@ -241,12 +260,31 @@ local function findNearestBlock(targetPosition, maxDistance)
     return closestBlock
 end
 
+local function normalizeOrNil(vector)
+    local magnitude = vector.Magnitude
+    if magnitude <= 0.001 then
+        return nil
+    end
+    return vector / magnitude
+end
+
 local function canReach(player, worldPosition, maxDistance)
     local hrp = getHumanoidRootPart(player)
     if not hrp then
         return false
     end
     return (hrp.Position - worldPosition).Magnitude <= maxDistance
+end
+
+local function releaseHeldBlock(player)
+    local block = heldBlocksByPlayer[player]
+    if not block then
+        return nil
+    end
+
+    heldBlocksByPlayer[player] = nil
+    setPlayerBlockState(player, nil)
+    return block
 end
 
 local function pickupBlock(player, inputData)
@@ -274,6 +312,9 @@ local function pickupBlock(player, inputData)
     end
 
     heldBlocksByPlayer[player] = block
+    block.Anchored = false
+    block.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
+    block.AssemblyAngularVelocity = Vector3.new(0, 0, 0)
     block.CanCollide = false
     setPlayerBlockState(player, block)
     player:SetAttribute("LastActionResult", "PickupSuccess")
@@ -326,8 +367,7 @@ local function placeBlock(player, inputData)
     local startPos = block.Position
     block.Anchored = true
     block.CanCollide = false
-    heldBlocksByPlayer[player] = nil
-    setPlayerBlockState(player, nil)
+    releaseHeldBlock(player)
 
     table.insert(placingBlocks, {
         block = block,
@@ -338,6 +378,74 @@ local function placeBlock(player, inputData)
     })
 
     player:SetAttribute("LastActionResult", "PlaceSuccess")
+end
+
+local function clamp(value, minValue, maxValue)
+    return math.max(minValue, math.min(maxValue, value))
+end
+
+local function getThrowDirection(inputData)
+    if not inputData or not inputData.direction then
+        return nil
+    end
+
+    local dir = inputData.direction
+    return normalizeOrNil(Vector3.new(dir[1], dir[2], dir[3]))
+end
+
+local function getThrowSpeed(inputData)
+    if not inputData or inputData.speed == nil then
+        return THROW_SPEED
+    end
+
+    return clamp(tonumber(inputData.speed) or THROW_SPEED, MIN_THROW_SPEED, MAX_THROW_SPEED)
+end
+
+local function throwBlock(player, inputData)
+    local hrp = getHumanoidRootPart(player)
+    local block = heldBlocksByPlayer[player]
+    if not hrp or not block then
+        player:SetAttribute("LastActionResult", "ThrowFailed:EmptyHands")
+        return
+    end
+
+    if not inputData or not inputData.direction then
+        player:SetAttribute("LastActionResult", "ThrowFailed:MissingDirection")
+        return
+    end
+
+    local throwDirection = getThrowDirection(inputData)
+    if not throwDirection then
+        player:SetAttribute("LastActionResult", "ThrowFailed:InvalidDirection")
+        return
+    end
+
+    local throwSpeed = getThrowSpeed(inputData)
+
+    local blockToThrow = releaseHeldBlock(player)
+    if not blockToThrow then
+        player:SetAttribute("LastActionResult", "ThrowFailed:EmptyHands")
+        return
+    end
+
+    blockToThrow.Anchored = false
+    blockToThrow.CanCollide = false
+    blockToThrow.Position = hrp.Position
+        + Vector3.new(0, THROW_SPAWN_OFFSET_Y, 0)
+        + throwDirection * THROW_FORWARD_OFFSET
+    blockToThrow.AssemblyLinearVelocity = throwDirection * throwSpeed
+        + Vector3.new(0, THROW_UPWARD_SPEED, 0)
+        + hrp.AssemblyLinearVelocity * THROW_CARRY_VELOCITY_FACTOR
+    blockToThrow.AssemblyAngularVelocity = Vector3.new(0, 8, 0)
+    blockToThrow:SetNetworkOwner(nil)
+
+    table.insert(thrownBlocks, {
+        block = blockToThrow,
+        elapsed = 0,
+        duration = THROW_COLLISION_GRACE_PERIOD,
+    })
+
+    player:SetAttribute("LastActionResult", "ThrowSuccess")
 end
 
 if AgentInputService then
@@ -356,6 +464,8 @@ if AgentInputService then
             pickupBlock(player, inputData)
         elseif inputType == "Place" then
             placeBlock(player, inputData)
+        elseif inputType == "Throw" then
+            throwBlock(player, inputData)
         end
     end)
 end
@@ -376,7 +486,9 @@ RunService.Heartbeat:Connect(function(dt)
     for player, heldBlock in pairs(heldBlocksByPlayer) do
         local hrp = getHumanoidRootPart(player)
         if hrp and heldBlock then
-            heldBlock.Position = hrp.Position + Vector3.new(0, 3.5, 0)
+            heldBlock.Position = hrp.Position + HOLD_OFFSET
+            heldBlock.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
+            heldBlock.AssemblyAngularVelocity = Vector3.new(0, 0, 0)
         end
     end
 
@@ -397,6 +509,22 @@ RunService.Heartbeat:Connect(function(dt)
             table.remove(placingBlocks, i)
         else
             i = i + 1
+        end
+    end
+
+    local thrownIndex = 1
+    while thrownIndex <= #thrownBlocks do
+        local thrown = thrownBlocks[thrownIndex]
+        if not thrown.block.Parent then
+            table.remove(thrownBlocks, thrownIndex)
+        else
+            thrown.elapsed = thrown.elapsed + dt
+            if thrown.elapsed >= thrown.duration then
+                thrown.block.CanCollide = true
+                table.remove(thrownBlocks, thrownIndex)
+            else
+                thrownIndex = thrownIndex + 1
+            end
         end
     end
 
