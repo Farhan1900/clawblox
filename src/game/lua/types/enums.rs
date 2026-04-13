@@ -5,6 +5,7 @@ pub enum PartType {
     Ball,
     Block,
     Cylinder,
+    Ring,
     Wedge,
 }
 
@@ -14,6 +15,7 @@ impl PartType {
             PartType::Ball => "Ball",
             PartType::Block => "Block",
             PartType::Cylinder => "Cylinder",
+            PartType::Ring => "Ring",
             PartType::Wedge => "Wedge",
         }
     }
@@ -23,7 +25,8 @@ impl PartType {
             PartType::Ball => 0,
             PartType::Block => 1,
             PartType::Cylinder => 2,
-            PartType::Wedge => 3,
+            PartType::Ring => 3,
+            PartType::Wedge => 4,
         }
     }
 }
@@ -342,6 +345,7 @@ pub fn register_enums(lua: &Lua) -> Result<()> {
     part_type_table.set("Ball", PartType::Ball)?;
     part_type_table.set("Block", PartType::Block)?;
     part_type_table.set("Cylinder", PartType::Cylinder)?;
+    part_type_table.set("Ring", PartType::Ring)?;
     part_type_table.set("Wedge", PartType::Wedge)?;
     enum_table.set("PartType", part_type_table)?;
 
@@ -350,6 +354,7 @@ pub fn register_enums(lua: &Lua) -> Result<()> {
     part_shape_table.set("Ball", PartType::Ball)?;
     part_shape_table.set("Block", PartType::Block)?;
     part_shape_table.set("Cylinder", PartType::Cylinder)?;
+    part_shape_table.set("Ring", PartType::Ring)?;
     part_shape_table.set("Wedge", PartType::Wedge)?;
     enum_table.set("PartShape", part_shape_table)?;
 

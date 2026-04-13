@@ -1128,6 +1128,59 @@ fn test_get_parts_in_part_respects_overlap_params() {
 }
 
 #[test]
+fn test_get_parts_in_part_uses_exact_ring_shape() {
+    let mut runtime = test_runtime();
+    runtime
+        .load_script(
+            r#"
+            local ring = Instance.new("Part")
+            ring.Name = "RingQuery"
+            ring.Anchored = true
+            ring.Shape = Enum.PartType.Ring
+            ring.Size = Vector3.new(4, 0.4, 4)
+            ring.Position = Vector3.new(0, 0.2, 0)
+            ring.Parent = Workspace
+
+            local centerBall = Instance.new("Part")
+            centerBall.Name = "CenterBall"
+            centerBall.Anchored = true
+            centerBall.Shape = Enum.PartType.Ball
+            centerBall.Size = Vector3.new(0.8, 0.8, 0.8)
+            centerBall.Position = Vector3.new(0, 0.4, 0)
+            centerBall.Parent = Workspace
+
+            local rimBlock = Instance.new("Part")
+            rimBlock.Name = "RimBlock"
+            rimBlock.Anchored = true
+            rimBlock.Size = Vector3.new(0.5, 0.5, 0.5)
+            rimBlock.Position = Vector3.new(1.8, 0.25, 0)
+            rimBlock.Parent = Workspace
+
+            local hits = Workspace:GetPartsInPart(ring)
+            _G.hitCenterBall = false
+            _G.hitRimBlock = false
+            for _, v in ipairs(hits) do
+                if v.Name == "CenterBall" then _G.hitCenterBall = true end
+                if v.Name == "RimBlock" then _G.hitRimBlock = true end
+            end
+        "#,
+        )
+        .expect("Failed to load script");
+
+    let globals = runtime.lua().globals().get::<mlua::Table>("_G").unwrap();
+    let hit_center_ball: bool = globals.get("hitCenterBall").unwrap();
+    let hit_rim_block: bool = globals.get("hitRimBlock").unwrap();
+    assert!(
+        !hit_center_ball,
+        "Objects resting fully inside the ring hole should not count as overlapping"
+    );
+    assert!(
+        hit_rim_block,
+        "Objects touching the ring body should count as overlapping"
+    );
+}
+
+#[test]
 fn test_player_has_character() {
     let runtime = test_runtime();
     let (player, hrp_id) = runtime.add_player(12345, "TestPlayer");
@@ -2303,6 +2356,24 @@ fn test_enum_partshape_alias_maps_to_part_type() {
     let globals = runtime.lua().globals().get::<mlua::Table>("_G").unwrap();
     let shape_name: String = globals.get("shapeName").unwrap();
     assert_eq!(shape_name, "Ball");
+}
+
+#[test]
+fn test_enum_parttype_ring_exists() {
+    let mut runtime = test_runtime();
+    runtime
+        .load_script(
+            r#"
+            local p = Instance.new("Part")
+            p.Shape = Enum.PartType.Ring
+            _G.shapeName = p.Shape.Name
+        "#,
+        )
+        .expect("Failed to run script");
+
+    let globals = runtime.lua().globals().get::<mlua::Table>("_G").unwrap();
+    let shape_name: String = globals.get("shapeName").unwrap();
+    assert_eq!(shape_name, "Ring");
 }
 
 #[test]

@@ -1,5 +1,22 @@
 import * as THREE from 'https://esm.sh/three@0.160.0'
 
+const COLLIDER_DEBUG_FILL_MATERIAL = new THREE.MeshBasicMaterial({
+  color: 0x00d8ff,
+  transparent: true,
+  opacity: 0.08,
+  depthWrite: false,
+  depthTest: false,
+  toneMapped: false,
+})
+
+const COLLIDER_DEBUG_LINE_MATERIAL = new THREE.LineBasicMaterial({
+  color: 0x00d8ff,
+  transparent: true,
+  opacity: 0.95,
+  depthTest: false,
+  toneMapped: false,
+})
+
 function rotationToQuaternion(rot) {
   const m = new THREE.Matrix4()
   m.set(
@@ -49,6 +66,141 @@ function createRockLikeMaterial(color) {
     metalness: 0.0,
     flatShading: true,
   })
+}
+
+function readDebugFlag(name) {
+  if (typeof globalThis?.location?.search !== 'string') return false
+  const params = new URLSearchParams(globalThis.location.search)
+  const raw = params.get(name)
+  if (raw == null) return false
+  const normalized = raw.trim().toLowerCase()
+  return normalized === '' || normalized === '1' || normalized === 'true' || normalized === 'yes' || normalized === 'on'
+}
+
+function resolveColliderShape(entity) {
+  if (typeof entity?.shape === 'string' && entity.shape.length > 0) {
+    return entity.shape
+  }
+
+  const primitive = typeof entity?.render?.primitive === 'string'
+    ? entity.render.primitive.toLowerCase()
+    : ''
+  if (primitive === 'sphere' || primitive === 'ball') return 'Ball'
+  if (primitive === 'cylinder') return 'Cylinder'
+  if (primitive === 'wedge') return 'Wedge'
+
+  const role = typeof entity?.render?.role === 'string' ? entity.render.role : ''
+  if (role === 'Ring') return 'Ring'
+  return 'Block'
+}
+
+function createWedgeGeometry(size) {
+  const hx = size[0] * 0.5
+  const hy = size[1] * 0.5
+  const hz = size[2] * 0.5
+  const vertices = new Float32Array([
+    -hx, -hy, -hz,
+    hx, -hy, -hz,
+    -hx, -hy, hz,
+    hx, -hy, hz,
+    -hx, hy, -hz,
+    -hx, hy, hz,
+  ])
+  const indices = [
+    0, 1, 2,
+    1, 3, 2,
+    0, 4, 1,
+    2, 3, 5,
+    0, 2, 4,
+    2, 5, 4,
+    1, 4, 3,
+    3, 4, 5,
+  ]
+  const geometry = new THREE.BufferGeometry()
+  geometry.setAttribute('position', new THREE.BufferAttribute(vertices, 3))
+  geometry.setIndex(indices)
+  geometry.computeVertexNormals()
+  return geometry
+}
+
+function buildRingSegmentSpecs(size) {
+  const outerRadius = Math.min(size[0], size[2]) * 0.5
+  const tubeRadius = Math.max(Math.min(size[1] * 0.5, outerRadius * 0.45), 0.05)
+  const majorRadius = Math.max(outerRadius - tubeRadius, 0.05)
+  const segments = 12
+  const segmentLength = Math.max(2 * majorRadius * Math.tan(Math.PI / segments), tubeRadius * 1.5) * 1.08
+  const segmentSize = [segmentLength, tubeRadius * 2, tubeRadius * 2]
+  const out = []
+  for (let index = 0; index < segments; index += 1) {
+    const angle = (index / segments) * Math.PI * 2
+    out.push({
+      position: [Math.cos(angle) * majorRadius, 0, Math.sin(angle) * majorRadius],
+      rotationY: -(angle + Math.PI / 2),
+      size: segmentSize,
+    })
+  }
+  return out
+}
+
+function addColliderDebugPrimitive(parent, geometry, position = [0, 0, 0], quaternion = null) {
+  const fill = new THREE.Mesh(geometry, COLLIDER_DEBUG_FILL_MATERIAL)
+  fill.renderOrder = 999
+  fill.position.set(position[0], position[1], position[2])
+  if (quaternion) fill.quaternion.copy(quaternion)
+  parent.add(fill)
+
+  const edges = new THREE.LineSegments(new THREE.EdgesGeometry(geometry), COLLIDER_DEBUG_LINE_MATERIAL)
+  edges.renderOrder = 1000
+  edges.position.copy(fill.position)
+  if (quaternion) edges.quaternion.copy(quaternion)
+  parent.add(edges)
+}
+
+function createColliderDebugVisual(entity) {
+  const size = Array.isArray(entity?.size) && entity.size.length >= 3 ? entity.size : null
+  if (!size) return null
+
+  const shape = resolveColliderShape(entity)
+  const group = new THREE.Group()
+  group.userData.colliderDebugKey = buildColliderDebugKey(entity)
+
+  if (shape === 'Ball') {
+    addColliderDebugPrimitive(group, new THREE.SphereGeometry(size[0] * 0.5, 18, 12))
+    return group
+  }
+
+  if (shape === 'Cylinder') {
+    addColliderDebugPrimitive(group, new THREE.CylinderGeometry(size[0] * 0.5, size[0] * 0.5, size[1], 18, 1, false))
+    return group
+  }
+
+  if (shape === 'Wedge') {
+    addColliderDebugPrimitive(group, createWedgeGeometry(size))
+    return group
+  }
+
+  if (shape === 'Ring') {
+    for (const segment of buildRingSegmentSpecs(size)) {
+      const rotation = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), segment.rotationY)
+      addColliderDebugPrimitive(
+        group,
+        new THREE.BoxGeometry(segment.size[0], segment.size[1], segment.size[2]),
+        segment.position,
+        rotation,
+      )
+    }
+    return group
+  }
+
+  addColliderDebugPrimitive(group, new THREE.BoxGeometry(size[0], size[1], size[2]))
+  return group
+}
+
+function buildColliderDebugKey(entity) {
+  const size = Array.isArray(entity?.size) && entity.size.length >= 3 ? entity.size : null
+  if (!size) return 'none'
+  const shape = resolveColliderShape(entity)
+  return `${shape}:${size.map((value) => Number(value).toFixed(3)).join(',')}`
 }
 
 function applyColorToMeshes(obj, colorHex) {
@@ -345,6 +497,7 @@ export function createRenderer(ctx) {
   const captureConfig = globalThis.__mesaCaptureConfig && typeof globalThis.__mesaCaptureConfig === 'object'
     ? globalThis.__mesaCaptureConfig
     : {}
+  const debugCollidersEnabled = Boolean(captureConfig.debugColliders) || readDebugFlag('debugColliders') || readDebugFlag('debugCollider')
 
   const camera = new THREE.PerspectiveCamera(60, 1, 0.1, 3000)
 
@@ -406,6 +559,7 @@ export function createRenderer(ctx) {
     ctx.runtime.internal.expose('camera', cameraModes.api)
   }
   const entityObjects = new Map()
+  const colliderDebugObjects = new Map()
   const modelController = ctx.runtime.three.createModelEntityController(THREE, {
     onError(err, meta) {
       ctx.log('warn', 'Model entity load failed', { err: String(err), ...meta })
@@ -416,6 +570,30 @@ export function createRenderer(ctx) {
   const anchorPos = new THREE.Vector3(0, 4, 0)
   const clock = new THREE.Clock()
   let elapsed = 0
+
+  function syncColliderDebug(entity, visible) {
+    if (!debugCollidersEnabled) return
+
+    const debugKey = buildColliderDebugKey(entity)
+    let debugObj = colliderDebugObjects.get(entity.id)
+    if (!debugObj || debugObj.userData.colliderDebugKey !== debugKey) {
+      if (debugObj) {
+        scene.remove(debugObj)
+        colliderDebugObjects.delete(entity.id)
+      }
+      debugObj = createColliderDebugVisual(entity)
+      if (debugObj) {
+        colliderDebugObjects.set(entity.id, debugObj)
+        scene.add(debugObj)
+      }
+    }
+
+    if (!debugObj) return
+    debugObj.position.set(entity.position[0], entity.position[1], entity.position[2])
+    if (entity.rotation) debugObj.quaternion.copy(rotationToQuaternion(entity.rotation))
+    else debugObj.quaternion.identity()
+    debugObj.visible = visible
+  }
 
   function computeAnchorPosition(obs) {
     let count = 0
@@ -459,8 +637,10 @@ export function createRenderer(ctx) {
 
       obj.position.set(entity.position[0], entity.position[1], entity.position[2])
       if (entity.rotation) obj.quaternion.copy(rotationToQuaternion(entity.rotation))
+      else obj.quaternion.identity()
       obj.visible = !(entity.render && entity.render.visible === false)
       applyEntityAppearance(obj, entity)
+      syncColliderDebug(entity, obj.visible)
 
       const prev = obj.userData.prevPos
       let speed = 0
@@ -495,6 +675,12 @@ export function createRenderer(ctx) {
         scene.remove(obj)
         modelController.remove(id)
         entityObjects.delete(id)
+      }
+    }
+    for (const [id, obj] of colliderDebugObjects.entries()) {
+      if (!activeIds.has(id)) {
+        scene.remove(obj)
+        colliderDebugObjects.delete(id)
       }
     }
 
@@ -571,7 +757,9 @@ export function createRenderer(ctx) {
       if (ctx.runtime?.internal?.remove) ctx.runtime.internal.remove('camera')
       if (cameraModes?.dispose) cameraModes.dispose()
       for (const obj of entityObjects.values()) scene.remove(obj)
+      for (const obj of colliderDebugObjects.values()) scene.remove(obj)
       entityObjects.clear()
+      colliderDebugObjects.clear()
       modelController.clear()
       renderer.dispose()
     },

@@ -2134,6 +2134,8 @@ pub struct SpectatorEntity {
     pub rotation: Option<[[f32; 3]; 3]>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub size: Option<[f32; 3]>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub shape: Option<String>,
     pub render: SpectatorRender,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub health: Option<i32>,

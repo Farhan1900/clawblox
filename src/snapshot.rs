@@ -1770,6 +1770,7 @@ fn restore_part_type(v: &str) -> Result<PartType, String> {
         "Ball" => Ok(PartType::Ball),
         "Block" => Ok(PartType::Block),
         "Cylinder" => Ok(PartType::Cylinder),
+        "Ring" => Ok(PartType::Ring),
         "Wedge" => Ok(PartType::Wedge),
         other => Err(format!("unsupported PartType '{}'", other)),
     }

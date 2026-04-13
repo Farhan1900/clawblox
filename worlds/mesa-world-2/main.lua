@@ -10,7 +10,7 @@ Workspace.Gravity = 10
 local BLOCK_SIZE = 0.75
 local BALL_SIZE = 1.5
 local PLANK_SIZE = Vector3.new(9, 0.45, 1.8)
-local RING_SIZE = Vector3.new(2.4, 0.36, 2.4)
+local RING_SIZE = Vector3.new(2.9, 0.4, 2.9)
 local PICKUP_RANGE = 6
 local PLACE_RANGE = 7
 local HOLD_OFFSET = Vector3.new(0, 3.5, 0)
@@ -21,7 +21,7 @@ local THROW_UPWARD_SPEED = 6
 local THROW_CARRY_VELOCITY_FACTOR = 0.35
 local THROW_COLLISION_GRACE_PERIOD = 0.18
 local MIN_THROW_SPEED = 0
-local MAX_THROW_SPEED = 40
+local MAX_THROW_SPEED = 10
 local PLAYER_SPAWN_POSITION = Vector3.new(0, 5, 0)
 local OUT_OF_BOUNDS_Y = -200
 
@@ -338,6 +338,7 @@ local function createRing(name, position, colorName, rotationDegrees, size)
     local ring = Instance.new("Part")
     ring.Name = name
     ring.Size = size or RING_SIZE
+    ring.Shape = Enum.PartType.Ring
     local pitch = 0
     local yaw = 0
     local roll = 0
@@ -422,13 +423,13 @@ createPlank("Plank_1", Vector3.new(70.8, 0.9, -79.4), "Wood", { 0, 20, 0 })
 createPlank("Plank_2", Vector3.new(74.2, 1.16, -77.5), "Wood", { 5, -28, 12 })
 createPlank("Plank_3", Vector3.new(67.2, 1.02, -75.1), "Wood", { -6, 44, -10 })
 
-createRing("Ring_1", Vector3.new(72.4, 0.18, -81.4), "Gold", nil, Vector3.new(2.2, 0.36, 2.2))
-createRing("Ring_2", Vector3.new(75.1, 0.2, -83.3), "Gold", { 0, 18, 0 }, Vector3.new(2.65, 0.4, 2.65))
-createRing("Ring_3", Vector3.new(78.2, 0.16, -79.9), "Gold", { 0, -26, 0 }, Vector3.new(1.8, 0.32, 1.8))
-createRing("Ring_4", Vector3.new(80.6, 0.22, -82.1), "Gold", { 0, 34, 0 }, Vector3.new(2.9, 0.44, 2.9))
-createRing("Ring_5", Vector3.new(83.4, 0.18, -84.7), "Gold", { 0, -12, 0 }, Vector3.new(2.3, 0.36, 2.3))
-createRing("Ring_6", Vector3.new(85.8, 0.14, -80.8), "Gold", { 0, 26, 0 }, Vector3.new(1.6, 0.28, 1.6))
-createRing("Ring_7", Vector3.new(77.0, 0.2, -86.0), "Gold", { 0, -40, 0 }, Vector3.new(2.55, 0.4, 2.55))
+createRing("Ring_1", Vector3.new(72.4, 0.22, -81.4), "Gold", nil, Vector3.new(2.7, 0.44, 2.7))
+createRing("Ring_2", Vector3.new(75.1, 0.24, -83.3), "Gold", { 0, 18, 0 }, Vector3.new(3.2, 0.48, 3.2))
+createRing("Ring_3", Vector3.new(78.2, 0.2, -79.9), "Gold", { 0, -26, 0 }, Vector3.new(2.2, 0.4, 2.2))
+createRing("Ring_4", Vector3.new(80.6, 0.28, -82.1), "Gold", { 0, 34, 0 }, Vector3.new(3.6, 0.56, 3.6))
+createRing("Ring_5", Vector3.new(83.4, 0.22, -84.7), "Gold", { 0, -12, 0 }, Vector3.new(2.8, 0.44, 2.8))
+createRing("Ring_6", Vector3.new(85.8, 0.17, -80.8), "Gold", { 0, 26, 0 }, Vector3.new(1.95, 0.34, 1.95))
+createRing("Ring_7", Vector3.new(77.0, 0.24, -86.0), "Gold", { 0, -40, 0 }, Vector3.new(3.05, 0.48, 3.05))
 
 --------------------------------------------------------------------------------
 -- PLAYER
@@ -634,13 +635,15 @@ local function positionOccupied(player, targetPosition, heldObject)
     params.FilterType = Enum.RaycastFilterType.Exclude
     params.FilterDescendantsInstances = { player.Character, heldObject }
 
-    local size = heldObject and heldObject.Size or Vector3.new(BLOCK_SIZE, BLOCK_SIZE, BLOCK_SIZE)
+    local probe = Instance.new("Part")
+    probe.Size = heldObject and heldObject.Size or Vector3.new(BLOCK_SIZE, BLOCK_SIZE, BLOCK_SIZE)
+    probe.CFrame = CFrame.new(targetPosition)
+    if heldObject then
+        probe.Shape = heldObject.Shape
+    end
 
-    local hits = Workspace:GetPartBoundsInBox(
-        CFrame.new(targetPosition),
-        size,
-        params
-    )
+    local hits = Workspace:GetPartsInPart(probe, params)
+    probe:Destroy()
 
     for _, hit in ipairs(hits) do
         if hit:IsA("Part") then
@@ -706,7 +709,7 @@ end
 
 local function getThrowSpeed(inputData)
     if not inputData or inputData.speed == nil then
-        return THROW_SPEED
+        return clamp(THROW_SPEED, MIN_THROW_SPEED, MAX_THROW_SPEED)
     end
 
     return clamp(tonumber(inputData.speed) or THROW_SPEED, MIN_THROW_SPEED, MAX_THROW_SPEED)

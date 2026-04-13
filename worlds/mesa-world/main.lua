@@ -219,6 +219,7 @@ local function createRing(name, position, colorName, rotationDegrees, size)
     local ring = Instance.new("Part")
     ring.Name = name
     ring.Size = size or RING_SIZE
+    ring.Shape = Enum.PartType.Ring
     local pitch = 0
     local yaw = 0
     local roll = 0
@@ -287,11 +288,11 @@ createPlank("Plank_1", Vector3.new(25.6, 0.9, -45.4), "Wood", { 0, 18, 0 })
 createPlank("Plank_2", Vector3.new(25.9, 1.18, -45.0), "Wood", { 4, -27, 11 })
 createPlank("Plank_3", Vector3.new(23.9, 1.05, -45.2), "Wood", { -6, 53, -8 })
 
-createRing("Ring_1", Vector3.new(39.4, 0.16, -45.8), "Gold", nil, Vector3.new(1.95, 0.32, 1.95))
-createRing("Ring_2", Vector3.new(41.2, 0.2, -47.0), "Gold", { 0, 18, 0 }, Vector3.new(2.45, 0.4, 2.45))
-createRing("Ring_3", Vector3.new(42.8, 0.14, -45.4), "Gold", { 0, -24, 0 }, Vector3.new(1.55, 0.28, 1.55))
-createRing("Ring_4", Vector3.new(44.7, 0.24, -47.2), "Gold", { 0, 32, 0 }, Vector3.new(3.2, 0.48, 3.2))
-createRing("Ring_5", Vector3.new(43.1, 0.18, -43.8), "Gold", { 0, -12, 0 }, Vector3.new(2.3, 0.36, 2.3))
+createRing("Ring_1", Vector3.new(36.6, 0.22, -44.6), "Gold", nil, Vector3.new(2.7, 0.44, 2.7))
+createRing("Ring_2", Vector3.new(40.1, 0.24, -45.9), "Gold", { 0, 18, 0 }, Vector3.new(3.2, 0.48, 3.2))
+createRing("Ring_3", Vector3.new(43.0, 0.2, -42.0), "Gold", { 0, -24, 0 }, Vector3.new(2.2, 0.4, 2.2))
+createRing("Ring_4", Vector3.new(45.4, 0.28, -45.7), "Gold", { 0, 32, 0 }, Vector3.new(3.6, 0.56, 3.6))
+createRing("Ring_5", Vector3.new(40.0, 0.22, -39.6), "Gold", { 0, -12, 0 }, Vector3.new(2.8, 0.44, 2.8))
 
 --------------------------------------------------------------------------------
 -- PLAYER
@@ -536,7 +537,13 @@ local function positionOccupied(player, targetCFrame, object)
     params.FilterType = Enum.RaycastFilterType.Exclude
     params.FilterDescendantsInstances = { player.Character, heldBlocksByPlayer[player] }
 
-    local hits = Workspace:GetPartBoundsInBox(targetCFrame, object.Size, params)
+    local probe = Instance.new("Part")
+    probe.Size = object.Size
+    probe.CFrame = targetCFrame
+    probe.Shape = object.Shape
+
+    local hits = Workspace:GetPartsInPart(probe, params)
+    probe:Destroy()
 
     for _, hit in ipairs(hits) do
         if hit:IsA("Part") then
@@ -608,7 +615,7 @@ end
 
 local function getThrowSpeed(inputData)
     if not inputData or inputData.speed == nil then
-        return THROW_SPEED
+        return clamp(THROW_SPEED, MIN_THROW_SPEED, MAX_THROW_SPEED)
     end
 
     return clamp(tonumber(inputData.speed) or THROW_SPEED, MIN_THROW_SPEED, MAX_THROW_SPEED)
