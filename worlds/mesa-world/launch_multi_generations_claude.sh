@@ -117,6 +117,10 @@ csv_unquote() {
   printf '%s' "${value//\"\"/\"}"
 }
 
+utc_now() {
+  date -u +%Y-%m-%dT%H:%M:%SZ
+}
+
 sleep_until_deadline() {
   local deadline="$1"
   while ((SECONDS < deadline)); do
@@ -210,10 +214,13 @@ copy_agent_generation_snapshot() {
 
   mkdir -p "$dest_agent_dir/logs" "$dest_agent_dir/runtime"
   cp -a "$src_agent_dir/workspace" "$dest_agent_dir/"
-  cp -a "$src_agent_dir/logs/agent.log" "$dest_agent_dir/logs/"
-  cp -a "$src_agent_dir/runtime/system_prompt.md" "$dest_agent_dir/runtime/"
+  cp -a "$src_agent_dir/logs/." "$dest_agent_dir/logs/"
+  cp -a "$src_agent_dir/runtime/." "$dest_agent_dir/runtime/"
   cp -a "$src_agent_dir/claude_session_id.txt" "$dest_agent_dir/"
   cp -a "$src_agent_dir/world_session.txt" "$dest_agent_dir/"
+  if [[ -d "$src_agent_dir/session" ]]; then
+    cp -a "$src_agent_dir/session" "$dest_agent_dir/"
+  fi
 }
 
 usage() {
@@ -646,6 +653,31 @@ else
 fi
 
 CURRENT_SESSION=""
+audit_generation_event() {
+  local event="$1"
+  local details="${2:-}"
+  local audit_file parent_cmd self_cmd
+
+  if [[ -z "${EXPERIMENT_DIR:-}" ]]; then
+    return 0
+  fi
+
+  audit_file="$EXPERIMENT_DIR/generation_audit.log"
+  mkdir -p "$(dirname "$audit_file")"
+  parent_cmd="$(ps -o args= -p "$PPID" 2>/dev/null | tr '\n' ' ' || true)"
+  self_cmd="$(ps -o args= -p "$$" 2>/dev/null | tr '\n' ' ' || true)"
+  printf '%s event=%s pid=%s ppid=%s current_session=%q experiment_id=%q parent_cmd=%q self_cmd=%q details=%q\n' \
+    "$(utc_now)" \
+    "$event" \
+    "$$" \
+    "$PPID" \
+    "$CURRENT_SESSION" \
+    "$EXPERIMENT_ID" \
+    "$parent_cmd" \
+    "$self_cmd" \
+    "$details" >>"$audit_file"
+}
+
 cleanup_active_session() {
   if [[ -z "$CURRENT_SESSION" ]]; then
     return
@@ -653,7 +685,10 @@ cleanup_active_session() {
 
   echo
   echo "Stopping active session '$CURRENT_SESSION'..."
-  bash "$LAUNCH_SCRIPT" --tmux-session "$CURRENT_SESSION" --stop --force --stop-grace-seconds "$STOP_GRACE_SECONDS" || true
+  audit_generation_event "cleanup_active_session" "stop_grace_seconds=$STOP_GRACE_SECONDS"
+  CLAWBLOX_STOP_REASON="${CLAWBLOX_STOP_REASON:-generation_cleanup}" \
+    CLAWBLOX_STOP_SOURCE="${CLAWBLOX_STOP_SOURCE:-launch_multi_generations_claude_cleanup}" \
+    bash "$LAUNCH_SCRIPT" --tmux-session "$CURRENT_SESSION" --stop --force --stop-grace-seconds "$STOP_GRACE_SECONDS" || true
   CURRENT_SESSION=""
 }
 
@@ -661,6 +696,9 @@ cleanup_on_signal() {
   local signal_name="$1"
   echo
   echo "Signal $signal_name received."
+  audit_generation_event "signal_received" "signal=$signal_name"
+  CLAWBLOX_STOP_REASON="generation_wrapper_signal_${signal_name}" \
+    CLAWBLOX_STOP_SOURCE="launch_multi_generations_claude_signal"
   cleanup_active_session
   exit 130
 }
@@ -955,6 +993,7 @@ run_persistent_world_generations() {
   echo "  active Claude window: ${launch_duration}s"
   echo "  save grace: ${launch_warning}s"
   echo
+  audit_generation_event "persistent_world_launch" "live_run_id=$live_run_id tmux_session=$live_tmux_session total_duration_seconds=$total_duration_seconds launch_duration=$launch_duration save_grace=$launch_warning"
 
   start_utc="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   CHECKPOINT_WARNING_SECONDS="$launch_warning" \
@@ -1002,6 +1041,7 @@ run_persistent_world_generations() {
 
     if ((gen < GENERATIONS)); then
       echo "  waiting for reset cycle $gen..."
+      audit_generation_event "waiting_for_reset_cycle" "generation=$gen timeout_seconds=$boundary_wait_seconds"
       mapfile -t workspaces < <(find "$agents_root" -mindepth 2 -maxdepth 2 -type d -name workspace | sort)
       if ((${#workspaces[@]} != AGENTS_PER_WORLD)); then
         echo "Error: expected $AGENTS_PER_WORLD live workspaces under $agents_root, found ${#workspaces[@]}."
@@ -1011,17 +1051,22 @@ run_persistent_world_generations() {
         agent_dir="$(dirname "$workspace_out")"
         log_file="$agent_dir/logs/agent.log"
         if ! wait_for_reset_cycle "$log_file" "$gen" "$boundary_wait_seconds"; then
+          audit_generation_event "reset_cycle_timeout" "generation=$gen log_file=$log_file timeout_seconds=$boundary_wait_seconds"
           echo "Error: timed out waiting for reset cycle $gen in $log_file"
           return 1
         fi
       done
+      audit_generation_event "reset_cycle_observed" "generation=$gen"
     else
       echo "  waiting for final session shutdown..."
+      audit_generation_event "waiting_for_final_shutdown" "generation=$gen timeout_seconds=$final_wait_seconds"
       if ! wait_for_tmux_session_exit "$live_tmux_session" "$final_wait_seconds"; then
+        audit_generation_event "final_shutdown_timeout" "generation=$gen timeout_seconds=$final_wait_seconds"
         echo "Error: timed out waiting for persistent session '$live_tmux_session' to stop."
         return 1
       fi
       CURRENT_SESSION=""
+      audit_generation_event "final_shutdown_observed" "generation=$gen"
     fi
 
     mapfile -t workspaces < <(find "$agents_root" -mindepth 2 -maxdepth 2 -type d -name workspace | sort)
@@ -1091,6 +1136,7 @@ run_persistent_world_generations() {
 
     template_inputs=("${CURRENT_TEMPLATES[@]}")
     start_utc="$end_utc"
+    audit_generation_event "generation_snapshot_written" "generation=$gen run_id=$run_id"
     echo
   done
 
@@ -1117,6 +1163,7 @@ if ((RESUME_MODE == 1)); then
 fi
 echo "  Experiment metadata: $EXPERIMENT_DIR"
 echo
+audit_generation_event "wrapper_started" "generations=$GENERATIONS keep_world=$KEEP_WORLD base_port=$BASE_PORT"
 
 if ((START_GENERATION > GENERATIONS)); then
   echo "Nothing to run: completed generations already reach target ($GENERATIONS)."

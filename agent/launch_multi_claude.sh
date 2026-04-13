@@ -66,6 +66,45 @@ sanitize_name() {
   printf '%s' "$1" | tr -c 'A-Za-z0-9._-' '_'
 }
 
+utc_now() {
+  date -u +%Y-%m-%dT%H:%M:%SZ
+}
+
+append_launcher_audit() {
+  local event="$1"
+  local details="${2:-}"
+  local meta_file run_dir audit_file tmux_socket parent_cmd self_cmd
+
+  meta_file="$(session_meta_file)"
+  run_dir="${RUN_DIR:-}"
+  if [[ -f "$meta_file" ]]; then
+    # shellcheck disable=SC1090
+    source "$meta_file"
+    run_dir="${RUN_DIR:-$run_dir}"
+  fi
+  if [[ -z "$run_dir" ]]; then
+    return 0
+  fi
+
+  audit_file="$run_dir/launcher_audit.log"
+  mkdir -p "$(dirname "$audit_file")"
+  tmux_socket="${TMUX:-}"
+  parent_cmd="$(ps -o args= -p "$PPID" 2>/dev/null | tr '\n' ' ' || true)"
+  self_cmd="$(ps -o args= -p "$$" 2>/dev/null | tr '\n' ' ' || true)"
+  printf '%s event=%s pid=%s ppid=%s tmux_session=%q tmux_env=%q stop_reason=%q stop_source=%q parent_cmd=%q self_cmd=%q details=%q\n' \
+    "$(utc_now)" \
+    "$event" \
+    "$$" \
+    "$PPID" \
+    "$TMUX_SESSION" \
+    "$tmux_socket" \
+    "${CLAWBLOX_STOP_REASON:-}" \
+    "${CLAWBLOX_STOP_SOURCE:-}" \
+    "$parent_cmd" \
+    "$self_cmd" \
+    "$details" >>"$audit_file"
+}
+
 archive_existing_run_dir() {
   local run_dir="$1"
   local ts archive_dir
@@ -251,6 +290,7 @@ do_stop() {
   local i
   local port
   local snapshot_failed=0
+  append_launcher_audit "stop_requested" "force=$FORCE stop_grace_seconds=$STOP_GRACE_SECONDS"
   if tmux has-session -t "$TMUX_SESSION" 2>/dev/null; then
     mapfile -t recordings < <(collect_session_recordings)
     meta_file="$(session_meta_file)"
@@ -266,6 +306,7 @@ do_stop() {
           fi
         done
         if ((snapshot_failed != 0)); then
+          append_launcher_audit "stop_snapshot_failed" "num_worlds=$NUM_WORLDS base_port=$BASE_PORT"
           if ((FORCE == 1)); then
             echo "Warning: snapshot capture failed, continuing with --force." >&2
           else
@@ -293,9 +334,11 @@ do_stop() {
       done
     fi
     echo "Stopped."
+    append_launcher_audit "stop_completed" "recordings=${#recordings[@]} snapshot_failed=$snapshot_failed"
     rm -f "$meta_file"
   else
     echo "No tmux session '$TMUX_SESSION' found."
+    append_launcher_audit "stop_no_session" "force=$FORCE"
   fi
 }
 
@@ -598,10 +641,12 @@ mkdir -p "$WORLDS_ROOT"
 printf '%s\n' "$RUN_DIR" >"$RESULTS_ABS_ROOT/latest_run.txt"
 write_run_metadata "$RUN_DIR/run.env"
 write_run_metadata "$(session_meta_file)"
+append_launcher_audit "run_metadata_written" "run_id=$RUN_ID base_port=$BASE_PORT num_worlds=$NUM_WORLDS agents_per_world=$AGENTS_PER_WORLD"
 
 echo "Starting $NUM_WORLDS world servers..."
 tmux new-session -d -s "$TMUX_SESSION" -n "world-0"
 tmux set-option -t "$TMUX_SESSION" remain-on-exit on
+append_launcher_audit "tmux_session_created" "session=$TMUX_SESSION"
 
 for ((i = 0; i < NUM_WORLDS; i++)); do
   port=$((BASE_PORT + i))
@@ -636,8 +681,10 @@ for ((i = 0; i < NUM_WORLDS; i++)); do
   if wait_for_server "$port"; then
     cache_world_spectator_token "$i" >/dev/null 2>&1 || true
     echo "ready"
+    append_launcher_audit "world_ready" "world_index=$i port=$port"
   else
     echo "TIMEOUT (${HEALTH_TIMEOUT}s)"
+    append_launcher_audit "world_health_timeout" "world_index=$i port=$port health_timeout=$HEALTH_TIMEOUT"
   fi
 done
 
@@ -722,10 +769,13 @@ if [[ -n "$DURATION" ]]; then
   # Agent gets duration + warning time to save workspace
   total_wait=$(( duration_secs + CHECKPOINT_WARNING_SECONDS + 30 ))
   echo "Run will auto-stop after ${DURATION} (${duration_secs}s + ${CHECKPOINT_WARNING_SECONDS}s warning)..."
+  append_launcher_audit "auto_stop_scheduled" "duration=$DURATION duration_seconds=$duration_secs warning_seconds=$CHECKPOINT_WARNING_SECONDS total_wait=$total_wait"
   (
     sleep "$total_wait"
     echo "Duration ${DURATION} + warning elapsed. Stopping..."
-    bash "$0" --stop --tmux-session "$TMUX_SESSION"
+    CLAWBLOX_STOP_REASON="duration_elapsed" \
+      CLAWBLOX_STOP_SOURCE="launch_multi_claude_auto_timer" \
+      bash "$0" --stop --tmux-session "$TMUX_SESSION"
   ) &
   disown
 fi
