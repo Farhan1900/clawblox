@@ -29,9 +29,6 @@ RESET_EVERY="${RESET_EVERY-}"
 SANDBOX="${SANDBOX-0}"
 CHECKPOINT_WARNING_SECONDS="${CHECKPOINT_WARNING_SECONDS:-300}"
 CHECKPOINT_WARNING_PROMPT="${CHECKPOINT_WARNING_PROMPT:-You will be reset in 5 minutes. Update your workspace memory files now.}"
-CLAUDE_FAILURE_IDLE_GRACE_SECONDS="${CLAUDE_FAILURE_IDLE_GRACE_SECONDS:-90}"
-CLAUDE_FAILURE_STALL_GRACE_SECONDS="${CLAUDE_FAILURE_STALL_GRACE_SECONDS:-180}"
-CLAUDE_FAILURE_RESTART_BACKOFF_SECONDS="${CLAUDE_FAILURE_RESTART_BACKOFF_SECONDS:-5}"
 
 parse_duration_seconds() {
   local input="$1"
@@ -447,354 +444,6 @@ fi
 
 cd "$WORKSPACE_DIR"
 
-RECOVERY_LOG_FILE="$RUNTIME_DIR/recovery.log"
-RECOVERY_REQUEST_FILE="$RUNTIME_DIR/recovery_request.env"
-
-utc_now() {
-  date -u +%Y-%m-%dT%H:%M:%SZ
-}
-
-log_recovery_event() {
-  local event="$1"
-  local details="${2:-}"
-  printf '%s event=%s pid=%s details=%q\n' \
-    "$(utc_now)" \
-    "$event" \
-    "$$" \
-    "$details" >>"$RECOVERY_LOG_FILE"
-}
-
-map_runtime_path() {
-  local src="${1:-}"
-  if [[ -z "$src" ]]; then
-    return 0
-  fi
-  if [[ "$SANDBOX" == "1" && "$src" == /home/agent/* ]]; then
-    printf '%s\n' "${SANDBOX_HOME_DIR}${src#/home/agent}"
-    return 0
-  fi
-  printf '%s\n' "$src"
-}
-
-file_mtime_epoch() {
-  local path="$1"
-  if [[ ! -e "$path" ]]; then
-    printf '0\n'
-    return 0
-  fi
-  stat -c %Y "$path" 2>/dev/null || printf '0\n'
-}
-
-current_runtime_session_id() {
-  if [[ -f "$SESSION_ID_FILE" ]]; then
-    tr -d '[:space:]' < "$SESSION_ID_FILE"
-    return 0
-  fi
-  printf '%s' "$CLAUDE_SESSION_ID"
-}
-
-resolve_session_transcript_path() {
-  local session_id="$1"
-  local session_start_file="$LOG_DIR/session_start.${session_id}.json"
-  local src=""
-
-  if [[ -f "$session_start_file" ]]; then
-    src="$(
-      INPUT_JSON="$(cat "$session_start_file")" node <<'EOF'
-const data = JSON.parse(process.env.INPUT_JSON ?? "{}");
-process.stdout.write(String(data.transcript_path ?? ""));
-EOF
-    )"
-  elif [[ -f "$HOOK_METADATA_FILE" ]]; then
-    local SESSION_ID="" TRANSCRIPT_PATH=""
-    # shellcheck disable=SC1090
-    source "$HOOK_METADATA_FILE"
-    if [[ "${SESSION_ID:-}" == "$session_id" ]]; then
-      src="${TRANSCRIPT_PATH:-}"
-    fi
-  fi
-
-  map_runtime_path "$src"
-}
-
-write_recovery_request() {
-  local invocation_id="$1"
-  local session_id="$2"
-  local reason="$3"
-  local error_type="$4"
-  local trigger_file="$5"
-  local tmp_file="$RECOVERY_REQUEST_FILE.tmp"
-
-  cat >"$tmp_file" <<EOF
-INVOCATION_ID=$(printf '%q' "$invocation_id")
-SESSION_ID=$(printf '%q' "$session_id")
-REASON=$(printf '%q' "$reason")
-ERROR_TYPE=$(printf '%q' "$error_type")
-TRIGGER_FILE=$(printf '%q' "$trigger_file")
-RECORDED_AT=$(printf '%q' "$(utc_now)")
-EOF
-  mv "$tmp_file" "$RECOVERY_REQUEST_FILE"
-}
-
-stop_failure_fields_for_session() {
-  local session_id="$1"
-  local stop_failure_file="$LOG_DIR/stop_failure.${session_id}.json"
-  if [[ ! -f "$stop_failure_file" ]]; then
-    return 1
-  fi
-
-  INPUT_JSON="$(cat "$stop_failure_file")" node <<'EOF'
-const data = JSON.parse(process.env.INPUT_JSON ?? "{}");
-const fields = [
-  data.error ?? "",
-  data.transcript_path ?? "",
-];
-for (const value of fields) process.stdout.write(String(value) + "\n");
-EOF
-}
-
-fresh_stop_failure_for_session() {
-  local session_id="$1"
-  local started_epoch="$2"
-  local stop_failure_file="$LOG_DIR/stop_failure.${session_id}.json"
-  local seen_epoch
-
-  if [[ ! -f "$stop_failure_file" ]]; then
-    return 1
-  fi
-  seen_epoch="$(file_mtime_epoch "$stop_failure_file")"
-  (( seen_epoch >= started_epoch ))
-}
-
-start_failure_watchdog() {
-  local runner_pid="$1"
-  local invocation_id="$2"
-  local session_id="$3"
-  local started_epoch="$4"
-
-  (
-    local stop_failure_file="$LOG_DIR/stop_failure.${session_id}.json"
-    local idle_prompt_file="$LOG_DIR/notification.idle_prompt.${session_id}.json"
-    local transcript_path=""
-    local self_pid="$BASHPID"
-    local timeout_pid=""
-    local stop_failure_epoch=0
-    local idle_prompt_epoch=0
-    local last_progress_epoch=0
-    local failure_error=""
-    local progress_epoch=0
-    local transcript_epoch=0
-    local agent_log_epoch=0
-    local now=0
-    local -a target_pids=()
-    local pid=""
-
-    child_pids() {
-      local parent_pid="$1"
-      ps -o pid= --ppid "$parent_pid" 2>/dev/null | awk '{print $1}' | while IFS= read -r child_pid; do
-        [[ -n "$child_pid" ]] || continue
-        [[ "$child_pid" == "$self_pid" ]] && continue
-        printf '%s\n' "$child_pid"
-      done
-    }
-
-    collect_descendants() {
-      local parent_pid="$1"
-      local child_pid=""
-      while IFS= read -r child_pid; do
-        [[ -n "$child_pid" ]] || continue
-        collect_descendants "$child_pid"
-        printf '%s\n' "$child_pid"
-      done < <(child_pids "$parent_pid")
-    }
-
-    find_timeout_child() {
-      local parent_pid="$1"
-      local latest=""
-      while IFS= read -r latest; do
-        :
-      done < <(child_pids "$parent_pid")
-      printf '%s\n' "$latest"
-    }
-
-    terminate_active_invocation() {
-      local parent_pid="$1"
-      local root_pid="$2"
-      local -a descendants=()
-      local target_pid=""
-      local remaining_pid=""
-
-      if [[ -z "$root_pid" ]]; then
-        return 1
-      fi
-
-      mapfile -t descendants < <(collect_descendants "$root_pid")
-      for target_pid in "${descendants[@]}"; do
-        kill -TERM "$target_pid" 2>/dev/null || true
-      done
-      kill -TERM "$root_pid" 2>/dev/null || true
-      sleep 5
-      for target_pid in "${descendants[@]}"; do
-        if kill -0 "$target_pid" 2>/dev/null; then
-          kill -KILL "$target_pid" 2>/dev/null || true
-        fi
-      done
-      if kill -0 "$root_pid" 2>/dev/null; then
-        kill -KILL "$root_pid" 2>/dev/null || true
-      fi
-
-      remaining_pid="$(find_timeout_child "$parent_pid")"
-      [[ "$remaining_pid" != "$root_pid" ]]
-    }
-
-    while kill -0 "$runner_pid" 2>/dev/null; do
-      timeout_pid="$(find_timeout_child "$runner_pid")"
-      if [[ -z "$timeout_pid" ]]; then
-        sleep 1
-        continue
-      fi
-
-      if (( stop_failure_epoch == 0 )) && [[ -f "$stop_failure_file" ]]; then
-        stop_failure_epoch="$(file_mtime_epoch "$stop_failure_file")"
-        if (( stop_failure_epoch < started_epoch )); then
-          stop_failure_epoch=0
-        else
-          mapfile -t failure_fields < <(stop_failure_fields_for_session "$session_id" || true)
-          failure_error="${failure_fields[0]:-unknown}"
-          transcript_path="$(map_runtime_path "${failure_fields[1]:-}")"
-          if [[ -z "$transcript_path" ]]; then
-            transcript_path="$(resolve_session_transcript_path "$session_id")"
-          fi
-          log_recovery_event "stop_failure_observed" "session_id=$session_id error=$failure_error stop_failure_epoch=$stop_failure_epoch transcript_path=$transcript_path"
-        fi
-      fi
-
-      if (( stop_failure_epoch > 0 )); then
-        if (( idle_prompt_epoch == 0 )) && [[ -f "$idle_prompt_file" ]]; then
-          idle_prompt_epoch="$(file_mtime_epoch "$idle_prompt_file")"
-          if (( idle_prompt_epoch < stop_failure_epoch )); then
-            idle_prompt_epoch=0
-          else
-            log_recovery_event "idle_prompt_observed" "session_id=$session_id idle_prompt_epoch=$idle_prompt_epoch"
-          fi
-        fi
-
-        progress_epoch=0
-        if [[ -n "$transcript_path" && -f "$transcript_path" ]]; then
-          transcript_epoch="$(file_mtime_epoch "$transcript_path")"
-          (( transcript_epoch > progress_epoch )) && progress_epoch="$transcript_epoch"
-        fi
-        agent_log_epoch="$(file_mtime_epoch "$LOG_DIR/agent.log")"
-        (( agent_log_epoch > progress_epoch )) && progress_epoch="$agent_log_epoch"
-        (( progress_epoch > last_progress_epoch )) && last_progress_epoch="$progress_epoch"
-
-        now="$(date +%s)"
-        if (( idle_prompt_epoch > 0 && now - idle_prompt_epoch >= CLAUDE_FAILURE_IDLE_GRACE_SECONDS )); then
-          write_recovery_request "$invocation_id" "$session_id" "stop_failure_idle_prompt" "$failure_error" "$idle_prompt_file"
-          log_recovery_event "recovery_requested" "invocation_id=$invocation_id session_id=$session_id reason=stop_failure_idle_prompt error=$failure_error runner_pid=$runner_pid timeout_pid=$timeout_pid"
-          terminate_active_invocation "$runner_pid" "$timeout_pid" || true
-          break
-        fi
-
-        if (( now - stop_failure_epoch >= CLAUDE_FAILURE_STALL_GRACE_SECONDS && last_progress_epoch <= stop_failure_epoch )); then
-          write_recovery_request "$invocation_id" "$session_id" "stop_failure_stalled" "$failure_error" "$stop_failure_file"
-          log_recovery_event "recovery_requested" "invocation_id=$invocation_id session_id=$session_id reason=stop_failure_stalled error=$failure_error runner_pid=$runner_pid timeout_pid=$timeout_pid"
-          terminate_active_invocation "$runner_pid" "$timeout_pid" || true
-          break
-        fi
-      fi
-
-      sleep 2
-    done
-  ) &
-  printf '%s\n' "$!"
-}
-
-run_claude_until_deadline() {
-  local deadline_epoch="$1"
-  local session_mode="$2"
-  local session_id="$3"
-  local prompt_text="$4"
-  local label="$5"
-  local restart_count=0
-  RUN_CLAUDE_STATUS=0
-
-  while true; do
-    local now_epoch remaining_seconds invocation_id invocation_started_epoch watchdog_pid
-    local -a session_args=()
-    local status=0
-    local backoff_seconds=0
-    local recovery_request_present=0
-
-    now_epoch="$(date +%s)"
-    remaining_seconds=$((deadline_epoch - now_epoch))
-    if (( remaining_seconds <= 0 )); then
-      RUN_CLAUDE_STATUS=124
-      return 0
-    fi
-
-    rm -f "$RECOVERY_REQUEST_FILE"
-    if [[ "$session_mode" == "continue" ]]; then
-      session_args=(--continue)
-      session_id="$(current_runtime_session_id)"
-    else
-      session_args=(--session-id "$session_id")
-    fi
-
-    invocation_id="$(generate_session_id)"
-    invocation_started_epoch="$(date +%s)"
-    log_recovery_event "claude_window_start" "label=$label invocation_id=$invocation_id session_mode=$session_mode session_id=$session_id remaining_seconds=$remaining_seconds"
-
-    watchdog_pid="$(start_failure_watchdog "$$" "$invocation_id" "$session_id" "$invocation_started_epoch")"
-    set +e
-    timeout --foreground --signal=TERM "$remaining_seconds" \
-      env "${claude_env_args[@]}" \
-      "${bwrap_prefix[@]}" "$CLAUDE_CMD" "${claude_base_args[@]}" "${session_args[@]}" "$prompt_text"
-    status=$?
-    set -e
-
-    if [[ -n "${watchdog_pid:-}" ]]; then
-      kill "$watchdog_pid" 2>/dev/null || true
-      wait "$watchdog_pid" 2>/dev/null || true
-    fi
-
-    sync_latest_session_artifacts
-    if [[ -f "$RECOVERY_REQUEST_FILE" ]]; then
-      local INVOCATION_ID="" SESSION_ID="" REASON="" ERROR_TYPE="" TRIGGER_FILE=""
-      # shellcheck disable=SC1090
-      source "$RECOVERY_REQUEST_FILE"
-      if [[ "${INVOCATION_ID:-}" == "$invocation_id" ]]; then
-        recovery_request_present=1
-        log_recovery_event "claude_window_recover" "label=$label invocation_id=$invocation_id session_id=${SESSION_ID:-$session_id} reason=${REASON:-unknown} error=${ERROR_TYPE:-unknown} status=$status"
-      fi
-    fi
-
-    if (( recovery_request_present == 1 )); then
-      restart_count=$((restart_count + 1))
-      session_mode="continue"
-      session_id="$(current_runtime_session_id)"
-      backoff_seconds=$((CLAUDE_FAILURE_RESTART_BACKOFF_SECONDS * restart_count))
-      (( backoff_seconds > 60 )) && backoff_seconds=60
-      sleep "$backoff_seconds"
-      continue
-    fi
-
-    if fresh_stop_failure_for_session "$session_id" "$invocation_started_epoch"; then
-      restart_count=$((restart_count + 1))
-      session_mode="continue"
-      session_id="$(current_runtime_session_id)"
-      backoff_seconds=$((CLAUDE_FAILURE_RESTART_BACKOFF_SECONDS * restart_count))
-      (( backoff_seconds > 60 )) && backoff_seconds=60
-      log_recovery_event "claude_window_restart_after_exit" "label=$label invocation_id=$invocation_id session_id=$session_id status=$status backoff_seconds=$backoff_seconds"
-      sleep "$backoff_seconds"
-      continue
-    fi
-
-    RUN_CLAUDE_STATUS="$status"
-    return 0
-  done
-}
-
 # --- No reset, no duration: single session, exec into claude ---
 if [[ -z "$RESET_EVERY" && -z "${DURATION_SECONDS:-}" ]]; then
   if [[ "$CLAUDE_RESUME_MODE" == "resume" || ( "$CLAUDE_RESUME_MODE" == "auto" && -f "$HOOK_METADATA_FILE" ) ]]; then
@@ -815,15 +464,12 @@ if [[ -z "$RESET_EVERY" && -n "${DURATION_SECONDS:-}" ]]; then
   fi
 
   # Main session: run for the full duration
-  main_deadline_epoch=$(( $(date +%s) + DURATION_SECONDS ))
-  main_session_mode="continue"
-  main_session_id="$(current_runtime_session_id)"
-  if [[ "${session_flag[0]}" == "--session-id" ]]; then
-    main_session_mode="session_id"
-    main_session_id="${session_flag[1]}"
-  fi
-  run_claude_until_deadline "$main_deadline_epoch" "$main_session_mode" "$main_session_id" "$CLAUDE_INITIAL_PROMPT" "duration_main"
-  main_status="$RUN_CLAUDE_STATUS"
+  set +e
+  timeout --foreground --signal=TERM "$DURATION_SECONDS" \
+    env "${claude_env_args[@]}" \
+    "${bwrap_prefix[@]}" "$CLAUDE_CMD" "${claude_base_args[@]}" "${session_flag[@]}" "$CLAUDE_INITIAL_PROMPT"
+  main_status=$?
+  set -e
 
   if [[ "$main_status" -ne 124 && "$main_status" -ne 143 ]]; then
     exit "$main_status"
@@ -831,8 +477,11 @@ if [[ -z "$RESET_EVERY" && -n "${DURATION_SECONDS:-}" ]]; then
 
   # Warning session: continue with checkpoint prompt, extra time to save
   echo "Sending shutdown warning..."
-  warning_deadline_epoch=$(( $(date +%s) + CHECKPOINT_WARNING_SECONDS ))
-  run_claude_until_deadline "$warning_deadline_epoch" "continue" "$(current_runtime_session_id)" "$CHECKPOINT_WARNING_PROMPT" "duration_warning"
+  set +e
+  timeout --foreground --signal=TERM "$CHECKPOINT_WARNING_SECONDS" \
+    env "${claude_env_args[@]}" \
+    "${bwrap_prefix[@]}" "$CLAUDE_CMD" "${claude_base_args[@]}" --continue "$CHECKPOINT_WARNING_PROMPT"
+  set -e
   sync_latest_session_artifacts
   exit 0
 fi
@@ -850,17 +499,13 @@ while true; do
     session_args=(--session-id "$new_session_id")
   fi
 
-  cycle_deadline_epoch=$(( $(date +%s) + RESET_EVERY ))
-  cycle_session_mode="continue"
-  cycle_session_id="$(current_runtime_session_id)"
-  if [[ "${session_args[0]}" == "--session-id" ]]; then
-    cycle_session_mode="session_id"
-    cycle_session_id="${session_args[1]}"
-  fi
-
-  # Main session: run for full RESET_EVERY duration, restarting on recoverable Claude failures.
-  run_claude_until_deadline "$cycle_deadline_epoch" "$cycle_session_mode" "$cycle_session_id" "$CLAUDE_INITIAL_PROMPT" "reset_cycle_${reset_index}_main"
-  main_status="$RUN_CLAUDE_STATUS"
+  # Main session: run for full RESET_EVERY duration
+  set +e
+  timeout --foreground --signal=TERM "$RESET_EVERY" \
+    env "${claude_env_args[@]}" \
+    "${bwrap_prefix[@]}" "$CLAUDE_CMD" "${claude_base_args[@]}" "${session_args[@]}" "$CLAUDE_INITIAL_PROMPT"
+  main_status=$?
+  set -e
 
   # If claude exited on its own (not timeout), stop
   if [[ "$main_status" -ne 124 && "$main_status" -ne 143 ]]; then
@@ -869,8 +514,11 @@ while true; do
 
   # Warning session: continue the same session with checkpoint prompt
   echo "Sending checkpoint warning..."
-  warning_deadline_epoch=$(( $(date +%s) + CHECKPOINT_WARNING_SECONDS ))
-  run_claude_until_deadline "$warning_deadline_epoch" "continue" "$(current_runtime_session_id)" "$CHECKPOINT_WARNING_PROMPT" "reset_cycle_${reset_index}_warning"
+  set +e
+  timeout --foreground --signal=TERM "$CHECKPOINT_WARNING_SECONDS" \
+    env "${claude_env_args[@]}" \
+    "${bwrap_prefix[@]}" "$CLAUDE_CMD" "${claude_base_args[@]}" --continue "$CHECKPOINT_WARNING_PROMPT"
+  set -e
   sync_latest_session_artifacts
 
   reset_index=$((reset_index + 1))

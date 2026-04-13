@@ -30,9 +30,13 @@ CLAUDE_BARE="${CLAUDE_BARE:-0}"
 CLAUDE_EXTRA_ARGS="${CLAUDE_EXTRA_ARGS:-}"
 CLAUDE_USE_ENV_AUTH="${CLAUDE_USE_ENV_AUTH:-0}"
 SANDBOX="${SANDBOX:-0}"
+CLAUDE_FAILURE_IDLE_GRACE_SECONDS="${CLAUDE_FAILURE_IDLE_GRACE_SECONDS:-180}"
+CLAUDE_FAILURE_STALL_GRACE_SECONDS="${CLAUDE_FAILURE_STALL_GRACE_SECONDS:-300}"
+CLAUDE_FAILURE_RESTART_BACKOFF_SECONDS="${CLAUDE_FAILURE_RESTART_BACKOFF_SECONDS:-5}"
 declare -a AGENT_TEMPLATE_DIRS=()
 
 AGENT_SCRIPT="$SCRIPT_DIR/run_claude_agent.sh"
+WATCHDOG_SCRIPT="$SCRIPT_DIR/watch_claude_recovery.sh"
 if [[ ! -f "$AGENT_SCRIPT" ]]; then
   echo "Error: Claude agent runner not found at $AGENT_SCRIPT"
   exit 1
@@ -103,6 +107,70 @@ append_launcher_audit() {
     "$parent_cmd" \
     "$self_cmd" \
     "$details" >>"$audit_file"
+}
+
+write_agent_pane_command() {
+  local target="$1"
+  local root_dir="$2"
+  local auth_env_prefix="$3"
+  local world_url="$4"
+  local agent_display_name="$5"
+  local agent_dir="$6"
+  local agent_workspace="$7"
+  local session_id_file="$8"
+  local world_session_file="$9"
+  local reset_every_seconds="${10}"
+  local duration_seconds="${11}"
+  local checkpoint_warning_seconds="${12}"
+  local checkpoint_warning_prompt="${13}"
+  local claude_model="${14}"
+  local claude_permission_mode="${15}"
+  local claude_bare="${16}"
+  local claude_extra_args="${17}"
+  local sandbox_env_prefix="${18}"
+  local template_env_prefix="${19}"
+  local startup_env_prefix="${20}"
+
+  cat >"$target" <<EOF
+#!/usr/bin/env bash
+set -euo pipefail
+cd $(printf '%q' "$root_dir")
+${auth_env_prefix}WORLD_BASE_URL=$(printf '%q' "$world_url") WORLD_AGENT_NAME=$(printf '%q' "$agent_display_name") AGENT_DIR=$(printf '%q' "$agent_dir") WORKSPACE_DIR=$(printf '%q' "$agent_workspace") SESSION_ID_FILE=$(printf '%q' "$session_id_file") WORLD_SESSION_FILE=$(printf '%q' "$world_session_file") RESET_EVERY=$(printf '%q' "$reset_every_seconds") DURATION_SECONDS=$(printf '%q' "$duration_seconds") CHECKPOINT_WARNING_SECONDS=$(printf '%q' "$checkpoint_warning_seconds") CHECKPOINT_WARNING_PROMPT=$(printf '%q' "$checkpoint_warning_prompt") CLAUDE_MODEL=$(printf '%q' "$claude_model") CLAUDE_PERMISSION_MODE=$(printf '%q' "$claude_permission_mode") CLAUDE_BARE=$(printf '%q' "$claude_bare") CLAUDE_EXTRA_ARGS=$(printf '%q' "$claude_extra_args") ${sandbox_env_prefix}${template_env_prefix}${startup_env_prefix}bash $(printf '%q' "$AGENT_SCRIPT")
+EOF
+  chmod +x "$target"
+}
+
+start_agent_recovery_watchdog() {
+  local pane_id="$1"
+  local agent_dir="$2"
+  local command_file="$3"
+  local agent_log_file="$4"
+  local runtime_dir pid_file existing_pid watcher_pid
+
+  [[ -x "$WATCHDOG_SCRIPT" ]] || return 0
+
+  runtime_dir="$agent_dir/runtime"
+  pid_file="$runtime_dir/recovery_watchdog.pid"
+  if [[ -f "$pid_file" ]]; then
+    existing_pid="$(tr -d '[:space:]' <"$pid_file" 2>/dev/null || true)"
+    if [[ -n "$existing_pid" ]] && kill -0 "$existing_pid" 2>/dev/null; then
+      kill "$existing_pid" 2>/dev/null || true
+    fi
+    rm -f "$pid_file"
+  fi
+
+  CLAUDE_FAILURE_IDLE_GRACE_SECONDS="$CLAUDE_FAILURE_IDLE_GRACE_SECONDS" \
+    CLAUDE_FAILURE_STALL_GRACE_SECONDS="$CLAUDE_FAILURE_STALL_GRACE_SECONDS" \
+    CLAUDE_FAILURE_RESTART_BACKOFF_SECONDS="$CLAUDE_FAILURE_RESTART_BACKOFF_SECONDS" \
+    nohup bash "$WATCHDOG_SCRIPT" \
+      --pane-id "$pane_id" \
+      --agent-dir "$agent_dir" \
+      --command-file "$command_file" \
+      --agent-log-file "$agent_log_file" \
+      >/dev/null 2>&1 &
+  watcher_pid="$!"
+  printf '%s\n' "$watcher_pid" >"$pid_file"
+  append_launcher_audit "watchdog_started" "pane_id=$pane_id agent_dir=$agent_dir watchdog_pid=$watcher_pid"
 }
 
 archive_existing_run_dir() {
@@ -732,11 +800,12 @@ for ((i = 0; i < NUM_WORLDS; i++)); do
     world_agents_dir="$WORLDS_ROOT/world-$i/agents"
     agent_dir="$world_agents_dir/$agent_name"
     agent_log_dir="$agent_dir/logs"
+    agent_runtime_dir="$agent_dir/runtime"
     agent_workspace="$agent_dir/workspace"
     agent_session_file="$agent_dir/claude_session_id.txt"
     agent_log_file="$agent_log_dir/agent.log"
     agent_world_session_file="$agent_dir/world_session.txt"
-    mkdir -p "$agent_log_dir" "$agent_workspace"
+    mkdir -p "$agent_log_dir" "$agent_workspace" "$agent_runtime_dir"
 
     agent_template_abs_dir="$TEMPLATE_ABS_DIR"
     if ((j < ${#AGENT_TEMPLATE_ABS_DIRS[@]})); then
@@ -756,8 +825,6 @@ for ((i = 0; i < NUM_WORLDS; i++)); do
       startup_env_prefix="WORLD_STARTUP_INSTRUCTIONS=${startup_instructions_q} "
     fi
 
-    reset_wrapper_prefix="bash '$AGENT_SCRIPT'"
-
     auth_env_prefix="unset ANTHROPIC_API_KEY ANTHROPIC_OAUTH_TOKEN; "
     if [[ "$CLAUDE_USE_ENV_AUTH" == "1" ]]; then
       auth_env_prefix=""
@@ -771,9 +838,34 @@ for ((i = 0; i < NUM_WORLDS; i++)); do
       sandbox_env_prefix="SANDBOX=1 "
     fi
 
+    pane_command_file="$agent_runtime_dir/launch_agent_pane.sh"
+    write_agent_pane_command \
+      "$pane_command_file" \
+      "$ROOT_DIR" \
+      "$auth_env_prefix" \
+      "$url" \
+      "$agent_display_name" \
+      "$agent_dir" \
+      "$agent_workspace" \
+      "$agent_session_file" \
+      "$agent_world_session_file" \
+      "$RESET_EVERY_SECONDS" \
+      "$DURATION_SECONDS" \
+      "$CHECKPOINT_WARNING_SECONDS" \
+      "$CHECKPOINT_WARNING_PROMPT" \
+      "$CLAUDE_MODEL" \
+      "$CLAUDE_PERMISSION_MODE" \
+      "$CLAUDE_BARE" \
+      "$CLAUDE_EXTRA_ARGS" \
+      "$sandbox_env_prefix" \
+      "$template_env_prefix" \
+      "$startup_env_prefix"
+    printf '%s\n' "$pane_target" >"$agent_runtime_dir/pane_id.txt"
+    printf '%s\n' "$pane_command_file" >"$agent_runtime_dir/pane_command_file.txt"
+
     tmux pipe-pane -o -t "$pane_target" "cat >> '$(printf "%q" "$agent_log_file")'"
-    tmux send-keys -t "$pane_target" \
-      "cd '$ROOT_DIR' && ${auth_env_prefix}WORLD_BASE_URL='$url' WORLD_AGENT_NAME='$agent_display_name' AGENT_DIR='$agent_dir' WORKSPACE_DIR='$agent_workspace' SESSION_ID_FILE='$agent_session_file' WORLD_SESSION_FILE='$agent_world_session_file' RESET_EVERY=$(printf '%q' "$RESET_EVERY_SECONDS") DURATION_SECONDS=$(printf '%q' "$DURATION_SECONDS") CHECKPOINT_WARNING_SECONDS=$(printf '%q' "$CHECKPOINT_WARNING_SECONDS") CHECKPOINT_WARNING_PROMPT=$(printf '%q' "$CHECKPOINT_WARNING_PROMPT") CLAUDE_MODEL=$(printf '%q' "$CLAUDE_MODEL") CLAUDE_PERMISSION_MODE=$(printf '%q' "$CLAUDE_PERMISSION_MODE") CLAUDE_BARE=$(printf '%q' "$CLAUDE_BARE") CLAUDE_EXTRA_ARGS=$(printf '%q' "$CLAUDE_EXTRA_ARGS") ${sandbox_env_prefix}${template_env_prefix}${startup_env_prefix}${reset_wrapper_prefix}" Enter
+    tmux send-keys -t "$pane_target" "bash $(printf '%q' "$pane_command_file")" Enter
+    start_agent_recovery_watchdog "$pane_target" "$agent_dir" "$pane_command_file" "$agent_log_file"
   done
 done
 if [[ -n "$DURATION" ]]; then
