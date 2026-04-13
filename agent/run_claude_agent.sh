@@ -567,7 +567,7 @@ fresh_stop_failure_for_session() {
 }
 
 start_failure_watchdog() {
-  local timeout_pid="$1"
+  local runner_pid="$1"
   local invocation_id="$2"
   local session_id="$3"
   local started_epoch="$4"
@@ -576,6 +576,8 @@ start_failure_watchdog() {
     local stop_failure_file="$LOG_DIR/stop_failure.${session_id}.json"
     local idle_prompt_file="$LOG_DIR/notification.idle_prompt.${session_id}.json"
     local transcript_path=""
+    local self_pid="$BASHPID"
+    local timeout_pid=""
     local stop_failure_epoch=0
     local idle_prompt_epoch=0
     local last_progress_epoch=0
@@ -584,8 +586,74 @@ start_failure_watchdog() {
     local transcript_epoch=0
     local agent_log_epoch=0
     local now=0
+    local -a target_pids=()
+    local pid=""
 
-    while kill -0 "$timeout_pid" 2>/dev/null; do
+    child_pids() {
+      local parent_pid="$1"
+      ps -o pid= --ppid "$parent_pid" 2>/dev/null | awk '{print $1}' | while IFS= read -r child_pid; do
+        [[ -n "$child_pid" ]] || continue
+        [[ "$child_pid" == "$self_pid" ]] && continue
+        printf '%s\n' "$child_pid"
+      done
+    }
+
+    collect_descendants() {
+      local parent_pid="$1"
+      local child_pid=""
+      while IFS= read -r child_pid; do
+        [[ -n "$child_pid" ]] || continue
+        collect_descendants "$child_pid"
+        printf '%s\n' "$child_pid"
+      done < <(child_pids "$parent_pid")
+    }
+
+    find_timeout_child() {
+      local parent_pid="$1"
+      local latest=""
+      while IFS= read -r latest; do
+        :
+      done < <(child_pids "$parent_pid")
+      printf '%s\n' "$latest"
+    }
+
+    terminate_active_invocation() {
+      local parent_pid="$1"
+      local root_pid="$2"
+      local -a descendants=()
+      local target_pid=""
+      local remaining_pid=""
+
+      if [[ -z "$root_pid" ]]; then
+        return 1
+      fi
+
+      mapfile -t descendants < <(collect_descendants "$root_pid")
+      for target_pid in "${descendants[@]}"; do
+        kill -TERM "$target_pid" 2>/dev/null || true
+      done
+      kill -TERM "$root_pid" 2>/dev/null || true
+      sleep 5
+      for target_pid in "${descendants[@]}"; do
+        if kill -0 "$target_pid" 2>/dev/null; then
+          kill -KILL "$target_pid" 2>/dev/null || true
+        fi
+      done
+      if kill -0 "$root_pid" 2>/dev/null; then
+        kill -KILL "$root_pid" 2>/dev/null || true
+      fi
+
+      remaining_pid="$(find_timeout_child "$parent_pid")"
+      [[ "$remaining_pid" != "$root_pid" ]]
+    }
+
+    while kill -0 "$runner_pid" 2>/dev/null; do
+      timeout_pid="$(find_timeout_child "$runner_pid")"
+      if [[ -z "$timeout_pid" ]]; then
+        sleep 1
+        continue
+      fi
+
       if (( stop_failure_epoch == 0 )) && [[ -f "$stop_failure_file" ]]; then
         stop_failure_epoch="$(file_mtime_epoch "$stop_failure_file")"
         if (( stop_failure_epoch < started_epoch )); then
@@ -623,15 +691,15 @@ start_failure_watchdog() {
         now="$(date +%s)"
         if (( idle_prompt_epoch > 0 && now - idle_prompt_epoch >= CLAUDE_FAILURE_IDLE_GRACE_SECONDS )); then
           write_recovery_request "$invocation_id" "$session_id" "stop_failure_idle_prompt" "$failure_error" "$idle_prompt_file"
-          log_recovery_event "recovery_requested" "invocation_id=$invocation_id session_id=$session_id reason=stop_failure_idle_prompt error=$failure_error timeout_pid=$timeout_pid"
-          kill -TERM "$timeout_pid" 2>/dev/null || true
+          log_recovery_event "recovery_requested" "invocation_id=$invocation_id session_id=$session_id reason=stop_failure_idle_prompt error=$failure_error runner_pid=$runner_pid timeout_pid=$timeout_pid"
+          terminate_active_invocation "$runner_pid" "$timeout_pid" || true
           break
         fi
 
         if (( now - stop_failure_epoch >= CLAUDE_FAILURE_STALL_GRACE_SECONDS && last_progress_epoch <= stop_failure_epoch )); then
           write_recovery_request "$invocation_id" "$session_id" "stop_failure_stalled" "$failure_error" "$stop_failure_file"
-          log_recovery_event "recovery_requested" "invocation_id=$invocation_id session_id=$session_id reason=stop_failure_stalled error=$failure_error timeout_pid=$timeout_pid"
-          kill -TERM "$timeout_pid" 2>/dev/null || true
+          log_recovery_event "recovery_requested" "invocation_id=$invocation_id session_id=$session_id reason=stop_failure_stalled error=$failure_error runner_pid=$runner_pid timeout_pid=$timeout_pid"
+          terminate_active_invocation "$runner_pid" "$timeout_pid" || true
           break
         fi
       fi
@@ -651,7 +719,7 @@ run_claude_until_deadline() {
   local restart_count=0
 
   while true; do
-    local now_epoch remaining_seconds invocation_id invocation_started_epoch timeout_pid watchdog_pid
+    local now_epoch remaining_seconds invocation_id invocation_started_epoch watchdog_pid
     local -a session_args=()
     local status=0
     local backoff_seconds=0
@@ -676,13 +744,11 @@ run_claude_until_deadline() {
     invocation_started_epoch="$(date +%s)"
     log_recovery_event "claude_window_start" "label=$label invocation_id=$invocation_id session_mode=$session_mode session_id=$session_id remaining_seconds=$remaining_seconds"
 
+    watchdog_pid="$(start_failure_watchdog "$$" "$invocation_id" "$session_id" "$invocation_started_epoch")"
     set +e
     timeout --foreground --signal=TERM "$remaining_seconds" \
       env "${claude_env_args[@]}" \
-      "${bwrap_prefix[@]}" "$CLAUDE_CMD" "${claude_base_args[@]}" "${session_args[@]}" "$prompt_text" &
-    timeout_pid=$!
-    watchdog_pid="$(start_failure_watchdog "$timeout_pid" "$invocation_id" "$session_id" "$invocation_started_epoch")"
-    wait "$timeout_pid"
+      "${bwrap_prefix[@]}" "$CLAUDE_CMD" "${claude_base_args[@]}" "${session_args[@]}" "$prompt_text"
     status=$?
     set -e
 
