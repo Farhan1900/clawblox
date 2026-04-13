@@ -290,23 +290,35 @@ do_stop() {
   local i
   local port
   local snapshot_failed=0
+  local meta_run_dir=""
+  local meta_num_worlds=""
+  local meta_base_port=""
   append_launcher_audit "stop_requested" "force=$FORCE stop_grace_seconds=$STOP_GRACE_SECONDS"
   if tmux has-session -t "$TMUX_SESSION" 2>/dev/null; then
     mapfile -t recordings < <(collect_session_recordings)
     meta_file="$(session_meta_file)"
     if [[ -f "$meta_file" ]]; then
-      # shellcheck disable=SC1090
-      source "$meta_file"
-      if [[ -n "${RUN_DIR:-}" && -n "${NUM_WORLDS:-}" && -n "${BASE_PORT:-}" ]]; then
+      mapfile -t meta_fields < <(
+        bash -lc '
+          set -euo pipefail
+          # shellcheck disable=SC1090
+          source "$1"
+          printf "%s\n%s\n%s\n" "${RUN_DIR:-}" "${NUM_WORLDS:-}" "${BASE_PORT:-}"
+        ' _ "$meta_file"
+      )
+      meta_run_dir="${meta_fields[0]:-}"
+      meta_num_worlds="${meta_fields[1]:-}"
+      meta_base_port="${meta_fields[2]:-}"
+      if [[ -n "$meta_run_dir" && -n "$meta_num_worlds" && -n "$meta_base_port" ]]; then
         echo "Saving world snapshots..."
-        for ((i = 0; i < NUM_WORLDS; i++)); do
-          port=$((BASE_PORT + i))
+        for ((i = 0; i < meta_num_worlds; i++)); do
+          port=$((meta_base_port + i))
           if ! save_world_snapshot "$i" "$port"; then
             snapshot_failed=1
           fi
         done
         if ((snapshot_failed != 0)); then
-          append_launcher_audit "stop_snapshot_failed" "num_worlds=$NUM_WORLDS base_port=$BASE_PORT"
+          append_launcher_audit "stop_snapshot_failed" "num_worlds=$meta_num_worlds base_port=$meta_base_port"
           if ((FORCE == 1)); then
             echo "Warning: snapshot capture failed, continuing with --force." >&2
           else
