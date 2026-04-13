@@ -325,7 +325,7 @@ local function createBlock(name, position, colorName)
     block.Size = Vector3.new(BLOCK_SIZE, BLOCK_SIZE, BLOCK_SIZE)
     block.Position = position
     block.Anchored = false
-    block.Material = Enum.Material.SmoothPlastic
+    block.Material = Enum.Material.Slate
     block.Color = blockColors[colorName]
     block.CustomPhysicalProperties = blockPhysics
     setCarryableMetadata(block, colorName, "PickupObject", "Block")
@@ -448,7 +448,7 @@ for _, cluster in ipairs(blockClusters) do
             oz = 0
         end
         local oy = BLOCK_SIZE * 0.5 + layer * (BLOCK_SIZE * 1.05) + blockRandom() * 0.08
-        local colorName = (j % 2 == 0) and "Slate" or "Sand"
+        local colorName = "Slate"
         createBlock(
             "Block_" .. blockIndex,
             Vector3.new(cluster.cx + ox, oy, cluster.cz + oz),

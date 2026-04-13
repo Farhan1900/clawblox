@@ -160,7 +160,7 @@ local function createBlock(name, position, colorName)
     block.Size = Vector3.new(BLOCK_SIZE, BLOCK_SIZE, BLOCK_SIZE)
     block.Position = position
     block.Anchored = false
-    block.Material = Enum.Material.SmoothPlastic
+    block.Material = Enum.Material.Slate
     block.Color = blockColors[colorName]
     block.CustomPhysicalProperties = blockPhysics
     setPickupMetadata(block, colorName, "PickupObject")
@@ -246,18 +246,18 @@ local function createRing(name, position, colorName, rotationDegrees, size)
 end
 
 local baseBlockPile = {
-    { pos = Vector3.new(14.5, 6.5, -1.9), color = "Sand" },
+    { pos = Vector3.new(14.5, 6.5, -1.9), color = "Slate" },
     { pos = Vector3.new(15.2, 6.9, -1.3), color = "Slate" },
-    { pos = Vector3.new(15.8, 7.3, -1.8), color = "Sand" },
+    { pos = Vector3.new(15.8, 7.3, -1.8), color = "Slate" },
     { pos = Vector3.new(14.8, 7.8, -0.9), color = "Slate" },
     { pos = Vector3.new(15.5, 8.2, -1.2), color = "Slate" },
-    { pos = Vector3.new(15.0, 8.7, -1.6), color = "Sand" },
+    { pos = Vector3.new(15.0, 8.7, -1.6), color = "Slate" },
     { pos = Vector3.new(14.7, 9.1, -1.1), color = "Slate" },
-    { pos = Vector3.new(15.6, 9.6, -1.5), color = "Sand" },
+    { pos = Vector3.new(15.6, 9.6, -1.5), color = "Slate" },
     { pos = Vector3.new(15.1, 10.0, -0.8), color = "Slate" },
-    { pos = Vector3.new(15.3, 10.5, -1.3), color = "Sand" },
+    { pos = Vector3.new(15.3, 10.5, -1.3), color = "Slate" },
     { pos = Vector3.new(14.9, 11.0, -1.7), color = "Slate" },
-    { pos = Vector3.new(15.4, 11.4, -1.0), color = "Sand" },
+    { pos = Vector3.new(15.4, 11.4, -1.0), color = "Slate" },
 }
 
 for index, blockDef in ipairs(baseBlockPile) do
