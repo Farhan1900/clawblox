@@ -1515,6 +1515,22 @@ fn bundle_renderer_package_with_esbuild(
     bundle_renderer_with_esbuild(game_dir, source_rel, out_rel)
 }
 
+fn renderer_output_contains_create_renderer(output_path: &Path) -> Result<bool, String> {
+    if !output_path.is_file() {
+        return Ok(false);
+    }
+
+    let built_source = std::fs::read_to_string(output_path).map_err(|e| {
+        format!(
+            "Failed reading renderer output {}: {}",
+            output_path.display(),
+            e
+        )
+    })?;
+
+    Ok(built_source.contains("createRenderer"))
+}
+
 fn maybe_build_renderer_package(
     game_dir: &Path,
     config: &clawblox::config::RendererConfig,
@@ -1560,33 +1576,49 @@ fn maybe_build_renderer_package(
     flock_exclusive(&lock_file)
         .map_err(|e| format!("Failed to acquire renderer build lock: {}", e))?;
 
-    if package.scripts.contains_key("build") {
+    let output_path = renderer_dir.join(&out_rel);
+    let build_result = if package.scripts.contains_key("build") {
         if !command_exists("npm") {
-            return Err(
+            Err(
                 "Renderer package declares a build script, but npm is not available in PATH."
                     .to_string(),
-            );
-        }
-        let output = Command::new("npm")
-            .args(["run", "build"])
-            .current_dir(&renderer_dir)
-            .output()
-            .map_err(|e| format!("Failed to run renderer build script: {}", e))?;
-        if !output.status.success() {
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(format!(
-                "Renderer package build failed (npm run build)\nstdout:\n{}\nstderr:\n{}",
-                stdout, stderr
-            ));
+            )
+        } else {
+            let output = Command::new("npm")
+                .args(["run", "build"])
+                .current_dir(&renderer_dir)
+                .output()
+                .map_err(|e| format!("Failed to run renderer build script: {}", e))?;
+            if output.status.success() {
+                Ok(())
+            } else {
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                Err(format!(
+                    "Renderer package build failed (npm run build)\nstdout:\n{}\nstderr:\n{}",
+                    stdout, stderr
+                ))
+            }
         }
     } else {
-        bundle_renderer_package_with_esbuild(game_dir, &entry_rel, &out_rel)?;
+        bundle_renderer_package_with_esbuild(game_dir, &entry_rel, &out_rel)
+    };
+
+    if let Err(build_error) = build_result {
+        if renderer_output_contains_create_renderer(&output_path)? {
+            eprintln!(
+                "Warning: renderer rebuild failed; using existing bundle at {}",
+                output_path.display()
+            );
+            eprintln!("Reason: {}", build_error);
+        } else {
+            drop(lock_file);
+            return Err(build_error);
+        }
     }
 
     drop(lock_file);
 
-    let output_path = renderer_dir.join(&out_rel);
     if !output_path.is_file() {
         return Err(format!(
             "Renderer build did not produce expected output: {}",
@@ -1594,14 +1626,7 @@ fn maybe_build_renderer_package(
         ));
     }
 
-    let built_source = std::fs::read_to_string(&output_path).map_err(|e| {
-        format!(
-            "Failed reading renderer output {}: {}",
-            output_path.display(),
-            e
-        )
-    })?;
-    if !built_source.contains("createRenderer") {
+    if !renderer_output_contains_create_renderer(&output_path)? {
         return Err(format!(
             "Renderer output {} does not appear to export createRenderer.",
             output_path.display()
