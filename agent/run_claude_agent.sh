@@ -717,6 +717,7 @@ run_claude_until_deadline() {
   local prompt_text="$4"
   local label="$5"
   local restart_count=0
+  RUN_CLAUDE_STATUS=0
 
   while true; do
     local now_epoch remaining_seconds invocation_id invocation_started_epoch watchdog_pid
@@ -728,7 +729,7 @@ run_claude_until_deadline() {
     now_epoch="$(date +%s)"
     remaining_seconds=$((deadline_epoch - now_epoch))
     if (( remaining_seconds <= 0 )); then
-      printf '124\n'
+      RUN_CLAUDE_STATUS=124
       return 0
     fi
 
@@ -789,7 +790,7 @@ run_claude_until_deadline() {
       continue
     fi
 
-    printf '%s\n' "$status"
+    RUN_CLAUDE_STATUS="$status"
     return 0
   done
 }
@@ -821,7 +822,8 @@ if [[ -z "$RESET_EVERY" && -n "${DURATION_SECONDS:-}" ]]; then
     main_session_mode="session_id"
     main_session_id="${session_flag[1]}"
   fi
-  main_status="$(run_claude_until_deadline "$main_deadline_epoch" "$main_session_mode" "$main_session_id" "$CLAUDE_INITIAL_PROMPT" "duration_main")"
+  run_claude_until_deadline "$main_deadline_epoch" "$main_session_mode" "$main_session_id" "$CLAUDE_INITIAL_PROMPT" "duration_main"
+  main_status="$RUN_CLAUDE_STATUS"
 
   if [[ "$main_status" -ne 124 && "$main_status" -ne 143 ]]; then
     exit "$main_status"
@@ -830,7 +832,7 @@ if [[ -z "$RESET_EVERY" && -n "${DURATION_SECONDS:-}" ]]; then
   # Warning session: continue with checkpoint prompt, extra time to save
   echo "Sending shutdown warning..."
   warning_deadline_epoch=$(( $(date +%s) + CHECKPOINT_WARNING_SECONDS ))
-  run_claude_until_deadline "$warning_deadline_epoch" "continue" "$(current_runtime_session_id)" "$CHECKPOINT_WARNING_PROMPT" "duration_warning" >/dev/null
+  run_claude_until_deadline "$warning_deadline_epoch" "continue" "$(current_runtime_session_id)" "$CHECKPOINT_WARNING_PROMPT" "duration_warning"
   sync_latest_session_artifacts
   exit 0
 fi
@@ -857,7 +859,8 @@ while true; do
   fi
 
   # Main session: run for full RESET_EVERY duration, restarting on recoverable Claude failures.
-  main_status="$(run_claude_until_deadline "$cycle_deadline_epoch" "$cycle_session_mode" "$cycle_session_id" "$CLAUDE_INITIAL_PROMPT" "reset_cycle_${reset_index}_main")"
+  run_claude_until_deadline "$cycle_deadline_epoch" "$cycle_session_mode" "$cycle_session_id" "$CLAUDE_INITIAL_PROMPT" "reset_cycle_${reset_index}_main"
+  main_status="$RUN_CLAUDE_STATUS"
 
   # If claude exited on its own (not timeout), stop
   if [[ "$main_status" -ne 124 && "$main_status" -ne 143 ]]; then
@@ -867,7 +870,7 @@ while true; do
   # Warning session: continue the same session with checkpoint prompt
   echo "Sending checkpoint warning..."
   warning_deadline_epoch=$(( $(date +%s) + CHECKPOINT_WARNING_SECONDS ))
-  run_claude_until_deadline "$warning_deadline_epoch" "continue" "$(current_runtime_session_id)" "$CHECKPOINT_WARNING_PROMPT" "reset_cycle_${reset_index}_warning" >/dev/null
+  run_claude_until_deadline "$warning_deadline_epoch" "continue" "$(current_runtime_session_id)" "$CHECKPOINT_WARNING_PROMPT" "reset_cycle_${reset_index}_warning"
   sync_latest_session_artifacts
 
   reset_index=$((reset_index + 1))
