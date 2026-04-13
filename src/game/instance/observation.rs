@@ -270,6 +270,7 @@ pub(super) fn build_spectator_observation(instance: &GameInstance) -> SpectatorO
                         part_data.size.y,
                         part_data.size.z,
                     ])),
+                    shape: Some(part_data.shape.name().to_string()),
                     render: build_render(&data, part_data),
                     health: None,
                     pickup_type: None,

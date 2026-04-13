@@ -28,6 +28,9 @@ metadata_file="${CLAWBLOX_CLAUDE_METADATA_FILE:-}"
 if [[ -n "$log_dir" ]]; then
   mkdir -p "$log_dir"
   printf '%s\n' "$input" >"$log_dir/session_start.json"
+  if [[ -n "$session_id" ]]; then
+    printf '%s\n' "$input" >"$log_dir/session_start.${session_id}.json"
+  fi
 fi
 
 if [[ -n "$metadata_file" ]]; then

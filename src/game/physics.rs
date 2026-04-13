@@ -1,4 +1,4 @@
-use nalgebra::UnitQuaternion;
+use nalgebra::{Translation3, UnitQuaternion};
 use rapier3d::control::{
     CharacterAutostep, CharacterLength, EffectiveCharacterMovement, KinematicCharacterController,
 };
@@ -108,18 +108,40 @@ pub struct PhysicsWorld {
     pending_body_removals: Vec<RigidBodyHandle>,
 }
 
-/// Builds a collider with the correct shape for a given PartType and size.
-fn build_collider(
-    size: [f32; 3],
-    shape: PartType,
-    can_collide: bool,
-    interaction_state: PartInteractionState,
-) -> Collider {
+fn build_ring_shared_shape(size: [f32; 3]) -> SharedShape {
     let [sx, sy, sz] = size;
-    let shared_shape = match shape {
+    let outer_radius = 0.5 * sx.min(sz);
+    let tube_radius = (sy * 0.5).min(outer_radius * 0.45).max(0.05);
+    let major_radius = (outer_radius - tube_radius).max(0.05);
+    let segments = 12usize;
+    let segment_length = (2.0 * major_radius * (std::f32::consts::PI / segments as f32).tan())
+        .max(tube_radius * 1.5)
+        * 1.08;
+    let segment_half = [
+        segment_length * 0.5,
+        tube_radius,
+        tube_radius,
+    ];
+    let cuboid = SharedShape::cuboid(segment_half[0], segment_half[1], segment_half[2]);
+    let mut pieces = Vec::with_capacity(segments);
+    for index in 0..segments {
+        let angle = (index as f32 / segments as f32) * std::f32::consts::TAU;
+        let center_x = angle.cos() * major_radius;
+        let center_z = angle.sin() * major_radius;
+        let rotation = UnitQuaternion::from_euler_angles(0.0, angle + std::f32::consts::FRAC_PI_2, 0.0);
+        let transform = Isometry::from_parts(Translation3::new(center_x, 0.0, center_z), rotation);
+        pieces.push((transform, cuboid.clone()));
+    }
+    SharedShape::compound(pieces)
+}
+
+fn build_shared_shape(size: [f32; 3], shape: PartType) -> SharedShape {
+    let [sx, sy, sz] = size;
+    match shape {
         PartType::Block => SharedShape::cuboid(sx / 2.0, sy / 2.0, sz / 2.0),
         PartType::Ball => SharedShape::ball(sx / 2.0),
         PartType::Cylinder => SharedShape::cylinder(sy / 2.0, sx / 2.0),
+        PartType::Ring => build_ring_shared_shape(size),
         PartType::Wedge => {
             // Triangular prism: flat bottom, slope rises from +X to -X
             // 6 vertices matching Roblox wedge convention
@@ -137,7 +159,17 @@ fn build_collider(
             SharedShape::convex_hull(&points)
                 .expect("Wedge convex hull should always succeed with 6 valid vertices")
         }
-    };
+    }
+}
+
+/// Builds a collider with the correct shape for a given PartType and size.
+fn build_collider(
+    size: [f32; 3],
+    shape: PartType,
+    can_collide: bool,
+    interaction_state: PartInteractionState,
+) -> Collider {
+    let shared_shape = build_shared_shape(size, shape);
     ColliderBuilder::new(shared_shape)
         .enabled(interaction_state.collider_enabled())
         .sensor(!can_collide)

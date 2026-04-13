@@ -39,6 +39,8 @@ struct AppOpenReplayResponse {
     url: String,
     recording_path: String,
     world_dir: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    agent_log: Option<String>,
 }
 
 async fn build_replay_state(
@@ -54,6 +56,13 @@ async fn build_replay_state(
     let meta = reader.meta().await.map_err(|e| {
         format!(
             "failed to read recording metadata '{}': {}",
+            file.display(),
+            e
+        )
+    })?;
+    let active_ranges = reader.active_tick_ranges().await.map_err(|e| {
+        format!(
+            "failed to analyze replay activity '{}': {}",
             file.display(),
             e
         )
@@ -80,6 +89,7 @@ async fn build_replay_state(
         meta.tick_rate,
         meta.duration_ms,
         speed,
+        active_ranges,
     )?;
 
     let renderer_manifest = {
@@ -93,6 +103,8 @@ async fn build_replay_state(
             default_renderer_manifest()
         }
     };
+
+    let agent_log_file = agent_log_file.or_else(|| find_agent_log_near_recording(&file));
 
     let agent_timeline = if let Some(path) = agent_log_file.as_ref() {
         match load_agent_timeline(path, meta.tick_rate) {
@@ -165,6 +177,7 @@ pub fn run_app(path: PathBuf, port: u16, base_path: &str) {
                 )
                 .route("/sessions/{id}/replay/seek", post(app_replay_seek))
                 .route("/sessions/{id}/replay/speed", post(app_replay_speed))
+                .route("/sessions/{id}/replay/skip-idle", post(app_replay_skip_idle))
                 .route("/sessions/{id}/replay/pause", post(app_replay_pause))
                 .route("/sessions/{id}/replay/play", post(app_replay_play))
                 .route(
@@ -314,6 +327,101 @@ fn find_world_dir_near_recording(file: &Path) -> Option<PathBuf> {
     None
 }
 
+fn find_world_instance_dir_near_recording(file: &Path) -> Option<PathBuf> {
+    let mut current = file.parent();
+    while let Some(dir) = current {
+        if dir.join("agents").is_dir() && dir.join("recordings").is_dir() {
+            return Some(dir.to_path_buf());
+        }
+        current = dir.parent();
+    }
+    None
+}
+
+fn collect_agent_logs_recursive(dir: &Path, out: &mut Vec<PathBuf>) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            collect_agent_logs_recursive(&path, out);
+            continue;
+        }
+        if path.extension().and_then(|ext| ext.to_str()) != Some("jsonl") {
+            continue;
+        }
+        let Some(parent) = path.parent() else {
+            continue;
+        };
+        if parent.file_name().and_then(|name| name.to_str()) == Some("session") {
+            out.push(path);
+        }
+    }
+}
+
+fn timestamp_key_from_recording(path: &Path) -> Option<u64> {
+    let stem = path.file_stem()?.to_str()?;
+    let digits = stem
+        .chars()
+        .filter(|ch| ch.is_ascii_digit())
+        .collect::<String>();
+    if digits.len() < 14 {
+        return None;
+    }
+    digits[..14].parse().ok()
+}
+
+fn timestamp_key_from_agent_log(path: &Path) -> Option<u64> {
+    let name = path.file_name()?.to_str()?;
+    let prefix = name.split('_').next().unwrap_or(name);
+    let digits = prefix
+        .chars()
+        .filter(|ch| ch.is_ascii_digit())
+        .collect::<String>();
+    if digits.len() < 14 {
+        return None;
+    }
+    digits[..14].parse().ok()
+}
+
+fn find_agent_log_near_recording(file: &Path) -> Option<PathBuf> {
+    let world_instance_dir = find_world_instance_dir_near_recording(file)?;
+    let agents_dir = world_instance_dir.join("agents");
+    if !agents_dir.is_dir() {
+        return None;
+    }
+
+    let mut candidates = Vec::new();
+    collect_agent_logs_recursive(&agents_dir, &mut candidates);
+    if candidates.is_empty() {
+        return None;
+    }
+
+    let recording_key = timestamp_key_from_recording(file);
+    let mut ranked = candidates
+        .into_iter()
+        .map(|path| {
+            let diff = match (recording_key, timestamp_key_from_agent_log(&path)) {
+                (Some(recording), Some(agent)) => recording.abs_diff(agent),
+                _ => u64::MAX,
+            };
+            let modified = std::fs::metadata(&path)
+                .and_then(|meta| meta.modified())
+                .ok();
+            (diff, modified, path)
+        })
+        .collect::<Vec<_>>();
+
+    ranked.sort_by(|a, b| {
+        a.0.cmp(&b.0)
+            .then_with(|| b.1.cmp(&a.1))
+            .then_with(|| a.2.cmp(&b.2))
+    });
+
+    ranked.into_iter().next().map(|(_, _, path)| path)
+}
+
 fn sanitize_relative_path(value: &str) -> Option<PathBuf> {
     let mut out = PathBuf::new();
     for component in Path::new(value).components() {
@@ -384,7 +492,14 @@ async fn app_open_replay(
 
     let session_id = Uuid::new_v4().to_string();
     let session_base = app_session_base_path(&state, &session_id);
-    let replay_state = build_replay_state(recording_path.clone(), 1.0, &session_base, None, None)
+    let agent_log = find_agent_log_near_recording(&recording_path);
+    let replay_state = build_replay_state(
+        recording_path.clone(),
+        1.0,
+        &session_base,
+        None,
+        agent_log.clone(),
+    )
         .await
         .map_err(|e| (axum::http::StatusCode::BAD_REQUEST, e))?;
     let world_dir = replay_state.world_dir.display().to_string();
@@ -395,6 +510,7 @@ async fn app_open_replay(
         url: session_base,
         recording_path: recording_path.display().to_string(),
         world_dir,
+        agent_log: agent_log.map(|path| path.display().to_string()),
     }))
 }
 
@@ -510,6 +626,17 @@ async fn app_replay_speed(
     let replay_state = get_app_replay_state(&state, &id)?;
     let mut pb = replay_state.playback.lock().await;
     pb.set_speed(q.value);
+    Ok(axum::http::StatusCode::OK)
+}
+
+async fn app_replay_skip_idle(
+    AxumPath(id): AxumPath<String>,
+    State(state): State<AppState>,
+    Query(q): Query<SkipIdleQuery>,
+) -> Result<axum::http::StatusCode, (axum::http::StatusCode, String)> {
+    let replay_state = get_app_replay_state(&state, &id)?;
+    let mut pb = replay_state.playback.lock().await;
+    pb.set_skip_idle(q.enabled);
     Ok(axum::http::StatusCode::OK)
 }
 

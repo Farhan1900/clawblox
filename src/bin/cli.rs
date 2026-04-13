@@ -1439,11 +1439,13 @@ fn bundle_renderer_with_esbuild(
         )
     })?;
 
+    let mut needs_npm_cache = false;
     let mut cmd = if command_exists("esbuild") {
         let mut c = Command::new("esbuild");
         c.arg(source.as_os_str());
         c
     } else if command_exists("npx") {
+        needs_npm_cache = true;
         let mut c = Command::new("npx");
         c.args(["--yes", "esbuild"]);
         c.arg(source.as_os_str());
@@ -1455,16 +1457,28 @@ fn bundle_renderer_with_esbuild(
         );
     };
 
+    cmd.current_dir(game_dir).args([
+        "--bundle",
+        "--format=esm",
+        "--platform=browser",
+        "--target=es2020",
+        "--sourcemap",
+        "--log-level=warning",
+    ]);
+
+    if needs_npm_cache {
+        let npm_cache_dir = std::env::temp_dir().join("clawblox-npm-cache");
+        std::fs::create_dir_all(&npm_cache_dir).map_err(|e| {
+            format!(
+                "Failed to create npm cache dir {}: {}",
+                npm_cache_dir.display(),
+                e
+            )
+        })?;
+        cmd.env("NPM_CONFIG_CACHE", &npm_cache_dir);
+    }
+
     let output = cmd
-        .current_dir(game_dir)
-        .args([
-            "--bundle",
-            "--format=esm",
-            "--platform=browser",
-            "--target=es2020",
-            "--sourcemap",
-            "--log-level=warning",
-        ])
         .arg(format!("--outfile={}", out.display()))
         .output()
         .map_err(|e| format!("Failed to spawn esbuild: {}", e))?;
@@ -1922,6 +1936,7 @@ fn run_game(
             world_script_source: Arc::new(script.clone()),
             max_players: config.max_players,
             observation_radius: config.observation.radius,
+            allow_reset: config.agent_api.allow_reset,
             afk_timeout_secs: config.afk_timeout,
             error_mode: ErrorMode::Halt,
             started_at: Instant::now(),
@@ -2153,6 +2168,10 @@ fn run_replay(
             eprintln!("Error: failed to read recording metadata: {}", e);
             std::process::exit(1);
         });
+        let active_ranges = reader.active_tick_ranges().await.unwrap_or_else(|e| {
+            eprintln!("Error: failed to analyze replay activity: {}", e);
+            std::process::exit(1);
+        });
 
         let world_dir = world_dir_override
             .unwrap_or_else(|| PathBuf::from(&meta.world_dir));
@@ -2177,6 +2196,7 @@ fn run_replay(
             meta.tick_rate,
             meta.duration_ms,
             speed,
+            active_ranges,
         )
         .unwrap_or_else(|e| {
             eprintln!("Error: invalid replay playback state: {}", e);
@@ -2244,6 +2264,7 @@ fn run_replay(
             .route("/replay/agent", get(replay_agent_messages))
             .route("/replay/seek", post(replay_seek))
             .route("/replay/speed", post(replay_speed))
+            .route("/replay/skip-idle", post(replay_skip_idle))
             .route("/replay/pause", post(replay_pause))
             .route("/replay/play", post(replay_play))
             .nest_service("/renderer-files", ServeDir::new(world_dir.join("renderer")))
@@ -2472,6 +2493,20 @@ async fn replay_speed(
 ) -> axum::http::StatusCode {
     let mut pb = state.playback.lock().await;
     pb.set_speed(q.value);
+    axum::http::StatusCode::OK
+}
+
+#[derive(Deserialize)]
+struct SkipIdleQuery {
+    enabled: bool,
+}
+
+async fn replay_skip_idle(
+    State(state): State<ReplayState>,
+    Query(q): Query<SkipIdleQuery>,
+) -> axum::http::StatusCode {
+    let mut pb = state.playback.lock().await;
+    pb.set_skip_idle(q.enabled);
     axum::http::StatusCode::OK
 }
 
@@ -2929,6 +2964,7 @@ struct LocalState {
     world_script_source: Arc<String>,
     max_players: u32,
     observation_radius: f32,
+    allow_reset: bool,
     afk_timeout_secs: u64,
     error_mode: ErrorMode,
     started_at: Instant,
@@ -4138,6 +4174,12 @@ async fn local_input(
 ) -> Result<Json<PlayerObservation>, (axum::http::StatusCode, String)> {
     let (agent_id, agent_name) = get_session(&state, &headers)?;
     if input.input_type == "Reset" {
+        if !state.allow_reset {
+            return Err((
+                axum::http::StatusCode::FORBIDDEN,
+                "Reset is disabled for this world".to_string(),
+            ));
+        }
         return perform_engine_reset_for_session(&state, agent_id).map(Json);
     }
 
@@ -4174,6 +4216,12 @@ async fn local_reset(
     headers: axum::http::HeaderMap,
 ) -> Result<Json<PlayerObservation>, (axum::http::StatusCode, String)> {
     let (agent_id, _) = get_session(&state, &headers)?;
+    if !state.allow_reset {
+        return Err((
+            axum::http::StatusCode::FORBIDDEN,
+            "Reset is disabled for this world".to_string(),
+        ));
+    }
     perform_engine_reset_for_session(&state, agent_id).map(Json)
 }
 

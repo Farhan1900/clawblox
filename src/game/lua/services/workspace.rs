@@ -348,12 +348,94 @@ fn sphere_intersects_obb(
     (dx * dx + dy * dy + dz * dz) <= sphere_radius * sphere_radius
 }
 
+fn ring_segments(size: Vector3) -> Vec<([f32; 3], f32, [f32; 3])> {
+    let outer_radius = 0.5 * size.x.min(size.z);
+    let tube_radius = (size.y * 0.5).min(outer_radius * 0.45).max(0.05);
+    let major_radius = (outer_radius - tube_radius).max(0.05);
+    let segments = 12usize;
+    let segment_length = (2.0 * major_radius * (std::f32::consts::PI / segments as f32).tan())
+        .max(tube_radius * 1.5)
+        * 1.08;
+    let half = [segment_length * 0.5, tube_radius, tube_radius];
+
+    let mut out = Vec::with_capacity(segments);
+    for index in 0..segments {
+        let angle = (index as f32 / segments as f32) * std::f32::consts::TAU;
+        out.push((
+            [angle.cos() * major_radius, 0.0, angle.sin() * major_radius],
+            angle + std::f32::consts::FRAC_PI_2,
+            half,
+        ));
+    }
+    out
+}
+
+fn build_ring_shared_shape(size: Vector3) -> SharedShape {
+    let cuboid_half = {
+        let segments = ring_segments(size);
+        let half = segments.first().map(|(_, _, half)| *half).unwrap_or([0.05, 0.05, 0.05]);
+        SharedShape::cuboid(half[0], half[1], half[2])
+    };
+
+    let pieces = ring_segments(size)
+        .into_iter()
+        .map(|(center, angle, _half)| {
+            let transform = Isometry3::from_parts(
+                Translation3::new(center[0], center[1], center[2]),
+                UnitQuaternion::from_euler_angles(0.0, angle, 0.0),
+            );
+            (transform, cuboid_half.clone())
+        })
+        .collect();
+
+    SharedShape::compound(pieces)
+}
+
+fn intersect_ring_local(origin: [f32; 3], dir: [f32; 3], size: Vector3) -> Option<(f32, [f32; 3])> {
+    let mut best: Option<(f32, [f32; 3])> = None;
+
+    for (center, angle, half) in ring_segments(size) {
+        let cos_y = angle.cos();
+        let sin_y = angle.sin();
+        let relative_origin = [
+            origin[0] - center[0],
+            origin[1] - center[1],
+            origin[2] - center[2],
+        ];
+        let segment_origin = [
+            cos_y * relative_origin[0] - sin_y * relative_origin[2],
+            relative_origin[1],
+            sin_y * relative_origin[0] + cos_y * relative_origin[2],
+        ];
+        let segment_dir = [
+            cos_y * dir[0] - sin_y * dir[2],
+            dir[1],
+            sin_y * dir[0] + cos_y * dir[2],
+        ];
+
+        if let Some((t, local_normal)) = intersect_box_local(segment_origin, segment_dir, half) {
+            let world_normal = [
+                cos_y * local_normal[0] + sin_y * local_normal[2],
+                local_normal[1],
+                -sin_y * local_normal[0] + cos_y * local_normal[2],
+            ];
+            match best {
+                Some((best_t, _)) if t >= best_t => {}
+                _ => best = Some((t, normalize(world_normal))),
+            }
+        }
+    }
+
+    best
+}
+
 fn shape_from_part(size: Vector3, shape: PartType) -> Option<SharedShape> {
     let [sx, sy, sz] = [size.x, size.y, size.z];
     Some(match shape {
         PartType::Block => SharedShape::cuboid(sx / 2.0, sy / 2.0, sz / 2.0),
         PartType::Ball => SharedShape::ball(sx / 2.0),
         PartType::Cylinder => SharedShape::cylinder(sy / 2.0, sx / 2.0),
+        PartType::Ring => build_ring_shared_shape(size),
         PartType::Wedge => {
             let hx = sx / 2.0;
             let hy = sy / 2.0;
@@ -708,6 +790,7 @@ impl WorkspaceService {
                 PartType::Cylinder => {
                     intersect_cylinder_local(local_origin, local_dir, half[0], half[1])
                 }
+                PartType::Ring => intersect_ring_local(local_origin, local_dir, size),
                 PartType::Wedge => intersect_wedge_local(local_origin, local_dir, half),
             };
 

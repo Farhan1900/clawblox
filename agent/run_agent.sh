@@ -70,6 +70,68 @@ sanitize_name() {
   printf '%s' "$1" | tr -c 'A-Za-z0-9._-' '_'
 }
 
+read_persisted_agent_name() {
+  local workspace_dir="$1"
+  local name_file="$workspace_dir/.world_agent_name"
+  if [[ ! -f "$name_file" ]]; then
+    return 1
+  fi
+  local persisted_name
+  persisted_name="$(head -n 1 "$name_file" | tr -d '\r')"
+  if [[ -z "$persisted_name" ]]; then
+    return 1
+  fi
+  printf '%s' "$persisted_name"
+}
+
+write_persisted_agent_name() {
+  local workspace_dir="$1"
+  local agent_name="$2"
+  printf '%s\n' "$agent_name" >"$workspace_dir/.world_agent_name"
+}
+
+append_prompt_workspace_files() {
+  local prompt_file="$1"
+  local workspace_dir="$2"
+  local -a preferred_files=(SOUL.md IDENTITY.md SEMANTIC_MEMORY.md EPISODIC_MEMORY.md)
+  local -a prompt_files=()
+  local rel_path
+  local -A seen_files=()
+
+  for rel_path in "${preferred_files[@]}"; do
+    if [[ -f "$workspace_dir/$rel_path" ]]; then
+      prompt_files+=("$rel_path")
+      seen_files["$rel_path"]=1
+    fi
+  done
+
+  while IFS= read -r -d '' file_path; do
+    rel_path="${file_path#"$workspace_dir"/}"
+    if [[ -n "${seen_files[$rel_path]:-}" ]]; then
+      continue
+    fi
+    prompt_files+=("$rel_path")
+    seen_files["$rel_path"]=1
+  done < <(find "$workspace_dir" -type f -name '*.md' -print0 | sort -z)
+
+  if ((${#prompt_files[@]} == 0)); then
+    return 0
+  fi
+
+  {
+    printf '\nInitial workspace memory files at session start:\n'
+    printf 'These are the file contents as they existed when this session began.\n'
+  } >>"$prompt_file"
+
+  for rel_path in "${prompt_files[@]}"; do
+    {
+      printf '\n===== %s =====\n' "$rel_path"
+      cat "$workspace_dir/$rel_path"
+      printf '\n'
+    } >>"$prompt_file"
+  done
+}
+
 resolve_existing_system_prompt_template() {
   if [[ -n "$SYSTEM_PROMPT_TEMPLATE" ]]; then
     if [[ "$SYSTEM_PROMPT_TEMPLATE" != /* ]]; then
@@ -124,12 +186,18 @@ append_startup_instructions() {
 build_prompt_file() {
   resolve_existing_system_prompt_template
   if [[ -n "$SYSTEM_PROMPT_TEMPLATE" && -f "$SYSTEM_PROMPT_TEMPLATE" ]]; then
+    WORLD_AGENT_NAME="$WORLD_AGENT_NAME" \
     WORKSPACE_DIR="$WORKSPACE_DIR" \
+    SESSION_LINE="$SESSION_LINE" \
+    WORLD_BASE_URL="$WORLD_BASE_URL" \
+    SKILL_CURL="$SKILL_CURL" \
+    SKILL_URL="$SKILL_URL" \
       envsubst '${WORLD_AGENT_NAME} ${WORKSPACE_DIR} ${SESSION_LINE} ${WORLD_BASE_URL} ${SKILL_CURL} ${SKILL_URL}' \
       < "$SYSTEM_PROMPT_TEMPLATE" >"$PROMPT_FILE"
   else
     build_default_prompt
   fi
+  append_prompt_workspace_files "$PROMPT_FILE" "$WORKSPACE_DIR"
   append_startup_instructions
 }
 
@@ -206,11 +274,11 @@ latest_reset_cycle_index() {
   printf '%s' "$last"
 }
 
-if [[ -z "$WORLD_AGENT_NAME" ]]; then
+if [[ -z "$WORLD_AGENT_NAME" && -z "$WORKSPACE_DIR" ]]; then
   WORLD_AGENT_NAME="$(generate_agent_name)"
 fi
 
-SAFE_AGENT_NAME="$(sanitize_name "$WORLD_AGENT_NAME")"
+SAFE_AGENT_NAME="$(sanitize_name "${WORLD_AGENT_NAME:-agent}")"
 
 if [[ -z "$WORKSPACE_DIR" ]]; then
   WORKSPACE_DIR="$SCRIPT_DIR/workspace/$SAFE_AGENT_NAME"
@@ -243,6 +311,19 @@ if [[ -d "$TEMPLATE_DIR" ]]; then
     fi
   done < <(find "$TEMPLATE_DIR" -maxdepth 1 -type f -print0 | sort -z)
 fi
+
+if persisted_agent_name="$(read_persisted_agent_name "$WORKSPACE_DIR")"; then
+  if [[ -n "$WORLD_AGENT_NAME" && "$WORLD_AGENT_NAME" != "$persisted_agent_name" ]]; then
+    echo "Agent name: reusing persisted workspace identity '$persisted_agent_name' (ignoring requested '$WORLD_AGENT_NAME')"
+  fi
+  WORLD_AGENT_NAME="$persisted_agent_name"
+fi
+
+if [[ -z "$WORLD_AGENT_NAME" ]]; then
+  WORLD_AGENT_NAME="$(generate_agent_name)"
+fi
+
+write_persisted_agent_name "$WORKSPACE_DIR" "$WORLD_AGENT_NAME"
 
 SESSION_ID=""
 if [[ -n "$WORLD_JOIN_PATH" ]]; then

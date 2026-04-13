@@ -4129,6 +4129,12 @@ impl UserData for Instance {
                     let r = sx * 0.5;
                     std::f32::consts::PI * r * r * sy
                 }
+                PartType::Ring => {
+                    let outer_radius = 0.5 * sx.min(sz);
+                    let tube_radius = (sy * 0.5).min(outer_radius * 0.45);
+                    let major_radius = (outer_radius - tube_radius).max(0.0);
+                    2.0 * std::f32::consts::PI * std::f32::consts::PI * major_radius * tube_radius * tube_radius
+                }
             };
             Ok(volume * density)
         });

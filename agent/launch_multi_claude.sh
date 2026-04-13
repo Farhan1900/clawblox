@@ -15,13 +15,15 @@ RUN_ID="${RUN_ID:-$(date -u +%Y%m%dT%H%M%SZ)}"
 AGENT_NAME_PREFIX="${AGENT_NAME_PREFIX:-agent}"
 STOP_GRACE_SECONDS="${STOP_GRACE_SECONDS:-10}"
 GOAL="${GOAL:-}"
-TEMPLATE_DIR="${TEMPLATE_DIR:-$ROOT_DIR/worlds/mesa-island/agent-template}"
+TEMPLATE_DIR="${TEMPLATE_DIR:-$SCRIPT_DIR/template/agent}"
 RESULTS_ROOT="${RESULTS_ROOT:-}"
 PORT_WAIT_SECONDS="${PORT_WAIT_SECONDS:-120}"
 RESUME_PATH="${RESUME_PATH:-}"
 RESET_EVERY="${RESET_EVERY:-}"
 DURATION="${DURATION:-}"
 CHECKPOINT_INTERVAL="${CHECKPOINT_INTERVAL:-1800}"
+CHECKPOINT_WARNING_SECONDS="${CHECKPOINT_WARNING_SECONDS:-300}"
+CHECKPOINT_WARNING_PROMPT="${CHECKPOINT_WARNING_PROMPT:-You will be reset in 5 minutes. Update your workspace memory files now.}"
 CLAUDE_MODEL="${CLAUDE_MODEL:-claude-opus-4-6}"
 CLAUDE_PERMISSION_MODE="${CLAUDE_PERMISSION_MODE:-bypassPermissions}"
 CLAUDE_BARE="${CLAUDE_BARE:-0}"
@@ -62,6 +64,45 @@ parse_duration_seconds() {
 
 sanitize_name() {
   printf '%s' "$1" | tr -c 'A-Za-z0-9._-' '_'
+}
+
+utc_now() {
+  date -u +%Y-%m-%dT%H:%M:%SZ
+}
+
+append_launcher_audit() {
+  local event="$1"
+  local details="${2:-}"
+  local meta_file run_dir audit_file tmux_socket parent_cmd self_cmd
+
+  meta_file="$(session_meta_file)"
+  run_dir="${RUN_DIR:-}"
+  if [[ -f "$meta_file" ]]; then
+    # shellcheck disable=SC1090
+    source "$meta_file"
+    run_dir="${RUN_DIR:-$run_dir}"
+  fi
+  if [[ -z "$run_dir" ]]; then
+    return 0
+  fi
+
+  audit_file="$run_dir/launcher_audit.log"
+  mkdir -p "$(dirname "$audit_file")"
+  tmux_socket="${TMUX:-}"
+  parent_cmd="$(ps -o args= -p "$PPID" 2>/dev/null | tr '\n' ' ' || true)"
+  self_cmd="$(ps -o args= -p "$$" 2>/dev/null | tr '\n' ' ' || true)"
+  printf '%s event=%s pid=%s ppid=%s tmux_session=%q tmux_env=%q stop_reason=%q stop_source=%q parent_cmd=%q self_cmd=%q details=%q\n' \
+    "$(utc_now)" \
+    "$event" \
+    "$$" \
+    "$PPID" \
+    "$TMUX_SESSION" \
+    "$tmux_socket" \
+    "${CLAWBLOX_STOP_REASON:-}" \
+    "${CLAWBLOX_STOP_SOURCE:-}" \
+    "$parent_cmd" \
+    "$self_cmd" \
+    "$details" >>"$audit_file"
 }
 
 archive_existing_run_dir() {
@@ -249,6 +290,7 @@ do_stop() {
   local i
   local port
   local snapshot_failed=0
+  append_launcher_audit "stop_requested" "force=$FORCE stop_grace_seconds=$STOP_GRACE_SECONDS"
   if tmux has-session -t "$TMUX_SESSION" 2>/dev/null; then
     mapfile -t recordings < <(collect_session_recordings)
     meta_file="$(session_meta_file)"
@@ -264,6 +306,7 @@ do_stop() {
           fi
         done
         if ((snapshot_failed != 0)); then
+          append_launcher_audit "stop_snapshot_failed" "num_worlds=$NUM_WORLDS base_port=$BASE_PORT"
           if ((FORCE == 1)); then
             echo "Warning: snapshot capture failed, continuing with --force." >&2
           else
@@ -291,9 +334,11 @@ do_stop() {
       done
     fi
     echo "Stopped."
+    append_launcher_audit "stop_completed" "recordings=${#recordings[@]} snapshot_failed=$snapshot_failed"
     rm -f "$meta_file"
   else
     echo "No tmux session '$TMUX_SESSION' found."
+    append_launcher_audit "stop_no_session" "force=$FORCE"
   fi
 }
 
@@ -523,6 +568,26 @@ if [[ -z "${SYSTEM_PROMPT_TEMPLATE:-}" ]]; then
   fi
 fi
 
+if ((${#AGENT_TEMPLATE_DIRS[@]} > AGENTS_PER_WORLD)); then
+  echo "Error: received ${#AGENT_TEMPLATE_DIRS[@]} --agent-template values for only $AGENTS_PER_WORLD agents."
+  exit 1
+fi
+
+declare -a AGENT_TEMPLATE_ABS_DIRS=()
+if ((${#AGENT_TEMPLATE_DIRS[@]} > 0)); then
+  for template_dir in "${AGENT_TEMPLATE_DIRS[@]}"; do
+    template_abs_dir="$template_dir"
+    if [[ "$template_abs_dir" != /* ]]; then
+      template_abs_dir="$ROOT_DIR/$template_abs_dir"
+    fi
+    if [[ ! -d "$template_abs_dir" ]]; then
+      echo "Error: agent template directory not found at $template_abs_dir"
+      exit 1
+    fi
+    AGENT_TEMPLATE_ABS_DIRS+=("$template_abs_dir")
+  done
+fi
+
 RUN_SAFE_ID="$(sanitize_name "$RUN_ID")"
 if [[ -z "${RESULTS_ABS_ROOT:-}" ]]; then
   if [[ -n "$RESULTS_ROOT" ]]; then
@@ -576,10 +641,12 @@ mkdir -p "$WORLDS_ROOT"
 printf '%s\n' "$RUN_DIR" >"$RESULTS_ABS_ROOT/latest_run.txt"
 write_run_metadata "$RUN_DIR/run.env"
 write_run_metadata "$(session_meta_file)"
+append_launcher_audit "run_metadata_written" "run_id=$RUN_ID base_port=$BASE_PORT num_worlds=$NUM_WORLDS agents_per_world=$AGENTS_PER_WORLD"
 
 echo "Starting $NUM_WORLDS world servers..."
 tmux new-session -d -s "$TMUX_SESSION" -n "world-0"
 tmux set-option -t "$TMUX_SESSION" remain-on-exit on
+append_launcher_audit "tmux_session_created" "session=$TMUX_SESSION"
 
 for ((i = 0; i < NUM_WORLDS; i++)); do
   port=$((BASE_PORT + i))
@@ -614,8 +681,10 @@ for ((i = 0; i < NUM_WORLDS; i++)); do
   if wait_for_server "$port"; then
     cache_world_spectator_token "$i" >/dev/null 2>&1 || true
     echo "ready"
+    append_launcher_audit "world_ready" "world_index=$i port=$port"
   else
     echo "TIMEOUT (${HEALTH_TIMEOUT}s)"
+    append_launcher_audit "world_health_timeout" "world_index=$i port=$port health_timeout=$HEALTH_TIMEOUT"
   fi
 done
 
@@ -657,7 +726,18 @@ for ((i = 0; i < NUM_WORLDS; i++)); do
     agent_world_session_file="$agent_dir/world_session.txt"
     mkdir -p "$agent_log_dir" "$agent_workspace"
 
-    template_env_prefix="TEMPLATE_DIR=$(printf '%q' "$TEMPLATE_ABS_DIR") SYSTEM_PROMPT_TEMPLATE=$(printf '%q' "$SYSTEM_PROMPT_TEMPLATE") "
+    agent_template_abs_dir="$TEMPLATE_ABS_DIR"
+    if ((j < ${#AGENT_TEMPLATE_ABS_DIRS[@]})); then
+      agent_template_abs_dir="${AGENT_TEMPLATE_ABS_DIRS[$j]}"
+    fi
+
+    template_env_prefix=""
+    if [[ -n "$agent_template_abs_dir" ]]; then
+      template_env_prefix="TEMPLATE_DIR=$(printf '%q' "$agent_template_abs_dir") "
+    fi
+    if [[ -n "$SYSTEM_PROMPT_TEMPLATE" ]]; then
+      template_env_prefix+="SYSTEM_PROMPT_TEMPLATE=$(printf '%q' "$SYSTEM_PROMPT_TEMPLATE") "
+    fi
     startup_env_prefix=""
     if [[ -n "$startup_instructions" ]]; then
       startup_instructions_q="$(printf '%q' "$startup_instructions")"
@@ -681,20 +761,21 @@ for ((i = 0; i < NUM_WORLDS; i++)); do
 
     tmux pipe-pane -o -t "$pane_target" "cat >> '$(printf "%q" "$agent_log_file")'"
     tmux send-keys -t "$pane_target" \
-      "cd '$ROOT_DIR' && ${auth_env_prefix}WORLD_BASE_URL='$url' WORLD_AGENT_NAME='$agent_display_name' AGENT_DIR='$agent_dir' WORKSPACE_DIR='$agent_workspace' SESSION_ID_FILE='$agent_session_file' WORLD_SESSION_FILE='$agent_world_session_file' RESET_EVERY=$(printf '%q' "$RESET_EVERY_SECONDS") DURATION_SECONDS=$(printf '%q' "$DURATION_SECONDS") CLAUDE_MODEL=$(printf '%q' "$CLAUDE_MODEL") CLAUDE_PERMISSION_MODE=$(printf '%q' "$CLAUDE_PERMISSION_MODE") CLAUDE_BARE=$(printf '%q' "$CLAUDE_BARE") CLAUDE_EXTRA_ARGS=$(printf '%q' "$CLAUDE_EXTRA_ARGS") ${sandbox_env_prefix}${template_env_prefix}${startup_env_prefix}${reset_wrapper_prefix}" Enter
+      "cd '$ROOT_DIR' && ${auth_env_prefix}WORLD_BASE_URL='$url' WORLD_AGENT_NAME='$agent_display_name' AGENT_DIR='$agent_dir' WORKSPACE_DIR='$agent_workspace' SESSION_ID_FILE='$agent_session_file' WORLD_SESSION_FILE='$agent_world_session_file' RESET_EVERY=$(printf '%q' "$RESET_EVERY_SECONDS") DURATION_SECONDS=$(printf '%q' "$DURATION_SECONDS") CHECKPOINT_WARNING_SECONDS=$(printf '%q' "$CHECKPOINT_WARNING_SECONDS") CHECKPOINT_WARNING_PROMPT=$(printf '%q' "$CHECKPOINT_WARNING_PROMPT") CLAUDE_MODEL=$(printf '%q' "$CLAUDE_MODEL") CLAUDE_PERMISSION_MODE=$(printf '%q' "$CLAUDE_PERMISSION_MODE") CLAUDE_BARE=$(printf '%q' "$CLAUDE_BARE") CLAUDE_EXTRA_ARGS=$(printf '%q' "$CLAUDE_EXTRA_ARGS") ${sandbox_env_prefix}${template_env_prefix}${startup_env_prefix}${reset_wrapper_prefix}" Enter
   done
 done
-
-CHECKPOINT_WARNING_SECONDS="${CHECKPOINT_WARNING_SECONDS:-300}"
 if [[ -n "$DURATION" ]]; then
   duration_secs="$(parse_duration_seconds "$DURATION")"
   # Agent gets duration + warning time to save workspace
   total_wait=$(( duration_secs + CHECKPOINT_WARNING_SECONDS + 30 ))
   echo "Run will auto-stop after ${DURATION} (${duration_secs}s + ${CHECKPOINT_WARNING_SECONDS}s warning)..."
+  append_launcher_audit "auto_stop_scheduled" "duration=$DURATION duration_seconds=$duration_secs warning_seconds=$CHECKPOINT_WARNING_SECONDS total_wait=$total_wait"
   (
     sleep "$total_wait"
     echo "Duration ${DURATION} + warning elapsed. Stopping..."
-    bash "$0" --stop --tmux-session "$TMUX_SESSION"
+    CLAWBLOX_STOP_REASON="duration_elapsed" \
+      CLAWBLOX_STOP_SOURCE="launch_multi_claude_auto_timer" \
+      bash "$0" --stop --tmux-session "$TMUX_SESSION"
   ) &
   disown
 fi

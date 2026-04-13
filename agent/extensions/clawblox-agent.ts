@@ -4,6 +4,7 @@ import { mkdirSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 
 const AUTO_LOOP_STEER = "Please don't stop. Just continue doing whatever you want to do.";
+const MAX_BASH_TIMEOUT_SECONDS = 30;
 const PROJECT_CONTEXT_SECTION = /(?:^|\n)# Project Context\b[\s\S]*$/m;
 const CHECKPOINT_PROMPT = (process.env.AGENT_CHECKPOINT_PROMPT ?? "").trim();
 const CHECKPOINT_AT_EPOCH = parseEpochSeconds(process.env.AGENT_CHECKPOINT_AT_EPOCH);
@@ -96,6 +97,8 @@ function formatChatNotification(message: ChatMessage): string | null {
 
 export default function (pi: ExtensionAPI) {
   let autoLoopEnabled = true;
+  let autoContinueQueued = false;
+  let autoContinueTimer: ReturnType<typeof setTimeout> | null = null;
   let checkpointSent = false;
   let checkpointTimer: ReturnType<typeof setTimeout> | null = null;
   let chatPollTimer: ReturnType<typeof setInterval> | null = null;
@@ -105,6 +108,27 @@ export default function (pi: ExtensionAPI) {
   let chatPollingEnabled = false;
   const seenChatIds = new Set<string>();
   let latestCtx: ExtensionContext | null = null;
+
+  const clearAutoContinueTimer = () => {
+    if (!autoContinueTimer) return;
+    clearTimeout(autoContinueTimer);
+    autoContinueTimer = null;
+  };
+
+  const queueAutoContinue = (ctx: ExtensionContext) => {
+    latestCtx = ctx;
+    if (!autoLoopEnabled) return;
+    if (autoContinueQueued || autoContinueTimer) return;
+
+    // Defer one tick so PI can finish its own turn bookkeeping first.
+    autoContinueTimer = setTimeout(() => {
+      autoContinueTimer = null;
+      const currentCtx = latestCtx ?? ctx;
+      if (!autoLoopEnabled || currentCtx.hasPendingMessages()) return;
+      autoContinueQueued = true;
+      pi.sendUserMessage(AUTO_LOOP_STEER, { deliverAs: "followUp" });
+    }, 0);
+  };
 
   const sendCheckpointPrompt = () => {
     if (checkpointSent) return;
@@ -208,6 +232,7 @@ export default function (pi: ExtensionAPI) {
       const mode = (args || "").trim().toLowerCase();
       if (mode === "off") {
         autoLoopEnabled = false;
+        clearAutoContinueTimer();
         if (ctx.hasUI) ctx.ui.setStatus("agent-loop", "⏸ agent");
         ctx.ui.notify("Agent auto-loop disabled", "info");
         return;
@@ -216,9 +241,7 @@ export default function (pi: ExtensionAPI) {
         autoLoopEnabled = true;
         if (ctx.hasUI) ctx.ui.setStatus("agent-loop", "♾ agent");
         ctx.ui.notify("Agent auto-loop enabled", "info");
-        if (ctx.isIdle() && !ctx.hasPendingMessages()) {
-          pi.sendUserMessage(AUTO_LOOP_STEER, { deliverAs: "steer" });
-        }
+        queueAutoContinue(ctx);
         return;
       }
       if (mode === "status") {
@@ -229,13 +252,36 @@ export default function (pi: ExtensionAPI) {
     },
   });
 
-  pi.on("agent_end", async (_event, ctx) => {
+  pi.on("input", async (event) => {
+    if (event.source !== "extension") return;
+    if (event.text !== AUTO_LOOP_STEER) return;
+    if (autoLoopEnabled) return;
+    autoContinueQueued = false;
+    return { action: "handled" };
+  });
+
+  pi.on("turn_start", async (_event, ctx) => {
+    latestCtx = ctx;
+    autoContinueQueued = false;
+    clearAutoContinueTimer();
+  });
+
+  pi.on("turn_end", async (_event, ctx) => {
     latestCtx = ctx;
     if (ctx.hasUI) ctx.ui.setStatus("agent-loop", autoLoopEnabled ? "♾ agent" : "⏸ agent");
-    if (!autoLoopEnabled) return;
-    if (!ctx.isIdle()) return;
-    if (ctx.hasPendingMessages()) return;
-    pi.sendUserMessage(AUTO_LOOP_STEER, { deliverAs: "steer" });
+    queueAutoContinue(ctx);
+  });
+
+  pi.on("tool_call", async (event) => {
+    if (event.toolName !== "bash") return;
+    const requestedTimeout = Number((event.input as { timeout?: unknown }).timeout);
+    if (!Number.isFinite(requestedTimeout) || requestedTimeout <= 0) {
+      (event.input as { timeout?: number }).timeout = MAX_BASH_TIMEOUT_SECONDS;
+      return;
+    }
+    if (requestedTimeout > MAX_BASH_TIMEOUT_SECONDS) {
+      (event.input as { timeout?: number }).timeout = MAX_BASH_TIMEOUT_SECONDS;
+    }
   });
 
   pi.registerCommand("reload-runtime", {
@@ -261,6 +307,7 @@ export default function (pi: ExtensionAPI) {
   });
 
   pi.on("session_shutdown", async () => {
+    clearAutoContinueTimer();
     if (checkpointTimer) {
       clearTimeout(checkpointTimer);
       checkpointTimer = null;

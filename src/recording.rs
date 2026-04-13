@@ -1,4 +1,5 @@
 use crate::game::instance::{SpectatorEntity, SpectatorObservation, SpectatorPlayerInfo};
+use crate::replay::ReplayActiveRange;
 use serde::{Deserialize, Serialize};
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteSynchronous};
 use sqlx::{Row, SqlitePool};
@@ -59,6 +60,15 @@ struct FrameDelta {
     sounds: Vec<serde_json::Value>,
     #[serde(skip_serializing_if = "Vec::is_empty", default)]
     recent_events: Vec<serde_json::Value>,
+}
+
+impl FrameDelta {
+    fn is_empty(&self) -> bool {
+        self.entities.is_empty()
+            && self.players.is_empty()
+            && self.sounds.is_empty()
+            && self.recent_events.is_empty()
+    }
 }
 
 // --- Writer ---
@@ -614,6 +624,49 @@ impl RecordingReader {
 
         obs.tick = tick;
         Ok(obs)
+    }
+
+    pub async fn active_tick_ranges(
+        &self,
+    ) -> Result<Vec<ReplayActiveRange>, Box<dyn std::error::Error + Send + Sync>> {
+        let rows = sqlx::query("SELECT tick, data FROM deltas ORDER BY tick")
+            .fetch_all(&self.pool)
+            .await?;
+
+        let mut ranges = Vec::new();
+        let mut current_start: Option<u64> = None;
+        let mut current_end: u64 = 0;
+
+        for row in rows {
+            let tick = row.get::<i64, _>("tick").max(0) as u64;
+            let compressed: Vec<u8> = row.get("data");
+            let json = zstd::decode_all(compressed.as_slice())?;
+            let delta: FrameDelta = serde_json::from_slice(&json)?;
+
+            if delta.is_empty() {
+                if let Some(start_tick) = current_start.take() {
+                    ranges.push(ReplayActiveRange {
+                        start_tick,
+                        end_tick: current_end,
+                    });
+                }
+                continue;
+            }
+
+            if current_start.is_none() {
+                current_start = Some(tick);
+            }
+            current_end = tick;
+        }
+
+        if let Some(start_tick) = current_start {
+            ranges.push(ReplayActiveRange {
+                start_tick,
+                end_tick: current_end,
+            });
+        }
+
+        Ok(ranges)
     }
 
     /// Get chat messages in a tick range (inclusive on both ends).

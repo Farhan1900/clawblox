@@ -68,7 +68,7 @@ function renderTree(nodes, parent, depth = 0) {
       row.type = 'button'
       row.className = 'tree__row tree__row--dir'
       row.style.paddingLeft = makeIndent(depth)
-      row.setAttribute('aria-expanded', 'true')
+      row.setAttribute('aria-expanded', 'false')
       row.innerHTML = `
         <span class="tree__caret">${ICONS.chevronRight}</span>
         <span class="tree__icon">${ICONS.folder}</span>
@@ -78,10 +78,11 @@ function renderTree(nodes, parent, depth = 0) {
 
       const children = document.createElement('div')
       children.className = 'tree__children'
+      children.hidden = true
       renderTree(node.children || [], children, depth + 1)
 
-      let open = true
-      row.querySelector('.tree__caret').style.transform = 'rotate(90deg)'
+      let open = false
+      row.querySelector('.tree__caret').style.transform = 'rotate(0deg)'
       row.addEventListener('click', () => {
         open = !open
         children.hidden = !open
@@ -120,8 +121,11 @@ function updateSelectedUi(path) {
 }
 
 function shortMeta(payload) {
+  const parts = []
   const world = String(payload.world_dir || '').split('/').filter(Boolean).pop() || ''
-  return world
+  if (world) parts.push(world)
+  if (payload.agent_log) parts.push('agent linked')
+  return parts.join(' · ')
 }
 
 async function openReplay(path) {

@@ -8,7 +8,8 @@
 | Jump | `{}` |
 | Stop | `{}` |
 | Pickup | `{"position": [x, y, z]}` |
-| Place | `{"position": [x, y, z]}` |
+| Place | `{"position": [x, y, z], "rotation"?: {"yaw": deg, "pitch": deg, "roll": deg}}` |
+| Throw | `{"direction": [x, y, z], "speed": n}` |
 
 
 ## API Endpoints

@@ -21,13 +21,17 @@ AGENT_NAME_PREFIX="${AGENT_NAME_PREFIX:-mesa}"
 STOP_GRACE_SECONDS="${STOP_GRACE_SECONDS:-5}"
 GOAL="${GOAL:-}"
 TEMPLATE_DIR="${TEMPLATE_DIR:-}"
+SYSTEM_PROMPT_TEMPLATE="${SYSTEM_PROMPT_TEMPLATE:-}"
 RESULTS_ROOT="${RESULTS_ROOT:-}"
 PORT_WAIT_SECONDS="${PORT_WAIT_SECONDS:-120}"
 AGENT_CHECKPOINT_AT_EPOCH="${AGENT_CHECKPOINT_AT_EPOCH:-}"
 AGENT_CHECKPOINT_PROMPT="${AGENT_CHECKPOINT_PROMPT:-}"
 AGENT_CHECKPOINT_TRIGGER_TURN="${AGENT_CHECKPOINT_TRIGGER_TURN:-1}"
 AGENT_CHECKPOINT_DISABLE_AUTO_LOOP="${AGENT_CHECKPOINT_DISABLE_AUTO_LOOP:-0}"
+PI_PROVIDER="${PI_PROVIDER:-}"
+PI_MODEL="${PI_MODEL:-}"
 declare -a AGENT_TEMPLATE_DIRS=()
+declare -A USED_AGENT_DISPLAY_NAMES=()
 
 AGENT_SCRIPT="$ROOT_DIR/agent/run_agent.sh"
 if [[ ! -f "$AGENT_SCRIPT" ]]; then
@@ -37,6 +41,31 @@ fi
 
 sanitize_name() {
   printf '%s' "$1" | tr -c 'A-Za-z0-9._-' '_'
+}
+
+generate_agent_display_name() {
+  local -a first_parts=(Brisk Cozy Daring Fuzzy Jolly Lunar Nova Pixel Sunny Swift)
+  local -a second_parts=(Fox Owl Lynx Wolf Otter Koala Panda Kiwi Moth Crab)
+  local candidate=""
+  local attempts=0
+
+  while ((attempts < 20)); do
+    local first="${first_parts[$RANDOM % ${#first_parts[@]}]}"
+    local second="${second_parts[$RANDOM % ${#second_parts[@]}]}"
+    local suffix
+    suffix="$(printf '%02d' "$((RANDOM % 100))")"
+    candidate="${first}${second}${suffix}"
+    if [[ -z "${USED_AGENT_DISPLAY_NAMES[$candidate]:-}" ]]; then
+      USED_AGENT_DISPLAY_NAMES[$candidate]=1
+      printf '%s' "$candidate"
+      return 0
+    fi
+    attempts=$((attempts + 1))
+  done
+
+  candidate="Agent$(printf '%04d' "$((RANDOM % 10000))")"
+  USED_AGENT_DISPLAY_NAMES[$candidate]=1
+  printf '%s' "$candidate"
 }
 
 usage() {
@@ -61,7 +90,10 @@ Options:
   --stop-grace-seconds N       Wait after Ctrl+C before force-killing tmux
   --port-wait-seconds N        Wait up to N seconds for target ports to free before failing
   --goal TEXT                  Custom startup objective passed to agents
+  --provider PROVIDER          Provider passed to agent/run_agent.sh as PI_PROVIDER
+  --model MODEL_ID             Model id passed to agent/run_agent.sh as PI_MODEL
   --template PATH              Agent template directory (relative to project root or absolute)
+  --system-prompt PATH         System prompt template (defaults to <world-dir>/system_prompt.md if present)
   --agent-template PATH        Per-agent template directory; repeat in agent index order
   --results-root PATH          Results root directory (default: <world-dir>/results)
   --clawblox-bin PATH          Path or command name for clawblox binary
@@ -79,7 +111,10 @@ Environment variables:
   STOP_GRACE_SECONDS Seconds to wait after Ctrl+C before force-closing tmux (default: 5)
   PORT_WAIT_SECONDS Seconds to wait for target ports to free before failing (default: 120)
   GOAL              Custom startup objective passed to agents
+  PI_PROVIDER       Provider passed to pi via --provider
+  PI_MODEL          Model id passed to pi via --model
   TEMPLATE_DIR      Agent template directory (run_agent.sh TEMPLATE_DIR override)
+  SYSTEM_PROMPT_TEMPLATE System prompt template forwarded to run_agent.sh
   RESULTS_ROOT      Results root directory (default: <world-dir>/results)
   AGENT_CHECKPOINT_AT_EPOCH       Unix epoch seconds when checkpoint prompt should be sent
   AGENT_CHECKPOINT_PROMPT         Checkpoint message sent from clawblox-agent extension
@@ -186,6 +221,15 @@ do_stop() {
   fi
 }
 
+cleanup_failed_launch() {
+  if ! tmux has-session -t "$TMUX_SESSION" 2>/dev/null; then
+    return 0
+  fi
+
+  echo "Cleaning up failed launch session '$TMUX_SESSION'..."
+  tmux kill-session -t "$TMUX_SESSION" 2>/dev/null || true
+}
+
 do_status() {
   if ! tmux has-session -t "$TMUX_SESSION" 2>/dev/null; then
     echo "No tmux session '$TMUX_SESSION' running."
@@ -279,9 +323,24 @@ while [[ $# -gt 0 ]]; do
       GOAL="$2"
       shift 2
       ;;
+    --provider)
+      require_value "$1" "${2:-}"
+      PI_PROVIDER="$2"
+      shift 2
+      ;;
+    --model)
+      require_value "$1" "${2:-}"
+      PI_MODEL="$2"
+      shift 2
+      ;;
     --template|--template-dir)
       require_value "$1" "${2:-}"
       TEMPLATE_DIR="$2"
+      shift 2
+      ;;
+    --system-prompt)
+      require_value "$1" "${2:-}"
+      SYSTEM_PROMPT_TEMPLATE="$2"
       shift 2
       ;;
     --agent-template)
@@ -376,6 +435,10 @@ if [[ ! -d "$WORLD_ABS_DIR" ]]; then
   exit 1
 fi
 
+if [[ -n "$SYSTEM_PROMPT_TEMPLATE" && "$SYSTEM_PROMPT_TEMPLATE" != /* ]]; then
+  SYSTEM_PROMPT_TEMPLATE="$ROOT_DIR/$SYSTEM_PROMPT_TEMPLATE"
+fi
+
 TEMPLATE_ABS_DIR=""
 if [[ -n "$TEMPLATE_DIR" ]]; then
   if [[ "$TEMPLATE_DIR" = /* ]]; then
@@ -387,6 +450,16 @@ if [[ -n "$TEMPLATE_DIR" ]]; then
   if [[ ! -d "$TEMPLATE_ABS_DIR" ]]; then
     echo "Error: template directory not found at $TEMPLATE_ABS_DIR"
     exit 1
+  fi
+fi
+
+if [[ -z "$SYSTEM_PROMPT_TEMPLATE" ]]; then
+  if [[ -f "$WORLD_ABS_DIR/system_prompt.md" ]]; then
+    SYSTEM_PROMPT_TEMPLATE="$WORLD_ABS_DIR/system_prompt.md"
+  elif [[ "$(basename "$WORLD_ABS_DIR")" == "mesa-world-2" && -f "$ROOT_DIR/worlds/mesa-world/system_prompt.md" ]]; then
+    SYSTEM_PROMPT_TEMPLATE="$ROOT_DIR/worlds/mesa-world/system_prompt.md"
+  elif [[ -n "$TEMPLATE_ABS_DIR" && -f "$TEMPLATE_ABS_DIR/system_prompt.md" ]]; then
+    SYSTEM_PROMPT_TEMPLATE="$TEMPLATE_ABS_DIR/system_prompt.md"
   fi
 fi
 
@@ -566,9 +639,11 @@ done
 
 if [[ "$ALL_HEALTHY" -eq 0 ]]; then
   echo
-  echo "Warning: some servers did not become healthy in time."
-  echo "Agents will still be launched -- they may fail to join initially."
+  echo "Error: some servers did not become healthy in time."
+  echo "Refusing to launch agents against an unhealthy world."
   echo
+  cleanup_failed_launch
+  exit 1
 fi
 
 echo "Launching $AGENTS_PER_WORLD agents per world..."
@@ -579,6 +654,14 @@ if [[ -n "$AGENT_CHECKPOINT_AT_EPOCH" ]]; then
   CHECKPOINT_ENV_PREFIX+="AGENT_CHECKPOINT_PROMPT=$(printf '%q' "$AGENT_CHECKPOINT_PROMPT") "
   CHECKPOINT_ENV_PREFIX+="AGENT_CHECKPOINT_TRIGGER_TURN=$(printf '%q' "$AGENT_CHECKPOINT_TRIGGER_TURN") "
   CHECKPOINT_ENV_PREFIX+="AGENT_CHECKPOINT_DISABLE_AUTO_LOOP=$(printf '%q' "$AGENT_CHECKPOINT_DISABLE_AUTO_LOOP") "
+fi
+
+MODEL_ENV_PREFIX=""
+if [[ -n "$PI_PROVIDER" ]]; then
+  MODEL_ENV_PREFIX+="PI_PROVIDER=$(printf '%q' "$PI_PROVIDER") "
+fi
+if [[ -n "$PI_MODEL" ]]; then
+  MODEL_ENV_PREFIX+="PI_MODEL=$(printf '%q' "$PI_MODEL") "
 fi
 
 for ((i = 0; i < NUM_WORLDS; i++)); do
@@ -605,6 +688,7 @@ EOF
     fi
 
     agent_name="$(sanitize_name "${AGENT_NAME_PREFIX}-r${RUN_SAFE_ID}-w${i}-a${j}")"
+    agent_display_name="$(generate_agent_display_name)"
     world_agents_dir="$WORLDS_ROOT/world-$i/agents"
     agent_dir="$world_agents_dir/$agent_name"
     agent_log_dir="$agent_dir/logs"
@@ -623,14 +707,18 @@ EOF
     if [[ -n "$agent_template_abs_dir" ]]; then
       TEMPLATE_ENV_PREFIX="TEMPLATE_DIR=$(printf '%q' "$agent_template_abs_dir") "
     fi
+    PROMPT_ENV_PREFIX=""
+    if [[ -n "$SYSTEM_PROMPT_TEMPLATE" ]]; then
+      PROMPT_ENV_PREFIX="SYSTEM_PROMPT_TEMPLATE=$(printf '%q' "$SYSTEM_PROMPT_TEMPLATE") "
+    fi
 
     if [[ -n "$startup_instructions" ]]; then
       startup_instructions_q="$(printf '%q' "$startup_instructions")"
       tmux send-keys -t "${TMUX_SESSION}:agents-$i" \
-        "cd '$ROOT_DIR' && WORLD_BASE_URL='$url' WORLD_AGENT_NAME='$agent_name' WORKSPACE_DIR='$agent_workspace' SESSION_DIR='$agent_session' ${TEMPLATE_ENV_PREFIX}${CHECKPOINT_ENV_PREFIX}WORLD_STARTUP_INSTRUCTIONS=${startup_instructions_q} bash '$AGENT_SCRIPT' 2>&1 | tee -a '$agent_log_file'" Enter
+        "cd '$ROOT_DIR' && WORLD_BASE_URL='$url' WORLD_AGENT_NAME='$agent_display_name' WORKSPACE_DIR='$agent_workspace' SESSION_DIR='$agent_session' ${TEMPLATE_ENV_PREFIX}${PROMPT_ENV_PREFIX}${CHECKPOINT_ENV_PREFIX}${MODEL_ENV_PREFIX}WORLD_STARTUP_INSTRUCTIONS=${startup_instructions_q} bash '$AGENT_SCRIPT' 2>&1 | tee -a '$agent_log_file'" Enter
     else
       tmux send-keys -t "${TMUX_SESSION}:agents-$i" \
-        "cd '$ROOT_DIR' && WORLD_BASE_URL='$url' WORLD_AGENT_NAME='$agent_name' WORKSPACE_DIR='$agent_workspace' SESSION_DIR='$agent_session' ${TEMPLATE_ENV_PREFIX}${CHECKPOINT_ENV_PREFIX}bash '$AGENT_SCRIPT' 2>&1 | tee -a '$agent_log_file'" Enter
+        "cd '$ROOT_DIR' && WORLD_BASE_URL='$url' WORLD_AGENT_NAME='$agent_display_name' WORKSPACE_DIR='$agent_workspace' SESSION_DIR='$agent_session' ${TEMPLATE_ENV_PREFIX}${PROMPT_ENV_PREFIX}${CHECKPOINT_ENV_PREFIX}${MODEL_ENV_PREFIX}bash '$AGENT_SCRIPT' 2>&1 | tee -a '$agent_log_file'" Enter
     fi
   done
 done
