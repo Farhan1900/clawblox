@@ -112,6 +112,20 @@ impl Default for ObservationConfig {
     }
 }
 
+/// Agent API configuration section.
+#[derive(Debug, Clone, Deserialize)]
+pub struct AgentApiConfig {
+    /// Whether engine reset endpoints are available to agent sessions.
+    #[serde(default)]
+    pub allow_reset: bool,
+}
+
+impl Default for AgentApiConfig {
+    fn default() -> Self {
+        Self { allow_reset: false }
+    }
+}
+
 /// Speech delivery mode.
 #[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
@@ -169,6 +183,9 @@ pub struct WorldConfig {
     /// Observation configuration
     #[serde(default)]
     pub observation: ObservationConfig,
+    /// Agent API configuration
+    #[serde(default)]
+    pub agent_api: AgentApiConfig,
     /// Speech configuration
     #[serde(default)]
     pub speech: SpeechConfig,

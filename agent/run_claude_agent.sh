@@ -17,7 +17,7 @@ WORLD_AGENT_NAME="${WORLD_AGENT_NAME-}"
 WORKSPACE_DIR="${WORKSPACE_DIR-}"
 AGENT_DIR="${AGENT_DIR-}"
 SESSION_ID_FILE="${SESSION_ID_FILE-}"
-TEMPLATE_DIR="${TEMPLATE_DIR-$ROOT_DIR/worlds/mesa-island/agent-template}"
+TEMPLATE_DIR="${TEMPLATE_DIR:-$SCRIPT_DIR/template/agent}"
 WORLD_STARTUP_INSTRUCTIONS="${WORLD_STARTUP_INSTRUCTIONS-}"
 CLAUDE_MODEL="${CLAUDE_MODEL-claude-opus-4-6}"
 CLAUDE_BARE="${CLAUDE_BARE-0}"
@@ -27,8 +27,8 @@ CLAUDE_EXTRA_ARGS="${CLAUDE_EXTRA_ARGS-}"
 CLAUDE_INITIAL_PROMPT="${CLAUDE_INITIAL_PROMPT-Begin}"
 RESET_EVERY="${RESET_EVERY-}"
 SANDBOX="${SANDBOX-0}"
-CHECKPOINT_WARNING_SECONDS=300
-CHECKPOINT_WARNING_PROMPT="You will be reset in 5 minutes. Update your workspace memory files now."
+CHECKPOINT_WARNING_SECONDS="${CHECKPOINT_WARNING_SECONDS:-300}"
+CHECKPOINT_WARNING_PROMPT="${CHECKPOINT_WARNING_PROMPT:-You will be reset in 5 minutes. Update your workspace memory files now.}"
 
 parse_duration_seconds() {
   local input="$1"
@@ -51,6 +51,26 @@ parse_duration_seconds() {
     fi
   done
   printf '%s' "$total"
+}
+
+generate_session_id() {
+  if command -v uuidgen >/dev/null 2>&1; then
+    uuidgen
+    return 0
+  fi
+
+  if [[ -r /proc/sys/kernel/random/uuid ]]; then
+    cat /proc/sys/kernel/random/uuid
+    return 0
+  fi
+
+  if command -v python3 >/dev/null 2>&1; then
+    python3 -c 'import uuid; print(uuid.uuid4())'
+    return 0
+  fi
+
+  echo "Error: could not generate session id; install uuidgen or python3." >&2
+  exit 1
 }
 
 generate_agent_name() {
@@ -152,7 +172,7 @@ if [[ -d "$TEMPLATE_DIR" ]]; then
 fi
 
 if [[ ! -f "$SESSION_ID_FILE" ]]; then
-  uuidgen >"$SESSION_ID_FILE"
+  generate_session_id >"$SESSION_ID_FILE"
 fi
 CLAUDE_SESSION_ID="$(tr -d '[:space:]' < "$SESSION_ID_FILE")"
 
@@ -457,7 +477,7 @@ while true; do
   if (( reset_index == 0 )) && [[ "$CLAUDE_RESUME_MODE" == "resume" || ( "$CLAUDE_RESUME_MODE" == "auto" && -f "$HOOK_METADATA_FILE" ) ]]; then
     session_args=(--continue)
   else
-    new_session_id="$(uuidgen)"
+    new_session_id="$(generate_session_id)"
     session_args=(--session-id "$new_session_id")
   fi
 

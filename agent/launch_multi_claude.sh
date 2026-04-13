@@ -15,13 +15,15 @@ RUN_ID="${RUN_ID:-$(date -u +%Y%m%dT%H%M%SZ)}"
 AGENT_NAME_PREFIX="${AGENT_NAME_PREFIX:-agent}"
 STOP_GRACE_SECONDS="${STOP_GRACE_SECONDS:-10}"
 GOAL="${GOAL:-}"
-TEMPLATE_DIR="${TEMPLATE_DIR:-$ROOT_DIR/worlds/mesa-island/agent-template}"
+TEMPLATE_DIR="${TEMPLATE_DIR:-$SCRIPT_DIR/template/agent}"
 RESULTS_ROOT="${RESULTS_ROOT:-}"
 PORT_WAIT_SECONDS="${PORT_WAIT_SECONDS:-120}"
 RESUME_PATH="${RESUME_PATH:-}"
 RESET_EVERY="${RESET_EVERY:-}"
 DURATION="${DURATION:-}"
 CHECKPOINT_INTERVAL="${CHECKPOINT_INTERVAL:-1800}"
+CHECKPOINT_WARNING_SECONDS="${CHECKPOINT_WARNING_SECONDS:-300}"
+CHECKPOINT_WARNING_PROMPT="${CHECKPOINT_WARNING_PROMPT:-You will be reset in 5 minutes. Update your workspace memory files now.}"
 CLAUDE_MODEL="${CLAUDE_MODEL:-claude-opus-4-6}"
 CLAUDE_PERMISSION_MODE="${CLAUDE_PERMISSION_MODE:-bypassPermissions}"
 CLAUDE_BARE="${CLAUDE_BARE:-0}"
@@ -523,6 +525,26 @@ if [[ -z "${SYSTEM_PROMPT_TEMPLATE:-}" ]]; then
   fi
 fi
 
+if ((${#AGENT_TEMPLATE_DIRS[@]} > AGENTS_PER_WORLD)); then
+  echo "Error: received ${#AGENT_TEMPLATE_DIRS[@]} --agent-template values for only $AGENTS_PER_WORLD agents."
+  exit 1
+fi
+
+declare -a AGENT_TEMPLATE_ABS_DIRS=()
+if ((${#AGENT_TEMPLATE_DIRS[@]} > 0)); then
+  for template_dir in "${AGENT_TEMPLATE_DIRS[@]}"; do
+    template_abs_dir="$template_dir"
+    if [[ "$template_abs_dir" != /* ]]; then
+      template_abs_dir="$ROOT_DIR/$template_abs_dir"
+    fi
+    if [[ ! -d "$template_abs_dir" ]]; then
+      echo "Error: agent template directory not found at $template_abs_dir"
+      exit 1
+    fi
+    AGENT_TEMPLATE_ABS_DIRS+=("$template_abs_dir")
+  done
+fi
+
 RUN_SAFE_ID="$(sanitize_name "$RUN_ID")"
 if [[ -z "${RESULTS_ABS_ROOT:-}" ]]; then
   if [[ -n "$RESULTS_ROOT" ]]; then
@@ -657,7 +679,18 @@ for ((i = 0; i < NUM_WORLDS; i++)); do
     agent_world_session_file="$agent_dir/world_session.txt"
     mkdir -p "$agent_log_dir" "$agent_workspace"
 
-    template_env_prefix="TEMPLATE_DIR=$(printf '%q' "$TEMPLATE_ABS_DIR") SYSTEM_PROMPT_TEMPLATE=$(printf '%q' "$SYSTEM_PROMPT_TEMPLATE") "
+    agent_template_abs_dir="$TEMPLATE_ABS_DIR"
+    if ((j < ${#AGENT_TEMPLATE_ABS_DIRS[@]})); then
+      agent_template_abs_dir="${AGENT_TEMPLATE_ABS_DIRS[$j]}"
+    fi
+
+    template_env_prefix=""
+    if [[ -n "$agent_template_abs_dir" ]]; then
+      template_env_prefix="TEMPLATE_DIR=$(printf '%q' "$agent_template_abs_dir") "
+    fi
+    if [[ -n "$SYSTEM_PROMPT_TEMPLATE" ]]; then
+      template_env_prefix+="SYSTEM_PROMPT_TEMPLATE=$(printf '%q' "$SYSTEM_PROMPT_TEMPLATE") "
+    fi
     startup_env_prefix=""
     if [[ -n "$startup_instructions" ]]; then
       startup_instructions_q="$(printf '%q' "$startup_instructions")"
@@ -681,11 +714,9 @@ for ((i = 0; i < NUM_WORLDS; i++)); do
 
     tmux pipe-pane -o -t "$pane_target" "cat >> '$(printf "%q" "$agent_log_file")'"
     tmux send-keys -t "$pane_target" \
-      "cd '$ROOT_DIR' && ${auth_env_prefix}WORLD_BASE_URL='$url' WORLD_AGENT_NAME='$agent_display_name' AGENT_DIR='$agent_dir' WORKSPACE_DIR='$agent_workspace' SESSION_ID_FILE='$agent_session_file' WORLD_SESSION_FILE='$agent_world_session_file' RESET_EVERY=$(printf '%q' "$RESET_EVERY_SECONDS") DURATION_SECONDS=$(printf '%q' "$DURATION_SECONDS") CLAUDE_MODEL=$(printf '%q' "$CLAUDE_MODEL") CLAUDE_PERMISSION_MODE=$(printf '%q' "$CLAUDE_PERMISSION_MODE") CLAUDE_BARE=$(printf '%q' "$CLAUDE_BARE") CLAUDE_EXTRA_ARGS=$(printf '%q' "$CLAUDE_EXTRA_ARGS") ${sandbox_env_prefix}${template_env_prefix}${startup_env_prefix}${reset_wrapper_prefix}" Enter
+      "cd '$ROOT_DIR' && ${auth_env_prefix}WORLD_BASE_URL='$url' WORLD_AGENT_NAME='$agent_display_name' AGENT_DIR='$agent_dir' WORKSPACE_DIR='$agent_workspace' SESSION_ID_FILE='$agent_session_file' WORLD_SESSION_FILE='$agent_world_session_file' RESET_EVERY=$(printf '%q' "$RESET_EVERY_SECONDS") DURATION_SECONDS=$(printf '%q' "$DURATION_SECONDS") CHECKPOINT_WARNING_SECONDS=$(printf '%q' "$CHECKPOINT_WARNING_SECONDS") CHECKPOINT_WARNING_PROMPT=$(printf '%q' "$CHECKPOINT_WARNING_PROMPT") CLAUDE_MODEL=$(printf '%q' "$CLAUDE_MODEL") CLAUDE_PERMISSION_MODE=$(printf '%q' "$CLAUDE_PERMISSION_MODE") CLAUDE_BARE=$(printf '%q' "$CLAUDE_BARE") CLAUDE_EXTRA_ARGS=$(printf '%q' "$CLAUDE_EXTRA_ARGS") ${sandbox_env_prefix}${template_env_prefix}${startup_env_prefix}${reset_wrapper_prefix}" Enter
   done
 done
-
-CHECKPOINT_WARNING_SECONDS="${CHECKPOINT_WARNING_SECONDS:-300}"
 if [[ -n "$DURATION" ]]; then
   duration_secs="$(parse_duration_seconds "$DURATION")"
   # Agent gets duration + warning time to save workspace

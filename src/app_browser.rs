@@ -60,6 +60,13 @@ async fn build_replay_state(
             e
         )
     })?;
+    let active_ranges = reader.active_tick_ranges().await.map_err(|e| {
+        format!(
+            "failed to analyze replay activity '{}': {}",
+            file.display(),
+            e
+        )
+    })?;
 
     let world_dir = world_dir_override
         .or_else(|| {
@@ -82,6 +89,7 @@ async fn build_replay_state(
         meta.tick_rate,
         meta.duration_ms,
         speed,
+        active_ranges,
     )?;
 
     let renderer_manifest = {
@@ -169,6 +177,7 @@ pub fn run_app(path: PathBuf, port: u16, base_path: &str) {
                 )
                 .route("/sessions/{id}/replay/seek", post(app_replay_seek))
                 .route("/sessions/{id}/replay/speed", post(app_replay_speed))
+                .route("/sessions/{id}/replay/skip-idle", post(app_replay_skip_idle))
                 .route("/sessions/{id}/replay/pause", post(app_replay_pause))
                 .route("/sessions/{id}/replay/play", post(app_replay_play))
                 .route(
@@ -617,6 +626,17 @@ async fn app_replay_speed(
     let replay_state = get_app_replay_state(&state, &id)?;
     let mut pb = replay_state.playback.lock().await;
     pb.set_speed(q.value);
+    Ok(axum::http::StatusCode::OK)
+}
+
+async fn app_replay_skip_idle(
+    AxumPath(id): AxumPath<String>,
+    State(state): State<AppState>,
+    Query(q): Query<SkipIdleQuery>,
+) -> Result<axum::http::StatusCode, (axum::http::StatusCode, String)> {
+    let replay_state = get_app_replay_state(&state, &id)?;
+    let mut pb = replay_state.playback.lock().await;
+    pb.set_skip_idle(q.enabled);
     Ok(axum::http::StatusCode::OK)
 }
 

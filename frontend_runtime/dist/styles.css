@@ -472,7 +472,7 @@ body {
   transform: translateX(-50%);
   width: min(720px, calc(100vw - 28px));
   display: grid;
-  grid-template-columns: auto minmax(0, 1fr) auto auto;
+  grid-template-columns: auto minmax(0, 1fr) auto auto auto;
   align-items: center;
   gap: 10px;
   padding: 10px 12px;
@@ -565,6 +565,22 @@ body {
   cursor: pointer;
 }
 
+.replay-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  color: rgba(233, 238, 255, 0.92);
+  font-size: 11px;
+  font-weight: 600;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.replay-toggle input {
+  margin: 0;
+  accent-color: #7ed3ff;
+}
+
 body[data-mode="replay"] .chat-input-row {
   display: none;
 }
@@ -607,7 +623,8 @@ body[data-mode="replay"] .chat-input-row {
     grid-template-columns: auto minmax(0, 1fr);
     grid-template-areas:
       "play speed"
-      "timeline timeline";
+      "timeline timeline"
+      "toggle toggle";
   }
 
   .replay-button {
@@ -625,6 +642,11 @@ body[data-mode="replay"] .chat-input-row {
   .replay-speed {
     grid-area: speed;
     justify-self: end;
+  }
+
+  .replay-toggle {
+    grid-area: toggle;
+    justify-self: start;
   }
 }
 

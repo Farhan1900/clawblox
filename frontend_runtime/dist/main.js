@@ -51,6 +51,7 @@ const replaySliderEl = document.getElementById('replay-slider')
 const replayTimeCurrentEl = document.getElementById('replay-time-current')
 const replayTimeTotalEl = document.getElementById('replay-time-total')
 const replaySpeedEl = document.getElementById('replay-speed')
+const replaySkipIdleEl = document.getElementById('replay-skip-idle')
 const agentLogPanelEl = document.getElementById('agent-log-panel')
 const agentLogFeedEl = document.getElementById('agent-log-feed')
 const agentLogStatusEl = document.getElementById('agent-log-status')
@@ -240,6 +241,7 @@ function renderReplayInfo(info) {
       replaySpeedEl.value = value
     }
   }
+  if (replaySkipIdleEl) replaySkipIdleEl.checked = !!info.skip_idle
 }
 
 function formatAgentLogTime(timestampMs) {
@@ -1418,6 +1420,20 @@ if (replaySpeedEl) {
     } catch (err) {
       console.error(err)
       setStatus('Failed to change replay speed', 'error')
+    }
+  })
+}
+
+if (replaySkipIdleEl) {
+  replaySkipIdleEl.addEventListener('change', async () => {
+    if (!replayState.enabled) return
+    try {
+      await postReplay(`/replay/skip-idle?enabled=${replaySkipIdleEl.checked ? 'true' : 'false'}`)
+      await refreshReplayInfo()
+    } catch (err) {
+      console.error(err)
+      replaySkipIdleEl.checked = !replaySkipIdleEl.checked
+      setStatus('Failed to update replay idle skipping', 'error')
     }
   })
 }

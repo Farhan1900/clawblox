@@ -221,6 +221,15 @@ do_stop() {
   fi
 }
 
+cleanup_failed_launch() {
+  if ! tmux has-session -t "$TMUX_SESSION" 2>/dev/null; then
+    return 0
+  fi
+
+  echo "Cleaning up failed launch session '$TMUX_SESSION'..."
+  tmux kill-session -t "$TMUX_SESSION" 2>/dev/null || true
+}
+
 do_status() {
   if ! tmux has-session -t "$TMUX_SESSION" 2>/dev/null; then
     echo "No tmux session '$TMUX_SESSION' running."
@@ -630,9 +639,11 @@ done
 
 if [[ "$ALL_HEALTHY" -eq 0 ]]; then
   echo
-  echo "Warning: some servers did not become healthy in time."
-  echo "Agents will still be launched -- they may fail to join initially."
+  echo "Error: some servers did not become healthy in time."
+  echo "Refusing to launch agents against an unhealthy world."
   echo
+  cleanup_failed_launch
+  exit 1
 fi
 
 echo "Launching $AGENTS_PER_WORLD agents per world..."

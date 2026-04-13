@@ -21,6 +21,8 @@ HEALTH_TIMEOUT="${HEALTH_TIMEOUT:-30}"
 STOP_GRACE_SECONDS="${STOP_GRACE_SECONDS:-5}"
 PORT_WAIT_SECONDS="${PORT_WAIT_SECONDS:-120}"
 SAVE_GRACE_SECONDS="${SAVE_GRACE_SECONDS:-300}"
+MAX_GENERATION_RETRIES="${MAX_GENERATION_RETRIES:-3}"
+RETRY_DELAY_SECONDS="${RETRY_DELAY_SECONDS:-15}"
 RESUME_MODE=0
 RESUME_PRUNE_PARTIAL=0
 SAVE_PROMPT="${SAVE_PROMPT:-}"
@@ -42,6 +44,10 @@ sanitize_name() {
 
 is_positive_int() {
   [[ "$1" =~ ^[1-9][0-9]*$ ]]
+}
+
+is_nonnegative_int() {
+  [[ "$1" =~ ^[0-9]+$ ]]
 }
 
 require_value() {
@@ -132,6 +138,30 @@ set_all_current_templates() {
   done
 }
 
+validate_agent_generation_output() {
+  local agent_dir="$1"
+  local workspace_dir="$agent_dir/workspace"
+  local log_file="$agent_dir/logs/agent.log"
+  local prompt_file="$agent_dir/session/system_prompt.txt"
+
+  if [[ ! -s "$log_file" ]]; then
+    echo "Error: agent log missing or empty: $log_file"
+    return 1
+  fi
+  if [[ ! -s "$prompt_file" ]]; then
+    echo "Error: agent system prompt missing or empty: $prompt_file"
+    return 1
+  fi
+  if [[ ! -d "$workspace_dir" ]]; then
+    echo "Error: agent workspace missing: $workspace_dir"
+    return 1
+  fi
+  if ! find "$workspace_dir" -mindepth 1 -maxdepth 1 | read -r _; then
+    echo "Error: agent workspace is empty: $workspace_dir"
+    return 1
+  fi
+}
+
 schedule_stop_watchdog() {
   local tmux_session="$1"
   local expected_session_created="$2"
@@ -165,6 +195,8 @@ across sessions.
 Options:
   --generations N               Target generation count (default: 5)
   --generation-duration D       Per-generation runtime (e.g. 3600, 60m, 1h; default: 2h)
+  --generation-retries N        Automatic retries per failed generation (default: 3)
+  --retry-delay-seconds N       Wait between generation retries (default: 15)
   --experiment-id ID            Metadata directory under results/ (default: timestamped)
   --run-prefix PREFIX           Prefix for per-generation run ids (default: experiment id)
   --tmux-prefix PREFIX          Prefix for per-generation tmux sessions (default: clawblox-gen)
@@ -191,7 +223,8 @@ Options:
 Environment overrides:
   GENERATIONS, GENERATION_DURATION, EXPERIMENT_ID, RUN_PREFIX, TMUX_PREFIX,
   WORLD_DIR, BASE_PORT, AGENTS_PER_WORLD, RECORD, HEALTH_TIMEOUT, STOP_GRACE_SECONDS,
-  PORT_WAIT_SECONDS, SAVE_GRACE_SECONDS, SAVE_PROMPT, AGENT_NAME_PREFIX, GOAL,
+  PORT_WAIT_SECONDS, SAVE_GRACE_SECONDS, MAX_GENERATION_RETRIES, RETRY_DELAY_SECONDS,
+  SAVE_PROMPT, AGENT_NAME_PREFIX, GOAL,
   PI_PROVIDER, PI_MODEL, INITIAL_TEMPLATE, SYSTEM_PROMPT_TEMPLATE, CLAWBLOX_BIN
 EOF
 }
@@ -215,6 +248,16 @@ while [[ $# -gt 0 ]]; do
     --generation-duration)
       require_value "$1" "${2:-}"
       GENERATION_DURATION="$2"
+      shift 2
+      ;;
+    --generation-retries)
+      require_value "$1" "${2:-}"
+      MAX_GENERATION_RETRIES="$2"
+      shift 2
+      ;;
+    --retry-delay-seconds)
+      require_value "$1" "${2:-}"
+      RETRY_DELAY_SECONDS="$2"
       shift 2
       ;;
     --experiment-id)
@@ -361,6 +404,14 @@ if [[ ! "$PORT_WAIT_SECONDS" =~ ^[0-9]+$ ]]; then
 fi
 if [[ ! "$SAVE_GRACE_SECONDS" =~ ^[0-9]+$ ]]; then
   echo "Error: --save-grace-seconds must be a non-negative integer (got '$SAVE_GRACE_SECONDS')."
+  exit 1
+fi
+if ! is_nonnegative_int "$MAX_GENERATION_RETRIES"; then
+  echo "Error: --generation-retries must be a non-negative integer (got '$MAX_GENERATION_RETRIES')."
+  exit 1
+fi
+if ! is_nonnegative_int "$RETRY_DELAY_SECONDS"; then
+  echo "Error: --retry-delay-seconds must be a non-negative integer (got '$RETRY_DELAY_SECONDS')."
   exit 1
 fi
 if [[ "$RECORD" != "true" && "$RECORD" != "false" ]]; then
@@ -536,50 +587,43 @@ cleanup_on_signal() {
   exit 130
 }
 
-trap 'cleanup_on_signal INT' INT
-trap 'cleanup_on_signal TERM' TERM
-trap 'cleanup_on_signal HUP' HUP
-trap cleanup_active_session EXIT
+cleanup_failed_generation_attempt() {
+  local run_dir="$1"
+  cleanup_active_session
+  if [[ -d "$run_dir" ]]; then
+    echo "Removing failed generation run directory: $run_dir"
+    rm -rf "$run_dir"
+  fi
+}
 
-echo "Starting generation chain"
-echo "  Generations: $GENERATIONS"
-echo "  Agents/session: $AGENTS_PER_WORLD"
-echo "  Duration each: ${GENERATION_DURATION_SECONDS}s"
-echo "  Save grace: ${SAVE_GRACE_SECONDS}s"
-echo "  Resume: $([[ "$RESUME_MODE" -eq 1 ]] && echo "true" || echo "false")"
-if ((RESUME_MODE == 1)); then
-  echo "  Completed: $COMPLETED_GENERATIONS"
-  echo "  Next generation: $START_GENERATION"
-fi
-echo "  Experiment metadata: $EXPERIMENT_DIR"
-echo
+run_generation_once() {
+  local gen="$1"
+  local run_id="$2"
+  local tmux_session="$3"
+  local start_utc="$4"
+  shift 4
+  local template_inputs=("$@")
+  local run_dir="$EXPERIMENT_RUNS_DIR/$run_id"
+  local template_in
+  local idx
+  local effective_save_grace
+  local active_seconds
+  local generation_start_epoch
+  local checkpoint_at_epoch
+  local session_created
+  local active_deadline
+  local save_deadline
+  local agents_root
+  local workspace_out
+  local agent_dir
+  local agent_name
+  local agent_index
+  local end_utc
+  local launch_cmd=()
+  local -a workspaces=()
+  local -A next_templates=()
+  local -A next_agent_names=()
 
-if ((START_GENERATION > GENERATIONS)); then
-  echo "Nothing to run: completed generations already reach target ($GENERATIONS)."
-  echo "Metadata CSV: $CHAIN_CSV"
-  exit 0
-fi
-
-for ((gen = START_GENERATION; gen <= GENERATIONS; gen++)); do
-  gen_tag="$(printf 'g%03d' "$gen")"
-  run_id="$(sanitize_name "${RUN_PREFIX}-${gen_tag}")"
-  tmux_session="$(sanitize_name "${TMUX_PREFIX}-${gen_tag}")"
-  template_inputs=("${CURRENT_TEMPLATES[@]}")
-  start_utc="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-
-  echo "=== Generation $gen/$GENERATIONS ==="
-  echo "  run_id: $run_id"
-  echo "  tmux_session: $tmux_session"
-  for ((idx = 0; idx < AGENTS_PER_WORLD; idx++)); do
-    template_in="${template_inputs[$idx]:-}"
-    if [[ -n "$template_in" ]]; then
-      echo "  template_in[a${idx}]: $template_in"
-    else
-      echo "  template_in[a${idx}]: (default agent template)"
-    fi
-  done
-
-  run_dir="$EXPERIMENT_RUNS_DIR/$run_id"
   if [[ -e "$run_dir" ]]; then
     if ((RESUME_MODE == 1 && RESUME_PRUNE_PARTIAL == 1 && gen == START_GENERATION)); then
       echo "  removing partial run directory: $run_dir"
@@ -589,7 +633,7 @@ for ((gen = START_GENERATION; gen <= GENERATIONS; gen++)); do
       if ((RESUME_MODE == 1)); then
         echo "Use --resume-prune-partial to remove this partial directory and continue."
       fi
-      exit 1
+      return 1
     fi
   fi
 
@@ -645,15 +689,16 @@ for ((gen = START_GENERATION; gen <= GENERATIONS; gen++)); do
   if [[ -n "$checkpoint_at_epoch" ]]; then
     AGENT_CHECKPOINT_AT_EPOCH="$checkpoint_at_epoch" \
       AGENT_CHECKPOINT_PROMPT="$SAVE_PROMPT" \
-      "${launch_cmd[@]}"
+      "${launch_cmd[@]}" || return 1
   else
-    "${launch_cmd[@]}"
+    "${launch_cmd[@]}" || return 1
   fi
+
   CURRENT_SESSION="$tmux_session"
-  session_created="$(tmux display-message -p -t "$tmux_session" '#{session_created}')"
+  session_created="$(tmux display-message -p -t "$tmux_session" '#{session_created}' 2>/dev/null || true)"
   if [[ ! "$session_created" =~ ^[0-9]+$ ]]; then
     echo "Error: failed to resolve tmux session_created for '$tmux_session' (got '$session_created')."
-    exit 1
+    return 1
   fi
   schedule_stop_watchdog "$tmux_session" "$session_created" "$GENERATION_DURATION_SECONDS"
   echo "  fail-safe watchdog scheduled at +${GENERATION_DURATION_SECONDS}s"
@@ -670,37 +715,37 @@ for ((gen = START_GENERATION; gen <= GENERATIONS; gen++)); do
   fi
 
   echo "  stopping session: $tmux_session"
-  bash "$LAUNCH_SCRIPT" --tmux-session "$tmux_session" --stop --stop-grace-seconds "$STOP_GRACE_SECONDS"
+  bash "$LAUNCH_SCRIPT" --tmux-session "$tmux_session" --stop --stop-grace-seconds "$STOP_GRACE_SECONDS" || return 1
   CURRENT_SESSION=""
 
   agents_root="$run_dir/worlds/world-0/agents"
   if [[ ! -d "$agents_root" ]]; then
     echo "Error: expected agents directory not found: $agents_root"
-    exit 1
+    return 1
   fi
 
   mapfile -t workspaces < <(find "$agents_root" -mindepth 2 -maxdepth 2 -type d -name workspace | sort)
   if ((${#workspaces[@]} == 0)); then
     echo "Error: no workspace directory found under $agents_root"
-    exit 1
+    return 1
   fi
-  declare -A next_templates=()
-  declare -A next_agent_names=()
   for workspace_out in "${workspaces[@]}"; do
-    agent_name="$(basename "$(dirname "$workspace_out")")"
+    agent_dir="$(dirname "$workspace_out")"
+    agent_name="$(basename "$agent_dir")"
     if [[ ! "$agent_name" =~ -a([0-9]+)$ ]]; then
       echo "Error: could not infer agent index from agent directory '$agent_name'"
-      exit 1
+      return 1
     fi
     agent_index="${BASH_REMATCH[1]}"
     if ((agent_index >= AGENTS_PER_WORLD)); then
       echo "Error: found workspace for unexpected agent index $agent_index under $agents_root"
-      exit 1
+      return 1
     fi
     if [[ -n "${next_templates[$agent_index]:-}" ]]; then
       echo "Error: duplicate workspace discovered for agent index $agent_index under $agents_root"
-      exit 1
+      return 1
     fi
+    validate_agent_generation_output "$agent_dir" || return 1
     next_templates[$agent_index]="$workspace_out"
     next_agent_names[$agent_index]="$agent_name"
   done
@@ -708,7 +753,7 @@ for ((gen = START_GENERATION; gen <= GENERATIONS; gen++)); do
   for ((idx = 0; idx < AGENTS_PER_WORLD; idx++)); do
     if [[ -z "${next_templates[$idx]:-}" ]]; then
       echo "Error: missing workspace for agent index $idx under $agents_root"
-      exit 1
+      return 1
     fi
   done
 
@@ -735,6 +780,82 @@ for ((gen = START_GENERATION; gen <= GENERATIONS; gen++)); do
 
     echo "  workspace_out[a${idx}]: $workspace_out"
   done
+
+  return 0
+}
+
+trap 'cleanup_on_signal INT' INT
+trap 'cleanup_on_signal TERM' TERM
+trap 'cleanup_on_signal HUP' HUP
+trap cleanup_active_session EXIT
+
+echo "Starting generation chain"
+echo "  Generations: $GENERATIONS"
+echo "  Agents/session: $AGENTS_PER_WORLD"
+echo "  Duration each: ${GENERATION_DURATION_SECONDS}s"
+echo "  Generation retries: $MAX_GENERATION_RETRIES"
+echo "  Retry delay: ${RETRY_DELAY_SECONDS}s"
+echo "  Save grace: ${SAVE_GRACE_SECONDS}s"
+echo "  Resume: $([[ "$RESUME_MODE" -eq 1 ]] && echo "true" || echo "false")"
+if ((RESUME_MODE == 1)); then
+  echo "  Completed: $COMPLETED_GENERATIONS"
+  echo "  Next generation: $START_GENERATION"
+fi
+echo "  Experiment metadata: $EXPERIMENT_DIR"
+echo
+
+if ((START_GENERATION > GENERATIONS)); then
+  echo "Nothing to run: completed generations already reach target ($GENERATIONS)."
+  echo "Metadata CSV: $CHAIN_CSV"
+  exit 0
+fi
+
+for ((gen = START_GENERATION; gen <= GENERATIONS; gen++)); do
+  gen_tag="$(printf 'g%03d' "$gen")"
+  run_id="$(sanitize_name "${RUN_PREFIX}-${gen_tag}")"
+  tmux_session="$(sanitize_name "${TMUX_PREFIX}-${gen_tag}")"
+  template_inputs=("${CURRENT_TEMPLATES[@]}")
+
+  echo "=== Generation $gen/$GENERATIONS ==="
+  echo "  run_id: $run_id"
+  echo "  tmux_session: $tmux_session"
+  for ((idx = 0; idx < AGENTS_PER_WORLD; idx++)); do
+    template_in="${template_inputs[$idx]:-}"
+    if [[ -n "$template_in" ]]; then
+      echo "  template_in[a${idx}]: $template_in"
+    else
+      echo "  template_in[a${idx}]: (default agent template)"
+    fi
+  done
+
+  attempt=0
+  success=0
+  while ((attempt <= MAX_GENERATION_RETRIES)); do
+    start_utc="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    if ((attempt > 0)); then
+      echo "  retry attempt $attempt/$MAX_GENERATION_RETRIES"
+    fi
+
+    if run_generation_once "$gen" "$run_id" "$tmux_session" "$start_utc" "${template_inputs[@]}"; then
+      success=1
+      break
+    fi
+
+    cleanup_failed_generation_attempt "$EXPERIMENT_RUNS_DIR/$run_id"
+    if ((attempt == MAX_GENERATION_RETRIES)); then
+      break
+    fi
+    if ((RETRY_DELAY_SECONDS > 0)); then
+      echo "  waiting ${RETRY_DELAY_SECONDS}s before retry..."
+      sleep "$RETRY_DELAY_SECONDS"
+    fi
+    attempt=$((attempt + 1))
+  done
+
+  if ((success == 0)); then
+    echo "Error: generation $gen failed after $((MAX_GENERATION_RETRIES + 1)) attempt(s)."
+    exit 1
+  fi
   echo
 done
 
