@@ -311,7 +311,7 @@ local function setPlayerBlockState(player, block)
     -- Agents can infer state from world changes and LastActionResult.
 end
 
-local function setupPlayer(player)
+local function setupPlayer(player, shouldSpawnAtStart)
     local humanoid = nil
     local character = player.Character
     if character then
@@ -330,7 +330,9 @@ local function setupPlayer(player)
         local hrp = character:FindFirstChild("HumanoidRootPart")
         if hrp then
             hrp:SetAttribute("ModelYawOffsetDeg", 180)
-            hrp.Position = PLAYER_SPAWN_POSITION
+            if shouldSpawnAtStart ~= false then
+                hrp.Position = PLAYER_SPAWN_POSITION
+            end
         end
     end
 
@@ -765,11 +767,13 @@ end)
 -- INITIALIZATION
 --------------------------------------------------------------------------------
 
-Players.PlayerAdded:Connect(setupPlayer)
+Players.PlayerAdded:Connect(function(player)
+    setupPlayer(player, true)
+end)
 Players.PlayerRemoving:Connect(cleanupPlayer)
 
 for _, player in ipairs(Players:GetPlayers()) do
-    setupPlayer(player)
+    setupPlayer(player, false)
 end
 
 print("=== Mesa World ===")

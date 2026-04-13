@@ -144,6 +144,17 @@ set_all_current_templates() {
   done
 }
 
+archive_existing_directory() {
+  local dir_path="$1"
+  local ts archive_dir
+
+  [[ -e "$dir_path" ]] || return 0
+  ts="$(date -u +%Y%m%dT%H%M%SZ)"
+  archive_dir="${dir_path}.resume-prev-${ts}"
+  mv "$dir_path" "$archive_dir"
+  echo "Archived existing directory to: $archive_dir"
+}
+
 validate_agent_generation_output() {
   local agent_dir="$1"
   local workspace_dir="$agent_dir/workspace"
@@ -196,11 +207,12 @@ wait_for_reset_cycle() {
   local log_file="$1"
   local cycle_index="$2"
   local timeout_seconds="$3"
+  local start_line="${4:-1}"
   local deadline=$((SECONDS + timeout_seconds))
   local marker="cycle ${cycle_index})"
 
   while ((SECONDS < deadline)); do
-    if [[ -f "$log_file" ]] && grep -F "$marker" "$log_file" >/dev/null 2>&1; then
+    if [[ -f "$log_file" ]] && sed -n "${start_line},\$p" "$log_file" | grep -F "$marker" >/dev/null 2>&1; then
       return 0
     fi
     sleep 2
@@ -221,6 +233,172 @@ copy_agent_generation_snapshot() {
   if [[ -d "$src_agent_dir/session" ]]; then
     cp -a "$src_agent_dir/session" "$dest_agent_dir/"
   fi
+}
+
+write_generation_run_metadata() {
+  local target="$1"
+  local resume_run_id="$2"
+  local resume_run_dir="$3"
+  local tmux_session="$4"
+  local reset_every_seconds="$5"
+
+  mkdir -p "$(dirname "$target")"
+  cat >"$target" <<EOF
+RUN_ID=$(printf '%q' "$resume_run_id")
+RUN_SAFE_ID=$(printf '%q' "$(sanitize_name "$resume_run_id")")
+RUN_DIR=$(printf '%q' "$resume_run_dir")
+WORLDS_ROOT=$(printf '%q' "$resume_run_dir/worlds")
+WORLD_ABS_DIR=$(printf '%q' "$WORLD_ABS_DIR")
+NUM_WORLDS=$(printf '%q' "1")
+AGENTS_PER_WORLD=$(printf '%q' "$AGENTS_PER_WORLD")
+BASE_PORT=$(printf '%q' "$BASE_PORT")
+RECORD=$(printf '%q' "$RECORD")
+RESET_EVERY=$(printf '%q' "$reset_every_seconds")
+CLAWBLOX_BIN=$(printf '%q' "$CLAWBLOX_BIN")
+TMUX_SESSION=$(printf '%q' "$tmux_session")
+EOF
+}
+
+save_generation_world_snapshot() {
+  local src_world_root="$1"
+  local dest_run_dir="$2"
+  local world_index="$3"
+  local port="$4"
+  local dest_world_root="$dest_run_dir/worlds/world-$world_index"
+  local resume_dir="$dest_world_root/resume"
+  local snapshot_file="$resume_dir/latest.json"
+  local tmp_file="$snapshot_file.tmp"
+  local token_file="$src_world_root/spectator_token.txt"
+  local spectator_token=""
+  local ts
+  local -a curl_args=()
+
+  mkdir -p "$resume_dir"
+  if [[ -f "$token_file" ]]; then
+    spectator_token="$(tr -d '[:space:]' <"$token_file")"
+    if [[ -n "$spectator_token" ]]; then
+      curl_args=(-H "X-Spectator-Token: $spectator_token")
+    fi
+  fi
+
+  if ! curl -fsS "${curl_args[@]}" "http://localhost:${port}/snapshot" >"$tmp_file"; then
+    rm -f "$tmp_file"
+    echo "Error: failed to save generation snapshot for world-$world_index on port $port" >&2
+    return 1
+  fi
+
+  ts="$(date -u +%Y%m%dT%H%M%SZ)"
+  cp "$tmp_file" "$resume_dir/checkpoint_${ts}.json"
+  mv "$tmp_file" "$snapshot_file"
+  if [[ -f "$token_file" ]]; then
+    cp -a "$token_file" "$dest_world_root/"
+  fi
+}
+
+copy_generation_world_snapshot() {
+  local src_world_root="$1"
+  local dest_run_dir="$2"
+  local world_index="$3"
+  local dest_world_root="$dest_run_dir/worlds/world-$world_index"
+  local src_resume_dir="$src_world_root/resume"
+  local dest_resume_dir="$dest_world_root/resume"
+  local token_file="$src_world_root/spectator_token.txt"
+
+  if [[ ! -f "$src_resume_dir/latest.json" ]]; then
+    echo "Error: missing saved world snapshot at $src_resume_dir/latest.json" >&2
+    return 1
+  fi
+
+  mkdir -p "$dest_resume_dir"
+  cp -a "$src_resume_dir/." "$dest_resume_dir/"
+  if [[ -f "$token_file" ]]; then
+    cp -a "$token_file" "$dest_world_root/"
+  fi
+}
+
+prepare_persistent_world_resume_run() {
+  local checkpoint_run_dir="$1"
+  local live_run_dir="$2"
+  local live_tmux_session="$3"
+  local checkpoint_run_id
+  local checkpoint_reset_every
+  local checkpoint_world_abs_dir
+  local checkpoint_record
+  local checkpoint_clawblox_bin
+
+  if [[ ! -d "$checkpoint_run_dir" ]]; then
+    echo "Error: persistent resume checkpoint directory not found: $checkpoint_run_dir"
+    return 1
+  fi
+  if [[ ! -f "$checkpoint_run_dir/run.env" ]]; then
+    echo "Error: persistent resume checkpoint missing run.env: $checkpoint_run_dir/run.env"
+    return 1
+  fi
+  if [[ ! -f "$checkpoint_run_dir/worlds/world-0/resume/latest.json" ]]; then
+    echo "Error: persistent resume checkpoint missing world snapshot: $checkpoint_run_dir/worlds/world-0/resume/latest.json"
+    return 1
+  fi
+
+  checkpoint_run_id="$(
+    # shellcheck disable=SC1090
+    (
+      source "$checkpoint_run_dir/run.env"
+      printf '%s' "$RUN_ID"
+    )
+  )"
+  checkpoint_reset_every="$(
+    # shellcheck disable=SC1090
+    (
+      source "$checkpoint_run_dir/run.env"
+      printf '%s' "${RESET_EVERY:-}"
+    )
+  )"
+  checkpoint_world_abs_dir="$(
+    # shellcheck disable=SC1090
+    (
+      source "$checkpoint_run_dir/run.env"
+      printf '%s' "${WORLD_ABS_DIR:-}"
+    )
+  )"
+  checkpoint_record="$(
+    # shellcheck disable=SC1090
+    (
+      source "$checkpoint_run_dir/run.env"
+      printf '%s' "${RECORD:-}"
+    )
+  )"
+  checkpoint_clawblox_bin="$(
+    # shellcheck disable=SC1090
+    (
+      source "$checkpoint_run_dir/run.env"
+      printf '%s' "${CLAWBLOX_BIN:-}"
+    )
+  )"
+
+  if [[ -z "$checkpoint_run_id" ]]; then
+    echo "Error: persistent resume checkpoint run.env is missing RUN_ID."
+    return 1
+  fi
+  if [[ -n "$checkpoint_world_abs_dir" && "$checkpoint_world_abs_dir" != "$WORLD_ABS_DIR" ]]; then
+    echo "Error: checkpoint world directory mismatch: $checkpoint_world_abs_dir != $WORLD_ABS_DIR"
+    return 1
+  fi
+  if [[ -z "$CLAWBLOX_BIN" && -n "$checkpoint_clawblox_bin" ]]; then
+    CLAWBLOX_BIN="$checkpoint_clawblox_bin"
+  fi
+  if [[ -n "$checkpoint_record" ]]; then
+    RECORD="$checkpoint_record"
+  fi
+
+  archive_existing_directory "$live_run_dir"
+  mkdir -p "$live_run_dir"
+  cp -a "$checkpoint_run_dir/." "$live_run_dir/"
+  write_generation_run_metadata \
+    "$live_run_dir/run.env" \
+    "$checkpoint_run_id" \
+    "$live_run_dir" \
+    "$live_tmux_session" \
+    "$checkpoint_reset_every"
 }
 
 usage() {
@@ -504,10 +682,6 @@ fi
 GENERATION_DURATION_SECONDS="$(parse_duration_seconds "$GENERATION_DURATION")"
 if ((GENERATION_DURATION_SECONDS <= 0)); then
   echo "Error: --generation-duration must be greater than zero."
-  exit 1
-fi
-if ((KEEP_WORLD == 1 && RESUME_MODE == 1)); then
-  echo "Error: --keep-world does not support --resume yet."
   exit 1
 fi
 if ((KEEP_WORLD == 1)) && ((SAVE_GRACE_SECONDS <= 0 || GENERATION_DURATION_SECONDS <= 1)); then
@@ -902,9 +1076,11 @@ run_persistent_world_generations() {
   local live_run_id
   local live_tmux_session
   local live_run_dir
+  local checkpoint_run_dir=""
   local agents_root
   local idx
   local gen
+  local reset_cycle_index
   local template_in
   local start_utc
   local end_utc
@@ -912,6 +1088,7 @@ run_persistent_world_generations() {
   local launch_warning="$SAVE_GRACE_SECONDS"
   local launch_duration="$GENERATION_DURATION_SECONDS"
   local total_duration_seconds
+  local remaining_generations="$GENERATIONS"
   local launch_cmd=()
   local workspace_out
   local agent_dir
@@ -919,7 +1096,10 @@ run_persistent_world_generations() {
   local agent_index
   local snapshot_agent_dir
   local snapshot_agents_root
+  local snapshot_run_dir
+  local live_world_root
   local log_file
+  local log_start_line
   local final_wait_seconds
   local boundary_wait_seconds
   local -a template_inputs=()
@@ -931,37 +1111,71 @@ run_persistent_world_generations() {
     launch_warning=$((GENERATION_DURATION_SECONDS - 1))
   fi
   launch_duration="$((GENERATION_DURATION_SECONDS - launch_warning))"
-  total_duration_seconds=$((GENERATIONS * GENERATION_DURATION_SECONDS - launch_warning))
+  if ((RESUME_MODE == 1)); then
+    if ((COMPLETED_GENERATIONS <= 0)); then
+      echo "Error: --keep-world --resume requires at least one committed generation checkpoint."
+      return 1
+    fi
+    remaining_generations=$((GENERATIONS - COMPLETED_GENERATIONS))
+  fi
+  total_duration_seconds=$((remaining_generations * GENERATION_DURATION_SECONDS - launch_warning))
   boundary_wait_seconds=$((GENERATION_DURATION_SECONDS + STOP_GRACE_SECONDS + 120))
   final_wait_seconds=$((GENERATION_DURATION_SECONDS + STOP_GRACE_SECONDS + 180))
 
   live_run_id="$(sanitize_name "${RUN_PREFIX}-live")"
   live_tmux_session="$(sanitize_name "${TMUX_PREFIX}-live")"
   live_run_dir="$EXPERIMENT_RUNS_DIR/$live_run_id"
+  live_world_root="$live_run_dir/worlds/world-0"
   agents_root="$live_run_dir/worlds/world-0/agents"
 
   template_inputs=("${CURRENT_TEMPLATES[@]}")
-  launch_cmd=(
-    bash "$LAUNCH_SCRIPT"
-    --force
-    --run-id "$live_run_id"
-    --tmux-session "$live_tmux_session"
-    --num-worlds 1
-    --agents-per-world "$AGENTS_PER_WORLD"
-    --base-port "$BASE_PORT"
-    --record "$RECORD"
-    --world-dir "$WORLD_DIR"
-    --results-root "$EXPERIMENT_RUNS_DIR"
-    --health-timeout "$HEALTH_TIMEOUT"
-    --agent-name-prefix "$AGENT_NAME_PREFIX"
-    --stop-grace-seconds "$STOP_GRACE_SECONDS"
-    --port-wait-seconds "$PORT_WAIT_SECONDS"
-    --model "$CLAUDE_MODEL"
-    --permission-mode "$CLAUDE_PERMISSION_MODE"
-    --checkpoint-interval "$CHECKPOINT_INTERVAL"
-    --reset-every "$launch_duration"
-    --duration "$total_duration_seconds"
-  )
+  if ((RESUME_MODE == 1)); then
+    checkpoint_run_dir="$EXPERIMENT_RUNS_DIR/$(sanitize_name "$(printf '%s-g%03d' "$RUN_PREFIX" "$COMPLETED_GENERATIONS")")"
+    if ! prepare_persistent_world_resume_run "$checkpoint_run_dir" "$live_run_dir" "$live_tmux_session"; then
+      return 1
+    fi
+    launch_cmd=(
+      bash "$LAUNCH_SCRIPT"
+      --force
+      --resume "$live_run_dir"
+      --tmux-session "$live_tmux_session"
+      --num-worlds 1
+      --agents-per-world "$AGENTS_PER_WORLD"
+      --base-port "$BASE_PORT"
+      --record "$RECORD"
+      --health-timeout "$HEALTH_TIMEOUT"
+      --agent-name-prefix "$AGENT_NAME_PREFIX"
+      --stop-grace-seconds "$STOP_GRACE_SECONDS"
+      --port-wait-seconds "$PORT_WAIT_SECONDS"
+      --model "$CLAUDE_MODEL"
+      --permission-mode "$CLAUDE_PERMISSION_MODE"
+      --checkpoint-interval "$CHECKPOINT_INTERVAL"
+      --reset-every "$launch_duration"
+      --duration "$total_duration_seconds"
+    )
+  else
+    launch_cmd=(
+      bash "$LAUNCH_SCRIPT"
+      --force
+      --run-id "$live_run_id"
+      --tmux-session "$live_tmux_session"
+      --num-worlds 1
+      --agents-per-world "$AGENTS_PER_WORLD"
+      --base-port "$BASE_PORT"
+      --record "$RECORD"
+      --world-dir "$WORLD_DIR"
+      --results-root "$EXPERIMENT_RUNS_DIR"
+      --health-timeout "$HEALTH_TIMEOUT"
+      --agent-name-prefix "$AGENT_NAME_PREFIX"
+      --stop-grace-seconds "$STOP_GRACE_SECONDS"
+      --port-wait-seconds "$PORT_WAIT_SECONDS"
+      --model "$CLAUDE_MODEL"
+      --permission-mode "$CLAUDE_PERMISSION_MODE"
+      --checkpoint-interval "$CHECKPOINT_INTERVAL"
+      --reset-every "$launch_duration"
+      --duration "$total_duration_seconds"
+    )
+  fi
   if [[ -n "$GOAL" ]]; then
     launch_cmd+=(--goal "$GOAL")
   fi
@@ -1024,7 +1238,7 @@ run_persistent_world_generations() {
     fi
   done
 
-  for ((gen = 1; gen <= GENERATIONS; gen++)); do
+  for ((gen = START_GENERATION; gen <= GENERATIONS; gen++)); do
     run_id="$(sanitize_name "$(printf '%s-g%03d' "$RUN_PREFIX" "$gen")")"
 
     echo "=== Generation $gen/$GENERATIONS ==="
@@ -1040,8 +1254,9 @@ run_persistent_world_generations() {
     done
 
     if ((gen < GENERATIONS)); then
+      reset_cycle_index=$((gen - START_GENERATION + 1))
       echo "  waiting for reset cycle $gen..."
-      audit_generation_event "waiting_for_reset_cycle" "generation=$gen timeout_seconds=$boundary_wait_seconds"
+      audit_generation_event "waiting_for_reset_cycle" "generation=$gen reset_cycle_index=$reset_cycle_index timeout_seconds=$boundary_wait_seconds"
       mapfile -t workspaces < <(find "$agents_root" -mindepth 2 -maxdepth 2 -type d -name workspace | sort)
       if ((${#workspaces[@]} != AGENTS_PER_WORLD)); then
         echo "Error: expected $AGENTS_PER_WORLD live workspaces under $agents_root, found ${#workspaces[@]}."
@@ -1050,13 +1265,17 @@ run_persistent_world_generations() {
       for workspace_out in "${workspaces[@]}"; do
         agent_dir="$(dirname "$workspace_out")"
         log_file="$agent_dir/logs/agent.log"
-        if ! wait_for_reset_cycle "$log_file" "$gen" "$boundary_wait_seconds"; then
-          audit_generation_event "reset_cycle_timeout" "generation=$gen log_file=$log_file timeout_seconds=$boundary_wait_seconds"
-          echo "Error: timed out waiting for reset cycle $gen in $log_file"
+        log_start_line=1
+        if [[ -f "$log_file" ]]; then
+          log_start_line=$(($(wc -l <"$log_file") + 1))
+        fi
+        if ! wait_for_reset_cycle "$log_file" "$reset_cycle_index" "$boundary_wait_seconds" "$log_start_line"; then
+          audit_generation_event "reset_cycle_timeout" "generation=$gen reset_cycle_index=$reset_cycle_index log_file=$log_file timeout_seconds=$boundary_wait_seconds"
+          echo "Error: timed out waiting for reset cycle $reset_cycle_index in $log_file"
           return 1
         fi
       done
-      audit_generation_event "reset_cycle_observed" "generation=$gen"
+      audit_generation_event "reset_cycle_observed" "generation=$gen reset_cycle_index=$reset_cycle_index"
     else
       echo "  waiting for final session shutdown..."
       audit_generation_event "waiting_for_final_shutdown" "generation=$gen timeout_seconds=$final_wait_seconds"
@@ -1075,10 +1294,29 @@ run_persistent_world_generations() {
       return 1
     fi
 
-    snapshot_agents_root="$EXPERIMENT_RUNS_DIR/$run_id/worlds/world-0/agents"
+    snapshot_run_dir="$EXPERIMENT_RUNS_DIR/$run_id"
+    snapshot_agents_root="$snapshot_run_dir/worlds/world-0/agents"
     mkdir -p "$snapshot_agents_root"
     next_templates=()
     next_agent_names=()
+
+    if ((gen < GENERATIONS)); then
+      if ! save_generation_world_snapshot "$live_world_root" "$snapshot_run_dir" 0 "$BASE_PORT"; then
+        echo "Error: failed to snapshot live world for generation $gen."
+        return 1
+      fi
+    else
+      if ! copy_generation_world_snapshot "$live_world_root" "$snapshot_run_dir" 0; then
+        echo "Error: failed to copy saved live world snapshot for generation $gen."
+        return 1
+      fi
+    fi
+    write_generation_run_metadata \
+      "$snapshot_run_dir/run.env" \
+      "$live_run_id" \
+      "$snapshot_run_dir" \
+      "$live_tmux_session" \
+      "$launch_duration"
 
     for workspace_out in "${workspaces[@]}"; do
       agent_dir="$(dirname "$workspace_out")"

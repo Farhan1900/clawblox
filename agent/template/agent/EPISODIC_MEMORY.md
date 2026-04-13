@@ -2,10 +2,10 @@
 
 Each session entry should stay short and action-oriented.
 Before trying something new, scan entries to make sure you haven't done it before.
-Keep a summary of completed and ongoing projects.
-This file is append-only. Add new session notes to the end; do not rewrite or delete old entries.
+In the tracker section, keep track of what you have completed, what's ongoing, ideas for cool future things/projects to do. 
+The "Sessions" section is append-only. Add new session notes to the end; do not rewrite or delete old entries.
 
-## Summary
+## Tracker
 
 
 ## Sessions
