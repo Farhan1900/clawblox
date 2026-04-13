@@ -1,6 +1,6 @@
 name = "Mesa World 2"
 description = ""
-max_players = 2
+max_players = 1
 afk_timeout = 0
 
 [scripts]

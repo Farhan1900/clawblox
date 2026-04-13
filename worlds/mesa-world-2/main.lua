@@ -24,6 +24,9 @@ local MIN_THROW_SPEED = 0
 local MAX_THROW_SPEED = 10
 local PLAYER_SPAWN_POSITION = Vector3.new(0, 5, 0)
 local OUT_OF_BOUNDS_Y = -200
+local WORLD_BOUNDARY_HALF_EXTENT = 90
+local WORLD_BOUNDARY_HEIGHT = 80
+local WORLD_BOUNDARY_THICKNESS = 6
 
 local heldObjectsByPlayer = {}
 local placingObjects = {} -- { object, startPos, targetPos, elapsed, duration }
@@ -86,6 +89,42 @@ ground.Anchored = true
 ground.Color = Color3.fromRGB(85, 239, 196)
 ground:SetAttribute("RenderRole", "Ground")
 ground.Parent = Workspace
+
+local invisibleWalls = {
+    {
+        name = "BoundaryNorth",
+        size = Vector3.new(WORLD_BOUNDARY_HALF_EXTENT * 2, WORLD_BOUNDARY_HEIGHT, WORLD_BOUNDARY_THICKNESS),
+        pos = Vector3.new(0, WORLD_BOUNDARY_HEIGHT / 2, WORLD_BOUNDARY_HALF_EXTENT + WORLD_BOUNDARY_THICKNESS / 2),
+    },
+    {
+        name = "BoundarySouth",
+        size = Vector3.new(WORLD_BOUNDARY_HALF_EXTENT * 2, WORLD_BOUNDARY_HEIGHT, WORLD_BOUNDARY_THICKNESS),
+        pos = Vector3.new(0, WORLD_BOUNDARY_HEIGHT / 2, -WORLD_BOUNDARY_HALF_EXTENT - WORLD_BOUNDARY_THICKNESS / 2),
+    },
+    {
+        name = "BoundaryEast",
+        size = Vector3.new(WORLD_BOUNDARY_THICKNESS, WORLD_BOUNDARY_HEIGHT, WORLD_BOUNDARY_HALF_EXTENT * 2),
+        pos = Vector3.new(WORLD_BOUNDARY_HALF_EXTENT + WORLD_BOUNDARY_THICKNESS / 2, WORLD_BOUNDARY_HEIGHT / 2, 0),
+    },
+    {
+        name = "BoundaryWest",
+        size = Vector3.new(WORLD_BOUNDARY_THICKNESS, WORLD_BOUNDARY_HEIGHT, WORLD_BOUNDARY_HALF_EXTENT * 2),
+        pos = Vector3.new(-WORLD_BOUNDARY_HALF_EXTENT - WORLD_BOUNDARY_THICKNESS / 2, WORLD_BOUNDARY_HEIGHT / 2, 0),
+    },
+}
+
+for _, wallDef in ipairs(invisibleWalls) do
+    local wall = Instance.new("Part")
+    wall.Name = wallDef.name
+    wall.Size = wallDef.size
+    wall.Position = wallDef.pos
+    wall.Anchored = true
+    wall.Transparency = 1
+    wall.CanCollide = true
+    wall.CanQuery = false
+    wall.CanTouch = false
+    wall.Parent = Workspace
+end
 
 local mesas = {
     -- Spread out so the larger world has distinct regions while the center stays traversable.
