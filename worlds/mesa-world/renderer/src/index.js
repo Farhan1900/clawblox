@@ -85,6 +85,11 @@ function createEntityVisual(entity) {
   const role = (entity.render && entity.render.role) || entity.name || ''
   const size = entity.size || [1, 1, 1]
   const modelUrl = resolveEntityModelUrl(entity)
+  const color = entity.render && entity.render.color
+    ? (Math.round(entity.render.color[0] * 255) << 16) |
+      (Math.round(entity.render.color[1] * 255) << 8) |
+      Math.round(entity.render.color[2] * 255)
+    : 0x999999
 
   if (modelUrl) {
     const root = new THREE.Group()
@@ -166,13 +171,25 @@ function createEntityVisual(entity) {
     return group
   }
 
-  // Default: box with entity color
-  const color = entity.render && entity.render.color
-    ? (Math.round(entity.render.color[0] * 255) << 16) |
-      (Math.round(entity.render.color[1] * 255) << 8) |
-      Math.round(entity.render.color[2] * 255)
-    : 0x999999
+  if (role === 'Ring') {
+    const group = new THREE.Group()
+    const outerRadius = Math.min(size[0], size[2]) * 0.5
+    const tubeRadius = Math.max(Math.min(size[1] * 0.5, outerRadius * 0.45), 0.05)
+    const ringRadius = Math.max(outerRadius - tubeRadius, 0.05)
 
+    const ring = new THREE.Mesh(
+      new THREE.TorusGeometry(ringRadius, tubeRadius, 18, 40),
+      new THREE.MeshStandardMaterial({ color, roughness: 0.82, metalness: 0.12 }),
+    )
+    ring.rotation.x = Math.PI / 2
+    ring.castShadow = true
+    ring.receiveShadow = true
+    group.add(ring)
+
+    return group
+  }
+
+  // Default: box with entity color
   let geometry
   const primitive = entity.render && entity.render.primitive
   if (primitive === 'cylinder') geometry = new THREE.CylinderGeometry(size[0] / 2, size[0] / 2, size[1], 16)

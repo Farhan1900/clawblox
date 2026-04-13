@@ -10,17 +10,18 @@ Workspace.Gravity = 10
 local BLOCK_SIZE = 0.75
 local BALL_SIZE = 1.5
 local PLANK_SIZE = Vector3.new(9, 0.45, 1.8)
+local RING_SIZE = Vector3.new(2.4, 0.35, 2.4)
 local PICKUP_RANGE = 6
 local PLACE_RANGE = 7
 local HOLD_OFFSET = Vector3.new(0, 3.5, 0)
 local THROW_SPAWN_OFFSET_Y = 2.5
 local THROW_FORWARD_OFFSET = 1.75
-local THROW_SPEED = 24
+local THROW_SPEED = 16
 local THROW_UPWARD_SPEED = 6
 local THROW_CARRY_VELOCITY_FACTOR = 0.35
 local THROW_COLLISION_GRACE_PERIOD = 0.18
 local MIN_THROW_SPEED = 0
-local MAX_THROW_SPEED = 40
+local MAX_THROW_SPEED = 10
 local PLAYER_SPAWN_POSITION = Vector3.new(0, 5, 0)
 local OUT_OF_BOUNDS_Y = -200
 local WORLD_BOUNDARY_HALF_EXTENT = 50
@@ -28,7 +29,7 @@ local WORLD_BOUNDARY_HEIGHT = 80
 local WORLD_BOUNDARY_THICKNESS = 6
 
 local heldBlocksByPlayer = {}
-local placingBlocks = {} -- { block, startPos, targetPos, elapsed, duration }
+local placingBlocks = {} -- { block, startCFrame, targetCFrame, elapsed, duration }
 local thrownBlocks = {} -- { block, elapsed, duration }
 local trackedBlocks = {}
 
@@ -36,12 +37,29 @@ local blockColors = {
     Sand = Color3.fromRGB(214, 186, 128),
     Slate = Color3.fromRGB(148, 136, 124),
     Wood = Color3.fromRGB(156, 110, 72),
+    Gold = Color3.fromRGB(232, 192, 74),
 }
 
 local blockPhysics = PhysicalProperties.new(
     0.7, -- density
     0.9, -- friction
     0.03, -- elasticity
+    1.0, -- friction weight
+    1.0 -- elasticity weight
+)
+
+local terrainPhysics = PhysicalProperties.new(
+    2.0, -- density
+    1.4, -- friction
+    0.0, -- elasticity
+    1.0, -- friction weight
+    1.0 -- elasticity weight
+)
+
+local ballPhysics = PhysicalProperties.new(
+    3.5, -- density
+    1.2, -- friction
+    0.02, -- elasticity
     1.0, -- friction weight
     1.0 -- elasticity weight
 )
@@ -56,6 +74,7 @@ ground.Size = Vector3.new(100, 10, 100)
 ground.Position = Vector3.new(0, -5, 0)
 ground.Anchored = true
 ground.Color = Color3.fromRGB(85, 239, 196)
+ground.CustomPhysicalProperties = terrainPhysics
 ground:SetAttribute("RenderRole", "Ground")
 ground.Parent = Workspace
 
@@ -92,6 +111,7 @@ for _, wallDef in ipairs(invisibleWalls) do
     wall.CanCollide = true
     wall.CanQuery = false
     wall.CanTouch = false
+    wall.CustomPhysicalProperties = terrainPhysics
     wall.Parent = Workspace
 end
 
@@ -119,6 +139,7 @@ for _, m in ipairs(mesas) do
     mesa.Position = Vector3.new(m.pos[1], m.pos[2], m.pos[3])
     mesa.Anchored = true
     mesa.Color = Color3.fromRGB(200, 160, 100)
+    mesa.CustomPhysicalProperties = terrainPhysics
     mesa:SetAttribute("RenderRole", "Mesa")
     mesa.Parent = Workspace
 end
@@ -157,25 +178,27 @@ local function createBall(name, position)
     ball.Anchored = false
     ball.Material = Enum.Material.SmoothPlastic
     ball.Color = Color3.fromRGB(255, 99, 72)
-    ball.CustomPhysicalProperties = PhysicalProperties.new(
-        0.8,
-        0.6,
-        0.7,
-        1.0,
-        1.0
-    )
-    ball:SetAttribute("RenderRole", "Ball")
+    ball.CustomPhysicalProperties = ballPhysics
+    setPickupMetadata(ball, nil, "Ball")
     ball:SetAttribute("RenderPrimitive", "sphere")
     ball.Parent = Workspace
     trackedBlocks[ball] = true
     return ball
 end
 
-local function createPlank(name, position, colorName)
+local function createPlank(name, position, colorName, rotationDegrees)
     local plank = Instance.new("Part")
     plank.Name = name
     plank.Size = PLANK_SIZE
-    plank.CFrame = CFrame.new(position) * CFrame.Angles(0, math.rad(24), 0)
+    local pitch = 0
+    local yaw = 24
+    local roll = 0
+    if rotationDegrees then
+        pitch = rotationDegrees[1] or pitch
+        yaw = rotationDegrees[2] or yaw
+        roll = rotationDegrees[3] or roll
+    end
+    plank.CFrame = CFrame.new(position) * CFrame.Angles(math.rad(pitch), math.rad(yaw), math.rad(roll))
     plank.Anchored = false
     plank.Material = Enum.Material.Wood
     plank.Color = blockColors[colorName]
@@ -190,6 +213,35 @@ local function createPlank(name, position, colorName)
     plank.Parent = Workspace
     trackedBlocks[plank] = true
     return plank
+end
+
+local function createRing(name, position, colorName, rotationDegrees, size)
+    local ring = Instance.new("Part")
+    ring.Name = name
+    ring.Size = size or RING_SIZE
+    local pitch = 0
+    local yaw = 0
+    local roll = 0
+    if rotationDegrees then
+        pitch = rotationDegrees[1] or pitch
+        yaw = rotationDegrees[2] or yaw
+        roll = rotationDegrees[3] or roll
+    end
+    ring.CFrame = CFrame.new(position) * CFrame.Angles(math.rad(pitch), math.rad(yaw), math.rad(roll))
+    ring.Anchored = false
+    ring.Material = Enum.Material.Metal
+    ring.Color = blockColors[colorName]
+    ring.CustomPhysicalProperties = PhysicalProperties.new(
+        0.45,
+        0.35,
+        0.18,
+        1.0,
+        1.0
+    )
+    setPickupMetadata(ring, colorName, "Ring")
+    ring.Parent = Workspace
+    trackedBlocks[ring] = true
+    return ring
 end
 
 local baseBlockPile = {
@@ -231,7 +283,15 @@ nextBlockIndex = createBlockPile("Block_", Vector3.new(30.4, 0.6, -36.6), nextBl
 nextBlockIndex = createBlockPile("Block_", Vector3.new(33.6, 0.6, -37.8), nextBlockIndex)
 
 createBall("Ball_1", Vector3.new(-31.1, 2.75, 26.6))
-createPlank("Plank_1", Vector3.new(25.5, 0.9, -45.5), "Wood")
+createPlank("Plank_1", Vector3.new(25.6, 0.9, -45.4), "Wood", { 0, 18, 0 })
+createPlank("Plank_2", Vector3.new(25.9, 1.18, -45.0), "Wood", { 4, -27, 11 })
+createPlank("Plank_3", Vector3.new(23.9, 1.05, -45.2), "Wood", { -6, 53, -8 })
+
+createRing("Ring_1", Vector3.new(39.4, 0.16, -45.8), "Gold", nil, Vector3.new(1.95, 0.32, 1.95))
+createRing("Ring_2", Vector3.new(41.2, 0.2, -47.0), "Gold", { 0, 18, 0 }, Vector3.new(2.45, 0.4, 2.45))
+createRing("Ring_3", Vector3.new(42.8, 0.14, -45.4), "Gold", { 0, -24, 0 }, Vector3.new(1.55, 0.28, 1.55))
+createRing("Ring_4", Vector3.new(44.7, 0.24, -47.2), "Gold", { 0, 32, 0 }, Vector3.new(3.2, 0.48, 3.2))
+createRing("Ring_5", Vector3.new(43.1, 0.18, -43.8), "Gold", { 0, -12, 0 }, Vector3.new(2.3, 0.36, 2.3))
 
 --------------------------------------------------------------------------------
 -- PLAYER
@@ -428,16 +488,55 @@ local function pickupBlock(player, inputData)
     player:SetAttribute("LastActionResult", "PickupSuccess")
 end
 
-local function positionOccupied(player, targetPosition)
+local function parseRotationDegrees(rotation)
+    if rotation == nil then
+        return nil
+    end
+    if type(rotation) == "number" then
+        if rotation ~= rotation then
+            return nil
+        end
+        return 0, tonumber(rotation), 0
+    end
+    if type(rotation) ~= "table" then
+        return nil
+    end
+
+    local pitch = tonumber(rotation.pitch or rotation.x or rotation[1] or 0)
+    local yaw = tonumber(rotation.yaw or rotation.y or rotation[2] or 0)
+    local roll = tonumber(rotation.roll or rotation.z or rotation[3] or 0)
+    if not pitch or not yaw or not roll then
+        return nil
+    end
+    if pitch ~= pitch or yaw ~= yaw or roll ~= roll then
+        return nil
+    end
+    return pitch, yaw, roll
+end
+
+local function getCurrentRotationCFrame(object)
+    local pitch, yaw, roll = object.CFrame:ToOrientation()
+    return CFrame.fromOrientation(pitch, yaw, roll)
+end
+
+local function getTargetPlacementCFrame(object, targetPosition, rotation)
+    local rotationCFrame = getCurrentRotationCFrame(object)
+    if rotation ~= nil then
+        local pitch, yaw, roll = parseRotationDegrees(rotation)
+        if pitch == nil then
+            return nil
+        end
+        rotationCFrame = CFrame.fromOrientation(math.rad(pitch), math.rad(yaw), math.rad(roll))
+    end
+    return CFrame.new(targetPosition) * rotationCFrame
+end
+
+local function positionOccupied(player, targetCFrame, object)
     local params = OverlapParams.new()
     params.FilterType = Enum.RaycastFilterType.Exclude
     params.FilterDescendantsInstances = { player.Character, heldBlocksByPlayer[player] }
 
-    local hits = Workspace:GetPartBoundsInBox(
-        CFrame.new(targetPosition),
-        Vector3.new(BLOCK_SIZE, BLOCK_SIZE, BLOCK_SIZE),
-        params
-    )
+    local hits = Workspace:GetPartBoundsInBox(targetCFrame, object.Size, params)
 
     for _, hit in ipairs(hits) do
         if hit:IsA("Part") then
@@ -467,20 +566,26 @@ local function placeBlock(player, inputData)
         return
     end
 
-    if positionOccupied(player, targetPosition) then
+    local targetCFrame = getTargetPlacementCFrame(block, targetPosition, inputData.rotation)
+    if not targetCFrame then
+        player:SetAttribute("LastActionResult", "PlaceFailed:InvalidRotation")
+        return
+    end
+
+    if positionOccupied(player, targetCFrame, block) then
         player:SetAttribute("LastActionResult", "PlaceFailed:Occupied")
         return
     end
 
-    local startPos = block.Position
+    local startCFrame = block.CFrame
     block.Anchored = true
     block.CanCollide = false
     releaseHeldBlock(player)
 
     table.insert(placingBlocks, {
         block = block,
-        startPos = startPos,
-        targetPos = targetPosition,
+        startCFrame = startCFrame,
+        targetCFrame = targetCFrame,
         elapsed = 0,
         duration = 0.3,
     })
@@ -608,7 +713,7 @@ RunService.Heartbeat:Connect(function(dt)
         local alpha = math.min(p.elapsed / p.duration, 1)
         -- Smooth ease-out
         local t = 1 - (1 - alpha) * (1 - alpha)
-        p.block.Position = p.startPos:Lerp(p.targetPos, t)
+        p.block.CFrame = p.startCFrame:Lerp(p.targetCFrame, t)
 
         if alpha >= 1 then
             p.block.Anchored = false

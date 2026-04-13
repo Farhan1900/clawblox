@@ -8,6 +8,9 @@ local AgentInputService = game:GetService("AgentInputService")
 Workspace.Gravity = 10
 
 local BLOCK_SIZE = 0.75
+local BALL_SIZE = 1.5
+local PLANK_SIZE = Vector3.new(9, 0.45, 1.8)
+local RING_SIZE = Vector3.new(2.4, 0.36, 2.4)
 local PICKUP_RANGE = 6
 local PLACE_RANGE = 7
 local HOLD_OFFSET = Vector3.new(0, 3.5, 0)
@@ -34,6 +37,9 @@ local ORB_BASE_SIZE = Vector3.new(0.9, 0.9, 0.9)
 local blockColors = {
     Sand = Color3.fromRGB(214, 186, 128),
     Slate = Color3.fromRGB(148, 136, 124),
+    Wood = Color3.fromRGB(156, 110, 72),
+    Gold = Color3.fromRGB(232, 192, 74),
+    Coral = Color3.fromRGB(255, 99, 72),
 }
 
 local blockPhysics = PhysicalProperties.new(
@@ -42,6 +48,30 @@ local blockPhysics = PhysicalProperties.new(
     0.03, -- elasticity
     1.0, -- friction weight
     1.0 -- elasticity weight
+)
+
+local ballPhysics = PhysicalProperties.new(
+    3.5,
+    1.2,
+    0.02,
+    1.0,
+    1.0
+)
+
+local plankPhysics = PhysicalProperties.new(
+    0.5,
+    0.8,
+    0.05,
+    1.0,
+    1.0
+)
+
+local ringPhysics = PhysicalProperties.new(
+    0.45,
+    0.35,
+    0.18,
+    1.0,
+    1.0
 )
 
 --------------------------------------------------------------------------------
@@ -108,6 +138,7 @@ end
 --------------------------------------------------------------------------------
 
 local rockSeed = 9999
+local rockFootprints = {}
 local function rockRandom()
     rockSeed = (rockSeed * 16807) % 2147483647
     return (rockSeed - 1) / 2147483646
@@ -155,8 +186,27 @@ for _, cluster in ipairs(rockClusters) do
             )
             rock:SetAttribute("RenderRole", "Rock")
             rock.Parent = Workspace
+            table.insert(rockFootprints, {
+                x = x,
+                z = z,
+                halfWidth = sx / 2,
+                halfDepth = sz / 2,
+            })
         end
     end
+end
+
+local function isInsideRockFootprint(x, z, padding)
+    local extra = padding or 0
+    for _, rock in ipairs(rockFootprints) do
+        if x >= rock.x - rock.halfWidth - extra
+            and x <= rock.x + rock.halfWidth + extra
+            and z >= rock.z - rock.halfDepth - extra
+            and z <= rock.z + rock.halfDepth + extra then
+            return true
+        end
+    end
+    return false
 end
 
 --------------------------------------------------------------------------------
@@ -205,7 +255,7 @@ for _, cluster in ipairs(orbClusters) do
         local oz = (orbRandom() - 0.5) * 6
         local x = cluster.cx + ox
         local z = cluster.cz + oz
-        if not isInsideMesaFootprint(x, z, 0.5) then
+        if not isInsideMesaFootprint(x, z, 0.5) and not isInsideRockFootprint(x, z, 1.0) then
             clusterCreated = clusterCreated + 1
             orbIndex = orbIndex + 1
             createOrb(
@@ -221,13 +271,13 @@ end
 -- BLOCKS
 --------------------------------------------------------------------------------
 
-local function setBlockMetadata(block, colorName)
-    block:SetAttribute("RenderRole", "PickupObject")
-    block:SetAttribute("ItemColorName", colorName)
-    block:SetAttribute("IsPickupObject", true)
-    block:SetAttribute("IsCarryable", true)
-    block:SetAttribute("CarryKind", "Block")
-    block:SetAttribute("CarryCollisionEnabled", true)
+local function setCarryableMetadata(object, colorName, renderRole, carryKind)
+    object:SetAttribute("RenderRole", renderRole or "PickupObject")
+    object:SetAttribute("ItemColorName", colorName)
+    object:SetAttribute("IsPickupObject", true)
+    object:SetAttribute("IsCarryable", true)
+    object:SetAttribute("CarryKind", carryKind or renderRole or "Carryable")
+    object:SetAttribute("CarryCollisionEnabled", true)
 end
 
 local function createBlock(name, position, colorName)
@@ -239,19 +289,81 @@ local function createBlock(name, position, colorName)
     block.Material = Enum.Material.SmoothPlastic
     block.Color = blockColors[colorName]
     block.CustomPhysicalProperties = blockPhysics
-    setBlockMetadata(block, colorName)
+    setCarryableMetadata(block, colorName, "PickupObject", "Block")
     block.Parent = Workspace
     trackedCarryables[block] = true
     return block
 end
 
+local function createBall(name, position)
+    local ball = Instance.new("Part")
+    ball.Name = name
+    ball.Shape = Enum.PartType.Ball
+    ball.Size = Vector3.new(BALL_SIZE, BALL_SIZE, BALL_SIZE)
+    ball.Position = position
+    ball.Anchored = false
+    ball.Material = Enum.Material.SmoothPlastic
+    ball.Color = blockColors.Coral
+    ball.CustomPhysicalProperties = ballPhysics
+    setCarryableMetadata(ball, "Coral", "Ball", "Ball")
+    ball.Parent = Workspace
+    trackedCarryables[ball] = true
+    return ball
+end
+
+local function createPlank(name, position, colorName, rotationDegrees)
+    local plank = Instance.new("Part")
+    plank.Name = name
+    plank.Size = PLANK_SIZE
+    local pitch = 0
+    local yaw = 24
+    local roll = 0
+    if rotationDegrees then
+        pitch = rotationDegrees[1] or pitch
+        yaw = rotationDegrees[2] or yaw
+        roll = rotationDegrees[3] or roll
+    end
+    plank.CFrame = CFrame.new(position) * CFrame.Angles(math.rad(pitch), math.rad(yaw), math.rad(roll))
+    plank.Anchored = false
+    plank.Material = Enum.Material.Wood
+    plank.Color = blockColors[colorName]
+    plank.CustomPhysicalProperties = plankPhysics
+    setCarryableMetadata(plank, colorName, "Plank", "Plank")
+    plank.Parent = Workspace
+    trackedCarryables[plank] = true
+    return plank
+end
+
+local function createRing(name, position, colorName, rotationDegrees, size)
+    local ring = Instance.new("Part")
+    ring.Name = name
+    ring.Size = size or RING_SIZE
+    local pitch = 0
+    local yaw = 0
+    local roll = 0
+    if rotationDegrees then
+        pitch = rotationDegrees[1] or pitch
+        yaw = rotationDegrees[2] or yaw
+        roll = rotationDegrees[3] or roll
+    end
+    ring.CFrame = CFrame.new(position) * CFrame.Angles(math.rad(pitch), math.rad(yaw), math.rad(roll))
+    ring.Anchored = false
+    ring.Material = Enum.Material.Metal
+    ring.Color = blockColors[colorName]
+    ring.CustomPhysicalProperties = ringPhysics
+    setCarryableMetadata(ring, colorName, "Ring", "Ring")
+    ring.Parent = Workspace
+    trackedCarryables[ring] = true
+    return ring
+end
+
 -- Place a lot of pickup cubes in small stacks across the larger map.
 local blockClusters = {
-    { cx = 44, cz = -56, n = 28, spread = 4.4 },
-    { cx = -54, cz = 16, n = 28, spread = 4.4 },
-    { cx = 12, cz = 74, n = 28, spread = 4.4 },
-    { cx = 72, cz = 28, n = 28, spread = 4.4 },
-    { cx = -8, cz = -72, n = 28, spread = 4.4 },
+    { cx = 34, cz = -66, n = 28, spread = 4.4 },
+    { cx = -64, cz = 26, n = 28, spread = 4.4 },
+    { cx = 22, cz = 82, n = 28, spread = 4.4 },
+    { cx = 82, cz = 38, n = 28, spread = 4.4 },
+    { cx = -18, cz = -82, n = 28, spread = 4.4 },
 }
 
 local blockSeed = 20240408
@@ -286,7 +398,7 @@ for _, cluster in ipairs(blockClusters) do
             oz = lobe.z + math.sin(angle) * radius * (1.7 - stretch)
             local x = cluster.cx + ox
             local z = cluster.cz + oz
-            if not isInsideMesaFootprint(x, z, 0.5) then
+            if not isInsideMesaFootprint(x, z, 0.5) and not isInsideRockFootprint(x, z, 2.2) then
                 placed = true
                 break
             end
@@ -304,6 +416,19 @@ for _, cluster in ipairs(blockClusters) do
         )
     end
 end
+
+createBall("Ball_1", Vector3.new(69.8, 0.75, -73.2))
+createPlank("Plank_1", Vector3.new(70.8, 0.9, -79.4), "Wood", { 0, 20, 0 })
+createPlank("Plank_2", Vector3.new(74.2, 1.16, -77.5), "Wood", { 5, -28, 12 })
+createPlank("Plank_3", Vector3.new(67.2, 1.02, -75.1), "Wood", { -6, 44, -10 })
+
+createRing("Ring_1", Vector3.new(72.4, 0.18, -81.4), "Gold", nil, Vector3.new(2.2, 0.36, 2.2))
+createRing("Ring_2", Vector3.new(75.1, 0.2, -83.3), "Gold", { 0, 18, 0 }, Vector3.new(2.65, 0.4, 2.65))
+createRing("Ring_3", Vector3.new(78.2, 0.16, -79.9), "Gold", { 0, -26, 0 }, Vector3.new(1.8, 0.32, 1.8))
+createRing("Ring_4", Vector3.new(80.6, 0.22, -82.1), "Gold", { 0, 34, 0 }, Vector3.new(2.9, 0.44, 2.9))
+createRing("Ring_5", Vector3.new(83.4, 0.18, -84.7), "Gold", { 0, -12, 0 }, Vector3.new(2.3, 0.36, 2.3))
+createRing("Ring_6", Vector3.new(85.8, 0.14, -80.8), "Gold", { 0, 26, 0 }, Vector3.new(1.6, 0.28, 1.6))
+createRing("Ring_7", Vector3.new(77.0, 0.2, -86.0), "Gold", { 0, -40, 0 }, Vector3.new(2.55, 0.4, 2.55))
 
 --------------------------------------------------------------------------------
 -- PLAYER

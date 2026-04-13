@@ -51,6 +51,14 @@ function createRockLikeMaterial(color) {
   })
 }
 
+function applyColorToMeshes(obj, colorHex) {
+  obj.traverse((child) => {
+    if (child.isMesh && child.material && child.userData?.preserveColor !== true) {
+      child.material.color.setHex(colorHex)
+    }
+  })
+}
+
 function applyEntityAppearance(obj, entity) {
   if (!obj?.userData) return
 
@@ -69,6 +77,10 @@ function applyEntityAppearance(obj, entity) {
 
   if (obj.userData.dynamicRole === 'PickupObject' && obj.material) {
     obj.material.color.setHex(resolveEntityColorHex(entity))
+  }
+
+  if ((obj.userData.dynamicRole === 'Ball' || obj.userData.dynamicRole === 'Ring') && obj.userData.isStyledCarryable) {
+    applyColorToMeshes(obj, resolveEntityColorHex(entity))
   }
 }
 
@@ -235,6 +247,71 @@ function createEntityVisual(entity) {
     group.userData.isGlowBulb = true
     group.userData.dynamicRole = 'GlowBulb'
     applyEntityAppearance(group, entity)
+    return group
+  }
+
+  if (role === 'Ball') {
+    const group = new THREE.Group()
+    const radius = Math.max(size[0], size[1], size[2]) * 0.5
+    const ball = new THREE.Mesh(
+      new THREE.SphereGeometry(radius, 20, 20),
+      new THREE.MeshStandardMaterial({
+        color: resolveEntityColorHex(entity),
+        roughness: 0.35,
+        metalness: 0.08,
+      }),
+    )
+    ball.castShadow = true
+    ball.receiveShadow = true
+    group.add(ball)
+    group.userData.dynamicRole = 'Ball'
+    group.userData.isStyledCarryable = true
+    return group
+  }
+
+  if (role === 'Plank') {
+    const group = new THREE.Group()
+    const body = new THREE.Mesh(
+      new THREE.BoxGeometry(size[0], size[1], size[2]),
+      new THREE.MeshStandardMaterial({ color: 0x9c6e48, roughness: 0.92, metalness: 0.0 }),
+    )
+    body.castShadow = true
+    body.receiveShadow = true
+    group.add(body)
+
+    for (const zFrac of [-0.28, 0, 0.28]) {
+      const groove = new THREE.Mesh(
+        new THREE.BoxGeometry(size[0] * 0.96, size[1] * 0.12, size[2] * 0.08),
+        new THREE.MeshStandardMaterial({ color: 0x6f4a2c, roughness: 1.0, metalness: 0.0 }),
+      )
+      groove.position.set(0, size[1] * 0.18, size[2] * zFrac)
+      groove.castShadow = true
+      groove.receiveShadow = true
+      groove.userData.preserveColor = true
+      group.add(groove)
+    }
+    return group
+  }
+
+  if (role === 'Ring') {
+    const group = new THREE.Group()
+    const outerRadius = Math.min(size[0], size[2]) * 0.5
+    const tubeRadius = Math.max(Math.min(size[1] * 0.5, outerRadius * 0.45), 0.05)
+    const ringRadius = Math.max(outerRadius - tubeRadius, 0.05)
+    const ring = new THREE.Mesh(
+      new THREE.TorusGeometry(ringRadius, tubeRadius, 18, 40),
+      new THREE.MeshStandardMaterial({
+        color: resolveEntityColorHex(entity),
+        roughness: 0.82,
+        metalness: 0.12,
+      }),
+    )
+    ring.rotation.x = Math.PI / 2
+    ring.castShadow = true
+    ring.receiveShadow = true
+    group.add(ring)
+    group.userData.dynamicRole = 'Ring'
+    group.userData.isStyledCarryable = true
     return group
   }
 
