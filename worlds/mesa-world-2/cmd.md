@@ -2,7 +2,7 @@ bash worlds/mesa-world/launch_multi_generations.sh --world-dir worlds/mesa-world
 
 
 
-bash worlds/mesa-world/launch_multi_generations_claude.sh --world-dir worlds/mesa-world-2 --generations 10 --generation-duration 1h --base-port 8585 --tmux-prefix mesa-world-gens5 --system-prompt worlds/mesa-world/system_prompt.md --keep-world
+bash worlds/mesa-world/launch_multi_generations_claude.sh --world-dir worlds/mesa-world-2 --generations 10 --generation-duration 1h --base-port 8185 --tmux-prefix mesa-world-gens1 --system-prompt worlds/mesa-world/system_prompt.md --keep-world
 
 
 
