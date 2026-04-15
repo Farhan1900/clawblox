@@ -80,6 +80,11 @@
             <div id="agent-log-feed" class="agent-log-feed" role="log" aria-live="polite"></div>
           </section>
 
+          <section id="behavior-panel" class="behavior-panel" aria-label="Replay behaviors" hidden>
+            <div id="behavior-list" class="behavior-list"></div>
+            <div id="behavior-details" class="behavior-details"></div>
+          </section>
+
           <section id="replay-panel" class="replay-panel" aria-label="Replay controls" hidden>
             <button
               id="replay-play-toggle"
@@ -124,6 +129,16 @@
               <input id="replay-skip-idle" type="checkbox" />
               <span>Skip idle time</span>
             </label>
+            <button
+              id="behavior-panel-toggle"
+              class="replay-button replay-button--label"
+              type="button"
+              aria-label="Show behaviors"
+              title="Show behaviors"
+              hidden
+            >
+              Behaviors
+            </button>
           </section>
 
           <div class="runtime-meta-sr" aria-hidden="true">

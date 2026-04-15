@@ -44,6 +44,10 @@ const chatConnectionEl = document.getElementById('chat-connection')
 const chatLocalStatusEl = document.getElementById('chat-local-status')
 const playerListCountEl = document.getElementById('player-list-count')
 const playerListBodyEl = document.getElementById('player-list-body')
+const behaviorPanelEl = document.getElementById('behavior-panel')
+const behaviorPanelToggleEl = document.getElementById('behavior-panel-toggle')
+const behaviorListEl = document.getElementById('behavior-list')
+const behaviorDetailsEl = document.getElementById('behavior-details')
 const replayPanelEl = document.getElementById('replay-panel')
 const replayPlayToggleEl = document.getElementById('replay-play-toggle')
 const replayPlayIconEl = document.getElementById('replay-play-icon')
@@ -79,6 +83,12 @@ const replayState = {
   agentLoaded: false,
   agentMessages: [],
   agentPanelOpen: readStoredBool('clawblox_agent_log_open', true),
+  metadataEnabled: false,
+  metadataLoaded: false,
+  metadata: null,
+  behaviorPanelOpen: readStoredBool('clawblox_behavior_panel_open', false),
+  selectedBehaviorId: null,
+  selectedOccurrenceId: null,
 }
 const internalApiRegistry = new Map()
 
@@ -181,6 +191,29 @@ function syncAgentLogVisibility() {
   if (agentLogToggleEl) agentLogToggleEl.hidden = !shouldShow
 }
 
+function setBehaviorPanelOpen(open, persist = true) {
+  replayState.behaviorPanelOpen = !!open
+  if (behaviorPanelEl) {
+    behaviorPanelEl.classList.toggle('is-open', replayState.behaviorPanelOpen)
+  }
+  if (behaviorPanelToggleEl) {
+    behaviorPanelToggleEl.setAttribute('aria-label', replayState.behaviorPanelOpen ? 'Hide behaviors' : 'Show behaviors')
+    behaviorPanelToggleEl.title = replayState.behaviorPanelOpen ? 'Hide behaviors' : 'Show behaviors'
+  }
+  if (persist) storeBool('clawblox_behavior_panel_open', replayState.behaviorPanelOpen)
+  syncBehaviorPanelVisibility()
+  if (replayState.behaviorPanelOpen) renderBehaviorPanel()
+}
+
+function syncBehaviorPanelVisibility() {
+  const shouldShow = replayState.enabled && replayState.metadataEnabled
+  if (behaviorPanelEl) {
+    behaviorPanelEl.hidden = !shouldShow
+    behaviorPanelEl.classList.toggle('is-open', shouldShow && replayState.behaviorPanelOpen)
+  }
+  if (behaviorPanelToggleEl) behaviorPanelToggleEl.hidden = !shouldShow
+}
+
 function formatDurationMs(ms) {
   const totalSeconds = Math.max(0, Math.floor((Number(ms) || 0) / 1000))
   const hours = Math.floor(totalSeconds / 3600)
@@ -200,10 +233,16 @@ function setReplayMode(enabled) {
   if (!replayState.enabled) {
     replayState.agentLoaded = false
     replayState.agentMessages = []
+    replayState.metadataLoaded = false
+    replayState.metadataEnabled = false
+    replayState.metadata = null
+    replayState.selectedBehaviorId = null
+    replayState.selectedOccurrenceId = null
   }
   document.body.dataset.mode = replayState.enabled ? 'replay' : 'live'
   if (replayPanelEl) replayPanelEl.hidden = !replayState.enabled
   syncAgentLogVisibility()
+  syncBehaviorPanelVisibility()
   if (replayState.enabled) {
     setChatLocalStatus('Replay')
     setChatConnection('Replay')
@@ -242,6 +281,7 @@ function renderReplayInfo(info) {
     }
   }
   if (replaySkipIdleEl) replaySkipIdleEl.checked = !!info.skip_idle
+  if (replayState.behaviorPanelOpen) renderBehaviorPanel()
 }
 
 function formatAgentLogTime(timestampMs) {
@@ -329,6 +369,245 @@ function renderAgentLogMessages(currentTick, payload = null) {
   }
 }
 
+function behaviorAccentColor(behavior) {
+  const explicit = String(behavior?.color || '').trim()
+  if (explicit) return explicit
+  const label = String(behavior?.label || behavior?.id || 'behavior')
+  let hash = 0
+  for (let i = 0; i < label.length; i++) hash = (hash * 33 + label.charCodeAt(i)) >>> 0
+  const hue = hash % 360
+  return `hsl(${hue}deg 62% 58%)`
+}
+
+function getReplayBehaviors() {
+  const behaviors = Array.isArray(replayState.metadata?.behaviors) ? replayState.metadata.behaviors : []
+  return behaviors.filter((behavior) => behavior && typeof behavior === 'object' && Array.isArray(behavior.occurrences))
+}
+
+function findBehaviorById(behaviorId) {
+  return getReplayBehaviors().find((behavior) => String(behavior.id || '') === String(behaviorId || '')) || null
+}
+
+function findOccurrence(behaviorId, occurrenceId) {
+  const behavior = findBehaviorById(behaviorId)
+  if (!behavior) return { behavior: null, occurrence: null }
+  const occurrence = Array.isArray(behavior.occurrences)
+    ? behavior.occurrences.find((item) => String(item?.id || '') === String(occurrenceId || '')) || null
+    : null
+  return { behavior, occurrence }
+}
+
+function occurrenceDurationText(occurrence, info) {
+  if (!occurrence || !info) return ''
+  const startTick = Number(occurrence.start_tick)
+  const endTick = Number(occurrence.end_tick)
+  if (!Number.isFinite(startTick) || !Number.isFinite(endTick) || !Number.isFinite(info.tick_rate) || info.tick_rate <= 0) {
+    return ''
+  }
+  const durationTicks = Math.max(0, endTick - startTick)
+  return formatDurationMs((durationTicks / info.tick_rate) * 1000)
+}
+
+async function playBehaviorOccurrence(behaviorId, occurrenceId) {
+  const { behavior, occurrence } = findOccurrence(behaviorId, occurrenceId)
+  if (!behavior || !occurrence || !replayState.enabled) return
+  replayState.selectedBehaviorId = String(behavior.id || '')
+  replayState.selectedOccurrenceId = String(occurrence.id || '')
+  renderBehaviorPanel()
+  try {
+    await postReplay(`/replay/play-range?start_tick=${encodeURIComponent(String(occurrence.start_tick || 0))}&end_tick=${encodeURIComponent(String(occurrence.end_tick || occurrence.start_tick || 0))}`)
+    await refreshReplayInfo()
+  } catch (err) {
+    console.error(err)
+    setStatus('Failed to replay behavior occurrence', 'error')
+  }
+}
+
+function renderBehaviorDetails() {
+  if (!behaviorDetailsEl) return
+  const { behavior, occurrence } = findOccurrence(replayState.selectedBehaviorId, replayState.selectedOccurrenceId)
+  if (!behavior || !occurrence) {
+    behaviorDetailsEl.textContent = ''
+    const empty = document.createElement('div')
+    empty.className = 'behavior-details__meta'
+    empty.textContent = 'Select a behavior occurrence to inspect its details.'
+    behaviorDetailsEl.appendChild(empty)
+    return
+  }
+
+  behaviorDetailsEl.textContent = ''
+
+  const title = document.createElement('div')
+  title.className = 'behavior-details__title'
+  title.textContent = String(behavior.label || behavior.id || 'Behavior')
+
+  const meta = document.createElement('div')
+  meta.className = 'behavior-details__meta'
+  const duration = occurrenceDurationText(occurrence, replayState.info)
+  const metaParts = [
+    `ticks ${occurrence.start_tick}..${occurrence.end_tick}`,
+    duration ? `duration ${duration}` : '',
+  ].filter(Boolean)
+  meta.textContent = metaParts.join(' | ')
+
+  behaviorDetailsEl.append(title, meta)
+
+  if (behavior.description) {
+    const description = document.createElement('div')
+    description.className = 'behavior-details__description'
+    description.textContent = String(behavior.description)
+    behaviorDetailsEl.appendChild(description)
+  }
+
+  const participants = Array.isArray(occurrence.participants) ? occurrence.participants : []
+  if (participants.length) {
+    const participantsWrap = document.createElement('div')
+    participantsWrap.className = 'behavior-details__participants'
+    for (const participant of participants) {
+      const chip = document.createElement('div')
+      chip.className = 'behavior-details__participant'
+      const parts = [
+        participant?.role ? String(participant.role) : '',
+        participant?.label ? String(participant.label) : '',
+        !participant?.label && participant?.id ? String(participant.id) : '',
+        participant?.kind ? `(${String(participant.kind)})` : '',
+      ].filter(Boolean)
+      chip.textContent = parts.join(' ')
+      participantsWrap.appendChild(chip)
+    }
+    behaviorDetailsEl.appendChild(participantsWrap)
+  }
+
+  const observations = Array.isArray(occurrence.observations) ? occurrence.observations.slice(0, 3) : []
+  if (observations.length) {
+    const list = document.createElement('div')
+    list.className = 'behavior-details__observations'
+    for (const observation of observations) {
+      const item = document.createElement('div')
+      item.className = 'behavior-details__observation'
+
+      const obsMeta = document.createElement('div')
+      obsMeta.className = 'behavior-details__observation-meta'
+      const obsParts = [
+        observation?.time ? String(observation.time) : '',
+        Number.isFinite(Number(observation?.tick)) ? `tick ${Number(observation.tick)}` : '',
+        observation?.channel ? String(observation.channel) : '',
+        observation?.speaker ? String(observation.speaker) : '',
+      ].filter(Boolean)
+      obsMeta.textContent = obsParts.join(' | ')
+
+      const body = document.createElement('div')
+      body.textContent = String(observation?.text || '')
+
+      item.append(obsMeta, body)
+      list.appendChild(item)
+    }
+    behaviorDetailsEl.appendChild(list)
+  } else {
+    const emptyObservations = document.createElement('div')
+    emptyObservations.className = 'behavior-details__meta'
+    emptyObservations.textContent = 'No observations attached to this occurrence.'
+    behaviorDetailsEl.appendChild(emptyObservations)
+  }
+}
+
+function renderBehaviorPanel() {
+  if (!behaviorListEl) return
+  const shouldRender = replayState.enabled && replayState.metadataEnabled && replayState.behaviorPanelOpen
+  if (!shouldRender) return
+
+  const behaviors = getReplayBehaviors()
+  const info = replayState.info
+  const firstTick = Number(info?.first_tick || 0)
+  const totalTicks = Number(info?.total_ticks || 0)
+  const tickSpan = Math.max(1, totalTicks - firstTick)
+  const currentTick = Number(info?.current_tick || firstTick)
+
+  if (!replayState.selectedBehaviorId && behaviors.length) {
+    replayState.selectedBehaviorId = String(behaviors[0].id || '')
+  }
+  if (replayState.selectedBehaviorId && !findBehaviorById(replayState.selectedBehaviorId)) {
+    replayState.selectedBehaviorId = behaviors.length ? String(behaviors[0].id || '') : null
+    replayState.selectedOccurrenceId = null
+  }
+  if (replayState.selectedBehaviorId && !replayState.selectedOccurrenceId) {
+    const selectedBehavior = findBehaviorById(replayState.selectedBehaviorId)
+    const firstOccurrence = Array.isArray(selectedBehavior?.occurrences) ? selectedBehavior.occurrences[0] : null
+    replayState.selectedOccurrenceId = firstOccurrence ? String(firstOccurrence.id || '') : null
+  }
+
+  behaviorListEl.textContent = ''
+  for (const behavior of behaviors) {
+    const row = document.createElement('div')
+    row.className = 'behavior-row'
+
+    const labelButton = document.createElement('button')
+    labelButton.type = 'button'
+    labelButton.className = 'behavior-row__label'
+    const behaviorId = String(behavior.id || '')
+    const occurrences = Array.isArray(behavior.occurrences) ? behavior.occurrences : []
+    if (behaviorId === replayState.selectedBehaviorId) {
+      labelButton.classList.add('is-selected')
+    }
+
+    const name = document.createElement('div')
+    name.className = 'behavior-row__name'
+    name.textContent = String(behavior.label || behavior.id || 'Behavior')
+
+    labelButton.append(name)
+    labelButton.addEventListener('click', () => {
+      replayState.selectedBehaviorId = behaviorId
+      if (occurrences.length) {
+        replayState.selectedOccurrenceId = String(occurrences[0].id || '')
+        void playBehaviorOccurrence(behaviorId, replayState.selectedOccurrenceId)
+      } else {
+        renderBehaviorPanel()
+      }
+    })
+
+    const track = document.createElement('div')
+    track.className = 'behavior-row__track'
+
+    const playhead = document.createElement('div')
+    playhead.className = 'behavior-row__playhead'
+    const playheadPct = ((currentTick - firstTick) / tickSpan) * 100
+    playhead.style.left = `${Math.max(0, Math.min(100, playheadPct))}%`
+    track.appendChild(playhead)
+
+    for (const occurrence of occurrences) {
+      const startTick = Number(occurrence?.start_tick || 0)
+      const endTick = Number(occurrence?.end_tick || startTick)
+      const startPct = ((startTick - firstTick) / tickSpan) * 100
+      const widthPct = Math.max(((Math.max(startTick, endTick) - startTick) / tickSpan) * 100, 0.8)
+      const bar = document.createElement('button')
+      bar.type = 'button'
+      bar.className = 'behavior-occurrence'
+      if (String(occurrence?.id || '') === replayState.selectedOccurrenceId) {
+        bar.classList.add('is-active')
+      } else if (currentTick >= startTick && currentTick <= endTick) {
+        bar.classList.add('is-active')
+      }
+      bar.style.left = `${Math.max(0, Math.min(100, startPct))}%`
+      bar.style.width = `${Math.max(0.8, Math.min(100 - Math.max(0, startPct), widthPct))}%`
+      bar.style.background = behaviorAccentColor(behavior)
+      const duration = occurrenceDurationText(occurrence, info)
+      bar.title = `${behavior.label || behavior.id || 'Behavior'} | ticks ${startTick}..${endTick}${duration ? ` | ${duration}` : ''}`
+      bar.addEventListener('click', (ev) => {
+        ev.stopPropagation()
+        replayState.selectedBehaviorId = behaviorId
+        replayState.selectedOccurrenceId = String(occurrence?.id || '')
+        void playBehaviorOccurrence(behaviorId, replayState.selectedOccurrenceId)
+      })
+      track.appendChild(bar)
+    }
+
+    row.append(labelButton, track)
+    behaviorListEl.appendChild(row)
+  }
+
+  renderBehaviorDetails()
+}
+
 async function fetchReplayInfo() {
   const resp = await fetch(withBasePath('/replay/info'), { cache: 'no-store' })
   if (!resp.ok) throw new Error(`replay info HTTP ${resp.status}`)
@@ -339,6 +618,24 @@ async function fetchReplayAgentMessages() {
   const resp = await fetch(withBasePath('/replay/agent'), { cache: 'no-store' })
   if (!resp.ok) throw new Error(`replay agent HTTP ${resp.status}`)
   return resp.json()
+}
+
+async function fetchReplayMetadata() {
+  const resp = await fetch(withBasePath('/replay/metadata'), { cache: 'no-store' })
+  if (!resp.ok) throw new Error(`replay metadata HTTP ${resp.status}`)
+  return resp.json()
+}
+
+function applyReplayMetadata(payload) {
+  replayState.metadataLoaded = true
+  replayState.metadataEnabled = !!payload?.enabled && !!payload?.metadata
+  replayState.metadata = replayState.metadataEnabled ? payload.metadata : null
+  if (!replayState.metadataEnabled) {
+    replayState.selectedBehaviorId = null
+    replayState.selectedOccurrenceId = null
+  }
+  syncBehaviorPanelVisibility()
+  if (replayState.behaviorPanelOpen) renderBehaviorPanel()
 }
 
 async function probeReplayMode() {
@@ -364,6 +661,10 @@ async function refreshReplayInfo() {
   try {
     const info = await fetchReplayInfo()
     renderReplayInfo(info)
+    if (!replayState.metadataLoaded) {
+      const metadata = await fetchReplayMetadata()
+      applyReplayMetadata(metadata)
+    }
     if (!replayState.agentLoaded) {
       const logs = await fetchReplayAgentMessages()
       if (logs) renderAgentLogMessages(info?.current_tick || 0, logs)
@@ -1222,6 +1523,11 @@ async function bootstrap() {
   if (replayInfo) {
     setReplayMode(true)
     renderReplayInfo(replayInfo)
+    const metadata = await fetchReplayMetadata().catch((err) => {
+      console.error(err)
+      return null
+    })
+    if (metadata) applyReplayMetadata(metadata)
     const logs = await fetchReplayAgentMessages().catch((err) => {
       console.error(err)
       return null
@@ -1435,6 +1741,13 @@ if (replaySkipIdleEl) {
       replaySkipIdleEl.checked = !replaySkipIdleEl.checked
       setStatus('Failed to update replay idle skipping', 'error')
     }
+  })
+}
+
+if (behaviorPanelToggleEl) {
+  setBehaviorPanelOpen(replayState.behaviorPanelOpen, false)
+  behaviorPanelToggleEl.addEventListener('click', () => {
+    setBehaviorPanelOpen(!replayState.behaviorPanelOpen, true)
   })
 }
 

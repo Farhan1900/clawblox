@@ -122,12 +122,25 @@ async fn build_replay_state(
         None
     };
 
+    let replay_metadata = match replay_metadata::load_for_recording(&file, &meta) {
+        Ok(metadata) => metadata.map(Arc::new),
+        Err(err) => {
+            eprintln!(
+                "Warning: failed to load replay metadata '{}': {}",
+                file.display(),
+                err
+            );
+            None
+        }
+    };
+
     Ok(ReplayState {
         reader: Arc::new(reader),
         playback: Arc::new(tokio::sync::Mutex::new(playback)),
         base_path: normalize_base_path(base_path),
         renderer_manifest,
         agent_timeline,
+        replay_metadata,
         world_dir,
     })
 }
@@ -175,11 +188,19 @@ pub fn run_app(path: PathBuf, port: u16, base_path: &str) {
                     "/sessions/{id}/replay/agent",
                     get(app_replay_agent_messages),
                 )
+                .route(
+                    "/sessions/{id}/replay/metadata",
+                    get(app_replay_metadata),
+                )
                 .route("/sessions/{id}/replay/seek", post(app_replay_seek))
                 .route("/sessions/{id}/replay/speed", post(app_replay_speed))
                 .route("/sessions/{id}/replay/skip-idle", post(app_replay_skip_idle))
                 .route("/sessions/{id}/replay/pause", post(app_replay_pause))
                 .route("/sessions/{id}/replay/play", post(app_replay_play))
+                .route(
+                    "/sessions/{id}/replay/play-range",
+                    post(app_replay_play_range),
+                )
                 .route(
                     "/sessions/{id}/renderer-files/{*path}",
                     get(app_replay_world_file),
@@ -607,6 +628,20 @@ async fn app_replay_agent_messages(
     }))
 }
 
+async fn app_replay_metadata(
+    AxumPath(id): AxumPath<String>,
+    State(state): State<AppState>,
+) -> Result<Json<ReplayMetadataResponse>, (axum::http::StatusCode, String)> {
+    let replay_state = get_app_replay_state(&state, &id)?;
+    Ok(Json(ReplayMetadataResponse {
+        enabled: replay_state.replay_metadata.is_some(),
+        metadata: replay_state
+            .replay_metadata
+            .as_ref()
+            .map(|metadata| (**metadata).clone()),
+    }))
+}
+
 async fn app_replay_seek(
     AxumPath(id): AxumPath<String>,
     State(state): State<AppState>,
@@ -656,7 +691,18 @@ async fn app_replay_play(
 ) -> Result<axum::http::StatusCode, (axum::http::StatusCode, String)> {
     let replay_state = get_app_replay_state(&state, &id)?;
     let mut pb = replay_state.playback.lock().await;
-    pb.set_paused(false);
+    pb.play();
+    Ok(axum::http::StatusCode::OK)
+}
+
+async fn app_replay_play_range(
+    AxumPath(id): AxumPath<String>,
+    State(state): State<AppState>,
+    Query(q): Query<PlayRangeQuery>,
+) -> Result<axum::http::StatusCode, (axum::http::StatusCode, String)> {
+    let replay_state = get_app_replay_state(&state, &id)?;
+    let mut pb = replay_state.playback.lock().await;
+    pb.play_range(q.start_tick, q.end_tick);
     Ok(axum::http::StatusCode::OK)
 }
 

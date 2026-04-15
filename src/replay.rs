@@ -11,6 +11,8 @@ pub struct ReplayInfo {
     pub speed: f32,
     pub paused: bool,
     pub skip_idle: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pause_at_tick: Option<u64>,
 }
 
 #[derive(Debug, Clone)]
@@ -28,6 +30,7 @@ pub struct ReplayPlayback {
     speed: f32,
     paused: bool,
     skip_idle: bool,
+    pause_at_tick: Option<u64>,
     fractional_ticks: f64,
     active_ranges: Vec<ReplayActiveRange>,
 }
@@ -59,6 +62,7 @@ impl ReplayPlayback {
             speed: speed.clamp(0.1, 100.0),
             paused: false,
             skip_idle: false,
+            pause_at_tick: None,
             fractional_ticks: 0.0,
             active_ranges: normalize_active_ranges(active_ranges, first_tick, total_ticks),
         })
@@ -74,6 +78,7 @@ impl ReplayPlayback {
             speed: self.speed,
             paused: self.paused,
             skip_idle: self.skip_idle,
+            pause_at_tick: self.pause_at_tick,
         }
     }
 
@@ -83,6 +88,7 @@ impl ReplayPlayback {
 
     pub fn seek(&mut self, tick: u64) {
         self.current_tick = tick.clamp(self.first_tick, self.total_ticks);
+        self.pause_at_tick = None;
         self.fractional_ticks = 0.0;
     }
 
@@ -92,6 +98,33 @@ impl ReplayPlayback {
 
     pub fn set_paused(&mut self, paused: bool) {
         self.paused = paused;
+        if paused {
+            self.pause_at_tick = None;
+        }
+    }
+
+    pub fn play(&mut self) {
+        self.pause_at_tick = None;
+        self.paused = false;
+    }
+
+    pub fn play_range(&mut self, start_tick: u64, end_tick: u64) {
+        let start_tick = start_tick.clamp(self.first_tick, self.total_ticks);
+        let end_tick = end_tick.clamp(start_tick, self.total_ticks);
+        self.current_tick = start_tick;
+        self.pause_at_tick = Some(end_tick);
+        self.fractional_ticks = 0.0;
+        self.paused = false;
+        if self.current_tick >= end_tick {
+            self.current_tick = end_tick;
+            self.pause_at_tick = None;
+            self.paused = true;
+            return;
+        }
+        if self.skip_idle {
+            self.skip_idle_gap();
+            self.apply_pause_bound();
+        }
     }
 
     pub fn set_skip_idle(&mut self, skip_idle: bool) {
@@ -122,6 +155,18 @@ impl ReplayPlayback {
 
         if self.skip_idle {
             self.skip_idle_gap();
+        }
+        self.apply_pause_bound();
+    }
+
+    fn apply_pause_bound(&mut self) {
+        if let Some(pause_at_tick) = self.pause_at_tick {
+            if self.current_tick >= pause_at_tick {
+                self.current_tick = pause_at_tick;
+                self.pause_at_tick = None;
+                self.paused = true;
+                self.fractional_ticks = 0.0;
+            }
         }
     }
 

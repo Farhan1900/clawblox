@@ -54,6 +54,7 @@ use clawblox::{
     },
     recording, replay,
     replay_agent_log::{load_agent_timeline, ReplayAgentMessage, ReplayAgentTimeline},
+    replay_metadata::{self, ReplayMetadata},
     snapshot::GameInstanceSnapshot,
 };
 
@@ -2239,12 +2240,25 @@ fn run_replay(
             None
         };
 
+        let replay_metadata = match replay_metadata::load_for_recording(&file, &meta) {
+            Ok(metadata) => metadata.map(Arc::new),
+            Err(err) => {
+                eprintln!(
+                    "Warning: failed to load replay metadata '{}': {}",
+                    file.display(),
+                    err
+                );
+                None
+            }
+        };
+
         let replay_state = ReplayState {
             reader: reader.clone(),
             playback: playback.clone(),
             base_path: base_path.clone(),
             renderer_manifest,
             agent_timeline,
+            replay_metadata,
             world_dir: world_dir.clone(),
         };
 
@@ -2262,11 +2276,13 @@ fn run_replay(
             .route("/replay/info", get(replay_info))
             .route("/replay/state", get(replay_state_at))
             .route("/replay/agent", get(replay_agent_messages))
+            .route("/replay/metadata", get(replay_metadata_route))
             .route("/replay/seek", post(replay_seek))
             .route("/replay/speed", post(replay_speed))
             .route("/replay/skip-idle", post(replay_skip_idle))
             .route("/replay/pause", post(replay_pause))
             .route("/replay/play", post(replay_play))
+            .route("/replay/play-range", post(replay_play_range))
             .nest_service("/renderer-files", ServeDir::new(world_dir.join("renderer")))
             .nest_service("/assets", ServeDir::new(world_dir.join("assets")))
             .nest_service("/static", ServeDir::new(world_dir.join("static")))
@@ -2301,7 +2317,15 @@ struct ReplayState {
     base_path: String,
     renderer_manifest: LocalRendererManifest,
     agent_timeline: Option<Arc<ReplayAgentTimeline>>,
+    replay_metadata: Option<Arc<ReplayMetadata>>,
     world_dir: PathBuf,
+}
+
+#[derive(Serialize)]
+struct ReplayMetadataResponse {
+    enabled: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    metadata: Option<ReplayMetadata>,
 }
 
 async fn replay_spectate_ws(
@@ -2468,6 +2492,15 @@ async fn replay_agent_messages(
     })
 }
 
+async fn replay_metadata_route(
+    State(state): State<ReplayState>,
+) -> Json<ReplayMetadataResponse> {
+    Json(ReplayMetadataResponse {
+        enabled: state.replay_metadata.is_some(),
+        metadata: state.replay_metadata.as_ref().map(|metadata| (**metadata).clone()),
+    })
+}
+
 #[derive(Deserialize)]
 struct SeekQuery {
     tick: u64,
@@ -2518,7 +2551,22 @@ async fn replay_pause(State(state): State<ReplayState>) -> axum::http::StatusCod
 
 async fn replay_play(State(state): State<ReplayState>) -> axum::http::StatusCode {
     let mut pb = state.playback.lock().await;
-    pb.set_paused(false);
+    pb.play();
+    axum::http::StatusCode::OK
+}
+
+#[derive(Deserialize)]
+struct PlayRangeQuery {
+    start_tick: u64,
+    end_tick: u64,
+}
+
+async fn replay_play_range(
+    State(state): State<ReplayState>,
+    Query(q): Query<PlayRangeQuery>,
+) -> axum::http::StatusCode {
+    let mut pb = state.playback.lock().await;
+    pb.play_range(q.start_tick, q.end_tick);
     axum::http::StatusCode::OK
 }
 

@@ -10,4 +10,5 @@ pub mod r2;
 pub mod recording;
 pub mod replay;
 pub mod replay_agent_log;
+pub mod replay_metadata;
 pub mod snapshot;
