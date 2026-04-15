@@ -8,6 +8,7 @@ local AgentInputService = game:GetService("AgentInputService")
 Workspace.Gravity = 10
 
 local BLOCK_SIZE = 0.75
+local ENABLE_LARGE_RING = true
 local PICKUP_RANGE = 6
 local PLACE_RANGE = 7
 local HOLD_OFFSET = Vector3.new(0, 3.5, 0)
@@ -37,6 +38,7 @@ end
 local blockColors = {
     Sand = Color3.fromRGB(214, 186, 128),
     Slate = Color3.fromRGB(148, 136, 124),
+    Gold = Color3.fromRGB(232, 192, 74),
 }
 
 local blockPhysics = PhysicalProperties.new(
@@ -166,6 +168,36 @@ local function createBlock(name, position, colorName)
     return block
 end
 
+local function createRing(name, position, colorName, rotationDegrees, size)
+    local ring = Instance.new("Part")
+    ring.Name = name
+    ring.Size = size
+    ring.Shape = Enum.PartType.Ring
+    local pitch = 0
+    local yaw = 0
+    local roll = 0
+    if rotationDegrees then
+        pitch = rotationDegrees[1] or pitch
+        yaw = rotationDegrees[2] or yaw
+        roll = rotationDegrees[3] or roll
+    end
+    ring.CFrame = CFrame.new(position) * CFrame.Angles(math.rad(pitch), math.rad(yaw), math.rad(roll))
+    ring.Anchored = false
+    ring.Material = Enum.Material.Metal
+    ring.Color = blockColors[colorName]
+    ring.CustomPhysicalProperties = PhysicalProperties.new(
+        0.45,
+        0.35,
+        0.18,
+        1.0,
+        1.0
+    )
+    setPickupMetadata(ring, colorName, "Ring")
+    ring.Parent = Workspace
+    trackedBlocks[ring] = true
+    return ring
+end
+
 local baseBlockPile = {
     { pos = Vector3.new(14.5, 6.5, -1.9), color = "Slate" },
     { pos = Vector3.new(15.2, 6.9, -1.3), color = "Slate" },
@@ -183,6 +215,10 @@ local baseBlockPile = {
 
 for index, blockDef in ipairs(baseBlockPile) do
     createBlock("Block_" .. index, blockDef.pos, blockDef.color)
+end
+
+if ENABLE_LARGE_RING then
+    createRing("Ring_1", Vector3.new(45.4, 0.28, -45.7), "Gold", { 0, 32, 0 }, Vector3.new(3.6, 0.56, 3.6))
 end
 
 --------------------------------------------------------------------------------
