@@ -638,6 +638,16 @@ local function releaseHeldObject(player)
     return object
 end
 
+local function parsePosition(pos)
+    if type(pos) ~= "table" then return nil end
+    local x = tonumber(pos[1])
+    local y = tonumber(pos[2])
+    local z = tonumber(pos[3])
+    if not x or not y or not z then return nil end
+    if x ~= x or y ~= y or z ~= z then return nil end
+    return Vector3.new(x, y, z)
+end
+
 local function pickupObject(player, inputData)
     if heldObjectsByPlayer[player] then
         player:SetAttribute("LastActionResult", "PickupFailed:AlreadyHolding")
@@ -649,8 +659,11 @@ local function pickupObject(player, inputData)
         return
     end
 
-    local pos = inputData.position
-    local targetPosition = Vector3.new(pos[1], pos[2], pos[3])
+    local targetPosition = parsePosition(inputData.position)
+    if not targetPosition then
+        player:SetAttribute("LastActionResult", "PickupFailed:InvalidPosition")
+        return
+    end
     if not canReach(player, targetPosition, PICKUP_RANGE) then
         player:SetAttribute("LastActionResult", "PickupFailed:OutOfRange")
         return
@@ -707,8 +720,11 @@ local function placeObject(player, inputData)
         return
     end
 
-    local pos = inputData.position
-    local targetPosition = Vector3.new(pos[1], pos[2], pos[3])
+    local targetPosition = parsePosition(inputData.position)
+    if not targetPosition then
+        player:SetAttribute("LastActionResult", "PlaceFailed:InvalidPosition")
+        return
+    end
     if not canReach(player, targetPosition, PLACE_RANGE) then
         player:SetAttribute("LastActionResult", "PlaceFailed:OutOfRange")
         return
@@ -744,8 +760,11 @@ local function getThrowDirection(inputData)
         return nil
     end
 
-    local dir = inputData.direction
-    return normalizeOrNil(Vector3.new(dir[1], dir[2], dir[3]))
+    local direction = parsePosition(inputData.direction)
+    if not direction then
+        return nil
+    end
+    return normalizeOrNil(direction)
 end
 
 local function getThrowSpeed(inputData)
@@ -809,8 +828,12 @@ if AgentInputService then
         if not humanoid then return end
 
         if inputType == "MoveTo" and inputData and inputData.position then
-            local pos = inputData.position
-            humanoid:MoveTo(Vector3.new(pos[1], pos[2], pos[3]))
+            local targetPosition = parsePosition(inputData.position)
+            if not targetPosition then
+                player:SetAttribute("LastActionResult", "MoveToFailed:InvalidPosition")
+                return
+            end
+            humanoid:MoveTo(targetPosition)
         elseif inputType == "Stop" then
             humanoid:CancelMoveTo()
         elseif inputType == "Jump" then
@@ -821,6 +844,8 @@ if AgentInputService then
             placeObject(player, inputData)
         elseif inputType == "Throw" then
             throwObject(player, inputData)
+        else
+            player:SetAttribute("LastActionResult", "InvalidAction")
         end
     end)
 end

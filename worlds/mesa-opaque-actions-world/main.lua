@@ -270,6 +270,16 @@ local function canReach(player, worldPosition, maxDistance)
     return (hrp.Position - worldPosition).Magnitude <= maxDistance
 end
 
+local function parsePosition(pos)
+    if type(pos) ~= "table" then return nil end
+    local x = tonumber(pos[1])
+    local y = tonumber(pos[2])
+    local z = tonumber(pos[3])
+    if not x or not y or not z then return nil end
+    if x ~= x or y ~= y or z ~= z then return nil end
+    return Vector3.new(x, y, z)
+end
+
 local function pickupBlock(player, inputData)
     if heldBlocksByPlayer[player] then
         setActionResult(player, "failure")
@@ -281,8 +291,11 @@ local function pickupBlock(player, inputData)
         return
     end
 
-    local pos = inputData.position
-    local targetPosition = Vector3.new(pos[1], pos[2], pos[3])
+    local targetPosition = parsePosition(inputData.position)
+    if not targetPosition then
+        setActionResult(player, "invalid")
+        return
+    end
     if not canReach(player, targetPosition, PICKUP_RANGE) then
         setActionResult(player, "failure")
         return
@@ -332,8 +345,11 @@ local function placeBlock(player, inputData)
         return
     end
 
-    local pos = inputData.position
-    local targetPosition = Vector3.new(pos[1], pos[2], pos[3])
+    local targetPosition = parsePosition(inputData.position)
+    if not targetPosition then
+        setActionResult(player, "invalid")
+        return
+    end
     if not canReach(player, targetPosition, PLACE_RANGE) then
         setActionResult(player, "failure")
         return
@@ -367,8 +383,12 @@ if AgentInputService then
         if not humanoid then return end
 
         if inputType == ACTION_MOVE and inputData and inputData.position then
-            local pos = inputData.position
-            humanoid:MoveTo(Vector3.new(pos[1], pos[2], pos[3]))
+            local targetPosition = parsePosition(inputData.position)
+            if not targetPosition then
+                setActionResult(player, "invalid")
+                return
+            end
+            humanoid:MoveTo(targetPosition)
             setActionResult(player, "success")
         elseif inputType == ACTION_MOVE then
             setActionResult(player, "invalid")
