@@ -26,6 +26,8 @@ pub struct GameInstanceSnapshot {
     pub tick: u64,
     pub workspace_gravity: f32,
     pub workspace_children: Vec<InstanceSnapshot>,
+    #[serde(default)]
+    pub server_script_service_children: Vec<InstanceSnapshot>,
     pub server_storage_children: Vec<InstanceSnapshot>,
     pub replicated_storage_children: Vec<InstanceSnapshot>,
     pub players: Vec<PlayerSnapshot>,
@@ -51,6 +53,8 @@ pub struct PlayerSnapshot {
     pub humanoid_root_part: Option<PlayerPartSnapshot>,
     #[serde(default)]
     pub humanoid: Option<PlayerHumanoidSnapshot>,
+    #[serde(default)]
+    pub character_controller: Option<PlayerCharacterControllerSnapshot>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -78,6 +82,21 @@ pub struct PlayerHumanoidSnapshot {
     #[serde(default)]
     pub move_to_target: Option<[f32; 3]>,
     pub cancel_move_to: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PlayerCharacterControllerSnapshot {
+    pub vertical_velocity: f32,
+    #[serde(default)]
+    pub target_position: Option<[f32; 3]>,
+    pub walk_speed: f32,
+    pub jump_power: f32,
+    pub jump_requested: bool,
+    pub jump_buffer_remaining: f32,
+    pub jump_cooldown_remaining: f32,
+    pub move_to_elapsed: f32,
+    pub grounded: bool,
+    pub horizontal_velocity: [f32; 2],
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -407,6 +426,13 @@ pub fn capture_game_instance(instance: &GameInstance) -> Result<GameInstanceSnap
         .into_iter()
         .map(snapshot_instance)
         .collect::<Result<Vec<_>, _>>()?;
+    let server_script_service_children = runtime
+        .game()
+        .server_script_service()
+        .get_children()
+        .into_iter()
+        .map(snapshot_instance)
+        .collect::<Result<Vec<_>, _>>()?;
     let server_storage_children = runtime
         .game()
         .server_storage()
@@ -467,6 +493,7 @@ pub fn capture_game_instance(instance: &GameInstance) -> Result<GameInstanceSnap
         tick: instance.tick,
         workspace_gravity,
         workspace_children,
+        server_script_service_children,
         server_storage_children,
         replicated_storage_children,
         players,
@@ -488,6 +515,7 @@ pub fn restore_game_instance(
 
     let (
         workspace,
+        server_script_service,
         server_storage,
         replicated_storage,
         players_service,
@@ -499,6 +527,7 @@ pub fn restore_game_instance(
         })?;
         (
             runtime.workspace(),
+            runtime.game().server_script_service(),
             runtime.game().server_storage(),
             runtime.game().replicated_storage(),
             runtime.players(),
@@ -519,6 +548,7 @@ pub fn restore_game_instance(
     let mut fixups = Vec::new();
 
     clear_workspace(&workspace);
+    clear_instance_children(&server_script_service);
     clear_instance_children(&server_storage);
     clear_instance_children(&replicated_storage);
 
@@ -526,6 +556,13 @@ pub fn restore_game_instance(
         &snapshot.workspace_children,
         &workspace.instance,
         Some(&workspace),
+        &mut instance_map,
+        &mut fixups,
+    )?;
+    restore_root_children(
+        &snapshot.server_script_service_children,
+        &server_script_service,
+        None,
         &mut instance_map,
         &mut fixups,
     )?;
@@ -676,6 +713,7 @@ fn capture_player_snapshot(
 
     let mut humanoid_root_part = None;
     let mut humanoid = None;
+    let mut character_controller = None;
     let mut character_attributes = HashMap::new();
     let mut character_id = None;
     let mut humanoid_root_part_id = None;
@@ -696,6 +734,20 @@ fn capture_player_snapshot(
             if let Some(part) = &data.part_data {
                 if data.name == "HumanoidRootPart" {
                     humanoid_root_part_id = Some(data.id.0);
+                    character_controller = instance.physics.get_character_state(data.id.0).map(|state| {
+                        PlayerCharacterControllerSnapshot {
+                            vertical_velocity: state.vertical_velocity,
+                            target_position: state.target_position,
+                            walk_speed: state.walk_speed,
+                            jump_power: state.jump_power,
+                            jump_requested: state.jump_requested,
+                            jump_buffer_remaining: state.jump_buffer_remaining,
+                            jump_cooldown_remaining: state.jump_cooldown_remaining,
+                            move_to_elapsed: state.move_to_elapsed,
+                            grounded: state.grounded,
+                            horizontal_velocity: state.horizontal_velocity,
+                        }
+                    });
                     humanoid_root_part = Some(PlayerPartSnapshot {
                         attributes: data
                             .attributes
@@ -745,7 +797,33 @@ fn capture_player_snapshot(
         character_attributes,
         humanoid_root_part,
         humanoid,
+        character_controller,
     })
+}
+
+fn infer_restored_character_grounded(
+    instance: &GameInstance,
+    hrp_id: u64,
+    height: f32,
+) -> bool {
+    let Some(state) = instance.physics.get_character_state(hrp_id) else {
+        return false;
+    };
+    let Some(position) = instance.physics.get_character_position(hrp_id) else {
+        return false;
+    };
+
+    let half_height = height * 0.5;
+    let max_distance = half_height + crate::game::constants::physics::SNAP_TO_GROUND + 0.1;
+    let Some((toi, _)) = instance
+        .physics
+        .raycast_down(position, max_distance, Some(state.body_handle))
+    else {
+        return false;
+    };
+
+    let support_gap = (toi - half_height).max(0.0);
+    support_gap <= crate::game::constants::physics::SNAP_TO_GROUND + 0.1
 }
 
 fn restore_players(
@@ -873,11 +951,23 @@ fn restore_players(
                 instance
                     .physics
                     .set_character_position(hrp_id, hrp_snapshot.position);
-                if let Some(handle) = instance.physics.get_handle(hrp_id) {
-                    instance.physics.set_velocity(handle, hrp_snapshot.velocity);
-                    instance
-                        .physics
-                        .set_angular_velocity(handle, hrp_snapshot.angular_velocity);
+                let inferred_grounded =
+                    infer_restored_character_grounded(instance, hrp_id, height);
+                if let Some(state) = instance.physics.get_character_state_mut(hrp_id) {
+                    if let Some(controller_snapshot) = player.character_controller.as_ref() {
+                        state.vertical_velocity = controller_snapshot.vertical_velocity;
+                        state.target_position = controller_snapshot.target_position;
+                        state.walk_speed = controller_snapshot.walk_speed;
+                        state.jump_power = controller_snapshot.jump_power;
+                        state.jump_requested = controller_snapshot.jump_requested;
+                        state.jump_buffer_remaining = controller_snapshot.jump_buffer_remaining;
+                        state.jump_cooldown_remaining = controller_snapshot.jump_cooldown_remaining;
+                        state.move_to_elapsed = controller_snapshot.move_to_elapsed;
+                        state.grounded = controller_snapshot.grounded;
+                        state.horizontal_velocity = controller_snapshot.horizontal_velocity;
+                    } else {
+                        state.grounded = inferred_grounded;
+                    }
                 }
             }
 

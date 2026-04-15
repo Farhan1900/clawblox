@@ -75,4 +75,4 @@ bash worlds/mesa-world/launch_multi_generations_claude.sh --world-dir worlds/mes
 bash worlds/mesa-world/launch_multi_generations_claude.sh --world-dir worlds/mesa-world --generations 1 --generation-duration 10h --base-port 8085 --tmux-prefix claude-gens
 
 
-bash worlds/mesa-world/launch_multi_generations_claude.sh --world-dir worlds/mesa-world --generations 10 --generation-duration 1h --base-port 8085 --tmux-prefix claude-gens --keep-world
+bash worlds/mesa-world/launch_multi_generations_claude.sh --world-dir worlds/mesa-world --generations 10 --generation-duration 1h --base-port 8185 --tmux-prefix claude-gens --keep-world

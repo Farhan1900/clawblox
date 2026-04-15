@@ -33,6 +33,10 @@ local placingObjects = {} -- { object, startPos, targetPos, elapsed, duration }
 local thrownObjects = {} -- { object, elapsed, duration }
 local trackedCarryables = {}
 
+local function findWorkspaceChild(name)
+    return Workspace:FindFirstChild(name)
+end
+
 local ROCK_COLOR = Color3.fromRGB(52, 49, 44)
 local ORB_COLOR = Color3.fromRGB(0, 220, 200)
 local ORB_BASE_SIZE = Vector3.new(0.9, 0.9, 0.9)
@@ -81,7 +85,7 @@ local ringPhysics = PhysicalProperties.new(
 -- GROUND
 --------------------------------------------------------------------------------
 
-local ground = Instance.new("Part")
+local ground = findWorkspaceChild("Ground") or Instance.new("Part")
 ground.Name = "Ground"
 ground.Size = Vector3.new(180, 10, 180)
 ground.Position = Vector3.new(0, -5, 0)
@@ -114,7 +118,7 @@ local invisibleWalls = {
 }
 
 for _, wallDef in ipairs(invisibleWalls) do
-    local wall = Instance.new("Part")
+    local wall = findWorkspaceChild(wallDef.name) or Instance.new("Part")
     wall.Name = wallDef.name
     wall.Size = wallDef.size
     wall.Position = wallDef.pos
@@ -144,7 +148,7 @@ local mesas = {
 }
 
 for _, m in ipairs(mesas) do
-    local mesa = Instance.new("Part")
+    local mesa = findWorkspaceChild(m.name) or Instance.new("Part")
     mesa.Name = m.name
     mesa.Size = Vector3.new(m.size[1], m.size[2], m.size[3])
     mesa.Position = Vector3.new(m.pos[1], m.pos[2], m.pos[3])
@@ -320,6 +324,12 @@ local function setCarryableMetadata(object, colorName, renderRole, carryKind)
 end
 
 local function createBlock(name, position, colorName)
+    local existing = findWorkspaceChild(name)
+    if existing then
+        setCarryableMetadata(existing, colorName, "PickupObject", "Block")
+        trackedCarryables[existing] = true
+        return existing
+    end
     local block = Instance.new("Part")
     block.Name = name
     block.Size = Vector3.new(BLOCK_SIZE, BLOCK_SIZE, BLOCK_SIZE)
@@ -335,6 +345,12 @@ local function createBlock(name, position, colorName)
 end
 
 local function createBall(name, position)
+    local existing = findWorkspaceChild(name)
+    if existing then
+        setCarryableMetadata(existing, "Coral", "Ball", "Ball")
+        trackedCarryables[existing] = true
+        return existing
+    end
     local ball = Instance.new("Part")
     ball.Name = name
     ball.Shape = Enum.PartType.Ball
@@ -351,6 +367,12 @@ local function createBall(name, position)
 end
 
 local function createPlank(name, position, colorName, rotationDegrees)
+    local existing = findWorkspaceChild(name)
+    if existing then
+        setCarryableMetadata(existing, colorName, "Plank", "Plank")
+        trackedCarryables[existing] = true
+        return existing
+    end
     local plank = Instance.new("Part")
     plank.Name = name
     plank.Size = PLANK_SIZE
@@ -374,6 +396,12 @@ local function createPlank(name, position, colorName, rotationDegrees)
 end
 
 local function createRing(name, position, colorName, rotationDegrees, size)
+    local existing = findWorkspaceChild(name)
+    if existing then
+        setCarryableMetadata(existing, colorName, "Ring", "Ring")
+        trackedCarryables[existing] = true
+        return existing
+    end
     local ring = Instance.new("Part")
     ring.Name = name
     ring.Size = size or RING_SIZE

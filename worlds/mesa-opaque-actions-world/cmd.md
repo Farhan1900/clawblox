@@ -19,9 +19,9 @@ uv run python analysis/plot_sustained_max_y_runs.py /storage/nacloos/projects/cl
 
 bash launch_multi_generations.sh --generations 10 --generation-duration 1h --base-port 8085
 
-
+ox/worlds/mesa-world/results/genexp-20260315T021154Z/runs/genexp-20260315T021154Z-g010/worlds/world-0/agents/mesa-rgenexp-20260315T021154Z-g
 # evaluate on tasks
-bash ./launch_parallel_evals.sh --experiment-dir /storage/nacloos/projects/clawblox/worlds/mesa-world/results/genexp-20260315T021154Z --template-workspace /storage/nacloos/projects/clawblox/worlds/mesa-world/results/genexp-20260315T021154Z/runs/genexp-20260315T021154Z-g010/worlds/world-0/agents/mesa-rgenexp-20260315T021154Z-g010-w0-a0/workspace --duration 1h
+bash ./launch_parallel_evals.sh --experiment-dir /storage/nacloos/projects/clawblox/worlds/mesa-world/results/genexp-20260315T021154Z --template-workspace /storage/nacloos/projects/clawbl010-w0-a0/workspace --duration 1h
 
 uv run python analysis/plot_eval_naive_vs_experienced.py /storage/nacloos/projects/clawblox/worlds/mesa-world/results/genexp-20260315T021154Z/evals
 
@@ -51,3 +51,7 @@ claude code:
 
 
 ./agent/launch_multi_claude.sh --sandbox --tmux-session mesa --base-port 8090 --num-worlds 1 --agents-per-world 1 --world-dir worlds/mesa-opaque-actions-world --template worlds/mesa-island/agent-template --record true --reset-every 3600      
+
+
+----
+uv run exp_naive_vs_experienced.py --exp 002 --train-duration 5h --eval-duration 1h

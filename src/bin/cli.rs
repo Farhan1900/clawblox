@@ -551,7 +551,7 @@ end
 
 local function createMap()
     -- Floor
-    local floor = Instance.new("Part")
+    local floor = Workspace:FindFirstChild("Floor") or Instance.new("Part")
     floor.Name = "Floor"
     floor.Size = Vector3.new(MAP_SIZE, 2, MAP_SIZE)
     floor.Position = Vector3.new(0, -1, 0)
@@ -1851,6 +1851,10 @@ fn run_game(
                 eprintln!("Error: failed to restore snapshot state: {}", e);
                 std::process::exit(1);
             });
+        // Re-run the script bundle on resume so legacy snapshots captured before
+        // script-instance materialization still regain their runtime handlers.
+        // The bundle is now idempotent and only ensures Script/ModuleScript
+        // instances exist in the restored DataModel.
         instance.load_script(&script);
         game::insert_instance(&game_handle, instance)
     } else {
@@ -3569,6 +3573,9 @@ fn reset_local_instance(state: &LocalState) -> Result<(), String> {
     instance.instance_id = state.instance_id;
     instance.init_runtime();
     clawblox::snapshot::restore_game_instance(&mut instance, &state.initial_instance_snapshot)?;
+    // Reset reuses the initial snapshot captured at startup, but older snapshots
+    // may not contain persistent script instances. Re-running the idempotent
+    // bundle ensures runtime handlers are rebound without duplicating world state.
     instance.load_script(state.world_script_source.as_str());
     instance.halted_error = None;
     apply_afk_timeout(&mut instance, state.afk_timeout_secs);

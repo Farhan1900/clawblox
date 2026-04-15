@@ -334,6 +334,16 @@ resolve_clawblox_bin() {
   fi
 }
 
+restore_clawblox_bin_after_resume() {
+  if [[ -n "${CLAWBLOX_BIN:-}" ]]; then
+    if command -v "$CLAWBLOX_BIN" >/dev/null 2>&1 || [[ -x "$CLAWBLOX_BIN" ]]; then
+      return 0
+    fi
+    CLAWBLOX_BIN=""
+  fi
+  resolve_clawblox_bin
+}
+
 verify_recording_db() {
   local recording_file="$1"
   if [[ ! -f "$recording_file" ]]; then
@@ -607,6 +617,7 @@ if [[ -n "$RESUME_PATH" ]]; then
   if ((CLI_CLAWBLOX_BIN == 1)); then
     CLAWBLOX_BIN="$requested_clawblox_bin"
   fi
+  restore_clawblox_bin_after_resume
   RESUME_PATH="$RUN_DIR"
   RESULTS_ABS_ROOT="$(dirname "$RUN_DIR")"
   for ((i = 0; i < NUM_WORLDS; i++)); do
@@ -694,8 +705,8 @@ if [[ -n "$RESUME_PATH" ]]; then
       agent_display_name="$(agent_display_name_for_index "$j")"
       agent_name="$(sanitize_name "${agent_display_name}-r${RUN_SAFE_ID}-w${i}-a${j}")"
       agent_dir="$RUN_DIR/worlds/world-$i/agents/$agent_name"
-      if [[ ! -f "$agent_dir/claude_session_id.txt" ]]; then
-        echo "Error: missing Claude session file for resume at $agent_dir/claude_session_id.txt"
+      if [[ ! -d "$agent_dir" ]]; then
+        echo "Error: missing agent directory for resume at $agent_dir"
         exit 1
       fi
       if [[ ! -f "$agent_dir/world_session.txt" ]]; then

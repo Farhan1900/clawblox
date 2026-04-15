@@ -17,6 +17,10 @@ local heldBlocksByPlayer = {}
 local placingBlocks = {} -- { block, startPos, targetPos, elapsed, duration }
 local trackedBlocks = {}
 
+local function findWorkspaceChild(name)
+    return Workspace:FindFirstChild(name)
+end
+
 local blockColors = {
     Sand = Color3.fromRGB(214, 186, 128),
     Slate = Color3.fromRGB(148, 136, 124),
@@ -34,7 +38,7 @@ local blockPhysics = PhysicalProperties.new(
 -- GROUND
 --------------------------------------------------------------------------------
 
-local ground = Instance.new("Part")
+local ground = findWorkspaceChild("Ground") or Instance.new("Part")
 ground.Name = "Ground"
 ground.Size = Vector3.new(100, 10, 100)
 ground.Position = Vector3.new(0, -5, 0)
@@ -62,7 +66,7 @@ local mesas = {
 }
 
 for _, m in ipairs(mesas) do
-    local mesa = Instance.new("Part")
+    local mesa = findWorkspaceChild(m.name) or Instance.new("Part")
     mesa.Name = m.name
     mesa.Size = Vector3.new(m.size[1], m.size[2], m.size[3])
     mesa.Position = Vector3.new(m.pos[1], m.pos[2], m.pos[3])
@@ -83,6 +87,12 @@ local function setBlockMetadata(block, colorName)
 end
 
 local function createBlock(name, position, colorName)
+    local existing = findWorkspaceChild(name)
+    if existing then
+        setBlockMetadata(existing, colorName)
+        trackedBlocks[existing] = true
+        return existing
+    end
     local block = Instance.new("Part")
     block.Name = name
     block.Size = Vector3.new(BLOCK_SIZE, BLOCK_SIZE, BLOCK_SIZE)

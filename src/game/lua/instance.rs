@@ -3927,6 +3927,7 @@ impl UserData for Instance {
                 if let Some(humanoid) = &mut data.humanoid_data {
                     let _ = id;
                     humanoid.move_to_target = Some(position);
+                    humanoid.cancel_move_to = false;
                 } else {
                     // No-op: MoveTo on non-humanoid instance.
                 }
