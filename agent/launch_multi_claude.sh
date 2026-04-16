@@ -12,6 +12,7 @@ RECORD="${RECORD:-true}"
 WORLD_DIR="${WORLD_DIR:-}"
 HEALTH_TIMEOUT="${HEALTH_TIMEOUT:-30}"
 RUN_ID="${RUN_ID:-$(date -u +%Y%m%dT%H%M%SZ)}"
+LAUNCH_INSTANCE_ID="${CLAWBLOX_LAUNCH_INSTANCE_ID:-$(date -u +%Y%m%dT%H%M%SZ)-$$-$RANDOM}"
 AGENT_NAME_PREFIX="${AGENT_NAME_PREFIX:-agent}"
 STOP_GRACE_SECONDS="${STOP_GRACE_SECONDS:-10}"
 GOAL="${GOAL:-}"
@@ -33,6 +34,10 @@ SANDBOX="${SANDBOX:-0}"
 CLAUDE_FAILURE_IDLE_GRACE_SECONDS="${CLAUDE_FAILURE_IDLE_GRACE_SECONDS:-180}"
 CLAUDE_FAILURE_STALL_GRACE_SECONDS="${CLAUDE_FAILURE_STALL_GRACE_SECONDS:-300}"
 CLAUDE_FAILURE_RESTART_BACKOFF_SECONDS="${CLAUDE_FAILURE_RESTART_BACKOFF_SECONDS:-5}"
+EXPECTED_RUN_ID="${CLAWBLOX_EXPECT_RUN_ID:-}"
+EXPECTED_LAUNCH_INSTANCE_ID="${CLAWBLOX_EXPECT_LAUNCH_INSTANCE_ID:-}"
+CURRENT_AUTO_TIMER_PID="${CLAWBLOX_AUTO_TIMER_PID:-}"
+AUTO_STOP_PID="${AUTO_STOP_PID:-}"
 declare -a AGENT_TEMPLATE_DIRS=()
 
 AGENT_SCRIPT="$SCRIPT_DIR/run_claude_agent.sh"
@@ -151,6 +156,17 @@ start_agent_recovery_watchdog() {
 
   runtime_dir="$agent_dir/runtime"
   pid_file="$runtime_dir/recovery_watchdog.pid"
+  while IFS= read -r existing_pid; do
+    [[ -n "$existing_pid" ]] || continue
+    if kill -0 "$existing_pid" 2>/dev/null; then
+      kill "$existing_pid" 2>/dev/null || true
+      append_launcher_audit "watchdog_cleanup_killed" "agent_dir=$agent_dir watchdog_pid=$existing_pid"
+    fi
+  done < <(
+    ps -eo pid=,args= | awk -v script="$WATCHDOG_SCRIPT" -v agent_dir="$agent_dir" '
+      index($0, script) && index($0, agent_dir) { print $1 }
+    '
+  )
   if [[ -f "$pid_file" ]]; then
     existing_pid="$(tr -d '[:space:]' <"$pid_file" 2>/dev/null || true)"
     if [[ -n "$existing_pid" ]] && kill -0 "$existing_pid" 2>/dev/null; then
@@ -213,6 +229,89 @@ RESET_EVERY=$(printf '%q' "$RESET_EVERY")
 CLAWBLOX_BIN=$(printf '%q' "$CLAWBLOX_BIN")
 TMUX_SESSION=$(printf '%q' "$TMUX_SESSION")
 EOF
+}
+
+write_session_metadata() {
+  local target="$1"
+  write_run_metadata "$target"
+  cat >>"$target" <<EOF
+LAUNCH_INSTANCE_ID=$(printf '%q' "$LAUNCH_INSTANCE_ID")
+AUTO_STOP_PID=$(printf '%q' "$AUTO_STOP_PID")
+EOF
+}
+
+load_session_metadata() {
+  local meta_file="$1"
+  local -n out_run_id_ref="$2"
+  local -n out_run_dir_ref="$3"
+  local -n out_num_worlds_ref="$4"
+  local -n out_base_port_ref="$5"
+  local -n out_launch_instance_ref="$6"
+  local -n out_auto_stop_pid_ref="$7"
+  local -a meta_fields=()
+
+  out_run_id_ref=""
+  out_run_dir_ref=""
+  out_num_worlds_ref=""
+  out_base_port_ref=""
+  out_launch_instance_ref=""
+  out_auto_stop_pid_ref=""
+
+  [[ -f "$meta_file" ]] || return 1
+
+  mapfile -t meta_fields < <(
+    bash -lc '
+      set -euo pipefail
+      # shellcheck disable=SC1090
+      source "$1"
+      printf "%s\n%s\n%s\n%s\n%s\n%s\n" \
+        "${RUN_ID:-}" \
+        "${RUN_DIR:-}" \
+        "${NUM_WORLDS:-}" \
+        "${BASE_PORT:-}" \
+        "${LAUNCH_INSTANCE_ID:-}" \
+        "${AUTO_STOP_PID:-}"
+    ' _ "$meta_file"
+  )
+  out_run_id_ref="${meta_fields[0]:-}"
+  out_run_dir_ref="${meta_fields[1]:-}"
+  out_num_worlds_ref="${meta_fields[2]:-}"
+  out_base_port_ref="${meta_fields[3]:-}"
+  out_launch_instance_ref="${meta_fields[4]:-}"
+  out_auto_stop_pid_ref="${meta_fields[5]:-}"
+}
+
+kill_recorded_auto_stop_pid() {
+  local meta_file="$1"
+  local skip_pid="${2:-}"
+  local meta_run_id meta_run_dir meta_num_worlds meta_base_port meta_launch_instance meta_auto_stop_pid
+  local pid_cmd
+
+  if ! load_session_metadata \
+    "$meta_file" \
+    meta_run_id \
+    meta_run_dir \
+    meta_num_worlds \
+    meta_base_port \
+    meta_launch_instance \
+    meta_auto_stop_pid; then
+    return 0
+  fi
+
+  [[ -n "$meta_auto_stop_pid" ]] || return 0
+  if [[ -n "$skip_pid" && "$meta_auto_stop_pid" == "$skip_pid" ]]; then
+    return 0
+  fi
+  if ! kill -0 "$meta_auto_stop_pid" 2>/dev/null; then
+    return 0
+  fi
+  pid_cmd="$(ps -o args= -p "$meta_auto_stop_pid" 2>/dev/null | tr '\n' ' ' || true)"
+  if [[ "$pid_cmd" != *"$(basename "$0")"* ]]; then
+    append_launcher_audit "auto_stop_cleanup_skipped" "pid=$meta_auto_stop_pid reason=command_mismatch cmd=$pid_cmd"
+    return 0
+  fi
+  kill "$meta_auto_stop_pid" 2>/dev/null || true
+  append_launcher_audit "auto_stop_cleanup_killed" "pid=$meta_auto_stop_pid launch_instance_id=$meta_launch_instance run_id=$meta_run_id"
 }
 
 world_root_for_index() {
@@ -334,6 +433,16 @@ resolve_clawblox_bin() {
   fi
 }
 
+restore_clawblox_bin_after_resume() {
+  if [[ -n "${CLAWBLOX_BIN:-}" ]]; then
+    if command -v "$CLAWBLOX_BIN" >/dev/null 2>&1 || [[ -x "$CLAWBLOX_BIN" ]]; then
+      return 0
+    fi
+    CLAWBLOX_BIN=""
+  fi
+  resolve_clawblox_bin
+}
+
 verify_recording_db() {
   local recording_file="$1"
   if [[ ! -f "$recording_file" ]]; then
@@ -358,25 +467,35 @@ do_stop() {
   local i
   local port
   local snapshot_failed=0
+  local meta_run_id=""
   local meta_run_dir=""
   local meta_num_worlds=""
   local meta_base_port=""
+  local meta_launch_instance_id=""
+  local meta_auto_stop_pid=""
   append_launcher_audit "stop_requested" "force=$FORCE stop_grace_seconds=$STOP_GRACE_SECONDS"
   if tmux has-session -t "$TMUX_SESSION" 2>/dev/null; then
     mapfile -t recordings < <(collect_session_recordings)
     meta_file="$(session_meta_file)"
-    if [[ -f "$meta_file" ]]; then
-      mapfile -t meta_fields < <(
-        bash -lc '
-          set -euo pipefail
-          # shellcheck disable=SC1090
-          source "$1"
-          printf "%s\n%s\n%s\n" "${RUN_DIR:-}" "${NUM_WORLDS:-}" "${BASE_PORT:-}"
-        ' _ "$meta_file"
-      )
-      meta_run_dir="${meta_fields[0]:-}"
-      meta_num_worlds="${meta_fields[1]:-}"
-      meta_base_port="${meta_fields[2]:-}"
+    if load_session_metadata \
+      "$meta_file" \
+      meta_run_id \
+      meta_run_dir \
+      meta_num_worlds \
+      meta_base_port \
+      meta_launch_instance_id \
+      meta_auto_stop_pid; then
+      if [[ -n "$EXPECTED_RUN_ID" && "$meta_run_id" != "$EXPECTED_RUN_ID" ]]; then
+        echo "Skipping stop for '$TMUX_SESSION': expected run '$EXPECTED_RUN_ID', current owner is '${meta_run_id:-unknown}'."
+        append_launcher_audit "stop_skipped_run_mismatch" "expected_run_id=$EXPECTED_RUN_ID current_run_id=${meta_run_id:-} force=$FORCE"
+        return 0
+      fi
+      if [[ -n "$EXPECTED_LAUNCH_INSTANCE_ID" && "$meta_launch_instance_id" != "$EXPECTED_LAUNCH_INSTANCE_ID" ]]; then
+        echo "Skipping stop for '$TMUX_SESSION': expected launch instance '$EXPECTED_LAUNCH_INSTANCE_ID', current owner is '${meta_launch_instance_id:-unknown}'."
+        append_launcher_audit "stop_skipped_launch_instance_mismatch" "expected_launch_instance_id=$EXPECTED_LAUNCH_INSTANCE_ID current_launch_instance_id=${meta_launch_instance_id:-} force=$FORCE"
+        return 0
+      fi
+      kill_recorded_auto_stop_pid "$meta_file" "$CURRENT_AUTO_TIMER_PID"
       if [[ -n "$meta_run_dir" && -n "$meta_num_worlds" && -n "$meta_base_port" ]]; then
         echo "Saving world snapshots..."
         for ((i = 0; i < meta_num_worlds; i++)); do
@@ -555,11 +674,16 @@ require_claude_auth
 if tmux has-session -t "$TMUX_SESSION" 2>/dev/null; then
   if [[ "$FORCE" -eq 1 ]]; then
     echo "Replacing existing session '$TMUX_SESSION'..."
+    kill_recorded_auto_stop_pid "$(session_meta_file)"
     do_stop
   else
     echo "Tmux session '$TMUX_SESSION' already exists."
     exit 1
   fi
+fi
+
+if [[ -f "$(session_meta_file)" ]]; then
+  kill_recorded_auto_stop_pid "$(session_meta_file)"
 fi
 
 if [[ -n "$RESUME_PATH" ]]; then
@@ -607,6 +731,7 @@ if [[ -n "$RESUME_PATH" ]]; then
   if ((CLI_CLAWBLOX_BIN == 1)); then
     CLAWBLOX_BIN="$requested_clawblox_bin"
   fi
+  restore_clawblox_bin_after_resume
   RESUME_PATH="$RUN_DIR"
   RESULTS_ABS_ROOT="$(dirname "$RUN_DIR")"
   for ((i = 0; i < NUM_WORLDS; i++)); do
@@ -694,8 +819,8 @@ if [[ -n "$RESUME_PATH" ]]; then
       agent_display_name="$(agent_display_name_for_index "$j")"
       agent_name="$(sanitize_name "${agent_display_name}-r${RUN_SAFE_ID}-w${i}-a${j}")"
       agent_dir="$RUN_DIR/worlds/world-$i/agents/$agent_name"
-      if [[ ! -f "$agent_dir/claude_session_id.txt" ]]; then
-        echo "Error: missing Claude session file for resume at $agent_dir/claude_session_id.txt"
+      if [[ ! -d "$agent_dir" ]]; then
+        echo "Error: missing agent directory for resume at $agent_dir"
         exit 1
       fi
       if [[ ! -f "$agent_dir/world_session.txt" ]]; then
@@ -720,8 +845,8 @@ ensure_ports_available
 mkdir -p "$WORLDS_ROOT"
 printf '%s\n' "$RUN_DIR" >"$RESULTS_ABS_ROOT/latest_run.txt"
 write_run_metadata "$RUN_DIR/run.env"
-write_run_metadata "$(session_meta_file)"
-append_launcher_audit "run_metadata_written" "run_id=$RUN_ID base_port=$BASE_PORT num_worlds=$NUM_WORLDS agents_per_world=$AGENTS_PER_WORLD"
+write_session_metadata "$(session_meta_file)"
+append_launcher_audit "run_metadata_written" "run_id=$RUN_ID launch_instance_id=$LAUNCH_INSTANCE_ID base_port=$BASE_PORT num_worlds=$NUM_WORLDS agents_per_world=$AGENTS_PER_WORLD"
 
 echo "Starting $NUM_WORLDS world servers..."
 tmux new-session -d -s "$TMUX_SESSION" -n "world-0"
@@ -873,14 +998,22 @@ if [[ -n "$DURATION" ]]; then
   # Agent gets duration + warning time to save workspace
   total_wait=$(( duration_secs + CHECKPOINT_WARNING_SECONDS + 30 ))
   echo "Run will auto-stop after ${DURATION} (${duration_secs}s + ${CHECKPOINT_WARNING_SECONDS}s warning)..."
-  append_launcher_audit "auto_stop_scheduled" "duration=$DURATION duration_seconds=$duration_secs warning_seconds=$CHECKPOINT_WARNING_SECONDS total_wait=$total_wait"
+  append_launcher_audit "auto_stop_scheduled" "duration=$DURATION duration_seconds=$duration_secs warning_seconds=$CHECKPOINT_WARNING_SECONDS total_wait=$total_wait launch_instance_id=$LAUNCH_INSTANCE_ID"
   (
+    expected_run_id="$RUN_ID"
+    expected_launch_instance_id="$LAUNCH_INSTANCE_ID"
     sleep "$total_wait"
     echo "Duration ${DURATION} + warning elapsed. Stopping..."
-    CLAWBLOX_STOP_REASON="duration_elapsed" \
+    CLAWBLOX_EXPECT_RUN_ID="$expected_run_id" \
+      CLAWBLOX_EXPECT_LAUNCH_INSTANCE_ID="$expected_launch_instance_id" \
+      CLAWBLOX_AUTO_TIMER_PID="$BASHPID" \
+      CLAWBLOX_STOP_REASON="duration_elapsed" \
       CLAWBLOX_STOP_SOURCE="launch_multi_claude_auto_timer" \
       bash "$0" --stop --tmux-session "$TMUX_SESSION"
   ) &
+  AUTO_STOP_PID="$!"
+  write_session_metadata "$(session_meta_file)"
+  append_launcher_audit "auto_stop_pid_recorded" "auto_stop_pid=$AUTO_STOP_PID launch_instance_id=$LAUNCH_INSTANCE_ID"
   disown
 fi
 

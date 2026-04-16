@@ -52,6 +52,24 @@ is_nonnegative_int() {
   [[ "$1" =~ ^[0-9]+$ ]]
 }
 
+resolve_clawblox_bin() {
+  if [[ -n "${CLAWBLOX_BIN:-}" ]]; then
+    if command -v "$CLAWBLOX_BIN" >/dev/null 2>&1 || [[ -x "$CLAWBLOX_BIN" ]]; then
+      return 0
+    fi
+    echo "Error: CLAWBLOX_BIN '$CLAWBLOX_BIN' was not found." >&2
+    exit 1
+  fi
+  if [[ -x "$ROOT_DIR/target/release/clawblox" ]]; then
+    CLAWBLOX_BIN="$ROOT_DIR/target/release/clawblox"
+  elif command -v clawblox >/dev/null 2>&1; then
+    CLAWBLOX_BIN="$(command -v clawblox)"
+  else
+    echo "Error: clawblox binary not found in target/release/ or PATH" >&2
+    exit 1
+  fi
+}
+
 require_value() {
   local opt="$1"
   local maybe_value="${2:-}"
@@ -227,12 +245,17 @@ copy_agent_generation_snapshot() {
   mkdir -p "$dest_agent_dir/logs" "$dest_agent_dir/runtime"
   cp -a "$src_agent_dir/workspace" "$dest_agent_dir/"
   cp -a "$src_agent_dir/logs/." "$dest_agent_dir/logs/"
-  cp -a "$src_agent_dir/runtime/." "$dest_agent_dir/runtime/"
-  cp -a "$src_agent_dir/claude_session_id.txt" "$dest_agent_dir/"
-  cp -a "$src_agent_dir/world_session.txt" "$dest_agent_dir/"
-  if [[ -d "$src_agent_dir/session" ]]; then
-    cp -a "$src_agent_dir/session" "$dest_agent_dir/"
-  fi
+}
+
+scrub_resumed_agent_runtime_metadata() {
+  local live_run_dir="$1"
+  local agent_dir
+
+  while IFS= read -r -d '' agent_dir; do
+    rm -f "$agent_dir/claude_session_id.txt"
+    rm -rf "$agent_dir/runtime" "$agent_dir/session"
+    mkdir -p "$agent_dir/runtime"
+  done < <(find "$live_run_dir/worlds" -type d -path '*/agents/*' ! -path '*/agents/*/*' -print0)
 }
 
 write_generation_run_metadata() {
@@ -386,6 +409,9 @@ prepare_persistent_world_resume_run() {
   if [[ -z "$CLAWBLOX_BIN" && -n "$checkpoint_clawblox_bin" ]]; then
     CLAWBLOX_BIN="$checkpoint_clawblox_bin"
   fi
+  if [[ -z "$CLAWBLOX_BIN" ]]; then
+    resolve_clawblox_bin
+  fi
   if [[ -n "$checkpoint_record" ]]; then
     RECORD="$checkpoint_record"
   fi
@@ -393,6 +419,7 @@ prepare_persistent_world_resume_run() {
   archive_existing_directory "$live_run_dir"
   mkdir -p "$live_run_dir"
   cp -a "$checkpoint_run_dir/." "$live_run_dir/"
+  scrub_resumed_agent_runtime_metadata "$live_run_dir"
   write_generation_run_metadata \
     "$live_run_dir/run.env" \
     "$checkpoint_run_id" \
@@ -678,6 +705,8 @@ if ! is_positive_int "$CHECKPOINT_INTERVAL"; then
   echo "Error: --checkpoint-interval must be a positive integer (got '$CHECKPOINT_INTERVAL')."
   exit 1
 fi
+
+resolve_clawblox_bin
 
 GENERATION_DURATION_SECONDS="$(parse_duration_seconds "$GENERATION_DURATION")"
 if ((GENERATION_DURATION_SECONDS <= 0)); then

@@ -551,7 +551,7 @@ end
 
 local function createMap()
     -- Floor
-    local floor = Instance.new("Part")
+    local floor = Workspace:FindFirstChild("Floor") or Instance.new("Part")
     floor.Name = "Floor"
     floor.Size = Vector3.new(MAP_SIZE, 2, MAP_SIZE)
     floor.Position = Vector3.new(0, -1, 0)
@@ -598,7 +598,12 @@ if AgentInputService then
             local humanoid = getHumanoid(player)
             if humanoid then
                 local pos = inputData.position
-                humanoid:MoveTo(Vector3.new(pos[1], pos[2], pos[3]))
+                local x = type(pos) == "table" and tonumber(pos[1]) or nil
+                local y = type(pos) == "table" and tonumber(pos[2]) or nil
+                local z = type(pos) == "table" and tonumber(pos[3]) or nil
+                if x and y and z and x == x and y == y and z == z then
+                    humanoid:MoveTo(Vector3.new(x, y, z))
+                end
             end
         end
     end)
@@ -1846,6 +1851,10 @@ fn run_game(
                 eprintln!("Error: failed to restore snapshot state: {}", e);
                 std::process::exit(1);
             });
+        // Re-run the script bundle on resume so legacy snapshots captured before
+        // script-instance materialization still regain their runtime handlers.
+        // The bundle is now idempotent and only ensures Script/ModuleScript
+        // instances exist in the restored DataModel.
         instance.load_script(&script);
         game::insert_instance(&game_handle, instance)
     } else {
@@ -3564,6 +3573,9 @@ fn reset_local_instance(state: &LocalState) -> Result<(), String> {
     instance.instance_id = state.instance_id;
     instance.init_runtime();
     clawblox::snapshot::restore_game_instance(&mut instance, &state.initial_instance_snapshot)?;
+    // Reset reuses the initial snapshot captured at startup, but older snapshots
+    // may not contain persistent script instances. Re-running the idempotent
+    // bundle ensures runtime handlers are rebound without duplicating world state.
     instance.load_script(state.world_script_source.as_str());
     instance.halted_error = None;
     apply_afk_timeout(&mut instance, state.afk_timeout_secs);
@@ -4215,6 +4227,59 @@ struct InputRequest {
     data: serde_json::Value,
 }
 
+fn parse_json_number(value: &serde_json::Value) -> Option<f64> {
+    let number = match value {
+        serde_json::Value::Number(n) => n.as_f64()?,
+        serde_json::Value::String(s) => s.parse::<f64>().ok()?,
+        _ => return None,
+    };
+    if number.is_finite() {
+        Some(number)
+    } else {
+        None
+    }
+}
+
+fn parse_json_vector3(value: &serde_json::Value) -> Option<(f64, f64, f64)> {
+    let arr = value.as_array()?;
+    if arr.len() != 3 {
+        return None;
+    }
+    let x = parse_json_number(&arr[0])?;
+    let y = parse_json_number(&arr[1])?;
+    let z = parse_json_number(&arr[2])?;
+    Some((x, y, z))
+}
+
+fn validate_builtin_input(input_type: &str, data: &serde_json::Value) -> Result<(), String> {
+    match input_type {
+        "MoveTo" | "Pickup" | "Place" => {
+            let position = data
+                .as_object()
+                .and_then(|obj| obj.get("position"))
+                .ok_or_else(|| format!("{input_type} requires data.position"))?;
+            parse_json_vector3(position)
+                .ok_or_else(|| format!("{input_type} requires data.position to be a finite [x, y, z] vector"))?;
+            Ok(())
+        }
+        "Throw" => {
+            let direction = data
+                .as_object()
+                .and_then(|obj| obj.get("direction"))
+                .ok_or_else(|| "Throw requires data.direction".to_string())?;
+            parse_json_vector3(direction)
+                .ok_or_else(|| "Throw requires data.direction to be a finite [x, y, z] vector".to_string())?;
+            if let Some(speed) = data.as_object().and_then(|obj| obj.get("speed")) {
+                parse_json_number(speed)
+                    .ok_or_else(|| "Throw requires data.speed to be a finite number".to_string())?;
+            }
+            Ok(())
+        }
+        "Stop" | "Jump" => Ok(()),
+        _ => Ok(()),
+    }
+}
+
 async fn local_input(
     State(state): State<LocalState>,
     headers: axum::http::HeaderMap,
@@ -4234,6 +4299,9 @@ async fn local_input(
     if let Some(err) = check_halted(&state) {
         return Err((axum::http::StatusCode::SERVICE_UNAVAILABLE, err));
     }
+
+    validate_builtin_input(&input.input_type, &input.data)
+        .map_err(|e| (axum::http::StatusCode::BAD_REQUEST, e))?;
 
     let speech_progress = extract_speech_progress_event(&input.input_type, &input.data);
     let input_type = input.input_type.clone();

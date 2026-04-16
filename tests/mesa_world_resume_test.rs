@@ -2,14 +2,55 @@ use std::fs;
 use std::path::PathBuf;
 
 use clawblox::game::instance::GameInstance;
+use clawblox::game::script_bundle::load_world_and_entry_script;
 use clawblox::snapshot::{capture_game_instance, restore_game_instance};
 use uuid::Uuid;
 
-fn mesa_world_script_path() -> PathBuf {
+fn mesa_world_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("worlds")
         .join("mesa-world")
-        .join("main.lua")
+}
+
+fn mesa_world_script_path() -> PathBuf {
+    mesa_world_dir().join("main.lua")
+}
+
+fn workspace_inventory(instance: &GameInstance) -> (i64, i64, i64, i64, i64) {
+    let runtime = instance.lua_runtime.as_ref().expect("runtime missing");
+    runtime
+        .lua()
+        .load(
+            r#"
+            local blockCount = 0
+            local groundCount = 0
+            local largeMesaCount = 0
+            local ballCount = 0
+            local ringCount = 0
+
+            for _, child in ipairs(Workspace:GetChildren()) do
+                if string.match(child.Name, "^Block_%d+$") then
+                    blockCount = blockCount + 1
+                end
+                if child.Name == "Ground" then
+                    groundCount = groundCount + 1
+                end
+                if child.Name == "LargeMesa" then
+                    largeMesaCount = largeMesaCount + 1
+                end
+                if child.Name == "Ball_1" then
+                    ballCount = ballCount + 1
+                end
+                if string.match(child.Name, "^Ring_%d+$") then
+                    ringCount = ringCount + 1
+                end
+            end
+
+            return blockCount, groundCount, largeMesaCount, ballCount, ringCount
+        "#,
+        )
+        .eval()
+        .expect("failed to read workspace inventory")
 }
 
 #[test]
@@ -101,5 +142,39 @@ fn mesa_world_resume_preserves_existing_player_position() {
         (after_restore.1 - 0.0).abs() > 1.0 || (after_restore.2 - 5.0).abs() > 1.0,
         "resume should not snap the player back to spawn; restored position={:?}",
         after_pos
+    );
+}
+
+#[test]
+fn mesa_world_resume_preserves_workspace_inventory() {
+    let mut instance = GameInstance::new(Uuid::new_v4(), None);
+    let (_config, source) =
+        load_world_and_entry_script(&mesa_world_dir()).expect("failed to load bundled mesa-world");
+    instance.load_script(&source);
+
+    for _ in 0..5 {
+        instance.tick();
+    }
+
+    let before_restore = workspace_inventory(&instance);
+    assert!(
+        before_restore.0 > 0,
+        "expected mesa-world to have pickup blocks before snapshot"
+    );
+
+    let snapshot = capture_game_instance(&instance).expect("failed to capture snapshot");
+
+    let mut restored = GameInstance::new(Uuid::new_v4(), None);
+    restored.init_runtime();
+    restore_game_instance(&mut restored, &snapshot).expect("failed to restore snapshot");
+
+    for _ in 0..5 {
+        restored.tick();
+    }
+
+    let after_restore = workspace_inventory(&restored);
+    assert_eq!(
+        after_restore, before_restore,
+        "workspace inventory changed across restore: before={before_restore:?} after={after_restore:?}"
     );
 }

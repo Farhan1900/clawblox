@@ -33,6 +33,10 @@ local heldBlocksByPlayer = {}
 local placingBlocks = {} -- { block, startPos, targetPos, elapsed, duration }
 local trackedBlocks = {}
 
+local function findWorkspaceChild(name)
+    return Workspace:FindFirstChild(name)
+end
+
 local blockColors = {
     Sand = Color3.fromRGB(214, 186, 128),
     Slate = Color3.fromRGB(148, 136, 124),
@@ -54,7 +58,7 @@ local blockPhysics = PhysicalProperties.new(
 -- GROUND
 --------------------------------------------------------------------------------
 
-local ground = Instance.new("Part")
+local ground = findWorkspaceChild(ENTITY_GROUND) or Instance.new("Part")
 ground.Name = ENTITY_GROUND
 ground.Size = Vector3.new(100, 10, 100)
 ground.Position = Vector3.new(0, -5, 0)
@@ -81,7 +85,7 @@ local mesas = {
 }
 
 for _, m in ipairs(mesas) do
-    local mesa = Instance.new("Part")
+    local mesa = findWorkspaceChild(m.name) or Instance.new("Part")
     mesa.Name = m.name
     mesa.Size = Vector3.new(m.size[1], m.size[2], m.size[3])
     mesa.Position = Vector3.new(m.pos[1], m.pos[2], m.pos[3])
@@ -102,6 +106,12 @@ local function setBlockMetadata(block, colorCode)
 end
 
 local function createBlock(name, position, colorName)
+    local existing = findWorkspaceChild(name)
+    if existing then
+        setBlockMetadata(existing, blockColorCodes[colorName])
+        trackedBlocks[existing] = true
+        return existing
+    end
     local block = Instance.new("Part")
     block.Name = name
     block.Size = Vector3.new(BLOCK_SIZE, BLOCK_SIZE, BLOCK_SIZE)
@@ -270,6 +280,16 @@ local function canReach(player, worldPosition, maxDistance)
     return (hrp.Position - worldPosition).Magnitude <= maxDistance
 end
 
+local function parsePosition(pos)
+    if type(pos) ~= "table" then return nil end
+    local x = tonumber(pos[1])
+    local y = tonumber(pos[2])
+    local z = tonumber(pos[3])
+    if not x or not y or not z then return nil end
+    if x ~= x or y ~= y or z ~= z then return nil end
+    return Vector3.new(x, y, z)
+end
+
 local function pickupBlock(player, inputData)
     if heldBlocksByPlayer[player] then
         setActionResult(player, "failure")
@@ -281,8 +301,11 @@ local function pickupBlock(player, inputData)
         return
     end
 
-    local pos = inputData.position
-    local targetPosition = Vector3.new(pos[1], pos[2], pos[3])
+    local targetPosition = parsePosition(inputData.position)
+    if not targetPosition then
+        setActionResult(player, "invalid")
+        return
+    end
     if not canReach(player, targetPosition, PICKUP_RANGE) then
         setActionResult(player, "failure")
         return
@@ -332,8 +355,11 @@ local function placeBlock(player, inputData)
         return
     end
 
-    local pos = inputData.position
-    local targetPosition = Vector3.new(pos[1], pos[2], pos[3])
+    local targetPosition = parsePosition(inputData.position)
+    if not targetPosition then
+        setActionResult(player, "invalid")
+        return
+    end
     if not canReach(player, targetPosition, PLACE_RANGE) then
         setActionResult(player, "failure")
         return
@@ -367,8 +393,12 @@ if AgentInputService then
         if not humanoid then return end
 
         if inputType == ACTION_MOVE and inputData and inputData.position then
-            local pos = inputData.position
-            humanoid:MoveTo(Vector3.new(pos[1], pos[2], pos[3]))
+            local targetPosition = parsePosition(inputData.position)
+            if not targetPosition then
+                setActionResult(player, "invalid")
+                return
+            end
+            humanoid:MoveTo(targetPosition)
             setActionResult(player, "success")
         elseif inputType == ACTION_MOVE then
             setActionResult(player, "invalid")

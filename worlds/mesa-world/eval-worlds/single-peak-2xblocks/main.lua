@@ -17,6 +17,10 @@ local heldBlocksByPlayer = {}
 local placingBlocks = {} -- { block, startPos, targetPos, elapsed, duration }
 local trackedBlocks = {}
 
+local function findWorkspaceChild(name)
+    return Workspace:FindFirstChild(name)
+end
+
 local blockColors = {
     Sand = Color3.fromRGB(214, 186, 128),
     Slate = Color3.fromRGB(148, 136, 124),
@@ -34,7 +38,7 @@ local blockPhysics = PhysicalProperties.new(
 -- GROUND
 --------------------------------------------------------------------------------
 
-local ground = Instance.new("Part")
+local ground = findWorkspaceChild("Ground") or Instance.new("Part")
 ground.Name = "Ground"
 ground.Size = Vector3.new(100, 10, 100)
 ground.Position = Vector3.new(0, -5, 0)
@@ -62,7 +66,7 @@ local mesas = {
 }
 
 for _, m in ipairs(mesas) do
-    local mesa = Instance.new("Part")
+    local mesa = findWorkspaceChild(m.name) or Instance.new("Part")
     mesa.Name = m.name
     mesa.Size = Vector3.new(m.size[1], m.size[2], m.size[3])
     mesa.Position = Vector3.new(m.pos[1], m.pos[2], m.pos[3])
@@ -83,6 +87,12 @@ local function setBlockMetadata(block, colorName)
 end
 
 local function createBlock(name, position, colorName)
+    local existing = findWorkspaceChild(name)
+    if existing then
+        setBlockMetadata(existing, colorName)
+        trackedBlocks[existing] = true
+        return existing
+    end
     local block = Instance.new("Part")
     block.Name = name
     block.Size = Vector3.new(BLOCK_SIZE, BLOCK_SIZE, BLOCK_SIZE)
@@ -262,6 +272,16 @@ local function canReach(player, worldPosition, maxDistance)
     return (hrp.Position - worldPosition).Magnitude <= maxDistance
 end
 
+local function parsePosition(pos)
+    if type(pos) ~= "table" then return nil end
+    local x = tonumber(pos[1])
+    local y = tonumber(pos[2])
+    local z = tonumber(pos[3])
+    if not x or not y or not z then return nil end
+    if x ~= x or y ~= y or z ~= z then return nil end
+    return Vector3.new(x, y, z)
+end
+
 local function pickupBlock(player, inputData)
     if heldBlocksByPlayer[player] then
         player:SetAttribute("LastActionResult", "PickupFailed:AlreadyHolding")
@@ -273,8 +293,11 @@ local function pickupBlock(player, inputData)
         return
     end
 
-    local pos = inputData.position
-    local targetPosition = Vector3.new(pos[1], pos[2], pos[3])
+    local targetPosition = parsePosition(inputData.position)
+    if not targetPosition then
+        player:SetAttribute("LastActionResult", "PickupFailed:InvalidPosition")
+        return
+    end
     if not canReach(player, targetPosition, PICKUP_RANGE) then
         player:SetAttribute("LastActionResult", "PickupFailed:OutOfRange")
         return
@@ -324,8 +347,11 @@ local function placeBlock(player, inputData)
         return
     end
 
-    local pos = inputData.position
-    local targetPosition = Vector3.new(pos[1], pos[2], pos[3])
+    local targetPosition = parsePosition(inputData.position)
+    if not targetPosition then
+        player:SetAttribute("LastActionResult", "PlaceFailed:InvalidPosition")
+        return
+    end
     if not canReach(player, targetPosition, PLACE_RANGE) then
         player:SetAttribute("LastActionResult", "PlaceFailed:OutOfRange")
         return
@@ -359,8 +385,12 @@ if AgentInputService then
         if not humanoid then return end
 
         if inputType == "MoveTo" and inputData and inputData.position then
-            local pos = inputData.position
-            humanoid:MoveTo(Vector3.new(pos[1], pos[2], pos[3]))
+            local targetPosition = parsePosition(inputData.position)
+            if not targetPosition then
+                player:SetAttribute("LastActionResult", "MoveToFailed:InvalidPosition")
+                return
+            end
+            humanoid:MoveTo(targetPosition)
         elseif inputType == "Stop" then
             humanoid:CancelMoveTo()
         elseif inputType == "Jump" then
@@ -369,6 +399,8 @@ if AgentInputService then
             pickupBlock(player, inputData)
         elseif inputType == "Place" then
             placeBlock(player, inputData)
+        else
+            player:SetAttribute("LastActionResult", "InvalidAction")
         end
     end)
 end

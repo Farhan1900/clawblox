@@ -12,6 +12,47 @@ fn mesa_world_2_script_path() -> PathBuf {
         .join("main.lua")
 }
 
+fn workspace_inventory(instance: &GameInstance) -> (i64, i64, i64, i64, i64, i64) {
+    let runtime = instance.lua_runtime.as_ref().expect("runtime missing");
+    runtime
+        .lua()
+        .load(
+            r#"
+            local rockCount = 0
+            local orbCount = 0
+            local blockCount = 0
+            local ballCount = 0
+            local plankCount = 0
+            local ringCount = 0
+
+            for _, child in ipairs(Workspace:GetChildren()) do
+                if string.match(child.Name, "^Rock_%d+$") then
+                    rockCount = rockCount + 1
+                end
+                if string.match(child.Name, "^Orb_%d+$") then
+                    orbCount = orbCount + 1
+                end
+                if string.match(child.Name, "^Block_%d+$") then
+                    blockCount = blockCount + 1
+                end
+                if string.match(child.Name, "^Ball_%d+$") then
+                    ballCount = ballCount + 1
+                end
+                if string.match(child.Name, "^Plank_%d+$") then
+                    plankCount = plankCount + 1
+                end
+                if string.match(child.Name, "^Ring_%d+$") then
+                    ringCount = ringCount + 1
+                end
+            end
+
+            return rockCount, orbCount, blockCount, ballCount, plankCount, ringCount
+        "#,
+        )
+        .eval()
+        .expect("failed to read workspace inventory")
+}
+
 #[test]
 fn mesa_world_2_resume_preserves_existing_player_position() {
     let mut instance = GameInstance::new(Uuid::new_v4(), None);
@@ -37,6 +78,12 @@ fn mesa_world_2_resume_preserves_existing_player_position() {
     for _ in 0..30 {
         instance.tick();
     }
+
+    let before_inventory = workspace_inventory(&instance);
+    assert!(
+        before_inventory.0 > 0 && before_inventory.1 > 0,
+        "expected mesa-world-2 to have rocks and orbs before snapshot: {before_inventory:?}"
+    );
 
     let before_restore: (String, f64, f64, f64) = {
         let runtime = instance.lua_runtime.as_ref().expect("runtime missing");
@@ -65,6 +112,12 @@ fn mesa_world_2_resume_preserves_existing_player_position() {
     for _ in 0..10 {
         restored.tick();
     }
+
+    let after_inventory = workspace_inventory(&restored);
+    assert_eq!(
+        after_inventory, before_inventory,
+        "workspace inventory changed across restore: before={before_inventory:?} after={after_inventory:?}"
+    );
 
     let after_restore: (String, f64, f64, f64) = {
         let runtime = restored.lua_runtime.as_ref().expect("runtime missing");
