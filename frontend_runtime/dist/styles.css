@@ -497,34 +497,82 @@ body {
   pointer-events: auto;
 }
 
-.behavior-list {
+.behavior-timeline-shell {
+  position: relative;
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  min-width: 0;
+  overflow: hidden;
+  border-right: 1px solid rgba(209, 222, 255, 0.08);
+}
+
+.behavior-ruler {
+  display: grid;
+  grid-template-columns: 168px minmax(0, 1fr);
+  gap: 6px;
+  align-items: center;
+  min-height: 28px;
+  padding: 8px 8px 0;
+}
+
+.behavior-ruler__spacer {
+  height: 100%;
+}
+
+.behavior-ruler__track {
+  position: relative;
+  min-height: 20px;
+  border-radius: 8px;
+  border: 1px solid rgba(209, 222, 255, 0.08);
+  background: rgba(255, 255, 255, 0.025);
+  overflow: hidden;
+}
+
+.behavior-ruler__tick {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 1px;
+  background: rgba(185, 196, 238, 0.18);
+}
+
+.behavior-ruler__label {
+  position: absolute;
+  top: 2px;
+  transform: translateX(4px);
+  font-size: 9px;
+  color: rgba(185, 196, 238, 0.82);
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+
+.behavior-tracks {
   height: 100%;
   overflow: auto;
   padding: 8px;
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: 4px;
   scrollbar-width: thin;
-  border-right: 1px solid rgba(209, 222, 255, 0.08);
 }
 
 .behavior-row {
   display: grid;
   grid-template-columns: 168px minmax(0, 1fr);
-  gap: 8px;
+  gap: 6px;
   align-items: center;
 }
 
 .behavior-row__label {
   appearance: none;
   width: 100%;
-  border: 1px solid rgba(209, 222, 255, 0.08);
-  border-radius: 8px;
-  background: rgba(255, 255, 255, 0.03);
+  border: none;
+  border-radius: 0;
+  background: transparent;
   color: inherit;
   text-align: left;
   font: inherit;
-  padding: 6px 8px;
+  padding: 2px 0;
   cursor: pointer;
   display: grid;
   gap: 3px;
@@ -542,9 +590,8 @@ body {
 }
 
 .behavior-row__label.is-selected {
-  border-color: rgba(126, 211, 255, 0.32);
-  box-shadow: inset 0 0 0 1px rgba(126, 211, 255, 0.22);
-  background: rgba(126, 211, 255, 0.08);
+  color: #ffffff;
+  text-shadow: 0 0 10px rgba(126, 211, 255, 0.18);
 }
 
 .behavior-row__name {
@@ -563,30 +610,19 @@ body {
 
 .behavior-row__track {
   position: relative;
-  min-height: 34px;
-  border-radius: 8px;
-  border: 1px solid rgba(209, 222, 255, 0.08);
-  background: rgba(255, 255, 255, 0.02);
+  min-height: 20px;
+  border-radius: 6px;
+  border: none;
+  background: transparent;
   overflow: hidden;
-}
-
-.behavior-row__playhead {
-  position: absolute;
-  top: 0;
-  bottom: 0;
-  width: 2px;
-  background: rgba(126, 211, 255, 0.92);
-  box-shadow: 0 0 0 1px rgba(126, 211, 255, 0.18);
-  transform: translateX(-1px);
-  pointer-events: none;
 }
 
 .behavior-occurrence {
   position: absolute;
-  top: 5px;
-  bottom: 5px;
+  top: 2px;
+  bottom: 2px;
   border: none;
-  border-radius: 6px;
+  border-radius: 4px;
   min-width: 4px;
   cursor: pointer;
   opacity: 0.82;
@@ -602,6 +638,34 @@ body {
   box-shadow:
     inset 0 0 0 1px rgba(255, 255, 255, 0.26),
     0 0 0 1px rgba(126, 211, 255, 0.42);
+}
+
+.behavior-occurrence--point {
+  top: 1px;
+  bottom: 1px;
+  min-width: 2px;
+  border-radius: 999px;
+  box-shadow:
+    inset 0 0 0 1px rgba(255, 255, 255, 0.2),
+    0 0 0 1px rgba(0, 0, 0, 0.12);
+}
+
+.behavior-global-playhead {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 2px;
+  background: rgba(126, 211, 255, 0.96);
+  box-shadow:
+    0 0 0 1px rgba(126, 211, 255, 0.18),
+    0 0 12px rgba(126, 211, 255, 0.18);
+  transform: translateX(-1px);
+  pointer-events: none;
+  opacity: 0;
+}
+
+.behavior-global-playhead.is-visible {
+  opacity: 1;
 }
 
 .behavior-details {
@@ -881,9 +945,17 @@ body[data-mode="replay"] .chat-input-row {
     grid-template-columns: 1fr;
   }
 
-  .behavior-list {
+  .behavior-timeline-shell {
     border-right: none;
     border-bottom: 1px solid rgba(209, 222, 255, 0.08);
+  }
+
+  .behavior-ruler {
+    grid-template-columns: 1fr;
+  }
+
+  .behavior-ruler__spacer {
+    display: none;
   }
 
   .behavior-details {
