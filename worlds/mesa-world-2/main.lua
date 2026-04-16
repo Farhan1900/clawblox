@@ -187,6 +187,41 @@ local function rockRandom()
     return (rockSeed - 1) / 2147483646
 end
 
+local function rememberRockFootprint(rock)
+    table.insert(rockFootprints, {
+        x = rock.Position.X,
+        z = rock.Position.Z,
+        halfWidth = rock.Size.X / 2,
+        halfDepth = rock.Size.Z / 2,
+    })
+end
+
+local function createRock(name, position, size)
+    local existing = findWorkspaceChild(name)
+    if existing then
+        existing:SetAttribute("RenderRole", "Rock")
+        rememberRockFootprint(existing)
+        return existing
+    end
+    local rock = Instance.new("Part")
+    rock.Name = name
+    rock.Size = size
+    rock.Position = position
+    rock.Anchored = false
+    rock.Color = ROCK_COLOR
+    rock.CustomPhysicalProperties = PhysicalProperties.new(
+        8.0,
+        0.9,
+        0.0,
+        1.0,
+        1.0
+    )
+    rock:SetAttribute("RenderRole", "Rock")
+    rock.Parent = Workspace
+    rememberRockFootprint(rock)
+    return rock
+end
+
 local rockClusters = {
     { cx = 44, cz = -56, n = 3 },
     { cx = -54, cz = 16, n = 3 },
@@ -214,27 +249,11 @@ for _, cluster in ipairs(rockClusters) do
             local sy = radius * 2 * (0.5 + rockRandom() * 0.5)
             local sz = radius * 2 * (1.0 + rockRandom() * 0.5)
 
-            local rock = Instance.new("Part")
-            rock.Name = "Rock_" .. rockIndex
-            rock.Size = Vector3.new(sx, sy, sz)
-            rock.Position = Vector3.new(x, sy / 2, z)
-            rock.Anchored = false
-            rock.Color = ROCK_COLOR
-            rock.CustomPhysicalProperties = PhysicalProperties.new(
-                8.0,
-                0.9,
-                0.0,
-                1.0,
-                1.0
+            createRock(
+                "Rock_" .. rockIndex,
+                Vector3.new(x, sy / 2, z),
+                Vector3.new(sx, sy, sz)
             )
-            rock:SetAttribute("RenderRole", "Rock")
-            rock.Parent = Workspace
-            table.insert(rockFootprints, {
-                x = x,
-                z = z,
-                halfWidth = sx / 2,
-                halfDepth = sz / 2,
-            })
         end
     end
 end
@@ -263,6 +282,15 @@ local function orbRandom()
 end
 
 local function createOrb(name, position, scale)
+    local existing = findWorkspaceChild(name)
+    if existing then
+        existing:SetAttribute("RenderRole", "GlowBulb")
+        existing:SetAttribute("IsCarryable", true)
+        existing:SetAttribute("CarryKind", "Orb")
+        existing:SetAttribute("CarryCollisionEnabled", true)
+        trackedCarryables[existing] = true
+        return existing
+    end
     local orb = Instance.new("Part")
     orb.Name = name
     orb.Shape = Enum.PartType.Ball
@@ -278,6 +306,7 @@ local function createOrb(name, position, scale)
     orb:SetAttribute("CarryCollisionEnabled", true)
     orb.Parent = Workspace
     trackedCarryables[orb] = true
+    return orb
 end
 
 local orbClusters = {

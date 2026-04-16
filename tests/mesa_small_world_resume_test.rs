@@ -12,7 +12,7 @@ fn mesa_small_world_dir() -> PathBuf {
         .join("mesa-small-world")
 }
 
-fn workspace_inventory(instance: &GameInstance) -> (i64, i64, i64, i64, i64) {
+fn workspace_inventory(instance: &GameInstance) -> (i64, i64, i64, i64, i64, i64) {
     let runtime = instance.lua_runtime.as_ref().expect("runtime missing");
     runtime
         .lua()
@@ -23,6 +23,7 @@ fn workspace_inventory(instance: &GameInstance) -> (i64, i64, i64, i64, i64) {
             local groundCount = 0
             local peakCount = 0
             local spireCount = 0
+            local ringCount = 0
 
             for _, child in ipairs(Workspace:GetChildren()) do
                 if string.match(child.Name, "^Block_%d+$") then
@@ -40,9 +41,12 @@ fn workspace_inventory(instance: &GameInstance) -> (i64, i64, i64, i64, i64) {
                 if child.Name == "Spire" then
                     spireCount = spireCount + 1
                 end
+                if string.match(child.Name, "^Ring_%d+$") then
+                    ringCount = ringCount + 1
+                end
             end
 
-            return blockCount, block1Count, groundCount, peakCount, spireCount
+            return blockCount, block1Count, groundCount, peakCount, spireCount, ringCount
         "#,
         )
         .eval()
@@ -73,7 +77,7 @@ fn mesa_small_world_resume_preserves_workspace_inventory() {
     let before_restore = workspace_inventory(&instance);
     assert_eq!(
         before_restore,
-        (12, 1, 1, 1, 1),
+        (12, 1, 1, 1, 1, 1),
         "unexpected fresh mesa-small-world inventory"
     );
 
@@ -108,6 +112,12 @@ fn mesa_small_world_legacy_resume_rebinds_input_handlers() {
     }
 
     let snapshot = capture_game_instance(&legacy_instance).expect("failed to capture snapshot");
+    let before_restore = workspace_inventory(&legacy_instance);
+    assert_eq!(
+        before_restore,
+        (12, 1, 1, 1, 1, 1),
+        "unexpected legacy mesa-small-world inventory"
+    );
     let (_config, bundled_source) = load_world_and_entry_script(&mesa_small_world_dir())
         .expect("failed to load bundled mesa-small-world");
 
@@ -119,6 +129,12 @@ fn mesa_small_world_legacy_resume_rebinds_input_handlers() {
     for _ in 0..10 {
         restored.tick();
     }
+
+    let after_restore = workspace_inventory(&restored);
+    assert_eq!(
+        after_restore, before_restore,
+        "legacy resume should not duplicate workspace objects: before={before_restore:?} after={after_restore:?}"
+    );
 
     let connection_count = restored
         .lua_runtime

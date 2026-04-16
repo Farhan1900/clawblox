@@ -33,6 +33,7 @@ SANDBOX="${SANDBOX:-0}"
 CLAUDE_FAILURE_IDLE_GRACE_SECONDS="${CLAUDE_FAILURE_IDLE_GRACE_SECONDS:-180}"
 CLAUDE_FAILURE_STALL_GRACE_SECONDS="${CLAUDE_FAILURE_STALL_GRACE_SECONDS:-300}"
 CLAUDE_FAILURE_RESTART_BACKOFF_SECONDS="${CLAUDE_FAILURE_RESTART_BACKOFF_SECONDS:-5}"
+EXPECTED_RUN_ID="${CLAWBLOX_EXPECT_RUN_ID:-}"
 declare -a AGENT_TEMPLATE_DIRS=()
 
 AGENT_SCRIPT="$SCRIPT_DIR/run_claude_agent.sh"
@@ -368,6 +369,7 @@ do_stop() {
   local i
   local port
   local snapshot_failed=0
+  local meta_run_id=""
   local meta_run_dir=""
   local meta_num_worlds=""
   local meta_base_port=""
@@ -381,12 +383,18 @@ do_stop() {
           set -euo pipefail
           # shellcheck disable=SC1090
           source "$1"
-          printf "%s\n%s\n%s\n" "${RUN_DIR:-}" "${NUM_WORLDS:-}" "${BASE_PORT:-}"
+          printf "%s\n%s\n%s\n%s\n" "${RUN_ID:-}" "${RUN_DIR:-}" "${NUM_WORLDS:-}" "${BASE_PORT:-}"
         ' _ "$meta_file"
       )
-      meta_run_dir="${meta_fields[0]:-}"
-      meta_num_worlds="${meta_fields[1]:-}"
-      meta_base_port="${meta_fields[2]:-}"
+      meta_run_id="${meta_fields[0]:-}"
+      meta_run_dir="${meta_fields[1]:-}"
+      meta_num_worlds="${meta_fields[2]:-}"
+      meta_base_port="${meta_fields[3]:-}"
+      if [[ -n "$EXPECTED_RUN_ID" && "$meta_run_id" != "$EXPECTED_RUN_ID" ]]; then
+        echo "Skipping stop for '$TMUX_SESSION': expected run '$EXPECTED_RUN_ID', current owner is '${meta_run_id:-unknown}'."
+        append_launcher_audit "stop_skipped_run_mismatch" "expected_run_id=$EXPECTED_RUN_ID current_run_id=${meta_run_id:-} force=$FORCE"
+        return 0
+      fi
       if [[ -n "$meta_run_dir" && -n "$meta_num_worlds" && -n "$meta_base_port" ]]; then
         echo "Saving world snapshots..."
         for ((i = 0; i < meta_num_worlds; i++)); do
@@ -886,9 +894,11 @@ if [[ -n "$DURATION" ]]; then
   echo "Run will auto-stop after ${DURATION} (${duration_secs}s + ${CHECKPOINT_WARNING_SECONDS}s warning)..."
   append_launcher_audit "auto_stop_scheduled" "duration=$DURATION duration_seconds=$duration_secs warning_seconds=$CHECKPOINT_WARNING_SECONDS total_wait=$total_wait"
   (
+    expected_run_id="$RUN_ID"
     sleep "$total_wait"
     echo "Duration ${DURATION} + warning elapsed. Stopping..."
-    CLAWBLOX_STOP_REASON="duration_elapsed" \
+    CLAWBLOX_EXPECT_RUN_ID="$expected_run_id" \
+      CLAWBLOX_STOP_REASON="duration_elapsed" \
       CLAWBLOX_STOP_SOURCE="launch_multi_claude_auto_timer" \
       bash "$0" --stop --tmux-session "$TMUX_SESSION"
   ) &

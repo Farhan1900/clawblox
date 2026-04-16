@@ -169,6 +169,12 @@ local function createBlock(name, position, colorName)
 end
 
 local function createRing(name, position, colorName, rotationDegrees, size)
+    local existing = findWorkspaceChild(name)
+    if existing then
+        setPickupMetadata(existing, colorName, "Ring")
+        trackedBlocks[existing] = true
+        return existing
+    end
     local ring = Instance.new("Part")
     ring.Name = name
     ring.Size = size

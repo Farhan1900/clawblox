@@ -27,6 +27,7 @@ PI_PROVIDER="${PI_PROVIDER:-}"
 PI_MODEL="${PI_MODEL:-}"
 PI_EXTENSION_PATH="${PI_EXTENSION_PATH:-}"
 PI_NO_GLOBAL_EXTENSIONS="${PI_NO_GLOBAL_EXTENSIONS:-1}"
+EXPECTED_RUN_ID="${CLAWBLOX_EXPECT_RUN_ID:-}"
 
 AGENT_SCRIPT="$SCRIPT_DIR/run_agent.sh"
 if [[ ! -f "$AGENT_SCRIPT" ]]; then
@@ -249,13 +250,18 @@ collect_session_recordings() {
 
 do_stop() {
   local recordings=()
-  local meta_file i port snapshot_failed=0
+  local meta_file i port snapshot_failed=0 meta_run_id=""
   if tmux has-session -t "$TMUX_SESSION" 2>/dev/null; then
     mapfile -t recordings < <(collect_session_recordings)
     meta_file="$(session_meta_file)"
     if [[ -f "$meta_file" ]]; then
       # shellcheck disable=SC1090
       source "$meta_file"
+      meta_run_id="${RUN_ID:-}"
+      if [[ -n "$EXPECTED_RUN_ID" && "$meta_run_id" != "$EXPECTED_RUN_ID" ]]; then
+        echo "Skipping stop for '$TMUX_SESSION': expected run '$EXPECTED_RUN_ID', current owner is '${meta_run_id:-unknown}'."
+        return 0
+      fi
       if [[ -n "${RUN_DIR:-}" && -n "${NUM_WORLDS:-}" && -n "${BASE_PORT:-}" ]]; then
         echo "Saving world snapshots..."
         for ((i = 0; i < NUM_WORLDS; i++)); do
@@ -653,9 +659,11 @@ if [[ -n "$DURATION" ]]; then
   total_wait=$(( duration_secs + CHECKPOINT_WARNING_SECONDS + 30 ))
   echo "Run will auto-stop after ${DURATION} (${duration_secs}s + ${CHECKPOINT_WARNING_SECONDS}s warning)..."
   (
+    expected_run_id="$RUN_ID"
     sleep "$total_wait"
     echo "Duration ${DURATION} + warning elapsed. Stopping..."
-    bash "$0" --stop --tmux-session "$TMUX_SESSION"
+    CLAWBLOX_EXPECT_RUN_ID="$expected_run_id" \
+      bash "$0" --stop --tmux-session "$TMUX_SESSION"
   ) &
   disown
 fi
