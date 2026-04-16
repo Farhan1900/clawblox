@@ -50,24 +50,24 @@ pub fn load_agent_timeline(path: &Path, tick_rate: u32) -> Result<ReplayAgentTim
         let Ok(value) = serde_json::from_str::<Value>(trimmed) else {
             continue;
         };
-        if value
-            .get("type")
-            .and_then(|v| v.as_str())
-            .unwrap_or_default()
-            != "message"
-        {
-            continue;
-        }
-
         let Some(message) = value.get("message") else {
             continue;
         };
+        let top_level_type = value
+            .get("type")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default();
         let role = message
             .get("role")
             .and_then(|v| v.as_str())
             .unwrap_or_default()
             .to_string();
-        if role.is_empty() {
+        let effective_role = if role.is_empty() && matches!(top_level_type, "assistant" | "user") {
+            top_level_type.to_string()
+        } else {
+            role
+        };
+        if effective_role.is_empty() {
             continue;
         }
         let Some(ts_ms) = parse_agent_timestamp_ms(&value) else {
@@ -79,25 +79,14 @@ pub fn load_agent_timeline(path: &Path, tick_rate: u32) -> Result<ReplayAgentTim
             .unwrap_or_default()
             .to_string();
 
-        if role == "toolResult" {
-            if let Some(content) = message.get("content").and_then(|v| v.as_array()) {
-                for item in content {
-                    let text = item
-                        .get("text")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or_default();
-                    if let Some(tick) = extract_tick_from_text(text) {
-                        anchors.push(TickAnchor {
-                            ts_ms,
-                            tick: tick as f64,
-                        });
-                        break;
-                    }
-                }
-            }
+        if let Some(tick) = extract_tick_anchor(&value, message) {
+            anchors.push(TickAnchor {
+                ts_ms,
+                tick: tick as f64,
+            });
         }
 
-        if role != "assistant" && role != "user" {
+        if effective_role != "assistant" && effective_role != "user" {
             continue;
         }
         let text = extract_replay_agent_message_text(message);
@@ -106,7 +95,7 @@ pub fn load_agent_timeline(path: &Path, tick_rate: u32) -> Result<ReplayAgentTim
         }
         raw_messages.push(RawReplayAgentMessage {
             id,
-            role,
+            role: effective_role,
             timestamp_ms: ts_ms,
             text,
         });
@@ -158,6 +147,9 @@ fn parse_agent_timestamp_ms(value: &Value) -> Option<i64> {
 }
 
 fn extract_replay_agent_message_text(message: &Value) -> String {
+    if let Some(text) = message.get("content").and_then(|v| v.as_str()) {
+        return text.trim().to_string();
+    }
     let Some(content) = message.get("content").and_then(|v| v.as_array()) else {
         return String::new();
     };
@@ -177,6 +169,23 @@ fn extract_replay_agent_message_text(message: &Value) -> String {
                     .trim();
                 if !text.is_empty() {
                     parts.push(text.to_string());
+                }
+            }
+            "tool_use" => {
+                let name = item.get("name").and_then(|v| v.as_str()).unwrap_or("tool");
+                let command = item
+                    .get("input")
+                    .and_then(|v| v.get("command"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default()
+                    .lines()
+                    .next()
+                    .unwrap_or_default()
+                    .trim();
+                if command.is_empty() {
+                    parts.push(format!("tool: {}", name));
+                } else {
+                    parts.push(format!("tool {}: {}", name, command));
                 }
             }
             "thinking" => {
@@ -216,6 +225,34 @@ fn extract_replay_agent_message_text(message: &Value) -> String {
         joined.push_str("...");
     }
     joined
+}
+
+fn extract_tick_anchor(value: &Value, message: &Value) -> Option<u64> {
+    if let Some(stdout) = value
+        .get("toolUseResult")
+        .and_then(|v| v.get("stdout"))
+        .and_then(|v| v.as_str())
+        .filter(|v| !v.is_empty())
+    {
+        if let Some(tick) = extract_tick_from_text(stdout) {
+            return Some(tick);
+        }
+    }
+
+    if let Some(content) = message.get("content").and_then(|v| v.as_array()) {
+        for item in content {
+            let text = item
+                .get("content")
+                .and_then(|v| v.as_str())
+                .or_else(|| item.get("text").and_then(|v| v.as_str()))
+                .unwrap_or_default();
+            if let Some(tick) = extract_tick_from_text(text) {
+                return Some(tick);
+            }
+        }
+    }
+
+    None
 }
 
 fn extract_tick_from_text(text: &str) -> Option<u64> {
