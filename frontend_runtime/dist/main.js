@@ -1,5 +1,19 @@
 import * as threeSdk from "./sdk/three.js"
 import * as inputSdk from "./sdk/input.js"
+import {
+  createElement as createLucideElement,
+  Wrench,
+  CircleAlert,
+  User,
+} from "lucide"
+
+function icon(iconNode, size = 14) {
+  const el = createLucideElement(iconNode)
+  el.setAttribute('width', String(size))
+  el.setAttribute('height', String(size))
+  el.setAttribute('aria-hidden', 'true')
+  return el
+}
 
 const API_VERSION = 1
 const BASE_PATH = (() => {
@@ -86,6 +100,7 @@ const replayState = {
   agentLoaded: false,
   agentMessages: [],
   agentPanelOpen: readStoredBool('clawblox_agent_log_open', true),
+  agentExpandedBlocks: new Set(),
   metadataEnabled: false,
   metadataLoaded: false,
   metadata: null,
@@ -293,30 +308,21 @@ function renderReplayInfo(info) {
   if (replayState.behaviorPanelOpen) renderBehaviorPanel()
 }
 
-function formatAgentLogTime(timestampMs) {
-  const ms = Number(timestampMs)
-  if (!Number.isFinite(ms)) return ''
-  const dt = new Date(ms)
-  if (!Number.isFinite(dt.getTime())) return ''
-  return dt.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })
-}
-
 function renderAgentLogMessages(currentTick, payload = null) {
   if (!agentLogFeedEl) return
-  const shouldStick = userAtBottom(agentLogFeedEl)
-  const prevScrollTop = agentLogFeedEl.scrollTop
-  const prevScrollHeight = agentLogFeedEl.scrollHeight
   if (payload) {
     const enabled = !!payload?.enabled
     replayState.agentEnabled = enabled
     replayState.agentLoaded = true
     replayState.agentMessages = Array.isArray(payload?.messages) ? payload.messages : []
+    replayState.agentRenderedSig = null
   }
   const enabled = replayState.agentEnabled
   syncAgentLogVisibility()
 
-  agentLogFeedEl.textContent = ''
   if (!enabled) {
+    agentLogFeedEl.textContent = ''
+    replayState.agentRenderedSig = null
     setAgentLogStatus('No file')
     return
   }
@@ -325,7 +331,10 @@ function renderAgentLogMessages(currentTick, payload = null) {
   const endTick = Number((currentTick ?? replayState.info?.current_tick) || 0)
   const messages = allMessages.filter((msg) => Number(msg?.tick) <= endTick + 1e-6)
   setAgentLogStatus(`${messages.length}/${allMessages.length}`)
+
   if (!allMessages.length) {
+    agentLogFeedEl.textContent = ''
+    replayState.agentRenderedSig = 'empty'
     const empty = document.createElement('div')
     empty.className = 'agent-log-empty'
     empty.textContent = 'No agent messages in this log.'
@@ -333,6 +342,8 @@ function renderAgentLogMessages(currentTick, payload = null) {
     return
   }
   if (!messages.length) {
+    agentLogFeedEl.textContent = ''
+    replayState.agentRenderedSig = 'empty-tick'
     const empty = document.createElement('div')
     empty.className = 'agent-log-empty'
     empty.textContent = 'No messages yet at this replay point.'
@@ -340,42 +351,156 @@ function renderAgentLogMessages(currentTick, payload = null) {
     return
   }
 
-  for (const msg of messages) {
-    const row = document.createElement('div')
-    row.className = 'agent-log-message'
+  const sig = `${messages.length}|${messages[messages.length - 1]?.id || ''}|${messages[messages.length - 1]?.timestamp_ms || ''}`
+  const sigChanged = replayState.agentRenderedSig !== sig
 
-    const meta = document.createElement('div')
-    meta.className = 'agent-log-message__meta'
-
-    const role = document.createElement('span')
-    role.className = 'agent-log-message__role'
-    role.textContent = String(msg?.role || 'message')
-
-    const tickNum = Number(msg?.tick)
-
-    const time = document.createElement('span')
-    time.className = 'agent-log-message__tick'
-    time.textContent = formatAgentLogTime(msg?.timestamp_ms)
-
-    meta.append(role, time)
-
-    const body = document.createElement('div')
-    body.textContent = String(msg?.text || '')
-
-    if (Number.isFinite(tickNum) && Math.abs(tickNum - endTick) <= 1) {
-      row.style.borderColor = 'rgba(126, 211, 255, 0.6)'
-      row.style.boxShadow = 'inset 0 0 0 1px rgba(126, 211, 255, 0.28)'
+  if (sigChanged) {
+    const shouldStick = userAtBottom(agentLogFeedEl)
+    const prevScrollTop = agentLogFeedEl.scrollTop
+    const prevScrollHeight = agentLogFeedEl.scrollHeight
+    agentLogFeedEl.textContent = ''
+    for (const msg of messages) {
+      const row = buildAgentLogMessage(msg, endTick)
+      if (row) agentLogFeedEl.appendChild(row)
     }
-
-    row.append(meta, body)
-    agentLogFeedEl.appendChild(row)
-  }
-  if (shouldStick) {
-    agentLogFeedEl.scrollTop = agentLogFeedEl.scrollHeight
+    replayState.agentRenderedSig = sig
+    if (shouldStick) {
+      agentLogFeedEl.scrollTop = agentLogFeedEl.scrollHeight
+    } else {
+      const growth = agentLogFeedEl.scrollHeight - prevScrollHeight
+      agentLogFeedEl.scrollTop = Math.max(0, prevScrollTop + growth)
+    }
   } else {
-    const growth = agentLogFeedEl.scrollHeight - prevScrollHeight
-    agentLogFeedEl.scrollTop = Math.max(0, prevScrollTop + growth)
+    updateCurrentTickHighlight(endTick)
   }
+}
+
+function updateCurrentTickHighlight(endTick) {
+  const rows = agentLogFeedEl.querySelectorAll('.agent-log-message')
+  rows.forEach((row) => {
+    const tickNum = Number(row.dataset.tick)
+    const isCurrent = Number.isFinite(tickNum) && Math.abs(tickNum - endTick) <= 1
+    row.classList.toggle('is-current', isCurrent)
+  })
+}
+
+function buildAgentLogMessage(msg, endTick) {
+  const blocks = Array.isArray(msg?.blocks) ? msg.blocks : []
+  if (!blocks.length) {
+    return null
+  }
+  const row = document.createElement('div')
+  row.className = 'agent-log-message'
+  const role = String(msg?.role || 'assistant')
+  row.dataset.role = role
+  const tickNum = Number(msg?.tick)
+  if (Number.isFinite(tickNum)) row.dataset.tick = String(tickNum)
+  if (Number.isFinite(tickNum) && Math.abs(tickNum - endTick) <= 1) {
+    row.classList.add('is-current')
+  }
+
+  const body = document.createElement('div')
+  body.className = 'agent-log-message__body'
+  if (role === 'user') {
+    const badge = document.createElement('span')
+    badge.className = 'agent-log-message__user-badge'
+    badge.appendChild(icon(User, 11))
+    row.appendChild(badge)
+  }
+
+  const msgId = String(msg?.id || msg?.timestamp_ms || '')
+  for (let i = 0; i < blocks.length; i++) {
+    const el = buildAgentLogBlock(blocks[i], `${msgId}:${i}`)
+    if (el) body.appendChild(el)
+  }
+
+  row.appendChild(body)
+  return row
+}
+
+function buildAgentLogBlock(block, key) {
+  const type = String(block?.type || '')
+  if (type === 'text') {
+    const el = document.createElement('div')
+    el.className = 'agent-log-block agent-log-block--text'
+    el.textContent = String(block?.text || '')
+    return el
+  }
+  if (type === 'thinking') {
+    const el = document.createElement('div')
+    el.className = 'agent-log-block agent-log-block--thinking'
+    el.textContent = String(block?.text || '')
+    return el
+  }
+  if (type === 'tool_use') {
+    return buildToolUseBlock(block, key)
+  }
+  return null
+}
+
+function buildToolUseBlock(block, key) {
+  const name = String(block?.name || 'tool')
+  const input = block?.input
+  const result = block?.result
+  const isError = !!result?.is_error
+
+  const wrap = document.createElement('div')
+  wrap.className = 'agent-log-block agent-log-block--tool'
+  if (isError) wrap.classList.add('is-error')
+
+  const expanded = replayState.agentExpandedBlocks.has(key)
+
+  const head = document.createElement('button')
+  head.type = 'button'
+  head.className = 'agent-log-tool__head'
+  head.setAttribute('aria-expanded', expanded ? 'true' : 'false')
+  head.appendChild(icon(isError ? CircleAlert : Wrench, 11))
+  const labelEl = document.createElement('span')
+  labelEl.className = 'agent-log-tool__name'
+  labelEl.textContent = name
+  head.appendChild(labelEl)
+  wrap.appendChild(head)
+
+  const detail = document.createElement('div')
+  detail.className = 'agent-log-tool__detail'
+  detail.hidden = !expanded
+
+  const hasInput = input && (typeof input === 'object' || typeof input === 'string')
+  if (hasInput) {
+    const inputEl = document.createElement('pre')
+    inputEl.className = 'agent-log-tool__body'
+    inputEl.textContent = typeof input === 'string'
+      ? input
+      : JSON.stringify(input, null, 2)
+    detail.appendChild(inputEl)
+  }
+
+  if (result) {
+    const resultEl = document.createElement('pre')
+    resultEl.className = 'agent-log-tool__body agent-log-tool__body--result'
+    if (isError) resultEl.classList.add('is-error')
+    resultEl.textContent = String(result.content || '')
+    detail.appendChild(resultEl)
+  }
+
+  if (detail.childElementCount > 0) {
+    wrap.appendChild(detail)
+    head.addEventListener('click', (e) => {
+      e.preventDefault()
+      const isOpen = replayState.agentExpandedBlocks.has(key)
+      if (isOpen) {
+        replayState.agentExpandedBlocks.delete(key)
+      } else {
+        replayState.agentExpandedBlocks.add(key)
+      }
+      detail.hidden = isOpen
+      head.setAttribute('aria-expanded', isOpen ? 'false' : 'true')
+    })
+  } else {
+    head.setAttribute('aria-disabled', 'true')
+  }
+
+  return wrap
 }
 
 function behaviorAccentColor(behavior) {

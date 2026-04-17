@@ -424,39 +424,146 @@ body {
 .agent-log-feed {
   min-height: 0;
   overflow: auto;
-  padding: 8px;
+  padding: 6px 8px;
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  gap: 2px;
   scrollbar-width: thin;
 }
 
 .agent-log-message {
-  border: 1px solid rgba(209, 222, 255, 0.08);
-  border-radius: 8px;
-  background: rgba(255, 255, 255, 0.03);
-  padding: 6px 7px;
+  display: flex;
+  gap: 6px;
+  padding: 1px 0;
   font-size: 12px;
-  line-height: 1.4;
-  white-space: pre-wrap;
+  line-height: 1.45;
   word-break: break-word;
 }
 
-.agent-log-message__meta {
+.agent-log-message.is-current {
+  background: rgba(126, 211, 255, 0.06);
+  box-shadow: inset 2px 0 0 0 rgba(126, 211, 255, 0.55);
+  padding-left: 6px;
+}
+
+.agent-log-message[data-role="user"] {
+  color: rgba(236, 240, 255, 0.95);
+}
+
+.agent-log-message__user-badge {
+  flex-shrink: 0;
+  padding-top: 2px;
+  color: rgba(126, 211, 255, 0.85);
+}
+
+.agent-log-message__body {
+  flex: 1;
+  min-width: 0;
   display: flex;
-  justify-content: space-between;
-  gap: 8px;
-  margin-bottom: 4px;
-  color: rgba(185, 196, 238, 0.88);
-  font-size: 10px;
+  flex-direction: column;
+  gap: 2px;
 }
 
-.agent-log-message__role {
-  font-weight: 700;
+.agent-log-block {
+  font-size: 12px;
+  line-height: 1.5;
 }
 
-.agent-log-message__tick {
-  font-variant-numeric: tabular-nums;
+.agent-log-block--text {
+  color: rgba(236, 240, 255, 0.95);
+  white-space: pre-wrap;
+}
+
+.agent-log-block--thinking {
+  color: rgba(185, 196, 238, 0.62);
+  font-style: italic;
+  white-space: pre-wrap;
+  border-left: 2px solid rgba(185, 196, 238, 0.18);
+  padding: 0 0 0 8px;
+}
+
+.agent-log-block--tool {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+}
+
+.agent-log-block--tool.is-error .agent-log-tool__name {
+  color: rgba(255, 170, 170, 0.95);
+}
+
+.agent-log-block--tool.is-error .agent-log-tool__head svg:first-child {
+  color: rgba(255, 140, 140, 0.9);
+}
+
+.agent-log-tool__head {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 1px 6px;
+  margin: 0;
+  height: 18px;
+  font: inherit;
+  font-size: 11px;
+  cursor: pointer;
+  color: rgba(220, 228, 255, 0.85);
+  background: transparent;
+  border: none;
+  user-select: none;
+  text-align: left;
+}
+
+.agent-log-tool__head[aria-disabled="true"] {
+  cursor: default;
+}
+
+.agent-log-tool__head svg {
+  flex-shrink: 0;
+  color: rgba(185, 196, 238, 0.72);
+}
+
+.agent-log-tool__name {
+  font-weight: 600;
+  color: rgba(236, 240, 255, 0.9);
+}
+
+.agent-log-tool__detail {
+  align-self: stretch;
+  margin: 2px 0 2px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.agent-log-tool__detail[hidden] {
+  display: none;
+}
+
+.agent-log-tool__body {
+  margin: 0;
+  padding: 6px 8px;
+  border: 1px solid rgba(209, 222, 255, 0.08);
+  border-radius: 6px;
+  background: rgba(0, 0, 0, 0.22);
+  color: rgba(220, 228, 255, 0.9);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px;
+  line-height: 1.45;
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 260px;
+  overflow: auto;
+}
+
+.agent-log-tool__body--result {
+  border-color: rgba(126, 211, 255, 0.18);
+  background: rgba(126, 211, 255, 0.04);
+}
+
+.agent-log-tool__body--result.is-error {
+  border-color: rgba(255, 120, 120, 0.35);
+  background: rgba(255, 120, 120, 0.06);
+  color: rgba(255, 220, 220, 0.95);
 }
 
 .agent-log-empty {
