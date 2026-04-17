@@ -281,6 +281,10 @@ load_session_metadata() {
   out_auto_stop_pid_ref="${meta_fields[5]:-}"
 }
 
+stop_requires_metadata_match() {
+  [[ -n "$EXPECTED_RUN_ID" || -n "$EXPECTED_LAUNCH_INSTANCE_ID" ]]
+}
+
 kill_recorded_auto_stop_pid() {
   local meta_file="$1"
   local skip_pid="${2:-}"
@@ -514,6 +518,10 @@ do_stop() {
           fi
         fi
       fi
+    elif stop_requires_metadata_match; then
+      echo "Skipping stop for '$TMUX_SESSION': expected ownership metadata is missing or unreadable."
+      append_launcher_audit "stop_skipped_missing_metadata" "expected_run_id=$EXPECTED_RUN_ID expected_launch_instance_id=$EXPECTED_LAUNCH_INSTANCE_ID force=$FORCE meta_file=$meta_file"
+      return 0
     fi
     echo "Stopping world servers..."
     while IFS= read -r window_name; do

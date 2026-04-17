@@ -1,5 +1,19 @@
 import * as threeSdk from "./sdk/three.js"
 import * as inputSdk from "./sdk/input.js"
+import {
+  createElement as createLucideElement,
+  Wrench,
+  CircleAlert,
+  User,
+} from "lucide"
+
+function icon(iconNode, size = 14) {
+  const el = createLucideElement(iconNode)
+  el.setAttribute('width', String(size))
+  el.setAttribute('height', String(size))
+  el.setAttribute('aria-hidden', 'true')
+  return el
+}
 
 const API_VERSION = 1
 const BASE_PATH = (() => {
@@ -46,7 +60,10 @@ const playerListCountEl = document.getElementById('player-list-count')
 const playerListBodyEl = document.getElementById('player-list-body')
 const behaviorPanelEl = document.getElementById('behavior-panel')
 const behaviorPanelToggleEl = document.getElementById('behavior-panel-toggle')
-const behaviorListEl = document.getElementById('behavior-list')
+const behaviorTimelineShellEl = document.getElementById('behavior-timeline-shell')
+const behaviorRulerEl = document.getElementById('behavior-ruler')
+const behaviorTracksEl = document.getElementById('behavior-tracks')
+const behaviorGlobalPlayheadEl = document.getElementById('behavior-global-playhead')
 const behaviorDetailsEl = document.getElementById('behavior-details')
 const replayPanelEl = document.getElementById('replay-panel')
 const replayPlayToggleEl = document.getElementById('replay-play-toggle')
@@ -83,12 +100,16 @@ const replayState = {
   agentLoaded: false,
   agentMessages: [],
   agentPanelOpen: readStoredBool('clawblox_agent_log_open', true),
+  agentExpandedBlocks: new Set(),
   metadataEnabled: false,
   metadataLoaded: false,
   metadata: null,
   behaviorPanelOpen: readStoredBool('clawblox_behavior_panel_open', false),
   selectedBehaviorId: null,
   selectedOccurrenceId: null,
+  behaviorViewStartTick: null,
+  behaviorViewEndTick: null,
+  behaviorPanState: null,
 }
 const internalApiRegistry = new Map()
 
@@ -238,6 +259,9 @@ function setReplayMode(enabled) {
     replayState.metadata = null
     replayState.selectedBehaviorId = null
     replayState.selectedOccurrenceId = null
+    replayState.behaviorViewStartTick = null
+    replayState.behaviorViewEndTick = null
+    replayState.behaviorPanState = null
   }
   document.body.dataset.mode = replayState.enabled ? 'replay' : 'live'
   if (replayPanelEl) replayPanelEl.hidden = !replayState.enabled
@@ -284,30 +308,21 @@ function renderReplayInfo(info) {
   if (replayState.behaviorPanelOpen) renderBehaviorPanel()
 }
 
-function formatAgentLogTime(timestampMs) {
-  const ms = Number(timestampMs)
-  if (!Number.isFinite(ms)) return ''
-  const dt = new Date(ms)
-  if (!Number.isFinite(dt.getTime())) return ''
-  return dt.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })
-}
-
 function renderAgentLogMessages(currentTick, payload = null) {
   if (!agentLogFeedEl) return
-  const shouldStick = userAtBottom(agentLogFeedEl)
-  const prevScrollTop = agentLogFeedEl.scrollTop
-  const prevScrollHeight = agentLogFeedEl.scrollHeight
   if (payload) {
     const enabled = !!payload?.enabled
     replayState.agentEnabled = enabled
     replayState.agentLoaded = true
     replayState.agentMessages = Array.isArray(payload?.messages) ? payload.messages : []
+    replayState.agentRenderedSig = null
   }
   const enabled = replayState.agentEnabled
   syncAgentLogVisibility()
 
-  agentLogFeedEl.textContent = ''
   if (!enabled) {
+    agentLogFeedEl.textContent = ''
+    replayState.agentRenderedSig = null
     setAgentLogStatus('No file')
     return
   }
@@ -316,7 +331,10 @@ function renderAgentLogMessages(currentTick, payload = null) {
   const endTick = Number((currentTick ?? replayState.info?.current_tick) || 0)
   const messages = allMessages.filter((msg) => Number(msg?.tick) <= endTick + 1e-6)
   setAgentLogStatus(`${messages.length}/${allMessages.length}`)
+
   if (!allMessages.length) {
+    agentLogFeedEl.textContent = ''
+    replayState.agentRenderedSig = 'empty'
     const empty = document.createElement('div')
     empty.className = 'agent-log-empty'
     empty.textContent = 'No agent messages in this log.'
@@ -324,6 +342,8 @@ function renderAgentLogMessages(currentTick, payload = null) {
     return
   }
   if (!messages.length) {
+    agentLogFeedEl.textContent = ''
+    replayState.agentRenderedSig = 'empty-tick'
     const empty = document.createElement('div')
     empty.className = 'agent-log-empty'
     empty.textContent = 'No messages yet at this replay point.'
@@ -331,42 +351,156 @@ function renderAgentLogMessages(currentTick, payload = null) {
     return
   }
 
-  for (const msg of messages) {
-    const row = document.createElement('div')
-    row.className = 'agent-log-message'
+  const sig = `${messages.length}|${messages[messages.length - 1]?.id || ''}|${messages[messages.length - 1]?.timestamp_ms || ''}`
+  const sigChanged = replayState.agentRenderedSig !== sig
 
-    const meta = document.createElement('div')
-    meta.className = 'agent-log-message__meta'
-
-    const role = document.createElement('span')
-    role.className = 'agent-log-message__role'
-    role.textContent = String(msg?.role || 'message')
-
-    const tickNum = Number(msg?.tick)
-
-    const time = document.createElement('span')
-    time.className = 'agent-log-message__tick'
-    time.textContent = formatAgentLogTime(msg?.timestamp_ms)
-
-    meta.append(role, time)
-
-    const body = document.createElement('div')
-    body.textContent = String(msg?.text || '')
-
-    if (Number.isFinite(tickNum) && Math.abs(tickNum - endTick) <= 1) {
-      row.style.borderColor = 'rgba(126, 211, 255, 0.6)'
-      row.style.boxShadow = 'inset 0 0 0 1px rgba(126, 211, 255, 0.28)'
+  if (sigChanged) {
+    const shouldStick = userAtBottom(agentLogFeedEl)
+    const prevScrollTop = agentLogFeedEl.scrollTop
+    const prevScrollHeight = agentLogFeedEl.scrollHeight
+    agentLogFeedEl.textContent = ''
+    for (const msg of messages) {
+      const row = buildAgentLogMessage(msg, endTick)
+      if (row) agentLogFeedEl.appendChild(row)
     }
-
-    row.append(meta, body)
-    agentLogFeedEl.appendChild(row)
-  }
-  if (shouldStick) {
-    agentLogFeedEl.scrollTop = agentLogFeedEl.scrollHeight
+    replayState.agentRenderedSig = sig
+    if (shouldStick) {
+      agentLogFeedEl.scrollTop = agentLogFeedEl.scrollHeight
+    } else {
+      const growth = agentLogFeedEl.scrollHeight - prevScrollHeight
+      agentLogFeedEl.scrollTop = Math.max(0, prevScrollTop + growth)
+    }
   } else {
-    const growth = agentLogFeedEl.scrollHeight - prevScrollHeight
-    agentLogFeedEl.scrollTop = Math.max(0, prevScrollTop + growth)
+    updateCurrentTickHighlight(endTick)
   }
+}
+
+function updateCurrentTickHighlight(endTick) {
+  const rows = agentLogFeedEl.querySelectorAll('.agent-log-message')
+  rows.forEach((row) => {
+    const tickNum = Number(row.dataset.tick)
+    const isCurrent = Number.isFinite(tickNum) && Math.abs(tickNum - endTick) <= 1
+    row.classList.toggle('is-current', isCurrent)
+  })
+}
+
+function buildAgentLogMessage(msg, endTick) {
+  const blocks = Array.isArray(msg?.blocks) ? msg.blocks : []
+  if (!blocks.length) {
+    return null
+  }
+  const row = document.createElement('div')
+  row.className = 'agent-log-message'
+  const role = String(msg?.role || 'assistant')
+  row.dataset.role = role
+  const tickNum = Number(msg?.tick)
+  if (Number.isFinite(tickNum)) row.dataset.tick = String(tickNum)
+  if (Number.isFinite(tickNum) && Math.abs(tickNum - endTick) <= 1) {
+    row.classList.add('is-current')
+  }
+
+  const body = document.createElement('div')
+  body.className = 'agent-log-message__body'
+  if (role === 'user') {
+    const badge = document.createElement('span')
+    badge.className = 'agent-log-message__user-badge'
+    badge.appendChild(icon(User, 11))
+    row.appendChild(badge)
+  }
+
+  const msgId = String(msg?.id || msg?.timestamp_ms || '')
+  for (let i = 0; i < blocks.length; i++) {
+    const el = buildAgentLogBlock(blocks[i], `${msgId}:${i}`)
+    if (el) body.appendChild(el)
+  }
+
+  row.appendChild(body)
+  return row
+}
+
+function buildAgentLogBlock(block, key) {
+  const type = String(block?.type || '')
+  if (type === 'text') {
+    const el = document.createElement('div')
+    el.className = 'agent-log-block agent-log-block--text'
+    el.textContent = String(block?.text || '')
+    return el
+  }
+  if (type === 'thinking') {
+    const el = document.createElement('div')
+    el.className = 'agent-log-block agent-log-block--thinking'
+    el.textContent = String(block?.text || '')
+    return el
+  }
+  if (type === 'tool_use') {
+    return buildToolUseBlock(block, key)
+  }
+  return null
+}
+
+function buildToolUseBlock(block, key) {
+  const name = String(block?.name || 'tool')
+  const input = block?.input
+  const result = block?.result
+  const isError = !!result?.is_error
+
+  const wrap = document.createElement('div')
+  wrap.className = 'agent-log-block agent-log-block--tool'
+  if (isError) wrap.classList.add('is-error')
+
+  const expanded = replayState.agentExpandedBlocks.has(key)
+
+  const head = document.createElement('button')
+  head.type = 'button'
+  head.className = 'agent-log-tool__head'
+  head.setAttribute('aria-expanded', expanded ? 'true' : 'false')
+  head.appendChild(icon(isError ? CircleAlert : Wrench, 11))
+  const labelEl = document.createElement('span')
+  labelEl.className = 'agent-log-tool__name'
+  labelEl.textContent = name
+  head.appendChild(labelEl)
+  wrap.appendChild(head)
+
+  const detail = document.createElement('div')
+  detail.className = 'agent-log-tool__detail'
+  detail.hidden = !expanded
+
+  const hasInput = input && (typeof input === 'object' || typeof input === 'string')
+  if (hasInput) {
+    const inputEl = document.createElement('pre')
+    inputEl.className = 'agent-log-tool__body'
+    inputEl.textContent = typeof input === 'string'
+      ? input
+      : JSON.stringify(input, null, 2)
+    detail.appendChild(inputEl)
+  }
+
+  if (result) {
+    const resultEl = document.createElement('pre')
+    resultEl.className = 'agent-log-tool__body agent-log-tool__body--result'
+    if (isError) resultEl.classList.add('is-error')
+    resultEl.textContent = String(result.content || '')
+    detail.appendChild(resultEl)
+  }
+
+  if (detail.childElementCount > 0) {
+    wrap.appendChild(detail)
+    head.addEventListener('click', (e) => {
+      e.preventDefault()
+      const isOpen = replayState.agentExpandedBlocks.has(key)
+      if (isOpen) {
+        replayState.agentExpandedBlocks.delete(key)
+      } else {
+        replayState.agentExpandedBlocks.add(key)
+      }
+      detail.hidden = isOpen
+      head.setAttribute('aria-expanded', isOpen ? 'false' : 'true')
+    })
+  } else {
+    head.setAttribute('aria-disabled', 'true')
+  }
+
+  return wrap
 }
 
 function behaviorAccentColor(behavior) {
@@ -408,11 +542,157 @@ function occurrenceDurationText(occurrence, info) {
   return formatDurationMs((durationTicks / info.tick_rate) * 1000)
 }
 
+function selectBehaviorOccurrence(behaviorId, occurrenceId) {
+  replayState.selectedBehaviorId = String(behaviorId || '')
+  replayState.selectedOccurrenceId = occurrenceId == null ? null : String(occurrenceId)
+}
+
+function minBehaviorViewSpan(info) {
+  const tickRate = Number(info?.tick_rate || 0)
+  return Math.max(60, tickRate > 0 ? Math.round(tickRate * 2) : 120)
+}
+
+function resetBehaviorView(info) {
+  if (!info) return
+  replayState.behaviorViewStartTick = Number(info.first_tick || 0)
+  replayState.behaviorViewEndTick = Number(info.total_ticks || info.first_tick || 0)
+}
+
+function getBehaviorView(info) {
+  if (!info) {
+    return { startTick: 0, endTick: 1, span: 1 }
+  }
+  const fullStart = Number(info.first_tick || 0)
+  const fullEnd = Number(info.total_ticks || fullStart || 1)
+  if (
+    !Number.isFinite(replayState.behaviorViewStartTick) ||
+    !Number.isFinite(replayState.behaviorViewEndTick) ||
+    replayState.behaviorViewEndTick <= replayState.behaviorViewStartTick
+  ) {
+    resetBehaviorView(info)
+  }
+  let startTick = Number(replayState.behaviorViewStartTick)
+  let endTick = Number(replayState.behaviorViewEndTick)
+  const minSpan = minBehaviorViewSpan(info)
+  const fullSpan = Math.max(1, fullEnd - fullStart)
+  let span = Math.max(minSpan, endTick - startTick)
+  span = Math.min(span, fullSpan)
+  startTick = Math.max(fullStart, Math.min(startTick, fullEnd - span))
+  endTick = startTick + span
+  replayState.behaviorViewStartTick = startTick
+  replayState.behaviorViewEndTick = endTick
+  return { startTick, endTick, span }
+}
+
+function setBehaviorView(startTick, endTick, info) {
+  if (!info) return
+  const fullStart = Number(info.first_tick || 0)
+  const fullEnd = Number(info.total_ticks || fullStart || 1)
+  const fullSpan = Math.max(1, fullEnd - fullStart)
+  const minSpan = minBehaviorViewSpan(info)
+  let nextStart = Number(startTick)
+  let nextEnd = Number(endTick)
+  if (!Number.isFinite(nextStart) || !Number.isFinite(nextEnd)) {
+    resetBehaviorView(info)
+    return
+  }
+  let span = Math.max(minSpan, nextEnd - nextStart)
+  span = Math.min(span, fullSpan)
+  nextStart = Math.max(fullStart, Math.min(nextStart, fullEnd - span))
+  nextEnd = nextStart + span
+  replayState.behaviorViewStartTick = nextStart
+  replayState.behaviorViewEndTick = nextEnd
+}
+
+function formatBehaviorTickLabel(tick, info) {
+  if (!info || !Number.isFinite(Number(info.tick_rate)) || Number(info.tick_rate) <= 0) {
+    return String(Math.round(Number(tick) || 0))
+  }
+  const seconds = Math.max(0, Math.floor((Number(tick) - Number(info.first_tick || 0)) / Number(info.tick_rate)))
+  const hours = Math.floor(seconds / 3600)
+  const minutes = Math.floor((seconds % 3600) / 60)
+  const secs = seconds % 60
+  if (hours > 0) return `${hours}:${String(minutes).padStart(2, '0')}:${String(secs).padStart(2, '0')}`
+  return `${minutes}:${String(secs).padStart(2, '0')}`
+}
+
+function getBehaviorTimelineMetrics() {
+  if (!behaviorTimelineShellEl) return null
+  const trackEl =
+    behaviorTracksEl?.querySelector('.behavior-row__track') ||
+    behaviorRulerEl?.querySelector('.behavior-ruler__track')
+  if (!(trackEl instanceof HTMLElement)) return null
+  const shellRect = behaviorTimelineShellEl.getBoundingClientRect()
+  const trackRect = trackEl.getBoundingClientRect()
+  if (trackRect.width <= 0) return null
+  return {
+    offsetLeft: trackRect.left - shellRect.left,
+    trackWidth: trackRect.width,
+  }
+}
+
+function tickFromBehaviorClientX(clientX, info) {
+  const metrics = getBehaviorTimelineMetrics()
+  if (!metrics || !info) return null
+  const rect = behaviorTimelineShellEl.getBoundingClientRect()
+  const x = clientX - rect.left - metrics.offsetLeft
+  const ratio = Math.max(0, Math.min(1, x / Math.max(1, metrics.trackWidth)))
+  const view = getBehaviorView(info)
+  return view.startTick + ratio * view.span
+}
+
+function renderBehaviorRuler(view, info) {
+  if (!behaviorRulerEl) return
+  behaviorRulerEl.textContent = ''
+  const spacer = document.createElement('div')
+  spacer.className = 'behavior-ruler__spacer'
+  const track = document.createElement('div')
+  track.className = 'behavior-ruler__track'
+  const tickCount = 6
+  for (let i = 0; i <= tickCount; i++) {
+    const ratio = i / tickCount
+    const tickValue = Math.round(view.startTick + ratio * view.span)
+    const marker = document.createElement('div')
+    marker.className = 'behavior-ruler__tick'
+    marker.style.left = `${ratio * 100}%`
+    const label = document.createElement('div')
+    label.className = 'behavior-ruler__label'
+    label.style.left = `${ratio * 100}%`
+    label.textContent = formatBehaviorTickLabel(tickValue, info)
+    track.append(marker, label)
+  }
+  behaviorRulerEl.append(spacer, track)
+}
+
+function renderBehaviorGlobalPlayhead(view, info) {
+  if (!behaviorGlobalPlayheadEl || !info) return
+  const metrics = getBehaviorTimelineMetrics()
+  if (!metrics) {
+    behaviorGlobalPlayheadEl.classList.remove('is-visible')
+    return
+  }
+  const currentTick = Number(info.current_tick || info.first_tick || 0)
+  if (currentTick < view.startTick || currentTick > view.endTick) {
+    behaviorGlobalPlayheadEl.classList.remove('is-visible')
+    return
+  }
+  const ratio = (currentTick - view.startTick) / Math.max(1, view.span)
+  behaviorGlobalPlayheadEl.style.left = `${metrics.offsetLeft + ratio * metrics.trackWidth}px`
+  behaviorGlobalPlayheadEl.classList.add('is-visible')
+}
+
 async function playBehaviorOccurrence(behaviorId, occurrenceId) {
   const { behavior, occurrence } = findOccurrence(behaviorId, occurrenceId)
   if (!behavior || !occurrence || !replayState.enabled) return
-  replayState.selectedBehaviorId = String(behavior.id || '')
-  replayState.selectedOccurrenceId = String(occurrence.id || '')
+  selectBehaviorOccurrence(behavior.id || '', occurrence.id || '')
+  if (replayState.info) {
+    replayState.info = {
+      ...replayState.info,
+      current_tick: Number(occurrence.start_tick || 0),
+      paused: false,
+      pause_at_tick: Number(occurrence.end_tick || occurrence.start_tick || 0),
+    }
+  }
   renderBehaviorPanel()
   try {
     await postReplay(`/replay/play-range?start_tick=${encodeURIComponent(String(occurrence.start_tick || 0))}&end_tick=${encodeURIComponent(String(occurrence.end_tick || occurrence.start_tick || 0))}`)
@@ -512,16 +792,14 @@ function renderBehaviorDetails() {
 }
 
 function renderBehaviorPanel() {
-  if (!behaviorListEl) return
+  if (!behaviorTracksEl) return
   const shouldRender = replayState.enabled && replayState.metadataEnabled && replayState.behaviorPanelOpen
   if (!shouldRender) return
 
   const behaviors = getReplayBehaviors()
   const info = replayState.info
-  const firstTick = Number(info?.first_tick || 0)
-  const totalTicks = Number(info?.total_ticks || 0)
-  const tickSpan = Math.max(1, totalTicks - firstTick)
-  const currentTick = Number(info?.current_tick || firstTick)
+  const view = getBehaviorView(info)
+  const currentTick = Number(info?.current_tick || info?.first_tick || 0)
 
   if (!replayState.selectedBehaviorId && behaviors.length) {
     replayState.selectedBehaviorId = String(behaviors[0].id || '')
@@ -536,7 +814,9 @@ function renderBehaviorPanel() {
     replayState.selectedOccurrenceId = firstOccurrence ? String(firstOccurrence.id || '') : null
   }
 
-  behaviorListEl.textContent = ''
+  renderBehaviorRuler(view, info)
+  const previousScrollTop = behaviorTracksEl.scrollTop
+  behaviorTracksEl.textContent = ''
   for (const behavior of behaviors) {
     const row = document.createElement('div')
     row.className = 'behavior-row'
@@ -555,33 +835,36 @@ function renderBehaviorPanel() {
     name.textContent = String(behavior.label || behavior.id || 'Behavior')
 
     labelButton.append(name)
-    labelButton.addEventListener('click', () => {
-      replayState.selectedBehaviorId = behaviorId
+    const playFirstOccurrence = (ev) => {
+      if (ev) ev.preventDefault()
+      selectBehaviorOccurrence(behaviorId, null)
       if (occurrences.length) {
-        replayState.selectedOccurrenceId = String(occurrences[0].id || '')
-        void playBehaviorOccurrence(behaviorId, replayState.selectedOccurrenceId)
+        const firstOccurrenceId = String(occurrences[0].id || '')
+        void playBehaviorOccurrence(behaviorId, firstOccurrenceId)
       } else {
         renderBehaviorPanel()
       }
-    })
+    }
+    labelButton.addEventListener('pointerdown', playFirstOccurrence)
+    labelButton.addEventListener('click', (ev) => ev.preventDefault())
 
     const track = document.createElement('div')
     track.className = 'behavior-row__track'
-
-    const playhead = document.createElement('div')
-    playhead.className = 'behavior-row__playhead'
-    const playheadPct = ((currentTick - firstTick) / tickSpan) * 100
-    playhead.style.left = `${Math.max(0, Math.min(100, playheadPct))}%`
-    track.appendChild(playhead)
+    const viewSpan = Math.max(1, view.span)
 
     for (const occurrence of occurrences) {
       const startTick = Number(occurrence?.start_tick || 0)
       const endTick = Number(occurrence?.end_tick || startTick)
-      const startPct = ((startTick - firstTick) / tickSpan) * 100
-      const widthPct = Math.max(((Math.max(startTick, endTick) - startTick) / tickSpan) * 100, 0.8)
+      if (endTick < view.startTick || startTick > view.endTick) continue
+      const isPointEvent = endTick <= startTick
+      const startPct = ((startTick - view.startTick) / viewSpan) * 100
+      const widthPct = isPointEvent
+        ? 0.25
+        : Math.max(((Math.max(startTick, endTick) - startTick) / viewSpan) * 100, 0.8)
       const bar = document.createElement('button')
       bar.type = 'button'
       bar.className = 'behavior-occurrence'
+      if (isPointEvent) bar.classList.add('behavior-occurrence--point')
       if (String(occurrence?.id || '') === replayState.selectedOccurrenceId) {
         bar.classList.add('is-active')
       } else if (currentTick >= startTick && currentTick <= endTick) {
@@ -592,18 +875,22 @@ function renderBehaviorPanel() {
       bar.style.background = behaviorAccentColor(behavior)
       const duration = occurrenceDurationText(occurrence, info)
       bar.title = `${behavior.label || behavior.id || 'Behavior'} | ticks ${startTick}..${endTick}${duration ? ` | ${duration}` : ''}`
-      bar.addEventListener('click', (ev) => {
+      const playOccurrence = (ev) => {
         ev.stopPropagation()
-        replayState.selectedBehaviorId = behaviorId
-        replayState.selectedOccurrenceId = String(occurrence?.id || '')
-        void playBehaviorOccurrence(behaviorId, replayState.selectedOccurrenceId)
-      })
+        ev.preventDefault()
+        const occurrenceId = String(occurrence?.id || '')
+        void playBehaviorOccurrence(behaviorId, occurrenceId)
+      }
+      bar.addEventListener('pointerdown', playOccurrence)
+      bar.addEventListener('click', (ev) => ev.preventDefault())
       track.appendChild(bar)
     }
 
     row.append(labelButton, track)
-    behaviorListEl.appendChild(row)
+    behaviorTracksEl.appendChild(row)
   }
+  behaviorTracksEl.scrollTop = previousScrollTop
+  renderBehaviorGlobalPlayhead(view, info)
 
   renderBehaviorDetails()
 }
@@ -633,9 +920,39 @@ function applyReplayMetadata(payload) {
   if (!replayState.metadataEnabled) {
     replayState.selectedBehaviorId = null
     replayState.selectedOccurrenceId = null
+    replayState.behaviorViewStartTick = null
+    replayState.behaviorViewEndTick = null
   }
   syncBehaviorPanelVisibility()
   if (replayState.behaviorPanelOpen) renderBehaviorPanel()
+}
+
+function beginBehaviorPan(clientX) {
+  if (!replayState.enabled || !replayState.behaviorPanelOpen || !replayState.info) return
+  const view = getBehaviorView(replayState.info)
+  replayState.behaviorPanState = {
+    clientX,
+    startTick: view.startTick,
+    endTick: view.endTick,
+  }
+}
+
+function updateBehaviorPan(clientX) {
+  if (!replayState.behaviorPanState || !replayState.info) return
+  const metrics = getBehaviorTimelineMetrics()
+  if (!metrics) return
+  const deltaPx = clientX - replayState.behaviorPanState.clientX
+  const deltaTicks = (deltaPx / Math.max(1, metrics.trackWidth)) * (replayState.behaviorPanState.endTick - replayState.behaviorPanState.startTick)
+  setBehaviorView(
+    replayState.behaviorPanState.startTick - deltaTicks,
+    replayState.behaviorPanState.endTick - deltaTicks,
+    replayState.info,
+  )
+  renderBehaviorPanel()
+}
+
+function endBehaviorPan() {
+  replayState.behaviorPanState = null
 }
 
 async function probeReplayMode() {
@@ -1750,6 +2067,32 @@ if (behaviorPanelToggleEl) {
     setBehaviorPanelOpen(!replayState.behaviorPanelOpen, true)
   })
 }
+
+if (behaviorTimelineShellEl) {
+  behaviorTimelineShellEl.addEventListener('dblclick', (ev) => {
+    if (ev.target instanceof Element && ev.target.closest('.behavior-occurrence')) return
+    if (!replayState.info) return
+    resetBehaviorView(replayState.info)
+    renderBehaviorPanel()
+  })
+
+  behaviorTimelineShellEl.addEventListener('pointerdown', (ev) => {
+    if (!replayState.enabled || !replayState.behaviorPanelOpen || !replayState.info) return
+    if (!(ev.target instanceof Element)) return
+    if (ev.target.closest('.behavior-occurrence') || ev.target.closest('.behavior-row__label')) return
+    beginBehaviorPan(ev.clientX)
+  })
+}
+
+window.addEventListener('pointermove', (ev) => {
+  if (!replayState.behaviorPanState) return
+  updateBehaviorPan(ev.clientX)
+})
+
+window.addEventListener('pointerup', () => {
+  if (!replayState.behaviorPanState) return
+  endBehaviorPan()
+})
 
 if (agentLogToggleEl) {
   setAgentLogPanelOpen(replayState.agentPanelOpen, false)

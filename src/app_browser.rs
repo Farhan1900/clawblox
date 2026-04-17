@@ -359,14 +359,14 @@ fn find_world_instance_dir_near_recording(file: &Path) -> Option<PathBuf> {
     None
 }
 
-fn collect_agent_logs_recursive(dir: &Path, out: &mut Vec<PathBuf>) {
+fn collect_session_transcripts_recursive(dir: &Path, out: &mut Vec<PathBuf>) {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return;
     };
     for entry in entries.flatten() {
         let path = entry.path();
         if path.is_dir() {
-            collect_agent_logs_recursive(&path, out);
+            collect_session_transcripts_recursive(&path, out);
             continue;
         }
         if path.extension().and_then(|ext| ext.to_str()) != Some("jsonl") {
@@ -393,7 +393,7 @@ fn timestamp_key_from_recording(path: &Path) -> Option<u64> {
     digits[..14].parse().ok()
 }
 
-fn timestamp_key_from_agent_log(path: &Path) -> Option<u64> {
+fn timestamp_key_from_transcript(path: &Path) -> Option<u64> {
     let name = path.file_name()?.to_str()?;
     let prefix = name.split('_').next().unwrap_or(name);
     let digits = prefix
@@ -406,6 +406,88 @@ fn timestamp_key_from_agent_log(path: &Path) -> Option<u64> {
     digits[..14].parse().ok()
 }
 
+fn parse_transcript_path_from_session_json(path: &Path, agent_dir: &Path) -> Option<PathBuf> {
+    let raw = std::fs::read_to_string(path).ok()?;
+    let value = serde_json::from_str::<serde_json::Value>(&raw).ok()?;
+    let transcript = value.get("transcript_path")?.as_str()?.trim();
+    if transcript.is_empty() {
+        return None;
+    }
+    Some(map_runtime_transcript_path(agent_dir, transcript))
+}
+
+fn parse_transcript_path_from_hook_env(path: &Path, agent_dir: &Path) -> Option<PathBuf> {
+    let raw = std::fs::read_to_string(path).ok()?;
+    for line in raw.lines() {
+        let line = line.trim();
+        let Some(value) = line.strip_prefix("TRANSCRIPT_PATH=") else {
+            continue;
+        };
+        let value = shell_unescape_basic(value.trim());
+        if value.is_empty() {
+            return None;
+        }
+        return Some(map_runtime_transcript_path(agent_dir, &value));
+    }
+    None
+}
+
+fn shell_unescape_basic(value: &str) -> String {
+    let trimmed = value.trim_matches('"').trim_matches('\'');
+    let mut out = String::with_capacity(trimmed.len());
+    let mut chars = trimmed.chars();
+    while let Some(ch) = chars.next() {
+        if ch == '\\' {
+            if let Some(next) = chars.next() {
+                out.push(next);
+            }
+            continue;
+        }
+        out.push(ch);
+    }
+    out
+}
+
+fn map_runtime_transcript_path(agent_dir: &Path, transcript_path: &str) -> PathBuf {
+    if let Some(rel) = transcript_path.strip_prefix("/home/agent/") {
+        return agent_dir.join("sandbox-home").join(rel);
+    }
+    PathBuf::from(transcript_path)
+}
+
+fn collect_transcript_candidates_for_agent(agent_dir: &Path, out: &mut Vec<PathBuf>) {
+    let session_dir = agent_dir.join("session");
+    if session_dir.is_dir() {
+        collect_session_transcripts_recursive(&session_dir, out);
+    }
+
+    let logs_dir = agent_dir.join("logs");
+    if let Ok(entries) = std::fs::read_dir(&logs_dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if !path.is_file() {
+                continue;
+            }
+            let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+                continue;
+            };
+            if !name.starts_with("session_start") || !name.ends_with(".json") {
+                continue;
+            }
+            if let Some(transcript_path) = parse_transcript_path_from_session_json(&path, agent_dir) {
+                out.push(transcript_path);
+            }
+        }
+    }
+
+    let hook_env = agent_dir.join("runtime").join("hook_session.env");
+    if hook_env.is_file() {
+        if let Some(transcript_path) = parse_transcript_path_from_hook_env(&hook_env, agent_dir) {
+            out.push(transcript_path);
+        }
+    }
+}
+
 fn find_agent_log_near_recording(file: &Path) -> Option<PathBuf> {
     let world_instance_dir = find_world_instance_dir_near_recording(file)?;
     let agents_dir = world_instance_dir.join("agents");
@@ -414,33 +496,69 @@ fn find_agent_log_near_recording(file: &Path) -> Option<PathBuf> {
     }
 
     let mut candidates = Vec::new();
-    collect_agent_logs_recursive(&agents_dir, &mut candidates);
+    let Ok(agent_entries) = std::fs::read_dir(&agents_dir) else {
+        return None;
+    };
+    for entry in agent_entries.flatten() {
+        let agent_dir = entry.path();
+        if !agent_dir.is_dir() {
+            continue;
+        }
+        collect_transcript_candidates_for_agent(&agent_dir, &mut candidates);
+    }
     if candidates.is_empty() {
         return None;
     }
 
+    let mut deduped = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for path in candidates {
+        let key = path.to_string_lossy().to_string();
+        if seen.insert(key) {
+            deduped.push(path);
+        }
+    }
+
     let recording_key = timestamp_key_from_recording(file);
-    let mut ranked = candidates
+    let recording_modified = std::fs::metadata(file).and_then(|meta| meta.modified()).ok();
+    let mut ranked = deduped
         .into_iter()
         .map(|path| {
-            let diff = match (recording_key, timestamp_key_from_agent_log(&path)) {
+            let diff = match (recording_key, timestamp_key_from_transcript(&path)) {
                 (Some(recording), Some(agent)) => recording.abs_diff(agent),
                 _ => u64::MAX,
             };
             let modified = std::fs::metadata(&path)
                 .and_then(|meta| meta.modified())
                 .ok();
-            (diff, modified, path)
+            let modified_diff = match (recording_modified, modified) {
+                (Some(recording), Some(candidate)) => {
+                    if let Ok(delta) = recording.duration_since(candidate) {
+                        delta.as_secs()
+                    } else if let Ok(delta) = candidate.duration_since(recording) {
+                        delta.as_secs()
+                    } else {
+                        u64::MAX
+                    }
+                }
+                _ => u64::MAX,
+            };
+            let exists = path.is_file();
+            (diff, modified_diff, !exists, modified, path)
         })
         .collect::<Vec<_>>();
 
     ranked.sort_by(|a, b| {
         a.0.cmp(&b.0)
-            .then_with(|| b.1.cmp(&a.1))
+            .then_with(|| a.1.cmp(&b.1))
             .then_with(|| a.2.cmp(&b.2))
+            .then_with(|| b.3.cmp(&a.3))
+            .then_with(|| a.4.cmp(&b.4))
     });
 
-    ranked.into_iter().next().map(|(_, _, path)| path)
+    ranked
+        .into_iter()
+        .find_map(|(_, _, missing, _, path)| if missing { None } else { Some(path) })
 }
 
 fn sanitize_relative_path(value: &str) -> Option<PathBuf> {
