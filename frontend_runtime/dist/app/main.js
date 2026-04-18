@@ -132,6 +132,10 @@ async function openReplay(path) {
   updateSelectedUi(path)
   selectionTitleEl.textContent = path.split('/').pop() || path
   selectionMetaEl.textContent = ''
+  viewerEl.src = 'about:blank'
+  viewerEl.hidden = true
+  viewerEmptyEl.textContent = 'Loading recording...'
+  viewerEmptyEl.hidden = false
   try {
     const payload = await fetchJson('api/open-replay', {
       method: 'POST',
@@ -144,7 +148,9 @@ async function openReplay(path) {
     selectionMetaEl.textContent = shortMeta(payload)
   } catch (err) {
     console.error(err)
+    viewerEl.src = 'about:blank'
     viewerEl.hidden = true
+    viewerEmptyEl.textContent = 'Select a recording'
     viewerEmptyEl.hidden = false
     selectionMetaEl.textContent = ''
     selectionTitleEl.textContent = err instanceof Error ? err.message : 'Failed to open replay'
