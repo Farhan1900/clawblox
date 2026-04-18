@@ -6,6 +6,7 @@ const selectionTitleEl = document.getElementById('selection-title')
 const selectionMetaEl = document.getElementById('selection-meta')
 
 let selectedPath = null
+let openReplayRequestSeq = 0
 
 const ICONS = {
   chevronRight: `
@@ -129,31 +130,36 @@ function shortMeta(payload) {
 }
 
 async function openReplay(path) {
+  const requestSeq = ++openReplayRequestSeq
   updateSelectedUi(path)
   selectionTitleEl.textContent = path.split('/').pop() || path
   selectionMetaEl.textContent = ''
-  viewerEl.src = 'about:blank'
   viewerEl.hidden = true
-  viewerEmptyEl.textContent = 'Loading recording...'
+  viewerEl.removeAttribute('src')
   viewerEmptyEl.hidden = false
+  viewerEmptyEl.textContent = 'Opening recording...'
   try {
     const payload = await fetchJson('api/open-replay', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ path }),
     })
+    if (requestSeq !== openReplayRequestSeq) return
     viewerEl.src = payload.url
     viewerEl.hidden = false
     viewerEmptyEl.hidden = true
     selectionMetaEl.textContent = shortMeta(payload)
   } catch (err) {
+    if (requestSeq !== openReplayRequestSeq) return
     console.error(err)
-    viewerEl.src = 'about:blank'
+    const message = err instanceof Error ? err.message : 'Failed to open replay'
     viewerEl.hidden = true
     viewerEmptyEl.textContent = 'Select a recording'
     viewerEmptyEl.hidden = false
+    viewerEl.removeAttribute('src')
+    viewerEmptyEl.textContent = message
     selectionMetaEl.textContent = ''
-    selectionTitleEl.textContent = err instanceof Error ? err.message : 'Failed to open replay'
+    selectionTitleEl.textContent = message
   }
 }
 

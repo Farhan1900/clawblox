@@ -46,6 +46,13 @@ pub struct ReplayAgentTimeline {
     pub anchor_count: usize,
 }
 
+impl ReplayAgentTimeline {
+    pub fn messages_up_to(&self, tick: f64) -> Vec<ReplayAgentMessage> {
+        let cutoff = self.messages.partition_point(|msg| msg.tick <= tick);
+        self.messages[..cutoff].to_vec()
+    }
+}
+
 #[derive(Clone)]
 struct TickAnchor {
     ts_ms: i64,
@@ -59,7 +66,11 @@ struct RawReplayAgentMessage {
     blocks: Vec<RawBlock>,
 }
 
-pub fn load_agent_timeline(path: &Path, tick_rate: u32) -> Result<ReplayAgentTimeline, String> {
+pub fn load_agent_timeline(
+    path: &Path,
+    tick_rate: u32,
+    first_tick: u64,
+) -> Result<ReplayAgentTimeline, String> {
     let file = File::open(path).map_err(|e| format!("open failed: {}", e))?;
     let reader = BufReader::new(file);
 
@@ -165,10 +176,26 @@ pub fn load_agent_timeline(path: &Path, tick_rate: u32) -> Result<ReplayAgentTim
             .then_with(|| a.timestamp_ms.cmp(&b.timestamp_ms))
     });
 
+    align_timeline_to_first_tick(&mut messages, first_tick);
+
     Ok(ReplayAgentTimeline {
         messages,
         anchor_count: anchors.len(),
     })
+}
+
+fn align_timeline_to_first_tick(messages: &mut [ReplayAgentMessage], first_tick: u64) {
+    let Some(first_message_tick) = messages.first().map(|msg| msg.tick) else {
+        return;
+    };
+    let shift = first_tick as f64 - first_message_tick;
+    if shift.abs() < f64::EPSILON {
+        return;
+    }
+    let min_tick = first_tick as f64;
+    for message in messages.iter_mut() {
+        message.tick = (message.tick + shift).max(min_tick);
+    }
 }
 
 fn parse_agent_timestamp_ms(value: &Value) -> Option<i64> {

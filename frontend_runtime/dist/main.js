@@ -1977,6 +1977,9 @@ async function bootstrap() {
       wsStats.frames += 1
       if (typeof state?.tick === 'number') wsStats.lastTick = state.tick
       renderPlayerList(state?.players)
+      if (replayState.enabled && replayState.agentLoaded && typeof state?.tick === 'number') {
+        renderAgentLogMessages(state.tick)
+      }
       const rendererState = prioritizeSelectedPlayer(state)
       if (renderer.onState) renderer.onState(rendererState)
     } catch (error) {
