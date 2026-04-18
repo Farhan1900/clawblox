@@ -83,7 +83,7 @@ async fn build_replay_state(
     let first_tick = reader
         .first_tick()
         .ok_or_else(|| "recording has no checkpoints to replay".to_string())?;
-    let playback = replay::ReplayPlayback::new(
+    let mut playback = replay::ReplayPlayback::new(
         first_tick,
         meta.total_ticks,
         meta.tick_rate,
@@ -91,6 +91,7 @@ async fn build_replay_state(
         speed,
         active_ranges,
     )?;
+    playback.set_paused(true);
 
     let renderer_manifest = {
         let world_toml_path = world_dir.join("world.toml");
@@ -107,7 +108,7 @@ async fn build_replay_state(
     let agent_log_file = agent_log_file.or_else(|| find_agent_log_near_recording(&file));
 
     let agent_timeline = if let Some(path) = agent_log_file.as_ref() {
-        match load_agent_timeline(path, meta.tick_rate) {
+        match load_agent_timeline(path, meta.tick_rate, first_tick) {
             Ok(timeline) => Some(Arc::new(timeline)),
             Err(err) => {
                 eprintln!(

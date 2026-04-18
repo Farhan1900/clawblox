@@ -2230,7 +2230,7 @@ fn run_replay(
         };
 
         let agent_timeline = if let Some(path) = agent_log_file.as_ref() {
-            match load_agent_timeline(path, meta.tick_rate) {
+            match load_agent_timeline(path, meta.tick_rate, first_tick) {
                 Ok(timeline) => {
                     println!(
                         "Loaded agent log: {} ({} messages, {} anchors)",
