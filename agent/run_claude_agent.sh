@@ -267,17 +267,20 @@ if [[ "$SANDBOX" == "1" ]]; then
     "$SANDBOX_HOME_DIR/.claude/plans" \
     "$SANDBOX_HOME_DIR/.claude/shell-snapshots"
 
+  HOST_CLAUDE_DIR="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
   if [[ -n "${ANTHROPIC_OAUTH_TOKEN:-}" ]]; then
     # Use the provided OAuth token instead of host credentials
     printf '{"claudeAiOauth":{"accessToken":"%s"}}' "$ANTHROPIC_OAUTH_TOKEN" \
       > "$SANDBOX_HOME_DIR/.claude/.credentials.json"
     chmod 600 "$SANDBOX_HOME_DIR/.claude/.credentials.json"
-  elif [[ -f "$HOME/.claude/.credentials.json" ]]; then
-    cp "$HOME/.claude/.credentials.json" "$SANDBOX_HOME_DIR/.claude/.credentials.json"
+  elif [[ -f "$HOST_CLAUDE_DIR/.credentials.json" ]]; then
+    cp "$HOST_CLAUDE_DIR/.credentials.json" "$SANDBOX_HOME_DIR/.claude/.credentials.json"
     chmod 600 "$SANDBOX_HOME_DIR/.claude/.credentials.json"
+  else
+    echo "Warning: no credentials found at $HOST_CLAUDE_DIR/.credentials.json — sandboxed claude will not be authenticated" >&2
   fi
-  if [[ -f "$HOME/.claude/settings.json" ]]; then
-    cp "$HOME/.claude/settings.json" "$SANDBOX_HOME_DIR/.claude/settings.json"
+  if [[ -f "$HOST_CLAUDE_DIR/settings.json" ]]; then
+    cp "$HOST_CLAUDE_DIR/settings.json" "$SANDBOX_HOME_DIR/.claude/settings.json"
   fi
   if [[ -f "$HOME/.claude.json" ]]; then
     cp "$HOME/.claude.json" "$SANDBOX_HOME_DIR/.claude.json"
@@ -421,6 +424,10 @@ if [[ "$SANDBOX" == "1" ]]; then
     --setenv LOGNAME agent
     --setenv SHELL /bin/bash
     --setenv PATH /sandbox-bin:/usr/bin:/bin
+    --unsetenv CLAUDE_CONFIG_DIR
+    --unsetenv CLAUDE_CODE_EXECPATH
+    --unsetenv CLAUDE_CODE_ENTRYPOINT
+    --unsetenv CLAUDECODE
     --chdir /workspace
     --die-with-parent
   )
