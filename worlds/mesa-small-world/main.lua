@@ -8,7 +8,7 @@ local AgentInputService = game:GetService("AgentInputService")
 Workspace.Gravity = 10
 
 local BLOCK_SIZE = 0.75
-local ENABLE_LARGE_RING = true
+local ENABLE_LARGE_RING = false
 local PICKUP_RANGE = 6
 local PLACE_RANGE = 7
 local HOLD_OFFSET = Vector3.new(0, 3.5, 0)

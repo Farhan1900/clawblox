@@ -414,7 +414,7 @@ local function spawnImpactCubes(origin, count)
         local angle = (i / count) * math.pi * 2
         local radius = 1.1 + 0.35 * ((i - 1) % 3)
         local spawnOffset = Vector3.new(math.cos(angle) * radius, 0.9 + 0.15 * ((i - 1) % 2), math.sin(angle) * radius)
-        local cube = createBlock("ImpactBlock_" .. impactBlockCounter, origin + spawnOffset, "Slate")
+        local cube = createBlock("Block_" .. impactBlockCounter, origin + spawnOffset, "Slate")
         cube.AssemblyLinearVelocity = Vector3.new(
             math.cos(angle) * (2.5 + i * 0.2),
             4.5 + i * 0.25,
