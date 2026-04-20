@@ -621,7 +621,7 @@ end
 local function positionOccupied(player, targetCFrame, object)
     local params = OverlapParams.new()
     params.FilterType = Enum.RaycastFilterType.Exclude
-    params.FilterDescendantsInstances = { player.Character, heldBlocksByPlayer[player] }
+    params.FilterDescendantsInstances = { heldBlocksByPlayer[player] }
 
     local probe = Instance.new("Part")
     probe.Size = object.Size

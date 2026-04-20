@@ -12,6 +12,12 @@ fn mesa_small_world_dir() -> PathBuf {
         .join("mesa-small-world")
 }
 
+fn mesa_small_world_2_dir() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("worlds")
+        .join("mesa-small-world-2")
+}
+
 fn workspace_inventory(instance: &GameInstance) -> (i64, i64, i64, i64, i64, i64) {
     let runtime = instance.lua_runtime.as_ref().expect("runtime missing");
     runtime
@@ -378,6 +384,95 @@ fn mesa_small_world_fresh_direct_controller_motion_works() {
         horizontal_distance > 1.0,
         "fresh direct controller motion should work; before={before_move:?} after={after_move:?}"
     );
+}
+
+#[test]
+fn mesa_small_world_2_place_rejects_overlap_with_player() {
+    let mut instance = GameInstance::new(Uuid::new_v4(), None);
+    let (_config, bundled_source) = load_world_and_entry_script(&mesa_small_world_2_dir())
+        .expect("failed to load bundled mesa-small-world-2");
+    instance.load_script(&bundled_source);
+
+    let agent_id = Uuid::new_v4();
+    assert!(instance.add_player(agent_id, "PlaceProbe"));
+    let user_id = *instance.players.get(&agent_id).expect("missing player");
+    let hrp_id = *instance
+        .player_hrp_ids
+        .get(&agent_id)
+        .expect("missing humanoid root part");
+
+    for _ in 0..20 {
+        instance.tick();
+    }
+
+    let hrp_pos = instance
+        .physics
+        .get_character_position(hrp_id)
+        .expect("missing player position");
+    let rock_x = hrp_pos[0] + 2.0;
+    let rock_y = hrp_pos[1];
+    let rock_z = hrp_pos[2];
+
+    {
+        let runtime = instance.lua_runtime.as_ref().expect("runtime missing");
+        runtime
+            .lua()
+            .load(&format!(
+                r#"
+                Workspace.Gravity = 0
+
+                local rock = Workspace.Rock_1
+                rock.Position = Vector3.new({rock_x}, {rock_y}, {rock_z})
+                rock.CanCollide = false
+                rock.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
+                rock.AssemblyAngularVelocity = Vector3.new(0, 0, 0)
+            "#
+            ))
+            .exec()
+            .expect("failed to configure mesa-small-world-2 player overlap scenario");
+    }
+
+    for _ in 0..5 {
+        instance.tick();
+    }
+
+    instance.queue_agent_input(
+        user_id,
+        "Pickup".to_string(),
+        serde_json::json!({ "position": [rock_x, rock_y, rock_z] }),
+    );
+
+    for _ in 0..10 {
+        instance.tick();
+    }
+
+    instance.queue_agent_input(
+        user_id,
+        "Place".to_string(),
+        serde_json::json!({
+            "position": [hrp_pos[0], hrp_pos[1], hrp_pos[2]],
+            "rotation": { "pitch": 0, "yaw": 0, "roll": 0 }
+        }),
+    );
+
+    for _ in 0..10 {
+        instance.tick();
+    }
+
+    let place_result: String = {
+        let runtime = instance.lua_runtime.as_ref().expect("runtime missing");
+        runtime
+            .lua()
+            .load(
+                r#"
+                return game:GetService("Players"):GetPlayers()[1]:GetAttribute("LastActionResult")
+            "#,
+            )
+            .eval()
+            .expect("failed to read place result")
+    };
+
+    assert_eq!(place_result, "PlaceFailed:Occupied");
 }
 
 #[test]
