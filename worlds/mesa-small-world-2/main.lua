@@ -49,6 +49,7 @@ end
 local blockColors = {
     Sand = Color3.fromRGB(214, 186, 128),
     Slate = Color3.fromRGB(148, 136, 124),
+    Yellow = Color3.fromRGB(232, 192, 74),
     Gold = Color3.fromRGB(232, 192, 74),
 }
 
@@ -231,7 +232,7 @@ local function createRing(name, position, colorName, rotationDegrees, size)
     end
     ring.CFrame = CFrame.new(position) * CFrame.Angles(math.rad(pitch), math.rad(yaw), math.rad(roll))
     ring.Anchored = false
-    ring.Material = Enum.Material.Metal
+    ring.Material = Enum.Material.Plastic
     ring.Color = blockColors[colorName]
     ring.CustomPhysicalProperties = PhysicalProperties.new(
         0.45,
@@ -269,7 +270,7 @@ impactBlockCounter = #baseBlockPile
 local rock = createRock("Rock_1", ROCK_SPAWN_POSITION, ROCK_SIZE)
 
 if ENABLE_LARGE_RING then
-    createRing("Ring_1", Vector3.new(45.4, 0.28, -45.7), "Gold", { 0, 32, 0 }, Vector3.new(3.6, 0.56, 3.6))
+    createRing("Ring_1", Vector3.new(45.4, 0.28, -45.7), "Yellow", { 0, 32, 0 }, Vector3.new(3.6, 0.56, 3.6))
 end
 
 --------------------------------------------------------------------------------
@@ -414,7 +415,7 @@ local function spawnImpactCubes(origin, count)
         local angle = (i / count) * math.pi * 2
         local radius = 1.1 + 0.35 * ((i - 1) % 3)
         local spawnOffset = Vector3.new(math.cos(angle) * radius, 0.9 + 0.15 * ((i - 1) % 2), math.sin(angle) * radius)
-        local cube = createBlock("Block_" .. impactBlockCounter, origin + spawnOffset, "Slate")
+        local cube = createBlock("ImpactBlock_" .. impactBlockCounter, origin + spawnOffset, "Slate")
         cube.AssemblyLinearVelocity = Vector3.new(
             math.cos(angle) * (2.5 + i * 0.2),
             4.5 + i * 0.25,
