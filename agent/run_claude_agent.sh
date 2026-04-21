@@ -286,7 +286,7 @@ if [[ "$SANDBOX" == "1" ]]; then
     cp "$HOME/.claude.json" "$SANDBOX_HOME_DIR/.claude.json"
     chmod 600 "$SANDBOX_HOME_DIR/.claude.json"
   fi
-  python - <<'PY' "$SANDBOX_HOME_DIR/.claude.json"
+  python3 - <<'PY' "$SANDBOX_HOME_DIR/.claude.json"
 import json, os, sys
 path = sys.argv[1]
 if os.path.exists(path):
