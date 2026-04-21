@@ -335,7 +335,7 @@ fi
 
 if [[ -n "$WORLD_STARTUP_INSTRUCTIONS" ]]; then
   {
-    printf '\nTASK:\n'
+    printf '\nGOAL:\n'
     printf '%s\n' "$WORLD_STARTUP_INSTRUCTIONS"
   } >>"$PROMPT_FILE"
 fi
