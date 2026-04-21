@@ -240,6 +240,96 @@ AUTO_STOP_PID=$(printf '%q' "$AUTO_STOP_PID")
 EOF
 }
 
+# Serialize the full launch configuration to a machine-readable JSON file.
+# Consumed by downstream replay/eval tooling (e.g. analysis/eval_tower_by_episode.py)
+# to inherit agent-config flags from a saved run without re-parsing bash state.
+write_run_config() {
+  local target="$1"
+  mkdir -p "$(dirname "$target")"
+  local agent_template_dirs_joined=""
+  if ((${#AGENT_TEMPLATE_DIRS[@]} > 0)); then
+    agent_template_dirs_joined="$(printf '%s\n' "${AGENT_TEMPLATE_DIRS[@]}")"
+  fi
+  RUN_CONFIG_TARGET="$target" \
+  RUN_ID="$RUN_ID" \
+  LAUNCH_INSTANCE_ID="$LAUNCH_INSTANCE_ID" \
+  NUM_WORLDS="$NUM_WORLDS" \
+  AGENTS_PER_WORLD="$AGENTS_PER_WORLD" \
+  BASE_PORT="$BASE_PORT" \
+  WORLD_ABS_DIR="$WORLD_ABS_DIR" \
+  RESULTS_ABS_ROOT="$RESULTS_ABS_ROOT" \
+  TMUX_SESSION="$TMUX_SESSION" \
+  GOAL="$GOAL" \
+  CLAUDE_MODEL="$CLAUDE_MODEL" \
+  CLAUDE_PERMISSION_MODE="$CLAUDE_PERMISSION_MODE" \
+  CLAUDE_BARE="$CLAUDE_BARE" \
+  CLAUDE_EXTRA_ARGS="$CLAUDE_EXTRA_ARGS" \
+  CLAUDE_USE_ENV_AUTH="$CLAUDE_USE_ENV_AUTH" \
+  SANDBOX="$SANDBOX" \
+  SYSTEM_PROMPT_TEMPLATE="${SYSTEM_PROMPT_TEMPLATE:-}" \
+  AGENT_NAME_PREFIX="$AGENT_NAME_PREFIX" \
+  AGENT_TEMPLATE_DIRS_JOINED="$agent_template_dirs_joined" \
+  DURATION="$DURATION" \
+  RESET_EVERY="$RESET_EVERY" \
+  CHECKPOINT_INTERVAL="$CHECKPOINT_INTERVAL" \
+  RECORD="$RECORD" \
+  HEALTH_TIMEOUT="$HEALTH_TIMEOUT" \
+  STOP_GRACE_SECONDS="$STOP_GRACE_SECONDS" \
+  PORT_WAIT_SECONDS="$PORT_WAIT_SECONDS" \
+  CLAWBLOX_BIN="$CLAWBLOX_BIN" \
+  python3 <<'PY'
+import json
+import os
+
+def _bool(val: str) -> bool:
+    return val.strip() in {"1", "true", "True", "yes"}
+
+config = {
+    "schema_version": 1,
+    "run_id": os.environ["RUN_ID"],
+    "launch_instance_id": os.environ["LAUNCH_INSTANCE_ID"],
+    "num_worlds": int(os.environ["NUM_WORLDS"]),
+    "agents_per_world": int(os.environ["AGENTS_PER_WORLD"]),
+    "base_port": int(os.environ["BASE_PORT"]),
+    "world_dir": os.environ["WORLD_ABS_DIR"],
+    "results_root": os.environ["RESULTS_ABS_ROOT"],
+    "tmux_session": os.environ["TMUX_SESSION"],
+    "goal": os.environ.get("GOAL", ""),
+    "claude": {
+        "model": os.environ["CLAUDE_MODEL"],
+        "permission_mode": os.environ["CLAUDE_PERMISSION_MODE"],
+        "bare": _bool(os.environ["CLAUDE_BARE"]),
+        "extra_args": os.environ.get("CLAUDE_EXTRA_ARGS", ""),
+        "use_env_auth": _bool(os.environ["CLAUDE_USE_ENV_AUTH"]),
+    },
+    "agent": {
+        "sandbox": _bool(os.environ["SANDBOX"]),
+        "system_prompt_template": os.environ.get("SYSTEM_PROMPT_TEMPLATE", ""),
+        "agent_name_prefix": os.environ["AGENT_NAME_PREFIX"],
+        "agent_template_dirs": [
+            line for line in os.environ.get("AGENT_TEMPLATE_DIRS_JOINED", "").splitlines() if line
+        ],
+    },
+    "session_cycling": {
+        "duration": os.environ.get("DURATION", ""),
+        "reset_every": os.environ.get("RESET_EVERY", ""),
+        "checkpoint_interval": os.environ.get("CHECKPOINT_INTERVAL", ""),
+    },
+    "plumbing": {
+        "record": os.environ["RECORD"],
+        "health_timeout": os.environ["HEALTH_TIMEOUT"],
+        "stop_grace_seconds": os.environ["STOP_GRACE_SECONDS"],
+        "port_wait_seconds": os.environ["PORT_WAIT_SECONDS"],
+        "clawblox_bin": os.environ["CLAWBLOX_BIN"],
+    },
+}
+
+with open(os.environ["RUN_CONFIG_TARGET"], "w", encoding="utf-8") as f:
+    json.dump(config, f, indent=2, sort_keys=True)
+    f.write("\n")
+PY
+}
+
 load_session_metadata() {
   local meta_file="$1"
   local -n out_run_id_ref="$2"
@@ -853,6 +943,7 @@ ensure_ports_available
 mkdir -p "$WORLDS_ROOT"
 printf '%s\n' "$RUN_DIR" >"$RESULTS_ABS_ROOT/latest_run.txt"
 write_run_metadata "$RUN_DIR/run.env"
+write_run_config "$RUN_DIR/run_config.json"
 write_session_metadata "$(session_meta_file)"
 append_launcher_audit "run_metadata_written" "run_id=$RUN_ID launch_instance_id=$LAUNCH_INSTANCE_ID base_port=$BASE_PORT num_worlds=$NUM_WORLDS agents_per_world=$AGENTS_PER_WORLD"
 
