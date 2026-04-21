@@ -333,14 +333,14 @@ else
   exit 1
 fi
 
-append_prompt_workspace_files "$PROMPT_FILE" "$WORKSPACE_DIR"
-
 if [[ -n "$WORLD_STARTUP_INSTRUCTIONS" ]]; then
   {
-    printf '\nStartup objective:\n'
+    printf '\nTASK:\n'
     printf '%s\n' "$WORLD_STARTUP_INSTRUCTIONS"
   } >>"$PROMPT_FILE"
 fi
+
+append_prompt_workspace_files "$PROMPT_FILE" "$WORKSPACE_DIR"
 
 if [[ -n "$RESET_EVERY" ]]; then
   if ! RESET_EVERY="$(parse_duration_seconds "$RESET_EVERY")"; then
