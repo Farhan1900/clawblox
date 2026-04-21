@@ -241,7 +241,7 @@ EOF
 }
 
 # Serialize the full launch configuration to a machine-readable JSON file.
-# Consumed by downstream replay/eval tooling (e.g. analysis/eval_tower_by_episode.py)
+# Consumed by downstream replay/eval tooling (e.g. analysis/eval_goal_by_episode.py)
 # to inherit agent-config flags from a saved run without re-parsing bash state.
 write_run_config() {
   local target="$1"
