@@ -31,6 +31,7 @@ CLAUDE_BARE="${CLAUDE_BARE:-0}"
 CLAUDE_EXTRA_ARGS="${CLAUDE_EXTRA_ARGS:-}"
 CLAUDE_USE_ENV_AUTH="${CLAUDE_USE_ENV_AUTH:-0}"
 SANDBOX="${SANDBOX:-0}"
+WORLD_CAPABILITY_PROXY="${WORLD_CAPABILITY_PROXY:-auto}"
 CLAUDE_FAILURE_IDLE_GRACE_SECONDS="${CLAUDE_FAILURE_IDLE_GRACE_SECONDS:-180}"
 CLAUDE_FAILURE_STALL_GRACE_SECONDS="${CLAUDE_FAILURE_STALL_GRACE_SECONDS:-300}"
 CLAUDE_FAILURE_RESTART_BACKOFF_SECONDS="${CLAUDE_FAILURE_RESTART_BACKOFF_SECONDS:-5}"
@@ -119,30 +120,92 @@ write_agent_pane_command() {
   local root_dir="$2"
   local auth_env_prefix="$3"
   local world_url="$4"
-  local agent_display_name="$5"
-  local agent_dir="$6"
-  local agent_workspace="$7"
-  local session_id_file="$8"
-  local world_session_file="$9"
-  local reset_every_seconds="${10}"
-  local duration_seconds="${11}"
-  local checkpoint_warning_seconds="${12}"
-  local checkpoint_warning_prompt="${13}"
-  local claude_model="${14}"
-  local claude_permission_mode="${15}"
-  local claude_bare="${16}"
-  local claude_extra_args="${17}"
-  local sandbox_env_prefix="${18}"
-  local template_env_prefix="${19}"
-  local startup_env_prefix="${20}"
+  local world_internal_url="$5"
+  local agent_display_name="$6"
+  local agent_dir="$7"
+  local agent_workspace="$8"
+  local session_id_file="$9"
+  local world_session_file="${10}"
+  local reset_every_seconds="${11}"
+  local duration_seconds="${12}"
+  local checkpoint_warning_seconds="${13}"
+  local checkpoint_warning_prompt="${14}"
+  local claude_model="${15}"
+  local claude_permission_mode="${16}"
+  local claude_bare="${17}"
+  local claude_extra_args="${18}"
+  local sandbox_env_prefix="${19}"
+  local template_env_prefix="${20}"
+  local startup_env_prefix="${21}"
 
   cat >"$target" <<EOF
 #!/usr/bin/env bash
 set -euo pipefail
 cd $(printf '%q' "$root_dir")
-${auth_env_prefix}WORLD_BASE_URL=$(printf '%q' "$world_url") WORLD_AGENT_NAME=$(printf '%q' "$agent_display_name") AGENT_DIR=$(printf '%q' "$agent_dir") WORKSPACE_DIR=$(printf '%q' "$agent_workspace") SESSION_ID_FILE=$(printf '%q' "$session_id_file") WORLD_SESSION_FILE=$(printf '%q' "$world_session_file") RESET_EVERY=$(printf '%q' "$reset_every_seconds") DURATION_SECONDS=$(printf '%q' "$duration_seconds") CHECKPOINT_WARNING_SECONDS=$(printf '%q' "$checkpoint_warning_seconds") CHECKPOINT_WARNING_PROMPT=$(printf '%q' "$checkpoint_warning_prompt") CLAUDE_MODEL=$(printf '%q' "$claude_model") CLAUDE_PERMISSION_MODE=$(printf '%q' "$claude_permission_mode") CLAUDE_BARE=$(printf '%q' "$claude_bare") CLAUDE_EXTRA_ARGS=$(printf '%q' "$claude_extra_args") ${sandbox_env_prefix}${template_env_prefix}${startup_env_prefix}bash $(printf '%q' "$AGENT_SCRIPT")
+${auth_env_prefix}WORLD_BASE_URL=$(printf '%q' "$world_url") WORLD_INTERNAL_BASE_URL=$(printf '%q' "$world_internal_url") WORLD_AGENT_NAME=$(printf '%q' "$agent_display_name") AGENT_DIR=$(printf '%q' "$agent_dir") WORKSPACE_DIR=$(printf '%q' "$agent_workspace") SESSION_ID_FILE=$(printf '%q' "$session_id_file") WORLD_SESSION_FILE=$(printf '%q' "$world_session_file") RESET_EVERY=$(printf '%q' "$reset_every_seconds") DURATION_SECONDS=$(printf '%q' "$duration_seconds") CHECKPOINT_WARNING_SECONDS=$(printf '%q' "$checkpoint_warning_seconds") CHECKPOINT_WARNING_PROMPT=$(printf '%q' "$checkpoint_warning_prompt") CLAUDE_MODEL=$(printf '%q' "$claude_model") CLAUDE_PERMISSION_MODE=$(printf '%q' "$claude_permission_mode") CLAUDE_BARE=$(printf '%q' "$claude_bare") CLAUDE_EXTRA_ARGS=$(printf '%q' "$claude_extra_args") ${sandbox_env_prefix}${template_env_prefix}${startup_env_prefix}bash $(printf '%q' "$AGENT_SCRIPT")
 EOF
   chmod +x "$target"
+}
+
+world_capability_proxy_enabled() {
+  case "$WORLD_CAPABILITY_PROXY" in
+    1|true|yes|on) return 0 ;;
+    0|false|no|off) return 1 ;;
+    auto) [[ "$SANDBOX" == "1" ]] ;;
+    *)
+      echo "Error: WORLD_CAPABILITY_PROXY must be auto, true, or false." >&2
+      exit 1
+      ;;
+  esac
+}
+
+start_world_capability_proxy() {
+  local agent_runtime_dir="$1"
+  local agent_log_dir="$2"
+  local target_url="$3"
+  local public_host="$4"
+  local session_file="$5"
+  local port_file="$agent_runtime_dir/world_proxy_port.txt"
+  local pid_file="$agent_runtime_dir/world_proxy.pid"
+  local log_file="$agent_log_dir/world_proxy.log"
+  local proxy_script="$SCRIPT_DIR/world_capability_proxy.py"
+  local proxy_pid
+
+  if [[ ! -x "$proxy_script" ]]; then
+    chmod +x "$proxy_script" 2>/dev/null || true
+  fi
+  if [[ ! -f "$proxy_script" ]]; then
+    echo "Error: missing world capability proxy at $proxy_script" >&2
+    exit 1
+  fi
+  rm -f "$port_file" "$pid_file"
+  python3 "$proxy_script" \
+    --listen-host 127.0.0.1 \
+    --listen-port 0 \
+    --target-base-url "$target_url" \
+    --public-host "$public_host" \
+    --session-token-file "$session_file" \
+    --session-header X-Session \
+    --port-file "$port_file" \
+    --pid-file "$pid_file" \
+    --log-file "$log_file" \
+    >>"$log_file" 2>&1 &
+  proxy_pid=$!
+
+  for _ in {1..50}; do
+    if [[ -s "$port_file" ]]; then
+      printf '%s\n' "$proxy_pid"
+      return 0
+    fi
+    if ! kill -0 "$proxy_pid" 2>/dev/null; then
+      echo "Error: world capability proxy exited early; see $log_file" >&2
+      exit 1
+    fi
+    sleep 0.1
+  done
+  echo "Error: world capability proxy did not publish a port; see $log_file" >&2
+  kill "$proxy_pid" 2>/dev/null || true
+  exit 1
 }
 
 start_agent_recovery_watchdog() {
@@ -266,6 +329,7 @@ write_run_config() {
   CLAUDE_EXTRA_ARGS="$CLAUDE_EXTRA_ARGS" \
   CLAUDE_USE_ENV_AUTH="$CLAUDE_USE_ENV_AUTH" \
   SANDBOX="$SANDBOX" \
+  WORLD_CAPABILITY_PROXY="$WORLD_CAPABILITY_PROXY" \
   SYSTEM_PROMPT_TEMPLATE="${SYSTEM_PROMPT_TEMPLATE:-}" \
   AGENT_NAME_PREFIX="$AGENT_NAME_PREFIX" \
   AGENT_TEMPLATE_DIRS_JOINED="$agent_template_dirs_joined" \
@@ -304,6 +368,7 @@ config = {
     },
     "agent": {
         "sandbox": _bool(os.environ["SANDBOX"]),
+        "world_capability_proxy": os.environ["WORLD_CAPABILITY_PROXY"],
         "system_prompt_template": os.environ.get("SYSTEM_PROMPT_TEMPLATE", ""),
         "agent_name_prefix": os.environ["AGENT_NAME_PREFIX"],
         "agent_template_dirs": [
@@ -488,6 +553,21 @@ save_world_snapshot() {
   return 1
 }
 
+kill_world_capability_proxies() {
+  local root="${1:-}"
+  local pid_file pid
+  [[ -n "$root" && -d "$root" ]] || return 0
+  while IFS= read -r -d '' pid_file; do
+    pid="$(tr -d '[:space:]' < "$pid_file" 2>/dev/null || true)"
+    [[ -n "$pid" ]] || continue
+    if kill -0 "$pid" 2>/dev/null; then
+      kill "$pid" 2>/dev/null || true
+      append_launcher_audit "world_capability_proxy_killed" "pid=$pid pid_file=$pid_file"
+    fi
+    rm -f "$pid_file"
+  done < <(find "$root" -type f -path '*/runtime/world_proxy.pid' -print0 2>/dev/null)
+}
+
 usage() {
   cat <<EOF
 Usage: $(basename "$0") [--stop|--status] [options]
@@ -614,6 +694,7 @@ do_stop() {
       return 0
     fi
     echo "Stopping world servers..."
+    kill_world_capability_proxies "$meta_run_dir"
     while IFS= read -r window_name; do
       [[ "$window_name" == world-* ]] || continue
       tmux send-keys -t "${TMUX_SESSION}:${window_name}" C-c 2>/dev/null || true
@@ -716,6 +797,22 @@ require_claude_auth() {
   fi
 }
 
+require_sandbox_runtime() {
+  local native_sandbox="${CLAUDE_NATIVE_SANDBOX:-$SANDBOX}"
+  if [[ "$SANDBOX" != "1" ]]; then
+    return 0
+  fi
+  if ! command -v bwrap >/dev/null 2>&1; then
+    echo "Error: --sandbox requires bubblewrap (bwrap)." >&2
+    exit 1
+  fi
+  if [[ "$native_sandbox" == "1" ]] && ! command -v socat >/dev/null 2>&1; then
+    echo "Error: --sandbox requires socat for Claude Code's native Linux sandbox." >&2
+    echo "Install socat, or set CLAUDE_NATIVE_SANDBOX=0 only for non-secure local debugging." >&2
+    exit 1
+  fi
+}
+
 FORCE=0
 ACTION="run"
 CLI_NUM_WORLDS=0
@@ -750,6 +847,8 @@ while [[ $# -gt 0 ]]; do
     --claude-extra-args) require_value "$1" "${2:-}"; CLAUDE_EXTRA_ARGS="$2"; shift 2 ;;
     --use-env-auth) CLAUDE_USE_ENV_AUTH=1; shift ;;
     --sandbox) SANDBOX=1; shift ;;
+    --world-capability-proxy) WORLD_CAPABILITY_PROXY=true; shift ;;
+    --no-world-capability-proxy) WORLD_CAPABILITY_PROXY=false; shift ;;
     --template|--template-dir) require_value "$1" "${2:-}"; TEMPLATE_DIR="$2"; shift 2 ;;
     --system-prompt) require_value "$1" "${2:-}"; SYSTEM_PROMPT_TEMPLATE="$2"; shift 2 ;;
     --agent-template) require_value "$1" "${2:-}"; AGENT_TEMPLATE_DIRS+=("$2"); shift 2 ;;
@@ -768,6 +867,7 @@ esac
 
 resolve_clawblox_bin
 require_claude_auth
+require_sandbox_runtime
 
 if tmux has-session -t "$TMUX_SESSION" 2>/dev/null; then
   if [[ "$FORCE" -eq 1 ]]; then
@@ -1061,13 +1161,32 @@ for ((i = 0; i < NUM_WORLDS; i++)); do
     if [[ "$SANDBOX" == "1" ]]; then
       sandbox_env_prefix="SANDBOX=1 "
     fi
+    agent_world_url="$url"
+    agent_internal_world_url="$url"
+    if world_capability_proxy_enabled; then
+      proxy_public_host="world"
+      proxy_pid="$(
+        start_world_capability_proxy \
+          "$agent_runtime_dir" \
+          "$agent_log_dir" \
+          "$url" \
+          "$proxy_public_host" \
+          "$agent_world_session_file"
+      )"
+      proxy_port="$(tr -d '[:space:]' < "$agent_runtime_dir/world_proxy_port.txt")"
+      agent_world_url="http://${proxy_public_host}"
+      sandbox_env_prefix+="CLAWBLOX_WORLD_HTTP_PROXY_PORT=$(printf '%q' "$proxy_port") "
+      printf '%s\n' "$proxy_public_host" >"$agent_runtime_dir/world_proxy_public_host.txt"
+      append_launcher_audit "world_capability_proxy_started" "agent_dir=$agent_dir pid=$proxy_pid public_host=$proxy_public_host listen_port=$proxy_port target=$url"
+    fi
 
     pane_command_file="$agent_runtime_dir/launch_agent_pane.sh"
     write_agent_pane_command \
       "$pane_command_file" \
       "$ROOT_DIR" \
       "$auth_env_prefix" \
-      "$url" \
+      "$agent_world_url" \
+      "$agent_internal_world_url" \
       "$agent_display_name" \
       "$agent_dir" \
       "$agent_workspace" \
@@ -1087,8 +1206,10 @@ for ((i = 0; i < NUM_WORLDS; i++)); do
     printf '%s\n' "$pane_target" >"$agent_runtime_dir/pane_id.txt"
     printf '%s\n' "$pane_command_file" >"$agent_runtime_dir/pane_command_file.txt"
 
-    tmux pipe-pane -o -t "$pane_target" "cat >> '$(printf "%q" "$agent_log_file")'"
-    tmux send-keys -t "$pane_target" "bash $(printf '%q' "$pane_command_file")" Enter
+    agent_log_file_q="$(printf '%q' "$agent_log_file")"
+    pane_command_file_q="$(printf '%q' "$pane_command_file")"
+    tmux pipe-pane -o -t "$pane_target" "cat >> $agent_log_file_q"
+    tmux send-keys -t "$pane_target" "bash $pane_command_file_q" Enter
     start_agent_recovery_watchdog "$pane_target" "$agent_dir" "$pane_command_file" "$agent_log_file"
   done
 done

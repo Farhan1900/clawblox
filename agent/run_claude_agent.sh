@@ -7,6 +7,7 @@ ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 # Prevent stray API keys from triggering Claude's key detection prompt
 unset ANTHROPIC_API_KEY 2>/dev/null || true
 WORLD_BASE_URL="${WORLD_BASE_URL-http://localhost:8080}"
+WORLD_INTERNAL_BASE_URL="${WORLD_INTERNAL_BASE_URL-$WORLD_BASE_URL}"
 WORLD_JOIN_PATH="${WORLD_JOIN_PATH-/join}"
 WORLD_LEAVE_PATH="${WORLD_LEAVE_PATH-}"
 WORLD_SKILL_PATH="${WORLD_SKILL_PATH-/skill.md}"
@@ -24,9 +25,12 @@ CLAUDE_BARE="${CLAUDE_BARE-0}"
 CLAUDE_PERMISSION_MODE="${CLAUDE_PERMISSION_MODE-bypassPermissions}"
 CLAUDE_RESUME_MODE="${CLAUDE_RESUME_MODE-auto}"
 CLAUDE_EXTRA_ARGS="${CLAUDE_EXTRA_ARGS-}"
+CLAUDE_SANDBOX_DISALLOWED_TOOLS="${CLAUDE_SANDBOX_DISALLOWED_TOOLS-WebFetch,WebSearch}"
 CLAUDE_INITIAL_PROMPT="${CLAUDE_INITIAL_PROMPT-Begin}"
 RESET_EVERY="${RESET_EVERY-}"
 SANDBOX="${SANDBOX-0}"
+CLAUDE_NATIVE_SANDBOX="${CLAUDE_NATIVE_SANDBOX-$SANDBOX}"
+CLAWBLOX_WORLD_HTTP_PROXY_PORT="${CLAWBLOX_WORLD_HTTP_PROXY_PORT-}"
 CHECKPOINT_WARNING_SECONDS="${CHECKPOINT_WARNING_SECONDS:-300}"
 CHECKPOINT_WARNING_PROMPT="${CHECKPOINT_WARNING_PROMPT:-You will be reset in 5 minutes. Update your workspace memory files now.}"
 
@@ -186,7 +190,7 @@ if [[ -n "$WORLD_JOIN_PATH" ]]; then
       join_headers=(-H "${WORLD_SESSION_HEADER}: ${EXISTING_WORLD_SESSION_ID}")
     fi
   fi
-  join_json="$(curl -fsS -X POST "${join_headers[@]}" "${WORLD_BASE_URL%/}${WORLD_JOIN_PATH}?name=${WORLD_AGENT_NAME}")"
+  join_json="$(curl -fsS -X POST "${join_headers[@]}" "${WORLD_INTERNAL_BASE_URL%/}${WORLD_JOIN_PATH}?name=${WORLD_AGENT_NAME}")"
   WORLD_SESSION_ID="$(node -e 'const o=JSON.parse(process.argv[1]); const key=process.argv[2]; process.stdout.write(String(o[key]||""));' "$join_json" "$WORLD_SESSION_FIELD")"
   if [[ -z "$WORLD_SESSION_ID" ]]; then
     echo "Failed to get session field '$WORLD_SESSION_FIELD' from: $join_json" >&2
@@ -208,7 +212,7 @@ cleanup() {
   fi
 
   if [[ -n "$WORLD_SESSION_ID" && -n "$WORLD_LEAVE_PATH" ]]; then
-    curl -fsS -X POST -H "${WORLD_SESSION_HEADER}: ${WORLD_SESSION_ID}" "${WORLD_BASE_URL%/}${WORLD_LEAVE_PATH}" >/dev/null 2>&1 || true
+    curl -fsS -X POST -H "${WORLD_SESSION_HEADER}: ${WORLD_SESSION_ID}" "${WORLD_INTERNAL_BASE_URL%/}${WORLD_LEAVE_PATH}" >/dev/null 2>&1 || true
   fi
 }
 trap cleanup EXIT INT TERM
@@ -246,6 +250,11 @@ fi
 if [[ "$SANDBOX" == "1" ]]; then
   if ! command -v bwrap >/dev/null 2>&1; then
     echo "Error: SANDBOX=1 requires bubblewrap (bwrap)." >&2
+    exit 1
+  fi
+  if [[ "$CLAUDE_NATIVE_SANDBOX" == "1" ]] && ! command -v socat >/dev/null 2>&1; then
+    echo "Error: CLAUDE_NATIVE_SANDBOX=1 requires socat for Claude Code's native Linux sandbox." >&2
+    echo "Install socat or set CLAUDE_NATIVE_SANDBOX=0 only for non-secure local debugging." >&2
     exit 1
   fi
   if ! command -v claude >/dev/null 2>&1; then
@@ -314,6 +323,57 @@ PY
   SANDBOX_CLAUDE_BIN="/sandbox-bin/claude"
 fi
 
+CLAUDE_GENERATED_SETTINGS_FILE=""
+SANDBOX_HOSTS_FILE=""
+if [[ "$CLAUDE_NATIVE_SANDBOX" == "1" ]]; then
+  CLAUDE_GENERATED_SETTINGS_FILE="$RUNTIME_DIR/claude_sandbox_settings.json"
+  SANDBOX_HOSTS_FILE="$RUNTIME_DIR/sandbox_hosts"
+  python3 - <<'PY' "$CLAUDE_GENERATED_SETTINGS_FILE" "$SANDBOX_HOSTS_FILE" "$CLAWBLOX_WORLD_HTTP_PROXY_PORT" "$WORLD_BASE_URL"
+import json
+import sys
+from urllib.parse import urlparse
+
+target = sys.argv[1]
+hosts_target = sys.argv[2]
+proxy_port = sys.argv[3].strip()
+world_base_url = sys.argv[4].strip()
+world_host = (urlparse(world_base_url).hostname or "").strip()
+allowed_domains = []
+if world_host and world_host not in {"localhost", "127.0.0.1", "::1"}:
+    allowed_domains.append(world_host)
+
+sandbox = {
+    "enabled": True,
+    "failIfUnavailable": True,
+    "allowUnsandboxedCommands": False,
+    "autoAllowBashIfSandboxed": True,
+    "network": {
+        "allowedDomains": allowed_domains,
+        "deniedDomains": ["localhost", "127.0.0.1"],
+    },
+}
+if proxy_port:
+    sandbox["network"]["httpProxyPort"] = int(proxy_port)
+
+settings = {
+    "sandbox": sandbox,
+}
+with open(target, "w", encoding="utf-8") as fh:
+    json.dump(settings, fh, indent=2, sort_keys=True)
+    fh.write("\n")
+if world_host:
+    try:
+        with open("/etc/hosts", encoding="utf-8") as fh:
+            hosts = fh.read()
+    except OSError:
+        hosts = "127.0.0.1 localhost\n"
+    if world_host not in hosts:
+        hosts = hosts.rstrip() + f"\n127.0.0.1 {world_host}\n"
+    with open(hosts_target, "w", encoding="utf-8") as fh:
+        fh.write(hosts)
+PY
+fi
+
 SESSION_LINE=""
 if [[ -n "$WORLD_SESSION_ID" ]]; then
   SESSION_LINE="${WORLD_SESSION_HEADER}: ${WORLD_SESSION_ID}"
@@ -360,6 +420,16 @@ declare -a claude_base_args=(
   --permission-mode "$CLAUDE_PERMISSION_MODE"
   --model "$CLAUDE_MODEL"
 )
+if [[ -n "$CLAUDE_GENERATED_SETTINGS_FILE" ]]; then
+  if [[ "$SANDBOX" == "1" ]]; then
+    claude_base_args+=(--settings "$SANDBOX_RUNTIME_DIR/$(basename "$CLAUDE_GENERATED_SETTINGS_FILE")")
+  else
+    claude_base_args+=(--settings "$CLAUDE_GENERATED_SETTINGS_FILE")
+  fi
+fi
+if [[ "$SANDBOX" == "1" && -n "$CLAUDE_SANDBOX_DISALLOWED_TOOLS" ]]; then
+  claude_base_args+=(--disallowedTools "$CLAUDE_SANDBOX_DISALLOWED_TOOLS")
+fi
 if [[ "$CLAUDE_BARE" == "1" ]]; then
   claude_base_args=(--bare "${claude_base_args[@]}")
 fi
@@ -432,6 +502,7 @@ if [[ "$SANDBOX" == "1" ]]; then
     --die-with-parent
   )
   [[ -d /lib64 ]] && bwrap_prefix+=(--ro-bind /lib64 /lib64)
+  [[ -n "$SANDBOX_HOSTS_FILE" && -f "$SANDBOX_HOSTS_FILE" ]] && bwrap_prefix+=(--ro-bind "$SANDBOX_HOSTS_FILE" /etc/hosts)
   # Mount only resolv.conf for DNS — do NOT mount all of /mnt/wsl, which
   # exposes the host filesystem via Docker bind mounts.
   [[ -f /mnt/wsl/resolv.conf ]] && bwrap_prefix+=(--ro-bind /mnt/wsl/resolv.conf /mnt/wsl/resolv.conf)
