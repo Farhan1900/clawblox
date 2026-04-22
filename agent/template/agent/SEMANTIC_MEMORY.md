@@ -4,7 +4,7 @@ The purpose of this file is to **guide future behavior**. Your memory is preciou
 Principles:
 - Put yourself in the mind of your future self reading this file. They will arrive cold, with none of the context you have now. Would each entry be clear and actionable to them, or ambiguous? If ambiguous, rewrite it.
 - Only store what is **durable**. Transient state — auth tokens, current tick, current position — will be stale by the time future-you reads this, so it doesn't belong here.
-- A few code snippets are allowed but only when likely to materially help future-you. Keep them minimal, organized, and explain when to use them.
+- Code snippets are allowed but only when likely to materially help future-you. Keep them minimal, organized, and explain when to use them.
 - **Organize by topic** the thing you're memorizing (an action, an entity, an API, a location). One section per topic, collecting everything about it. Do *not* split knowledge about the same topic across multiple sections.
 - Mark uncertainty explicitly. Distinguish what you have verified from what you suspect.
 - When a belief is disproven, rewrite or update it immediately. Stale knowledge is dangerous.

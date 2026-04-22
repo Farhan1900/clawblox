@@ -148,7 +148,13 @@ append_prompt_workspace_files() {
     seen_files["$rel_path"]=1
   done < <(find "$workspace_dir" -type f -name '*.md' -print0 | sort -z)
 
-  if ((${#prompt_files[@]} == 0)); then
+  local episodic_jsonl="$workspace_dir/EPISODIC_MEMORY.jsonl"
+  local has_episodic_jsonl=0
+  if [[ -f "$episodic_jsonl" && -s "$episodic_jsonl" ]]; then
+    has_episodic_jsonl=1
+  fi
+
+  if ((${#prompt_files[@]} == 0 && has_episodic_jsonl == 0)); then
     return 0
   fi
 
@@ -164,6 +170,33 @@ append_prompt_workspace_files() {
       printf '\n'
     } >>"$prompt_file"
   done
+
+  if ((has_episodic_jsonl == 1)); then
+    {
+      printf '\n===== EPISODIC_MEMORY.jsonl (summaries) =====\n'
+      python3 - "$episodic_jsonl" <<'PY'
+import json, sys
+path = sys.argv[1]
+with open(path, encoding="utf-8") as f:
+    for i, raw in enumerate(f, 1):
+        line = raw.strip()
+        if not line:
+            continue
+        try:
+            obj = json.loads(line)
+        except json.JSONDecodeError as e:
+            print(
+                f"[warning: EPISODIC_MEMORY.jsonl line {i} could not be parsed: {e}]",
+                file=sys.stderr,
+            )
+            continue
+        ts = obj.get("timestamp", "?")
+        summary = obj.get("summary", "?")
+        print(f"{ts} — {summary}")
+PY
+      printf '\n'
+    } >>"$prompt_file"
+  fi
 }
 
 canonical_path() {

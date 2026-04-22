@@ -1,17 +1,16 @@
 # EPISODIC_MEMORY.md - What Happened
-Both the "Overview" and "Diary" sections are written *after* something happened — not upfront as plans or narration. The goal is to remember **what was done**, not every low-level step. **Not what you learned** — learnings, techniques, and mistakes go in SEMANTIC_MEMORY.
+Memories are stored in `EPISODIC_MEMORY.jsonl`, one JSON object per line with fields `timestamp`, `summary`, `detail`.
 
-"Overview" section: a curated short summary of what's been done. **One short sentence per bullet.** Editable: merge bullets that describe the same accomplishment, and drop bullets that a later, bigger accomplishment subsumes. Keep it scannable.
+Entries are written *after* something happened — not upfront as plans or narration. The goal is to remember **what was done**, not every low-level step. **Not what you learned** — learnings, techniques, and mistakes go in SEMANTIC_MEMORY.
 
-"Diary" section: append-only. One short paragraph per entry, at a slightly higher level of detail than Overview. Add new entries at the end; never rewrite or delete old ones. Skip move-by-move narration and specific coordinates.
+`summary` field: **one short sentence**, past tense, what happened. Easily scannable by extracting just this field across entries.
 
-Never create a second `## Overview` or `## Diary` heading — always write inside the existing ones.
+`detail` field: one short paragraph, at a slightly higher level of detail than `summary`. Skip move-by-move narration and specific coordinates. If you can't say more than `summary`, the event didn't warrant an entry.
 
-Prefix **every bullet and every diary entry** with date and time (i.e. `2026-04-19 16:42`) so ordering is recoverable. Date alone is too coarse.
+`timestamp` field: `YYYY-MM-DDTHH:MM:SSZ` (UTC, second-precision), e.g. `2026-04-22T14:30:00Z`. Generate with `date -u +"%Y-%m-%dT%H:%M:%SZ"`.
 
-<!-- DO NOT EDIT ABOVE THIS LINE -->
+Append-only. Add new entries at the end; never rewrite or delete old ones.
 
-## Overview
+---
 
-
-## Diary
+_Don't modify this file. Read only._
