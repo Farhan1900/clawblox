@@ -97,9 +97,9 @@ ocean.Parent = Workspace
 -- Each lobe is offset from true cardinal so the silhouette reads as organic, not a plus-sign.
 local groundParts = {
     { name = "GroundCenter", size = {96, GROUND_HEIGHT, 100}, pos = {-2, GROUND_Y, 0} },
-    { name = "GroundN",      size = {40, GROUND_HEIGHT, 25},  pos = {10, GROUND_Y, 60} },
-    { name = "GroundS",      size = {35, GROUND_HEIGHT, 20},  pos = {-12, GROUND_Y, -58} },
-    { name = "GroundW",      size = {22, GROUND_HEIGHT, 35},  pos = {-60, GROUND_Y, -5} },
+    { name = "GroundN",      size = {42, GROUND_HEIGHT, 14},  pos = {10, GROUND_Y, 56} },
+    { name = "GroundS",      size = {36, GROUND_HEIGHT, 14},  pos = {-12, GROUND_Y, -55} },
+    { name = "GroundW",      size = {14, GROUND_HEIGHT, 40},  pos = {-56, GROUND_Y, -3} },
     { name = "GroundE",      size = {10, GROUND_HEIGHT, 58},  pos = {48, GROUND_Y, 5} },
 }
 
