@@ -30,6 +30,7 @@ CLAUDE_INITIAL_PROMPT="${CLAUDE_INITIAL_PROMPT-Begin}"
 RESET_EVERY="${RESET_EVERY-}"
 SANDBOX="${SANDBOX-0}"
 CLAUDE_NATIVE_SANDBOX="${CLAUDE_NATIVE_SANDBOX-$SANDBOX}"
+SANDBOX_DEPS_ROOT="${SANDBOX_DEPS_ROOT-}"
 CLAWBLOX_WORLD_HTTP_PROXY_PORT="${CLAWBLOX_WORLD_HTTP_PROXY_PORT-}"
 CHECKPOINT_WARNING_SECONDS="${CHECKPOINT_WARNING_SECONDS:-300}"
 CHECKPOINT_WARNING_PROMPT="${CHECKPOINT_WARNING_PROMPT:-You will be reset in 5 minutes. Update your workspace memory files now.}"
@@ -262,6 +263,29 @@ if [[ "$SANDBOX" == "1" ]]; then
     exit 1
   fi
 
+  if [[ "$CLAUDE_NATIVE_SANDBOX" == "1" && -z "$SANDBOX_DEPS_ROOT" ]]; then
+    bwrap_host_bin="$(command -v bwrap || true)"
+    socat_host_bin="$(command -v socat || true)"
+    bwrap_host_root="$(cd "$(dirname "$bwrap_host_bin")/.." && pwd -P)"
+    socat_host_root="$(cd "$(dirname "$socat_host_bin")/.." && pwd -P)"
+    if [[ "$bwrap_host_root" == "$socat_host_root" && "$bwrap_host_root" != "/usr" && "$bwrap_host_root" != "/" ]]; then
+      SANDBOX_DEPS_ROOT="$bwrap_host_root"
+    elif [[ "$bwrap_host_root" != "/usr" && "$bwrap_host_root" != "/" && ( "$socat_host_root" == "/usr" || "$socat_host_root" == "$bwrap_host_root" ) ]]; then
+      SANDBOX_DEPS_ROOT="$bwrap_host_root"
+    elif [[ "$socat_host_root" != "/usr" && "$socat_host_root" != "/" && ( "$bwrap_host_root" == "/usr" || "$bwrap_host_root" == "$socat_host_root" ) ]]; then
+      SANDBOX_DEPS_ROOT="$socat_host_root"
+    elif [[ "$bwrap_host_root" != "$socat_host_root" && "$bwrap_host_root" != "/usr" && "$socat_host_root" != "/usr" ]]; then
+      echo "Error: bwrap and socat are in different non-system prefixes; set SANDBOX_DEPS_ROOT explicitly." >&2
+      echo "  bwrap root: $bwrap_host_root" >&2
+      echo "  socat root: $socat_host_root" >&2
+      exit 1
+    fi
+  fi
+  if [[ -n "$SANDBOX_DEPS_ROOT" && ! -d "$SANDBOX_DEPS_ROOT/bin" ]]; then
+    echo "Error: SANDBOX_DEPS_ROOT must contain a bin directory: $SANDBOX_DEPS_ROOT" >&2
+    exit 1
+  fi
+
   CLAUDE_BIN_REAL="$(readlink -f "$(command -v claude)")"
   mkdir -p \
     "$SANDBOX_HOME_DIR/.claude/projects" \
@@ -466,6 +490,14 @@ fi
 declare -a bwrap_prefix=()
 CLAUDE_CMD="claude"
 if [[ "$SANDBOX" == "1" ]]; then
+  sandbox_path="/sandbox-bin:/usr/bin:/bin"
+  sandbox_ld_library_path=""
+  if [[ -n "$SANDBOX_DEPS_ROOT" ]]; then
+    sandbox_path="/sandbox-bin:/sandbox-deps/bin:/usr/bin:/bin"
+    if [[ -d "$SANDBOX_DEPS_ROOT/lib" ]]; then
+      sandbox_ld_library_path="/sandbox-deps/lib"
+    fi
+  fi
   bwrap_prefix=(
     bwrap
     --ro-bind /usr /usr
@@ -493,7 +525,7 @@ if [[ "$SANDBOX" == "1" ]]; then
     --setenv USER agent
     --setenv LOGNAME agent
     --setenv SHELL /bin/bash
-    --setenv PATH /sandbox-bin:/usr/bin:/bin
+    --setenv PATH "$sandbox_path"
     --unsetenv CLAUDE_CONFIG_DIR
     --unsetenv CLAUDE_CODE_EXECPATH
     --unsetenv CLAUDE_CODE_ENTRYPOINT
@@ -501,6 +533,8 @@ if [[ "$SANDBOX" == "1" ]]; then
     --chdir /workspace
     --die-with-parent
   )
+  [[ -n "$SANDBOX_DEPS_ROOT" ]] && bwrap_prefix+=(--ro-bind "$SANDBOX_DEPS_ROOT" /sandbox-deps)
+  [[ -n "$sandbox_ld_library_path" ]] && bwrap_prefix+=(--setenv LD_LIBRARY_PATH "$sandbox_ld_library_path")
   [[ -d /lib64 ]] && bwrap_prefix+=(--ro-bind /lib64 /lib64)
   [[ -n "$SANDBOX_HOSTS_FILE" && -f "$SANDBOX_HOSTS_FILE" ]] && bwrap_prefix+=(--ro-bind "$SANDBOX_HOSTS_FILE" /etc/hosts)
   # Mount only resolv.conf for DNS — do NOT mount all of /mnt/wsl, which
