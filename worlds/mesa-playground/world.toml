@@ -4,7 +4,7 @@ max_players = 30
 
 [scripts]
 main = "main.lua"
-skill = "SKILL.md"
+skill = "API.md"
 
 [renderer]
 name = "Mesa World Renderer"

@@ -261,7 +261,7 @@ function buildSystemPrompt() {
 		`Session key (X-Session): ${worldSession}`,
 		`Agent id: ${worldAgentId || "(unknown)"}`,
 		"",
-		`At the start of a session, fetch world commands with: curl -sS -H \"X-Session: ${worldSession}\" ${worldBaseUrl}/skill.md`,
+		`At the start of a session, fetch world commands with: curl -sS -H \"X-Session: ${worldSession}\" ${worldBaseUrl}/api.md`,
 		"You will receive world observations. Choose and execute your next action using /input.",
 		`Act: curl -sS -X POST -H \"X-Session: ${worldSession}\" -H \"Content-Type: application/json\" -d '<json>' ${worldBaseUrl}/input`,
 		"Always make a bash tool call to /input. Never respond with text only.",

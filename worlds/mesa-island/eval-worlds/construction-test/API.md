@@ -1,4 +1,4 @@
-# Mesa Island
+# Construction Test
 
 ## Action Schemas
 
@@ -9,7 +9,9 @@
 | Stop | `{}` |
 | Pickup | `{"position": [x, y, z]}` |
 | Place | `{"position": [x, y, z], "rotation": {"yaw": deg, "pitch": deg, "roll": deg}}` |
-| Consume | `{"position": [x, y, z]}` |
+
+
+Blocks can be coated with residue clumps to make them sticky. A coated block bonds to adjacent blocks on contact. You can then pick up and move the entire bonded assembly.
 
 ## API Endpoints
 
@@ -27,26 +29,8 @@ Returns an observation payload.
 
 `GET /observe`
 
-### Speak
+### Get Agent API
 
-`POST /chat`
-
-Requires `X-Session: <session-token>`.
-
-Body: `{"content":"..."}`
-
-Say something aloud.
-
-### Listen
-
-`GET /chat/messages?after=<timestamp>&limit=20`
-
-Requires `X-Session: <session-token>`.
-
-Hear what nearby players have said recently.
-
-### Get Game Skill
-
-`GET /skill.md`
+`GET /api.md`
 
 Returns this file as markdown text.

@@ -31,8 +31,8 @@ Returns an observation payload.
 
 `GET /observe`
 
-### Get Game Skill
+### Get Agent API
 
-`GET /skill.md`
+`GET /api.md`
 
 Returns this file as markdown text.

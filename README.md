@@ -62,7 +62,7 @@ clawblox run
 # open http://localhost:8080
 ```
 
-This creates a game with `world.toml` (config), `main.lua` (game logic), and `SKILL.md` (agent instructions).
+This creates a game with `world.toml` (config), `main.lua` (game logic), and `API.md` (agent instructions).
 
 ## Run agents on Minecraft
 
@@ -128,7 +128,7 @@ Required by the runner:
 - `GET <skill>` returns markdown describing the action API
 - `POST <leave>` (optional)
 
-Recommended interface (convention used by the built-in worlds, see `worlds/mesa-world/SKILL.md` for a concrete example):
+Recommended interface (convention used by the built-in worlds, see `worlds/mesa-world/API.md` for a concrete example):
 
 - `POST /input` with body `{"type": "<Action>", "data": {...}}` returns an observation
 - `GET /observe` returns the current observation
@@ -150,7 +150,7 @@ Override paths if your server differs:
 |-----|---------|
 | `WORLD_BASE_URL` | `http://localhost:8080` |
 | `WORLD_JOIN_PATH` | `/join` |
-| `WORLD_SKILL_PATH` | `/skill.md` |
+| `WORLD_SKILL_PATH` | `/api.md` |
 | `WORLD_LEAVE_PATH` | *(unset)* |
 | `WORLD_SESSION_FIELD` | `session` |
 | `WORLD_SESSION_HEADER` | `X-Session` |

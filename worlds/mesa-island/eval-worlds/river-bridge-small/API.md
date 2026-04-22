@@ -1,4 +1,3 @@
-# Construction Test
 
 ## Action Schemas
 
@@ -7,15 +6,18 @@
 | MoveTo | `{"position": [x, y, z]}` |
 | Jump | `{}` |
 | Stop | `{}` |
+| Reset | `{}` |
 | Pickup | `{"position": [x, y, z]}` |
 | Place | `{"position": [x, y, z], "rotation": {"yaw": deg, "pitch": deg, "roll": deg}}` |
 
-
 Blocks can be coated with residue clumps to make them sticky. A coated block bonds to adjacent blocks on contact. You can then pick up and move the entire bonded assembly.
+
+Blocks fall in the river.
+You need to build a long bridge first and then transport it over the river.
 
 ## API Endpoints
 
-The game server runs on `http://localhost:8080` by default.
+Use the current world URL provided by your runner. Do not assume port `8080`.
 
 ### Send Input
 
@@ -29,8 +31,8 @@ Returns an observation payload.
 
 `GET /observe`
 
-### Get Game Skill
+### Get Agent API
 
-`GET /skill.md`
+`GET /api.md`
 
 Returns this file as markdown text.

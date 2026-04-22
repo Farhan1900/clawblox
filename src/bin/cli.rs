@@ -60,6 +60,8 @@ use clawblox::{
 
 static DOCS_DIR: Dir = include_dir!("$CARGO_MANIFEST_DIR/docs");
 static LOCAL_RUNTIME_UI_DIR: Dir = include_dir!("$CARGO_MANIFEST_DIR/frontend_runtime/dist");
+const DEFAULT_AGENT_API_DOC: &str = "API.md";
+const LEGACY_AGENT_SKILL_DOC: &str = "SKILL.md";
 
 #[path = "../app_browser.rs"]
 mod app_browser;
@@ -498,7 +500,7 @@ max_players = 8
 
 [scripts]
 main = "main.lua"
-skill = "SKILL.md"
+skill = "API.md"
 
 [renderer]
 name = "Default Game Renderer"
@@ -630,8 +632,8 @@ print("Game initialized")
 "#;
     std::fs::write(project_dir.join("main.lua"), main_lua).expect("Failed to create main.lua");
 
-    // Create SKILL.md
-    let skill_md = format!(
+    // Create API.md
+    let api_md = format!(
         r#"# {}
 
 A new Clawblox game.
@@ -651,7 +653,8 @@ Move to a position on the map.
 "#,
         project_name, "100", "100"
     );
-    std::fs::write(project_dir.join("SKILL.md"), skill_md).expect("Failed to create SKILL.md");
+    std::fs::write(project_dir.join(DEFAULT_AGENT_API_DOC), api_md)
+        .expect("Failed to create API.md");
 
     // Fetch latest docs from GitHub, fall back to embedded copy
     {
@@ -806,6 +809,31 @@ export function createRenderer(ctx) {
         println!("  cd {}", project_name);
     }
     println!("  clawblox run");
+}
+
+fn read_agent_api_doc(world_dir: &Path, config: &clawblox::config::WorldConfig) -> Option<String> {
+    let mut candidates: Vec<&str> = Vec::new();
+
+    match config.scripts.skill.as_deref().map(str::trim) {
+        Some("") => {}
+        Some(DEFAULT_AGENT_API_DOC) => {
+            candidates.push(DEFAULT_AGENT_API_DOC);
+            candidates.push(LEGACY_AGENT_SKILL_DOC);
+        }
+        Some(LEGACY_AGENT_SKILL_DOC) => {
+            candidates.push(LEGACY_AGENT_SKILL_DOC);
+            candidates.push(DEFAULT_AGENT_API_DOC);
+        }
+        Some(skill_file) => candidates.push(skill_file),
+        None => {
+            candidates.push(DEFAULT_AGENT_API_DOC);
+            candidates.push(LEGACY_AGENT_SKILL_DOC);
+        }
+    }
+
+    candidates
+        .into_iter()
+        .find_map(|skill_file| std::fs::read_to_string(world_dir.join(skill_file)).ok())
 }
 
 // =============================================================================
@@ -979,17 +1007,7 @@ fn deploy_game(path: PathBuf, api_key_override: Option<String>, server_override:
         std::process::exit(1);
     });
 
-    // Read SKILL.md if configured
-    let skill_md = config.scripts.skill.as_ref().and_then(|skill_file| {
-        let p = path.join(skill_file);
-        match std::fs::read_to_string(&p) {
-            Ok(content) => Some(content),
-            Err(e) => {
-                eprintln!("Warning: Could not read {}: {}", p.display(), e);
-                None
-            }
-        }
-    });
+    let skill_md = read_agent_api_doc(&path, &config);
 
     // Check for existing game_id
     let game_id_path = path.join(".clawblox/game_id");
@@ -1732,12 +1750,7 @@ fn run_game(
         std::process::exit(1);
     });
 
-    // Load skill.md if present
-    let skill_md = config
-        .scripts
-        .skill
-        .as_ref()
-        .and_then(|skill_file| std::fs::read_to_string(path.join(skill_file)).ok());
+    let skill_md = read_agent_api_doc(&path, &config);
     let renderer_manifest = maybe_build_renderer_package(&path, &config.renderer, &base_path)
         .unwrap_or_else(|e| {
             eprintln!("Error: {}", e);
@@ -2084,6 +2097,7 @@ fn run_game(
             .route("/observe", get(local_observe))
             .route("/reset", post(local_reset))
             .route("/snapshot", get(local_snapshot))
+            .route("/api.md", get(local_skill))
             .route("/skill.md", get(local_skill))
             .route("/audio", post(local_audio))
             .route("/chat", post(local_chat))
@@ -2116,7 +2130,8 @@ fn run_game(
         println!("  POST /reset        - Engine-level full reset (requires X-Session header)");
         println!("  POST /chat         - Send chat message (requires X-Session header)");
         println!("  GET  /chat/messages - List local chat messages");
-        println!("  GET  /skill.md     - Game skill definition");
+        println!("  GET  /api.md       - Agent API documentation");
+        println!("  GET  /skill.md     - Legacy alias for /api.md");
 
         let listener = tokio::net::TcpListener::bind(addr)
             .await
@@ -2592,11 +2607,7 @@ fn run_external_runtime(
         write_pid_file_for(&pid_file, std::process::id());
     }
 
-    let skill_md = config
-        .scripts
-        .skill
-        .as_ref()
-        .and_then(|skill_file| std::fs::read_to_string(path.join(skill_file)).ok());
+    let skill_md = read_agent_api_doc(&path, config);
     let renderer_manifest = maybe_build_renderer_package(&path, &config.renderer, &base_path)
         .unwrap_or_else(|e| {
             eprintln!("Error: {}", e);
@@ -2630,6 +2641,7 @@ fn run_external_runtime(
                 .route("/renderer/manifest", get(external_renderer_manifest))
                 .route("/spectate", get(external_spectate))
                 .route("/spectate/ws", get(external_spectate_ws))
+                .route("/api.md", get(external_skill))
                 .route("/skill.md", get(external_skill))
                 .nest_service("/renderer-files", ServeDir::new(path.join("renderer")))
                 .nest_service("/assets", ServeDir::new(path.join("assets")))
@@ -3751,7 +3763,7 @@ async fn external_skill(State(state): State<ExternalLocalState>) -> impl IntoRes
         None => (
             axum::http::StatusCode::NOT_FOUND,
             [("content-type", "text/plain")],
-            "No skill.md found".to_string(),
+            "No API.md or SKILL.md found".to_string(),
         ),
     }
 }
@@ -4547,7 +4559,7 @@ async fn local_skill(State(state): State<LocalState>) -> impl IntoResponse {
         None => (
             axum::http::StatusCode::NOT_FOUND,
             [("content-type", "text/plain")],
-            "No skill.md found".to_string(),
+            "No API.md or SKILL.md found".to_string(),
         ),
     }
 }

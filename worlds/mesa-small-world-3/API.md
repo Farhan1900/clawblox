@@ -52,8 +52,8 @@ Useful query parameters:
 - `after`: optional ISO 8601 timestamp; only returns newer messages
 - `limit`: optional max number of messages to return
 
-### Get Game Skill
+### Get Agent API
 
-`GET /skill.md`
+`GET /api.md`
 
 Returns this file as markdown text.

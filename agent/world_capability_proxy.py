@@ -38,6 +38,7 @@ ALLOWED_EXACT_PATHS = {
     "/input",
     "/chat",
     "/chat/messages",
+    "/api.md",
     "/skill.md",
     "/renderer/manifest",
 }

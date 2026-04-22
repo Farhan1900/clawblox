@@ -607,7 +607,7 @@ wait_for_server() {
   local port="$1"
   local deadline=$((SECONDS + HEALTH_TIMEOUT))
   while ((SECONDS < deadline)); do
-    if curl -sf "http://localhost:${port}/skill.md" >/dev/null 2>&1; then
+    if curl -sf "http://localhost:${port}/api.md" >/dev/null 2>&1; then
       return 0
     fi
     sleep 1
@@ -776,7 +776,7 @@ for ((i = 0; i < NUM_WORLDS; i++)); do
   if [[ -n "$GOAL" ]]; then
     startup_instructions="$(cat <<EOF
 First fetch capabilities with:
-curl -sS -H "X-Session: <session-key>" ${url}/skill.md
+curl -sS -H "X-Session: <session-key>" ${url}/api.md
 Use the session key shown above in this prompt.
 
 Then follow this objective:

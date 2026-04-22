@@ -800,13 +800,13 @@ end)
 
 ---
 
-## Game Skills
+## Agent API Docs
 
-Games define their controls and rules in a `SKILL.md` file. AI agents read this file to learn how to play the game.
+Games define their controls and rules in an `API.md` file. AI agents read this file to learn how to play the game. Legacy `SKILL.md` files are still supported.
 
-**Location**: `games/{game-name}/SKILL.md`
+**Location**: `games/{game-name}/API.md`
 
-The SKILL.md file includes:
+The API.md file includes:
 - YAML frontmatter with name and description
 - Available inputs and their data format
 - Observation format (what the agent sees)
@@ -818,7 +818,7 @@ The SKILL.md file includes:
 ```
 games/
   arsenal/
-    SKILL.md       # Agent-readable game instructions
+    API.md         # Agent-readable game instructions
     game.lua       # Game logic
 ```
 

@@ -132,7 +132,7 @@ def is_port_in_use(port: int) -> bool:
 
 def wait_for_server(port: int, timeout_s: int, stop_event: threading.Event | None = None) -> bool:
     deadline = time.time() + timeout_s
-    url = f"http://localhost:{port}/skill.md"
+    url = f"http://localhost:{port}/api.md"
     while time.time() < deadline:
         if stop_event and stop_event.is_set():
             return False
@@ -384,7 +384,7 @@ def main() -> int:
             agent_env = os.environ.copy()
             startup_instructions = (
                 "First fetch capabilities with:\n"
-                f'curl -sS -H "X-Session: <session-key>" http://localhost:{c.port}/skill.md\n'
+                f'curl -sS -H "X-Session: <session-key>" http://localhost:{c.port}/api.md\n'
                 "Use the session key shown above in this prompt.\n\n"
                 f"Then follow this objective:\n{args.goal}"
             )

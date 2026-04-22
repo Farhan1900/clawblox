@@ -1,4 +1,4 @@
-# Mesa World 2
+# Mesa World
 
 ## Action Schemas
 
@@ -8,8 +8,9 @@
 | Jump | `{}` |
 | Stop | `{}` |
 | Pickup | `{"position": [x, y, z]}` |
-| Place | `{"position": [x, y, z]}` |
+| Place | `{"position": [x, y, z], "rotation"?: {"yaw": deg, "pitch": deg, "roll": deg}}` |
 | Throw | `{"direction": [x, y, z], "speed": n}` |
+
 
 ## API Endpoints
 
@@ -51,8 +52,8 @@ Useful query parameters:
 - `after`: optional ISO 8601 timestamp; only returns newer messages
 - `limit`: optional max number of messages to return
 
-### Get Game Skill
+### Get Agent API
 
-`GET /skill.md`
+`GET /api.md`
 
 Returns this file as markdown text.
