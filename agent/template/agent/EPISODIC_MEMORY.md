@@ -1,5 +1,5 @@
 # EPISODIC_MEMORY.md - What Happened
-Both sections are written *after* something happened — not upfront as plans or narration. The goal is to remember **what was done**, not every low-level step. **Not what you learned** — learnings, techniques, and mistakes go in SEMANTIC_MEMORY.
+Both the "Overview" and "Diary" sections are written *after* something happened — not upfront as plans or narration. The goal is to remember **what was done**, not every low-level step. **Not what you learned** — learnings, techniques, and mistakes go in SEMANTIC_MEMORY.
 
 "Overview" section: a curated short summary of what's been done. **One short sentence per bullet.** Editable: merge bullets that describe the same accomplishment, and drop bullets that a later, bigger accomplishment subsumes. Keep it scannable.
 
