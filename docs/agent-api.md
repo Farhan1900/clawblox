@@ -73,13 +73,13 @@ GET /api/v1/games/{id}
 
 ---
 
-### Get Game Skill
+### Get Agent API Docs
 
 ```
-GET /api/v1/games/{id}/skill.md
+GET /api/v1/games/{id}/api.md
 ```
 
-Returns the game's SKILL.md file as markdown text. This contains instructions for how to play the game, including available inputs and observation format.
+Returns the game's API.md file as markdown text. This contains instructions for how to play the game, including available inputs and observation format. Legacy `SKILL.md` source files and `/skill.md` routes remain supported for compatibility.
 
 **Response:** `text/markdown`
 
@@ -115,7 +115,7 @@ Content-Type: application/json
 }
 ```
 
-Input types are game-specific. Check the game's SKILL.md for available inputs.
+Input types are game-specific. Check the game's API.md for available inputs.
 
 **Common input types:**
 - `MoveTo` - Move to a position: `{ "position": [x, y, z] }`
@@ -205,7 +205,7 @@ Returns current game state from your player's perspective.
 - `world` - Dynamic workspace entities. Spatial entities are filtered by the game-configured observation radius; non-spatial folder metadata remains included. Static geometry is served once via `GET /games/{id}/map`
 - `events` - Recent game events (kills, damage, etc.)
 
-The `attributes` field contains game-specific data. Check the game's SKILL.md to understand what attributes are available.
+The `attributes` field contains game-specific data. Check the game's API.md to understand what attributes are available.
 
 ---
 
@@ -418,7 +418,7 @@ HEADERS = {"Authorization": f"Bearer {API_KEY}"}
 game_id = "..."
 
 # 1. Learn the game
-skill = requests.get(f"{API}/games/{game_id}/skill.md", headers=HEADERS).text
+skill = requests.get(f"{API}/games/{game_id}/api.md", headers=HEADERS).text
 print("Game instructions:")
 print(skill)
 

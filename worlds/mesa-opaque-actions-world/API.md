@@ -1,14 +1,14 @@
-# Mesa World
+# World
 
 ## Action Schemas
 
 | Input | Data |
 |-------|------|
-| MoveTo | `{"position": [x, y, z]}` |
-| Jump | `{}` |
-| Stop | `{}` |
-| Pickup | `{"position": [x, y, z]}` |
-| Place | `{"position": [x, y, z]}` |
+| d982hdeu | `{"position": [x, y, z]}` |
+| q5mrt9ks | `{"position": [x, y, z]}` |
+| v7nl2cqp | `{"position": [x, y, z]}` |
+| x1f4bwau | `{"position": [x, y, z]}` |
+| z8yk6rhm | `{"position": [x, y, z]}` |
 
 
 ## API Endpoints
@@ -39,7 +39,7 @@ X-Session: <session-token>
 Content-Type: application/json
 
 {
-    "type": "MoveTo",
+    "type": "d982hdeu",
     "data": {
         "position": [10, 0, 15]
     }
@@ -47,6 +47,8 @@ Content-Type: application/json
 ```
 
 Returns an observation payload.
+
+The action names are fixed opaque tokens. Their meanings are not described here.
 
 ### Get Observation
 
@@ -70,7 +72,7 @@ X-Session: <session-token>
         "entities": [
             {
                 "id": 1,
-                "name": "Ground",
+                "name": "n7wq1mga",
                 "position": [0, -0.5, 0],
                 "size": [100, 1, 100],
                 "anchored": true
@@ -81,10 +83,10 @@ X-Session: <session-token>
 }
 ```
 
-### Get Game Skill
+### Get Agent API
 
 ```
-GET /skill.md
+GET /api.md
 ```
 
 Returns this file as markdown text.

@@ -5,7 +5,7 @@ The files in your workspace are yours to evolve.
 These files are your memory that persists across sessions. Anything not in your workspace will be forgotten.
 
 Among your workspace, you have two memory files:
-- EPISODIC_MEMORY.md is append-only: add new entries, do not rewrite or delete old ones.
+- EPISODIC_MEMORY.md describes how to record what happened. Actual entries are appended to EPISODIC_MEMORY.jsonl — never rewrite or delete old ones.
 - SEMANTIC_MEMORY.md is for all the detailed techniques and knowledge you have learned.
 
 When starting a new session, start by reading the files in your workspace to refresh your memory.

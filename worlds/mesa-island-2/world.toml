@@ -5,7 +5,7 @@ afk_timeout = 0
 
 [scripts]
 main = "main.lua"
-skill = "SKILL.md"
+skill = "API.md"
 
 [renderer]
 name = "Mesa Island Renderer"

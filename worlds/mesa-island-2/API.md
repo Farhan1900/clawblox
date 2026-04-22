@@ -11,10 +11,6 @@
 | Place | `{"position": [x, y, z], "rotation": {"yaw": deg, "pitch": deg, "roll": deg}}` |
 | Consume | `{"position": [x, y, z]}` |
 
-
-Skuttlers secrete clumps that make blocks sticky. Drop a clump onto a block and it will stick to blocks touching it. You can then carry the structure.
-Use it to build and for transportation!
-
 ## API Endpoints
 
 The game server runs on `http://localhost:8080` by default.
@@ -49,8 +45,8 @@ Requires `X-Session: <session-token>`.
 
 Hear what nearby players have said recently.
 
-### Get Game Skill
+### Get Agent API
 
-`GET /skill.md`
+`GET /api.md`
 
 Returns this file as markdown text.

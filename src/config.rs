@@ -14,7 +14,10 @@ pub struct ScriptsConfig {
     /// - scripts/Workspace/**/*.lua
     #[serde(default)]
     pub tree: Option<String>,
-    /// Skill definition file (relative to game directory)
+    /// Agent API documentation file (relative to game directory).
+    ///
+    /// Historically this was `SKILL.md`; `API.md` is the preferred name for
+    /// new worlds, and legacy `SKILL.md` files remain supported.
     #[serde(default)]
     pub skill: Option<String>,
 }
@@ -24,7 +27,7 @@ impl Default for ScriptsConfig {
         Self {
             main: "main.lua".to_string(),
             tree: None,
-            skill: Some("SKILL.md".to_string()),
+            skill: Some("API.md".to_string()),
         }
     }
 }
@@ -318,6 +321,7 @@ mod tests {
         assert_eq!(config.name, "Test Game");
         assert_eq!(config.max_players, 8);
         assert_eq!(config.runtime.mode, "clawblox");
+        assert_eq!(config.scripts.skill, Some("API.md".to_string()));
         assert_eq!(config.observation.radius, 100.0);
         assert_eq!(config.speech.mode, SpeechMode::Global);
         assert_eq!(config.speech.hearing_radius, 30.0);

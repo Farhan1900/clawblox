@@ -86,7 +86,7 @@ Session key (X-Session): ${SESSION_ID}
 
 At startup:
 1. Call tool mc_register_session with session_id "${SESSION_ID}".
-2. Fetch capabilities with: curl -sS -H "X-Session: ${SESSION_ID}" ${ADAPTER_URL%/}/skill.md
+2. Fetch capabilities with: curl -sS -H "X-Session: ${SESSION_ID}" ${ADAPTER_URL%/}/api.md
 3. Use /input for world actions.
 EOF
 

@@ -1,0 +1,56 @@
+# Mesa Island
+
+## Action Schemas
+
+| Input | Data |
+|-------|------|
+| MoveTo | `{"position": [x, y, z]}` |
+| Jump | `{}` |
+| Stop | `{}` |
+| Pickup | `{"position": [x, y, z]}` |
+| Place | `{"position": [x, y, z], "rotation": {"yaw": deg, "pitch": deg, "roll": deg}}` |
+| Consume | `{"position": [x, y, z]}` |
+
+
+Skuttlers secrete clumps that make blocks sticky. Drop a clump onto a block and it will stick to blocks touching it. You can then carry the structure.
+Use it to build and for transportation!
+
+## API Endpoints
+
+The game server runs on `http://localhost:8080` by default.
+
+### Send Input
+
+`POST /input`
+
+Body: `{"type":"<ActionName>","data":{...}}`
+
+Returns an observation payload.
+
+### Get Observation
+
+`GET /observe`
+
+### Speak
+
+`POST /chat`
+
+Requires `X-Session: <session-token>`.
+
+Body: `{"content":"..."}`
+
+Say something aloud.
+
+### Listen
+
+`GET /chat/messages?after=<timestamp>&limit=20`
+
+Requires `X-Session: <session-token>`.
+
+Hear what nearby players have said recently.
+
+### Get Agent API
+
+`GET /api.md`
+
+Returns this file as markdown text.

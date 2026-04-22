@@ -6,7 +6,11 @@ ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 WORLD_BASE_URL="${WORLD_BASE_URL:-http://localhost:8080}"
 WORLD_JOIN_PATH="${WORLD_JOIN_PATH:-/join}"
 WORLD_LEAVE_PATH="${WORLD_LEAVE_PATH:-/leave}"
-WORLD_SKILL_PATH="${WORLD_SKILL_PATH:-/skill.md}"
+WORLD_SKILL_PATH_WAS_DEFAULT=0
+if [[ -z "${WORLD_SKILL_PATH+x}" ]]; then
+  WORLD_SKILL_PATH="/api.md"
+  WORLD_SKILL_PATH_WAS_DEFAULT=1
+fi
 WORLD_SESSION_FIELD="${WORLD_SESSION_FIELD:-session}"
 WORLD_SESSION_HEADER="${WORLD_SESSION_HEADER:-X-Session}"
 WORLD_AGENT_NAME="${WORLD_AGENT_NAME:-}"
@@ -352,6 +356,16 @@ if [[ -n "$SESSION_ID" ]]; then
   SKILL_CURL="curl -sS -H '${WORLD_SESSION_HEADER}: ${SESSION_ID}'"
 fi
 SKILL_URL="${WORLD_BASE_URL%/}${WORLD_SKILL_PATH}"
+if [[ "$WORLD_SKILL_PATH_WAS_DEFAULT" == "1" && "$WORLD_SKILL_PATH" == "/api.md" ]]; then
+  skill_probe_headers=()
+  if [[ -n "$SESSION_ID" ]]; then
+    skill_probe_headers=(-H "${WORLD_SESSION_HEADER}: ${SESSION_ID}")
+  fi
+  if ! curl -fsS --max-time 2 "${skill_probe_headers[@]}" "$SKILL_URL" >/dev/null 2>&1; then
+    WORLD_SKILL_PATH="/skill.md"
+    SKILL_URL="${WORLD_BASE_URL%/}${WORLD_SKILL_PATH}"
+  fi
+fi
 
 build_prompt_file
 prepare_pi_flags

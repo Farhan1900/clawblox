@@ -6,10 +6,41 @@ ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 # Prevent stray API keys from triggering Claude's key detection prompt
 unset ANTHROPIC_API_KEY 2>/dev/null || true
+
+load_claude_code_oauth_token_env() {
+  local env_file="${CLAWBLOX_ENV_FILE:-$ROOT_DIR/.env}"
+  local line value
+  if [[ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" || ! -f "$env_file" ]]; then
+    return 0
+  fi
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    if [[ "$line" =~ ^[[:space:]]*(export[[:space:]]+)?CLAUDE_CODE_OAUTH_TOKEN[[:space:]]*=[[:space:]]*(.*)$ ]]; then
+      value="${BASH_REMATCH[2]}"
+      value="${value%%#*}"
+      value="${value#"${value%%[![:space:]]*}"}"
+      value="${value%"${value##*[![:space:]]}"}"
+      if [[ "$value" == \"*\" && "$value" == *\" ]]; then
+        value="${value:1:${#value}-2}"
+      elif [[ "$value" == \'*\' && "$value" == *\' ]]; then
+        value="${value:1:${#value}-2}"
+      fi
+      export CLAUDE_CODE_OAUTH_TOKEN="$value"
+      return 0
+    fi
+  done <"$env_file"
+}
+
+load_claude_code_oauth_token_env
+
 WORLD_BASE_URL="${WORLD_BASE_URL-http://localhost:8080}"
+WORLD_INTERNAL_BASE_URL="${WORLD_INTERNAL_BASE_URL-$WORLD_BASE_URL}"
 WORLD_JOIN_PATH="${WORLD_JOIN_PATH-/join}"
 WORLD_LEAVE_PATH="${WORLD_LEAVE_PATH-}"
-WORLD_SKILL_PATH="${WORLD_SKILL_PATH-/skill.md}"
+WORLD_SKILL_PATH_WAS_DEFAULT=0
+if [[ -z "${WORLD_SKILL_PATH+x}" ]]; then
+  WORLD_SKILL_PATH="/api.md"
+  WORLD_SKILL_PATH_WAS_DEFAULT=1
+fi
 WORLD_SESSION_FIELD="${WORLD_SESSION_FIELD-session}"
 WORLD_SESSION_HEADER="${WORLD_SESSION_HEADER-X-Session}"
 WORLD_SESSION_FILE="${WORLD_SESSION_FILE-}"
@@ -24,9 +55,15 @@ CLAUDE_BARE="${CLAUDE_BARE-0}"
 CLAUDE_PERMISSION_MODE="${CLAUDE_PERMISSION_MODE-bypassPermissions}"
 CLAUDE_RESUME_MODE="${CLAUDE_RESUME_MODE-auto}"
 CLAUDE_EXTRA_ARGS="${CLAUDE_EXTRA_ARGS-}"
+CLAUDE_SANDBOX_DISALLOWED_TOOLS="${CLAUDE_SANDBOX_DISALLOWED_TOOLS-WebFetch,WebSearch}"
 CLAUDE_INITIAL_PROMPT="${CLAUDE_INITIAL_PROMPT-Begin}"
+CLAWBLOX_CLAUDE_BIN="${CLAWBLOX_CLAUDE_BIN-}"
+CLAWBLOX_CLAUDE_CODE_VERSION_PIN="${CLAWBLOX_CLAUDE_CODE_VERSION_PIN-2.1.116}"
 RESET_EVERY="${RESET_EVERY-}"
 SANDBOX="${SANDBOX-0}"
+CLAUDE_NATIVE_SANDBOX="${CLAUDE_NATIVE_SANDBOX-$SANDBOX}"
+SANDBOX_DEPS_ROOT="${SANDBOX_DEPS_ROOT-}"
+CLAWBLOX_WORLD_HTTP_PROXY_PORT="${CLAWBLOX_WORLD_HTTP_PROXY_PORT-}"
 CHECKPOINT_WARNING_SECONDS="${CHECKPOINT_WARNING_SECONDS:-300}"
 CHECKPOINT_WARNING_PROMPT="${CHECKPOINT_WARNING_PROMPT:-You will be reset in 5 minutes. Update your workspace memory files now.}"
 
@@ -111,7 +148,13 @@ append_prompt_workspace_files() {
     seen_files["$rel_path"]=1
   done < <(find "$workspace_dir" -type f -name '*.md' -print0 | sort -z)
 
-  if ((${#prompt_files[@]} == 0)); then
+  local episodic_jsonl="$workspace_dir/EPISODIC_MEMORY.jsonl"
+  local has_episodic_jsonl=0
+  if [[ -f "$episodic_jsonl" && -s "$episodic_jsonl" ]]; then
+    has_episodic_jsonl=1
+  fi
+
+  if ((${#prompt_files[@]} == 0 && has_episodic_jsonl == 0)); then
     return 0
   fi
 
@@ -127,6 +170,86 @@ append_prompt_workspace_files() {
       printf '\n'
     } >>"$prompt_file"
   done
+
+  if ((has_episodic_jsonl == 1)); then
+    {
+      printf '\n===== EPISODIC_MEMORY.jsonl (summaries) =====\n'
+      python3 - "$episodic_jsonl" <<'PY'
+import json, sys
+path = sys.argv[1]
+with open(path, encoding="utf-8") as f:
+    for i, raw in enumerate(f, 1):
+        line = raw.strip()
+        if not line:
+            continue
+        try:
+            obj = json.loads(line)
+        except json.JSONDecodeError as e:
+            print(
+                f"[warning: EPISODIC_MEMORY.jsonl line {i} could not be parsed: {e}]",
+                file=sys.stderr,
+            )
+            continue
+        ts = obj.get("timestamp", "?")
+        summary = obj.get("summary", "?")
+        print(f"{ts} — {summary}")
+PY
+      printf '\n'
+    } >>"$prompt_file"
+  fi
+}
+
+canonical_path() {
+  local path="$1"
+  if command -v python3 >/dev/null 2>&1; then
+    python3 -c 'import os, sys; print(os.path.realpath(sys.argv[1]))' "$path"
+    return 0
+  fi
+  if readlink -f "$path" >/dev/null 2>&1; then
+    readlink -f "$path"
+    return 0
+  fi
+  if [[ "$path" = /* ]]; then
+    printf '%s\n' "$path"
+  else
+    printf '%s/%s\n' "$PWD" "$path"
+  fi
+}
+
+resolve_claude_bin() {
+  local claude_cmd claude_real version_bin
+
+  if [[ -n "$CLAWBLOX_CLAUDE_BIN" ]]; then
+    if [[ ! -x "$CLAWBLOX_CLAUDE_BIN" ]]; then
+      echo "Error: CLAWBLOX_CLAUDE_BIN is not executable: $CLAWBLOX_CLAUDE_BIN" >&2
+      exit 1
+    fi
+    canonical_path "$CLAWBLOX_CLAUDE_BIN"
+    return 0
+  fi
+
+  if [[ -n "$CLAWBLOX_CLAUDE_CODE_VERSION_PIN" ]]; then
+    version_bin="$HOME/.local/share/claude/versions/$CLAWBLOX_CLAUDE_CODE_VERSION_PIN"
+    if [[ -x "$version_bin" ]]; then
+      canonical_path "$version_bin"
+      return 0
+    fi
+  fi
+
+  if ! claude_cmd="$(command -v claude 2>/dev/null)"; then
+    echo "Error: claude CLI was not found in PATH." >&2
+    exit 1
+  fi
+  claude_real="$(canonical_path "$claude_cmd")"
+  printf '%s\n' "$claude_real"
+}
+
+claude_version() {
+  local bin="$1"
+  local output version
+  output="$("$bin" --version 2>/dev/null | head -n 1 || true)"
+  version="$(printf '%s\n' "$output" | sed -nE 's/.*([0-9]+\.[0-9]+\.[0-9]+).*/\1/p' | head -n 1)"
+  printf '%s\n' "$version"
 }
 
 if [[ -z "$WORLD_AGENT_NAME" ]]; then
@@ -157,7 +280,18 @@ SANDBOX_RUNTIME_DIR="$RUNTIME_DIR"
 SANDBOX_PROMPT_FILE="$PROMPT_FILE"
 SANDBOX_PLUGIN_DIR="$PLUGIN_DIR"
 SANDBOX_CLAUDE_BIN=""
-CLAUDE_BIN_REAL=""
+CLAUDE_BIN_REAL="$(resolve_claude_bin)"
+CLAUDE_BIN_VERSION="$(claude_version "$CLAUDE_BIN_REAL")"
+
+if [[ "$SANDBOX" == "1" && "$CLAUDE_NATIVE_SANDBOX" == "1" && -n "$CLAWBLOX_CLAUDE_CODE_VERSION_PIN" ]]; then
+  if [[ "$CLAUDE_BIN_VERSION" != "$CLAWBLOX_CLAUDE_CODE_VERSION_PIN" ]]; then
+    echo "Error: sandboxed Claude TUI requires Claude Code $CLAWBLOX_CLAUDE_CODE_VERSION_PIN for now." >&2
+    echo "Selected binary: $CLAUDE_BIN_REAL" >&2
+    echo "Detected version: ${CLAUDE_BIN_VERSION:-unknown}" >&2
+    echo "Set CLAWBLOX_CLAUDE_BIN=/path/to/claude-$CLAWBLOX_CLAUDE_CODE_VERSION_PIN, or set CLAWBLOX_CLAUDE_CODE_VERSION_PIN= to opt out." >&2
+    exit 1
+  fi
+fi
 
 mkdir -p "$WORKSPACE_DIR" "$LOG_DIR" "$RUNTIME_DIR"
 
@@ -186,7 +320,7 @@ if [[ -n "$WORLD_JOIN_PATH" ]]; then
       join_headers=(-H "${WORLD_SESSION_HEADER}: ${EXISTING_WORLD_SESSION_ID}")
     fi
   fi
-  join_json="$(curl -fsS -X POST "${join_headers[@]}" "${WORLD_BASE_URL%/}${WORLD_JOIN_PATH}?name=${WORLD_AGENT_NAME}")"
+  join_json="$(curl -fsS -X POST "${join_headers[@]}" "${WORLD_INTERNAL_BASE_URL%/}${WORLD_JOIN_PATH}?name=${WORLD_AGENT_NAME}")"
   WORLD_SESSION_ID="$(node -e 'const o=JSON.parse(process.argv[1]); const key=process.argv[2]; process.stdout.write(String(o[key]||""));' "$join_json" "$WORLD_SESSION_FIELD")"
   if [[ -z "$WORLD_SESSION_ID" ]]; then
     echo "Failed to get session field '$WORLD_SESSION_FIELD' from: $join_json" >&2
@@ -208,7 +342,7 @@ cleanup() {
   fi
 
   if [[ -n "$WORLD_SESSION_ID" && -n "$WORLD_LEAVE_PATH" ]]; then
-    curl -fsS -X POST -H "${WORLD_SESSION_HEADER}: ${WORLD_SESSION_ID}" "${WORLD_BASE_URL%/}${WORLD_LEAVE_PATH}" >/dev/null 2>&1 || true
+    curl -fsS -X POST -H "${WORLD_SESSION_HEADER}: ${WORLD_SESSION_ID}" "${WORLD_INTERNAL_BASE_URL%/}${WORLD_LEAVE_PATH}" >/dev/null 2>&1 || true
   fi
 }
 trap cleanup EXIT INT TERM
@@ -248,13 +382,35 @@ if [[ "$SANDBOX" == "1" ]]; then
     echo "Error: SANDBOX=1 requires bubblewrap (bwrap)." >&2
     exit 1
   fi
-  if ! command -v claude >/dev/null 2>&1; then
-    echo "Error: claude CLI was not found in PATH." >&2
+  if [[ "$CLAUDE_NATIVE_SANDBOX" == "1" ]] && ! command -v socat >/dev/null 2>&1; then
+    echo "Error: CLAUDE_NATIVE_SANDBOX=1 requires socat for Claude Code's native Linux sandbox." >&2
+    echo "Install socat or set CLAUDE_NATIVE_SANDBOX=0 only for non-secure local debugging." >&2
     exit 1
   fi
-
-  CLAUDE_BIN_REAL="$(readlink -f "$(command -v claude)")"
+  if [[ "$CLAUDE_NATIVE_SANDBOX" == "1" && -z "$SANDBOX_DEPS_ROOT" ]]; then
+    bwrap_host_bin="$(command -v bwrap || true)"
+    socat_host_bin="$(command -v socat || true)"
+    bwrap_host_root="$(cd "$(dirname "$bwrap_host_bin")/.." && pwd -P)"
+    socat_host_root="$(cd "$(dirname "$socat_host_bin")/.." && pwd -P)"
+    if [[ "$bwrap_host_root" == "$socat_host_root" && "$bwrap_host_root" != "/usr" && "$bwrap_host_root" != "/" ]]; then
+      SANDBOX_DEPS_ROOT="$bwrap_host_root"
+    elif [[ "$bwrap_host_root" != "/usr" && "$bwrap_host_root" != "/" && ( "$socat_host_root" == "/usr" || "$socat_host_root" == "$bwrap_host_root" ) ]]; then
+      SANDBOX_DEPS_ROOT="$bwrap_host_root"
+    elif [[ "$socat_host_root" != "/usr" && "$socat_host_root" != "/" && ( "$bwrap_host_root" == "/usr" || "$bwrap_host_root" == "$socat_host_root" ) ]]; then
+      SANDBOX_DEPS_ROOT="$socat_host_root"
+    elif [[ "$bwrap_host_root" != "$socat_host_root" && "$bwrap_host_root" != "/usr" && "$socat_host_root" != "/usr" ]]; then
+      echo "Error: bwrap and socat are in different non-system prefixes; set SANDBOX_DEPS_ROOT explicitly." >&2
+      echo "  bwrap root: $bwrap_host_root" >&2
+      echo "  socat root: $socat_host_root" >&2
+      exit 1
+    fi
+  fi
+  if [[ -n "$SANDBOX_DEPS_ROOT" && ! -d "$SANDBOX_DEPS_ROOT/bin" ]]; then
+    echo "Error: SANDBOX_DEPS_ROOT must contain a bin directory: $SANDBOX_DEPS_ROOT" >&2
+    exit 1
+  fi
   mkdir -p \
+    "$SANDBOX_HOME_DIR/.local/bin" \
     "$SANDBOX_HOME_DIR/.claude/projects" \
     "$SANDBOX_HOME_DIR/.claude/session-env" \
     "$SANDBOX_HOME_DIR/.claude/sessions" \
@@ -273,6 +429,10 @@ if [[ "$SANDBOX" == "1" ]]; then
     printf '{"claudeAiOauth":{"accessToken":"%s"}}' "$ANTHROPIC_OAUTH_TOKEN" \
       > "$SANDBOX_HOME_DIR/.claude/.credentials.json"
     chmod 600 "$SANDBOX_HOME_DIR/.claude/.credentials.json"
+  elif [[ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" ]]; then
+    # setup-token auth is consumed directly from CLAUDE_CODE_OAUTH_TOKEN.
+    # Do not copy browser-login credentials with rotating refresh tokens.
+    rm -f "$SANDBOX_HOME_DIR/.claude/.credentials.json"
   elif [[ -f "$HOST_CLAUDE_DIR/.credentials.json" ]]; then
     cp "$HOST_CLAUDE_DIR/.credentials.json" "$SANDBOX_HOME_DIR/.claude/.credentials.json"
     chmod 600 "$SANDBOX_HOME_DIR/.claude/.credentials.json"
@@ -286,7 +446,7 @@ if [[ "$SANDBOX" == "1" ]]; then
     cp "$HOME/.claude.json" "$SANDBOX_HOME_DIR/.claude.json"
     chmod 600 "$SANDBOX_HOME_DIR/.claude.json"
   fi
-  python - <<'PY' "$SANDBOX_HOME_DIR/.claude.json"
+  python3 - <<'PY' "$SANDBOX_HOME_DIR/.claude.json"
 import json, os, sys
 path = sys.argv[1]
 if os.path.exists(path):
@@ -302,6 +462,8 @@ workspace.setdefault("mcpContextUris", [])
 workspace.setdefault("mcpServers", {})
 workspace.setdefault("enabledMcpjsonServers", [])
 workspace.setdefault("disabledMcpjsonServers", [])
+data["hasCompletedOnboarding"] = True
+data.setdefault("lastOnboardingVersion", "2.1.116")
 with open(path, "w") as fh:
     json.dump(data, fh)
 PY
@@ -312,6 +474,58 @@ PY
   SANDBOX_PROMPT_FILE="/tmp/system_prompt.md"
   SANDBOX_PLUGIN_DIR="/plugin"
   SANDBOX_CLAUDE_BIN="/sandbox-bin/claude"
+  ln -sfn "$SANDBOX_CLAUDE_BIN" "$SANDBOX_HOME_DIR/.local/bin/claude"
+fi
+
+CLAUDE_GENERATED_SETTINGS_FILE=""
+SANDBOX_HOSTS_FILE=""
+if [[ "$CLAUDE_NATIVE_SANDBOX" == "1" ]]; then
+  CLAUDE_GENERATED_SETTINGS_FILE="$RUNTIME_DIR/claude_sandbox_settings.json"
+  SANDBOX_HOSTS_FILE="$RUNTIME_DIR/sandbox_hosts"
+  python3 - <<'PY' "$CLAUDE_GENERATED_SETTINGS_FILE" "$SANDBOX_HOSTS_FILE" "$CLAWBLOX_WORLD_HTTP_PROXY_PORT" "$WORLD_BASE_URL"
+import json
+import sys
+from urllib.parse import urlparse
+
+target = sys.argv[1]
+hosts_target = sys.argv[2]
+proxy_port = sys.argv[3].strip()
+world_base_url = sys.argv[4].strip()
+world_host = (urlparse(world_base_url).hostname or "").strip()
+allowed_domains = []
+if world_host and world_host not in {"localhost", "127.0.0.1", "::1"}:
+    allowed_domains.append(world_host)
+
+sandbox = {
+    "enabled": True,
+    "failIfUnavailable": True,
+    "allowUnsandboxedCommands": False,
+    "autoAllowBashIfSandboxed": True,
+    "network": {
+        "allowedDomains": allowed_domains,
+        "deniedDomains": ["localhost", "127.0.0.1"],
+    },
+}
+if proxy_port:
+    sandbox["network"]["httpProxyPort"] = int(proxy_port)
+
+settings = {
+    "sandbox": sandbox,
+}
+with open(target, "w", encoding="utf-8") as fh:
+    json.dump(settings, fh, indent=2, sort_keys=True)
+    fh.write("\n")
+if world_host:
+    try:
+        with open("/etc/hosts", encoding="utf-8") as fh:
+            hosts = fh.read()
+    except OSError:
+        hosts = "127.0.0.1 localhost\n"
+    if world_host not in hosts:
+        hosts = hosts.rstrip() + f"\n127.0.0.1 {world_host}\n"
+    with open(hosts_target, "w", encoding="utf-8") as fh:
+        fh.write(hosts)
+PY
 fi
 
 SESSION_LINE=""
@@ -319,6 +533,16 @@ if [[ -n "$WORLD_SESSION_ID" ]]; then
   SESSION_LINE="${WORLD_SESSION_HEADER}: ${WORLD_SESSION_ID}"
 fi
 SKILL_URL="${WORLD_BASE_URL%/}${WORLD_SKILL_PATH}"
+if [[ "$WORLD_SKILL_PATH_WAS_DEFAULT" == "1" && "$WORLD_SKILL_PATH" == "/api.md" ]]; then
+  skill_probe_headers=()
+  if [[ -n "$WORLD_SESSION_ID" ]]; then
+    skill_probe_headers=(-H "${WORLD_SESSION_HEADER}: ${WORLD_SESSION_ID}")
+  fi
+  if ! curl -fsS --max-time 2 "${skill_probe_headers[@]}" "${WORLD_INTERNAL_BASE_URL%/}${WORLD_SKILL_PATH}" >/dev/null 2>&1; then
+    WORLD_SKILL_PATH="/skill.md"
+    SKILL_URL="${WORLD_BASE_URL%/}${WORLD_SKILL_PATH}"
+  fi
+fi
 PROMPT_WORKSPACE_DIR="${SANDBOX_WORKSPACE_DIR:-$WORKSPACE_DIR}"
 
 export WORLD_AGENT_NAME SESSION_LINE WORLD_BASE_URL SKILL_CURL SKILL_URL
@@ -335,7 +559,7 @@ fi
 
 if [[ -n "$WORLD_STARTUP_INSTRUCTIONS" ]]; then
   {
-    printf '\nTASK:\n'
+    printf '\nGOAL:\n'
     printf '%s\n' "$WORLD_STARTUP_INSTRUCTIONS"
   } >>"$PROMPT_FILE"
 fi
@@ -360,6 +584,16 @@ declare -a claude_base_args=(
   --permission-mode "$CLAUDE_PERMISSION_MODE"
   --model "$CLAUDE_MODEL"
 )
+if [[ -n "$CLAUDE_GENERATED_SETTINGS_FILE" ]]; then
+  if [[ "$SANDBOX" == "1" ]]; then
+    claude_base_args+=(--settings "$SANDBOX_RUNTIME_DIR/$(basename "$CLAUDE_GENERATED_SETTINGS_FILE")")
+  else
+    claude_base_args+=(--settings "$CLAUDE_GENERATED_SETTINGS_FILE")
+  fi
+fi
+if [[ "$SANDBOX" == "1" && -n "$CLAUDE_SANDBOX_DISALLOWED_TOOLS" ]]; then
+  claude_base_args+=(--disallowedTools "$CLAUDE_SANDBOX_DISALLOWED_TOOLS")
+fi
 if [[ "$CLAUDE_BARE" == "1" ]]; then
   claude_base_args=(--bare "${claude_base_args[@]}")
 fi
@@ -394,8 +628,16 @@ fi
 
 # Build bwrap prefix for sandbox mode
 declare -a bwrap_prefix=()
-CLAUDE_CMD="claude"
+CLAUDE_CMD="$CLAUDE_BIN_REAL"
 if [[ "$SANDBOX" == "1" ]]; then
+  sandbox_path="/home/agent/.local/bin:/sandbox-bin:/usr/bin:/bin"
+  sandbox_ld_library_path=""
+  if [[ -n "$SANDBOX_DEPS_ROOT" ]]; then
+    sandbox_path="/home/agent/.local/bin:/sandbox-bin:/sandbox-deps/bin:/usr/bin:/bin"
+    if [[ -d "$SANDBOX_DEPS_ROOT/lib" ]]; then
+      sandbox_ld_library_path="/sandbox-deps/lib"
+    fi
+  fi
   bwrap_prefix=(
     bwrap
     --ro-bind /usr /usr
@@ -423,7 +665,7 @@ if [[ "$SANDBOX" == "1" ]]; then
     --setenv USER agent
     --setenv LOGNAME agent
     --setenv SHELL /bin/bash
-    --setenv PATH /sandbox-bin:/usr/bin:/bin
+    --setenv PATH "$sandbox_path"
     --unsetenv CLAUDE_CONFIG_DIR
     --unsetenv CLAUDE_CODE_EXECPATH
     --unsetenv CLAUDE_CODE_ENTRYPOINT
@@ -431,7 +673,10 @@ if [[ "$SANDBOX" == "1" ]]; then
     --chdir /workspace
     --die-with-parent
   )
+  [[ -n "$SANDBOX_DEPS_ROOT" ]] && bwrap_prefix+=(--ro-bind "$SANDBOX_DEPS_ROOT" /sandbox-deps)
+  [[ -n "$sandbox_ld_library_path" ]] && bwrap_prefix+=(--setenv LD_LIBRARY_PATH "$sandbox_ld_library_path")
   [[ -d /lib64 ]] && bwrap_prefix+=(--ro-bind /lib64 /lib64)
+  [[ -n "$SANDBOX_HOSTS_FILE" && -f "$SANDBOX_HOSTS_FILE" ]] && bwrap_prefix+=(--ro-bind "$SANDBOX_HOSTS_FILE" /etc/hosts)
   # Mount only resolv.conf for DNS — do NOT mount all of /mnt/wsl, which
   # exposes the host filesystem via Docker bind mounts.
   [[ -f /mnt/wsl/resolv.conf ]] && bwrap_prefix+=(--ro-bind /mnt/wsl/resolv.conf /mnt/wsl/resolv.conf)

@@ -81,10 +81,10 @@ X-Session: <session-token>
 }
 ```
 
-### Get Game Skill
+### Get Agent API
 
 ```
-GET /skill.md
+GET /api.md
 ```
 
 Returns this file as markdown text.
