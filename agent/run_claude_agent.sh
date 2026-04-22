@@ -6,6 +6,32 @@ ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 # Prevent stray API keys from triggering Claude's key detection prompt
 unset ANTHROPIC_API_KEY 2>/dev/null || true
+
+load_claude_code_oauth_token_env() {
+  local env_file="${CLAWBLOX_ENV_FILE:-$ROOT_DIR/.env}"
+  local line value
+  if [[ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" || ! -f "$env_file" ]]; then
+    return 0
+  fi
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    if [[ "$line" =~ ^[[:space:]]*(export[[:space:]]+)?CLAUDE_CODE_OAUTH_TOKEN[[:space:]]*=[[:space:]]*(.*)$ ]]; then
+      value="${BASH_REMATCH[2]}"
+      value="${value%%#*}"
+      value="${value#"${value%%[![:space:]]*}"}"
+      value="${value%"${value##*[![:space:]]}"}"
+      if [[ "$value" == \"*\" && "$value" == *\" ]]; then
+        value="${value:1:${#value}-2}"
+      elif [[ "$value" == \'*\' && "$value" == *\' ]]; then
+        value="${value:1:${#value}-2}"
+      fi
+      export CLAUDE_CODE_OAUTH_TOKEN="$value"
+      return 0
+    fi
+  done <"$env_file"
+}
+
+load_claude_code_oauth_token_env
+
 WORLD_BASE_URL="${WORLD_BASE_URL-http://localhost:8080}"
 WORLD_INTERNAL_BASE_URL="${WORLD_INTERNAL_BASE_URL-$WORLD_BASE_URL}"
 WORLD_JOIN_PATH="${WORLD_JOIN_PATH-/join}"
@@ -27,6 +53,8 @@ CLAUDE_RESUME_MODE="${CLAUDE_RESUME_MODE-auto}"
 CLAUDE_EXTRA_ARGS="${CLAUDE_EXTRA_ARGS-}"
 CLAUDE_SANDBOX_DISALLOWED_TOOLS="${CLAUDE_SANDBOX_DISALLOWED_TOOLS-WebFetch,WebSearch}"
 CLAUDE_INITIAL_PROMPT="${CLAUDE_INITIAL_PROMPT-Begin}"
+CLAWBLOX_CLAUDE_BIN="${CLAWBLOX_CLAUDE_BIN-}"
+CLAWBLOX_CLAUDE_CODE_VERSION_PIN="${CLAWBLOX_CLAUDE_CODE_VERSION_PIN-2.1.116}"
 RESET_EVERY="${RESET_EVERY-}"
 SANDBOX="${SANDBOX-0}"
 CLAUDE_NATIVE_SANDBOX="${CLAUDE_NATIVE_SANDBOX-$SANDBOX}"
@@ -133,6 +161,59 @@ append_prompt_workspace_files() {
   done
 }
 
+canonical_path() {
+  local path="$1"
+  if command -v python3 >/dev/null 2>&1; then
+    python3 -c 'import os, sys; print(os.path.realpath(sys.argv[1]))' "$path"
+    return 0
+  fi
+  if readlink -f "$path" >/dev/null 2>&1; then
+    readlink -f "$path"
+    return 0
+  fi
+  if [[ "$path" = /* ]]; then
+    printf '%s\n' "$path"
+  else
+    printf '%s/%s\n' "$PWD" "$path"
+  fi
+}
+
+resolve_claude_bin() {
+  local claude_cmd claude_real version_bin
+
+  if [[ -n "$CLAWBLOX_CLAUDE_BIN" ]]; then
+    if [[ ! -x "$CLAWBLOX_CLAUDE_BIN" ]]; then
+      echo "Error: CLAWBLOX_CLAUDE_BIN is not executable: $CLAWBLOX_CLAUDE_BIN" >&2
+      exit 1
+    fi
+    canonical_path "$CLAWBLOX_CLAUDE_BIN"
+    return 0
+  fi
+
+  if [[ -n "$CLAWBLOX_CLAUDE_CODE_VERSION_PIN" ]]; then
+    version_bin="$HOME/.local/share/claude/versions/$CLAWBLOX_CLAUDE_CODE_VERSION_PIN"
+    if [[ -x "$version_bin" ]]; then
+      canonical_path "$version_bin"
+      return 0
+    fi
+  fi
+
+  if ! claude_cmd="$(command -v claude 2>/dev/null)"; then
+    echo "Error: claude CLI was not found in PATH." >&2
+    exit 1
+  fi
+  claude_real="$(canonical_path "$claude_cmd")"
+  printf '%s\n' "$claude_real"
+}
+
+claude_version() {
+  local bin="$1"
+  local output version
+  output="$("$bin" --version 2>/dev/null | head -n 1 || true)"
+  version="$(printf '%s\n' "$output" | sed -nE 's/.*([0-9]+\.[0-9]+\.[0-9]+).*/\1/p' | head -n 1)"
+  printf '%s\n' "$version"
+}
+
 if [[ -z "$WORLD_AGENT_NAME" ]]; then
   WORLD_AGENT_NAME="$(generate_agent_name)"
 fi
@@ -161,7 +242,18 @@ SANDBOX_RUNTIME_DIR="$RUNTIME_DIR"
 SANDBOX_PROMPT_FILE="$PROMPT_FILE"
 SANDBOX_PLUGIN_DIR="$PLUGIN_DIR"
 SANDBOX_CLAUDE_BIN=""
-CLAUDE_BIN_REAL=""
+CLAUDE_BIN_REAL="$(resolve_claude_bin)"
+CLAUDE_BIN_VERSION="$(claude_version "$CLAUDE_BIN_REAL")"
+
+if [[ "$SANDBOX" == "1" && "$CLAUDE_NATIVE_SANDBOX" == "1" && -n "$CLAWBLOX_CLAUDE_CODE_VERSION_PIN" ]]; then
+  if [[ "$CLAUDE_BIN_VERSION" != "$CLAWBLOX_CLAUDE_CODE_VERSION_PIN" ]]; then
+    echo "Error: sandboxed Claude TUI requires Claude Code $CLAWBLOX_CLAUDE_CODE_VERSION_PIN for now." >&2
+    echo "Selected binary: $CLAUDE_BIN_REAL" >&2
+    echo "Detected version: ${CLAUDE_BIN_VERSION:-unknown}" >&2
+    echo "Set CLAWBLOX_CLAUDE_BIN=/path/to/claude-$CLAWBLOX_CLAUDE_CODE_VERSION_PIN, or set CLAWBLOX_CLAUDE_CODE_VERSION_PIN= to opt out." >&2
+    exit 1
+  fi
+fi
 
 mkdir -p "$WORKSPACE_DIR" "$LOG_DIR" "$RUNTIME_DIR"
 
@@ -257,13 +349,8 @@ if [[ "$SANDBOX" == "1" ]]; then
     echo "Install socat or set CLAUDE_NATIVE_SANDBOX=0 only for non-secure local debugging." >&2
     exit 1
   fi
-  if ! command -v claude >/dev/null 2>&1; then
-    echo "Error: claude CLI was not found in PATH." >&2
-    exit 1
-  fi
-
-  CLAUDE_BIN_REAL="$(readlink -f "$(command -v claude)")"
   mkdir -p \
+    "$SANDBOX_HOME_DIR/.local/bin" \
     "$SANDBOX_HOME_DIR/.claude/projects" \
     "$SANDBOX_HOME_DIR/.claude/session-env" \
     "$SANDBOX_HOME_DIR/.claude/sessions" \
@@ -282,6 +369,10 @@ if [[ "$SANDBOX" == "1" ]]; then
     printf '{"claudeAiOauth":{"accessToken":"%s"}}' "$ANTHROPIC_OAUTH_TOKEN" \
       > "$SANDBOX_HOME_DIR/.claude/.credentials.json"
     chmod 600 "$SANDBOX_HOME_DIR/.claude/.credentials.json"
+  elif [[ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" ]]; then
+    # setup-token auth is consumed directly from CLAUDE_CODE_OAUTH_TOKEN.
+    # Do not copy browser-login credentials with rotating refresh tokens.
+    rm -f "$SANDBOX_HOME_DIR/.claude/.credentials.json"
   elif [[ -f "$HOST_CLAUDE_DIR/.credentials.json" ]]; then
     cp "$HOST_CLAUDE_DIR/.credentials.json" "$SANDBOX_HOME_DIR/.claude/.credentials.json"
     chmod 600 "$SANDBOX_HOME_DIR/.claude/.credentials.json"
@@ -311,6 +402,8 @@ workspace.setdefault("mcpContextUris", [])
 workspace.setdefault("mcpServers", {})
 workspace.setdefault("enabledMcpjsonServers", [])
 workspace.setdefault("disabledMcpjsonServers", [])
+data["hasCompletedOnboarding"] = True
+data.setdefault("lastOnboardingVersion", "2.1.116")
 with open(path, "w") as fh:
     json.dump(data, fh)
 PY
@@ -321,6 +414,7 @@ PY
   SANDBOX_PROMPT_FILE="/tmp/system_prompt.md"
   SANDBOX_PLUGIN_DIR="/plugin"
   SANDBOX_CLAUDE_BIN="/sandbox-bin/claude"
+  ln -sfn "$SANDBOX_CLAUDE_BIN" "$SANDBOX_HOME_DIR/.local/bin/claude"
 fi
 
 CLAUDE_GENERATED_SETTINGS_FILE=""
@@ -464,7 +558,7 @@ fi
 
 # Build bwrap prefix for sandbox mode
 declare -a bwrap_prefix=()
-CLAUDE_CMD="claude"
+CLAUDE_CMD="$CLAUDE_BIN_REAL"
 if [[ "$SANDBOX" == "1" ]]; then
   bwrap_prefix=(
     bwrap
@@ -493,7 +587,7 @@ if [[ "$SANDBOX" == "1" ]]; then
     --setenv USER agent
     --setenv LOGNAME agent
     --setenv SHELL /bin/bash
-    --setenv PATH /sandbox-bin:/usr/bin:/bin
+    --setenv PATH /home/agent/.local/bin:/sandbox-bin:/usr/bin:/bin
     --unsetenv CLAUDE_CONFIG_DIR
     --unsetenv CLAUDE_CODE_EXECPATH
     --unsetenv CLAUDE_CODE_ENTRYPOINT

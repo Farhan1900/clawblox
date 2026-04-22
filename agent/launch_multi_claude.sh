@@ -4,6 +4,31 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 
+load_claude_code_oauth_token_env() {
+  local env_file="${CLAWBLOX_ENV_FILE:-$ROOT_DIR/.env}"
+  local line value
+  if [[ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" || ! -f "$env_file" ]]; then
+    return 0
+  fi
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    if [[ "$line" =~ ^[[:space:]]*(export[[:space:]]+)?CLAUDE_CODE_OAUTH_TOKEN[[:space:]]*=[[:space:]]*(.*)$ ]]; then
+      value="${BASH_REMATCH[2]}"
+      value="${value%%#*}"
+      value="${value#"${value%%[![:space:]]*}"}"
+      value="${value%"${value##*[![:space:]]}"}"
+      if [[ "$value" == \"*\" && "$value" == *\" ]]; then
+        value="${value:1:${#value}-2}"
+      elif [[ "$value" == \'*\' && "$value" == *\' ]]; then
+        value="${value:1:${#value}-2}"
+      fi
+      export CLAUDE_CODE_OAUTH_TOKEN="$value"
+      return 0
+    fi
+  done <"$env_file"
+}
+
+load_claude_code_oauth_token_env
+
 NUM_WORLDS="${NUM_WORLDS:-1}"
 AGENTS_PER_WORLD="${AGENTS_PER_WORLD:-1}"
 BASE_PORT="${BASE_PORT:-8080}"
@@ -30,6 +55,8 @@ CLAUDE_PERMISSION_MODE="${CLAUDE_PERMISSION_MODE:-bypassPermissions}"
 CLAUDE_BARE="${CLAUDE_BARE:-0}"
 CLAUDE_EXTRA_ARGS="${CLAUDE_EXTRA_ARGS:-}"
 CLAUDE_USE_ENV_AUTH="${CLAUDE_USE_ENV_AUTH:-0}"
+CLAWBLOX_CLAUDE_BIN="${CLAWBLOX_CLAUDE_BIN:-}"
+CLAWBLOX_CLAUDE_CODE_VERSION_PIN="${CLAWBLOX_CLAUDE_CODE_VERSION_PIN:-2.1.116}"
 SANDBOX="${SANDBOX:-0}"
 WORLD_CAPABILITY_PROXY="${WORLD_CAPABILITY_PROXY:-auto}"
 CLAUDE_FAILURE_IDLE_GRACE_SECONDS="${CLAUDE_FAILURE_IDLE_GRACE_SECONDS:-180}"
@@ -137,12 +164,41 @@ write_agent_pane_command() {
   local sandbox_env_prefix="${19}"
   local template_env_prefix="${20}"
   local startup_env_prefix="${21}"
+  local claude_bin="${22}"
+  local claude_code_version_pin="${23}"
 
   cat >"$target" <<EOF
 #!/usr/bin/env bash
 set -euo pipefail
 cd $(printf '%q' "$root_dir")
-${auth_env_prefix}WORLD_BASE_URL=$(printf '%q' "$world_url") WORLD_INTERNAL_BASE_URL=$(printf '%q' "$world_internal_url") WORLD_AGENT_NAME=$(printf '%q' "$agent_display_name") AGENT_DIR=$(printf '%q' "$agent_dir") WORKSPACE_DIR=$(printf '%q' "$agent_workspace") SESSION_ID_FILE=$(printf '%q' "$session_id_file") WORLD_SESSION_FILE=$(printf '%q' "$world_session_file") RESET_EVERY=$(printf '%q' "$reset_every_seconds") DURATION_SECONDS=$(printf '%q' "$duration_seconds") CHECKPOINT_WARNING_SECONDS=$(printf '%q' "$checkpoint_warning_seconds") CHECKPOINT_WARNING_PROMPT=$(printf '%q' "$checkpoint_warning_prompt") CLAUDE_MODEL=$(printf '%q' "$claude_model") CLAUDE_PERMISSION_MODE=$(printf '%q' "$claude_permission_mode") CLAUDE_BARE=$(printf '%q' "$claude_bare") CLAUDE_EXTRA_ARGS=$(printf '%q' "$claude_extra_args") ${sandbox_env_prefix}${template_env_prefix}${startup_env_prefix}bash $(printf '%q' "$AGENT_SCRIPT")
+EOF
+  cat >>"$target" <<'EOF'
+load_claude_code_oauth_token_env() {
+  local env_file="${CLAWBLOX_ENV_FILE:-.env}"
+  local line value
+  if [[ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" || ! -f "$env_file" ]]; then
+    return 0
+  fi
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    if [[ "$line" =~ ^[[:space:]]*(export[[:space:]]+)?CLAUDE_CODE_OAUTH_TOKEN[[:space:]]*=[[:space:]]*(.*)$ ]]; then
+      value="${BASH_REMATCH[2]}"
+      value="${value%%#*}"
+      value="${value#"${value%%[![:space:]]*}"}"
+      value="${value%"${value##*[![:space:]]}"}"
+      if [[ "$value" == \"*\" && "$value" == *\" ]]; then
+        value="${value:1:${#value}-2}"
+      elif [[ "$value" == \'*\' && "$value" == *\' ]]; then
+        value="${value:1:${#value}-2}"
+      fi
+      export CLAUDE_CODE_OAUTH_TOKEN="$value"
+      return 0
+    fi
+  done <"$env_file"
+}
+load_claude_code_oauth_token_env
+EOF
+  cat >>"$target" <<EOF
+${auth_env_prefix}WORLD_BASE_URL=$(printf '%q' "$world_url") WORLD_INTERNAL_BASE_URL=$(printf '%q' "$world_internal_url") WORLD_AGENT_NAME=$(printf '%q' "$agent_display_name") AGENT_DIR=$(printf '%q' "$agent_dir") WORKSPACE_DIR=$(printf '%q' "$agent_workspace") SESSION_ID_FILE=$(printf '%q' "$session_id_file") WORLD_SESSION_FILE=$(printf '%q' "$world_session_file") RESET_EVERY=$(printf '%q' "$reset_every_seconds") DURATION_SECONDS=$(printf '%q' "$duration_seconds") CHECKPOINT_WARNING_SECONDS=$(printf '%q' "$checkpoint_warning_seconds") CHECKPOINT_WARNING_PROMPT=$(printf '%q' "$checkpoint_warning_prompt") CLAUDE_MODEL=$(printf '%q' "$claude_model") CLAUDE_PERMISSION_MODE=$(printf '%q' "$claude_permission_mode") CLAUDE_BARE=$(printf '%q' "$claude_bare") CLAUDE_EXTRA_ARGS=$(printf '%q' "$claude_extra_args") CLAWBLOX_CLAUDE_BIN=$(printf '%q' "$claude_bin") CLAWBLOX_CLAUDE_CODE_VERSION_PIN=$(printf '%q' "$claude_code_version_pin") ${sandbox_env_prefix}${template_env_prefix}${startup_env_prefix}bash $(printf '%q' "$AGENT_SCRIPT")
 EOF
   chmod +x "$target"
 }
@@ -328,6 +384,9 @@ write_run_config() {
   CLAUDE_BARE="$CLAUDE_BARE" \
   CLAUDE_EXTRA_ARGS="$CLAUDE_EXTRA_ARGS" \
   CLAUDE_USE_ENV_AUTH="$CLAUDE_USE_ENV_AUTH" \
+  CLAUDE_CODE_OAUTH_TOKEN_PRESENT="$([[ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" ]] && printf 1 || printf 0)" \
+  CLAWBLOX_CLAUDE_BIN="$CLAWBLOX_CLAUDE_BIN" \
+  CLAWBLOX_CLAUDE_CODE_VERSION_PIN="$CLAWBLOX_CLAUDE_CODE_VERSION_PIN" \
   SANDBOX="$SANDBOX" \
   WORLD_CAPABILITY_PROXY="$WORLD_CAPABILITY_PROXY" \
   SYSTEM_PROMPT_TEMPLATE="${SYSTEM_PROMPT_TEMPLATE:-}" \
@@ -365,6 +424,9 @@ config = {
         "bare": _bool(os.environ["CLAUDE_BARE"]),
         "extra_args": os.environ.get("CLAUDE_EXTRA_ARGS", ""),
         "use_env_auth": _bool(os.environ["CLAUDE_USE_ENV_AUTH"]),
+        "uses_claude_code_oauth_token": _bool(os.environ["CLAUDE_CODE_OAUTH_TOKEN_PRESENT"]),
+        "binary_override": os.environ.get("CLAWBLOX_CLAUDE_BIN", ""),
+        "version_pin": os.environ.get("CLAWBLOX_CLAUDE_CODE_VERSION_PIN", ""),
     },
     "agent": {
         "sandbox": _bool(os.environ["SANDBOX"]),
@@ -1149,11 +1211,12 @@ for ((i = 0; i < NUM_WORLDS; i++)); do
       startup_env_prefix="WORLD_STARTUP_INSTRUCTIONS=${startup_instructions_q} "
     fi
 
-    auth_env_prefix="unset ANTHROPIC_API_KEY ANTHROPIC_OAUTH_TOKEN; "
+    auth_env_prefix="unset ANTHROPIC_API_KEY ANTHROPIC_OAUTH_TOKEN ANTHROPIC_AUTH_TOKEN; "
     if [[ "$CLAUDE_USE_ENV_AUTH" == "1" ]]; then
-      auth_env_prefix=""
-      if [[ -n "${ANTHROPIC_OAUTH_TOKEN:-}" ]]; then
-        auth_env_prefix="ANTHROPIC_OAUTH_TOKEN=$(printf '%q' "$ANTHROPIC_OAUTH_TOKEN") "
+      if [[ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" ]]; then
+        auth_env_prefix="unset ANTHROPIC_API_KEY ANTHROPIC_OAUTH_TOKEN ANTHROPIC_AUTH_TOKEN; "
+      elif [[ -n "${ANTHROPIC_OAUTH_TOKEN:-}" ]]; then
+        auth_env_prefix="unset ANTHROPIC_API_KEY ANTHROPIC_AUTH_TOKEN; ANTHROPIC_OAUTH_TOKEN=$(printf '%q' "$ANTHROPIC_OAUTH_TOKEN") "
       fi
     fi
 
@@ -1202,7 +1265,9 @@ for ((i = 0; i < NUM_WORLDS; i++)); do
       "$CLAUDE_EXTRA_ARGS" \
       "$sandbox_env_prefix" \
       "$template_env_prefix" \
-      "$startup_env_prefix"
+      "$startup_env_prefix" \
+      "$CLAWBLOX_CLAUDE_BIN" \
+      "$CLAWBLOX_CLAUDE_CODE_VERSION_PIN"
     printf '%s\n' "$pane_target" >"$agent_runtime_dir/pane_id.txt"
     printf '%s\n' "$pane_command_file" >"$agent_runtime_dir/pane_command_file.txt"
 
