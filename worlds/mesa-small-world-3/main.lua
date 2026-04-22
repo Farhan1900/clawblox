@@ -22,7 +22,7 @@ local MIN_THROW_SPEED = 0
 local MAX_THROW_SPEED = 10
 local PLAYER_SPAWN_POSITION = Vector3.new(0, 5, 0)
 local OUT_OF_BOUNDS_Y = -200
-local WORLD_BOUNDARY_HALF_EXTENT = 65
+local WORLD_BOUNDARY_HALF_EXTENT = 80
 local WORLD_BOUNDARY_HEIGHT = 80
 local WORLD_BOUNDARY_THICKNESS = 6
 local GROUND_HEIGHT = 10
@@ -93,13 +93,14 @@ ocean.Transparency = 0.18
 ocean:SetAttribute("RenderRole", "Ocean")
 ocean.Parent = Workspace
 
--- Island ground: irregular shape built from overlapping parts
+-- Island ground: roughly circular outline built from 5 overlapping parts.
+-- Each lobe is offset from true cardinal so the silhouette reads as organic, not a plus-sign.
 local groundParts = {
-    { name = "GroundCenter", size = {90, GROUND_HEIGHT, 70}, pos = {5, GROUND_Y, -5} },
-    { name = "GroundNE",     size = {28, GROUND_HEIGHT, 18}, pos = {25, GROUND_Y, 32} },
-    { name = "GroundNW",     size = {22, GROUND_HEIGHT, 18}, pos = {-28, GROUND_Y, 29} },
-    { name = "GroundSW",     size = {22, GROUND_HEIGHT, 20}, pos = {-26, GROUND_Y, -30} },
-    { name = "GroundSE",     size = {28, GROUND_HEIGHT, 26}, pos = {42, GROUND_Y, -40} },
+    { name = "GroundCenter", size = {96, GROUND_HEIGHT, 100}, pos = {-2, GROUND_Y, 0} },
+    { name = "GroundN",      size = {40, GROUND_HEIGHT, 25},  pos = {10, GROUND_Y, 60} },
+    { name = "GroundS",      size = {35, GROUND_HEIGHT, 20},  pos = {-12, GROUND_Y, -58} },
+    { name = "GroundW",      size = {22, GROUND_HEIGHT, 35},  pos = {-60, GROUND_Y, -5} },
+    { name = "GroundE",      size = {10, GROUND_HEIGHT, 58},  pos = {48, GROUND_Y, 5} },
 }
 
 for _, g in ipairs(groundParts) do
@@ -115,10 +116,18 @@ for _, g in ipairs(groundParts) do
     part.Parent = Workspace
 end
 
--- Remove legacy single-ground part if it exists from an earlier version
-local legacyGround = findWorkspaceChild("Ground")
-if legacyGround then
-    legacyGround:Destroy()
+-- Remove ground parts from earlier layouts that aren't in the current groundParts list.
+local currentGroundNames = {}
+for _, g in ipairs(groundParts) do
+    currentGroundNames[g.name] = true
+end
+for _, legacyName in ipairs({ "Ground", "GroundNE", "GroundNW", "GroundSW", "GroundSE", "GroundE" }) do
+    if not currentGroundNames[legacyName] then
+        local stale = findWorkspaceChild(legacyName)
+        if stale then
+            stale:Destroy()
+        end
+    end
 end
 
 local invisibleWalls = {
@@ -253,6 +262,19 @@ local function createRing(name, position, colorName, rotationDegrees, size)
     local existing = findWorkspaceChild(name)
     if existing then
         setPickupMetadata(existing, colorName, "Ring")
+        -- Snap ring to canonical spawn on script load so layout edits take effect without a db wipe.
+        local pitch = 0
+        local yaw = 0
+        local roll = 0
+        if rotationDegrees then
+            pitch = rotationDegrees[1] or pitch
+            yaw = rotationDegrees[2] or yaw
+            roll = rotationDegrees[3] or roll
+        end
+        existing.Anchored = false
+        existing.CFrame = CFrame.new(position) * CFrame.Angles(math.rad(pitch), math.rad(yaw), math.rad(roll))
+        existing.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
+        existing.AssemblyAngularVelocity = Vector3.new(0, 0, 0)
         trackedBlocks[existing] = true
         return existing
     end
@@ -308,7 +330,7 @@ impactBlockCounter = #baseBlockPile
 local rock = createRock("Rock_1", ROCK_SPAWN_POSITION, ROCK_SIZE)
 
 if ENABLE_LARGE_RING then
-    createRing("Ring_1", Vector3.new(45.4, 0.28, -45.7), "Yellow", { 0, 32, 0 }, Vector3.new(3.6, 0.56, 3.6))
+    createRing("Ring_1", Vector3.new(40, 0.28, -42), "Yellow", { 0, 32, 0 }, Vector3.new(3.6, 0.56, 3.6))
 end
 
 --------------------------------------------------------------------------------

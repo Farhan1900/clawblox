@@ -309,8 +309,12 @@ function createEntityVisual(entity) {
   }
 
   if (role === 'Ocean') {
+    const geometry = new THREE.PlaneGeometry(size[0], size[2])
+    // Bake rotation into geometry; per-frame updateScene resets object quaternion
+    // when entity rotation is identity, which would otherwise flip the plane vertical.
+    geometry.rotateX(-Math.PI / 2)
     const mesh = new THREE.Mesh(
-      new THREE.PlaneGeometry(size[0], size[2]),
+      geometry,
       new THREE.MeshStandardMaterial({
         color: 0x4ab0d6,
         transparent: true,
@@ -319,7 +323,6 @@ function createEntityVisual(entity) {
         metalness: 0.18,
       }),
     )
-    mesh.rotation.x = -Math.PI / 2
     mesh.receiveShadow = true
     return mesh
   }
