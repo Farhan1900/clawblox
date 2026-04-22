@@ -48,6 +48,7 @@ local thrownBlocks = {} -- { block, elapsed, duration }
 local trackedBlocks = {}
 local impactBlockCounter = 0
 local rockImpactStates = {}
+local partSpawnCFrames = {} -- part -> CFrame to reset to on OOB
 
 local function findWorkspaceChild(name)
     return Workspace:FindFirstChild(name)
@@ -213,6 +214,7 @@ local function createBlock(name, position, colorName)
     if existing then
         setPickupMetadata(existing, colorName, "PickupObject")
         trackedBlocks[existing] = true
+        partSpawnCFrames[existing] = partSpawnCFrames[existing] or CFrame.new(position)
         return existing
     end
     local block = Instance.new("Part")
@@ -226,6 +228,7 @@ local function createBlock(name, position, colorName)
     setPickupMetadata(block, colorName, "PickupObject")
     block.Parent = Workspace
     trackedBlocks[block] = true
+    partSpawnCFrames[block] = CFrame.new(position)
     return block
 end
 
@@ -235,6 +238,7 @@ local function createRock(name, position, size)
         setPickupMetadata(existing, "Slate", "Rock")
         existing.Color = ROCK_COLOR
         trackedBlocks[existing] = true
+        partSpawnCFrames[existing] = partSpawnCFrames[existing] or CFrame.new(position)
         return existing
     end
 
@@ -255,33 +259,11 @@ local function createRock(name, position, size)
     setPickupMetadata(rock, "Slate", "Rock")
     rock.Parent = Workspace
     trackedBlocks[rock] = true
+    partSpawnCFrames[rock] = CFrame.new(position)
     return rock
 end
 
 local function createRing(name, position, colorName, rotationDegrees, size)
-    local existing = findWorkspaceChild(name)
-    if existing then
-        setPickupMetadata(existing, colorName, "Ring")
-        -- Snap ring to canonical spawn on script load so layout edits take effect without a db wipe.
-        local pitch = 0
-        local yaw = 0
-        local roll = 0
-        if rotationDegrees then
-            pitch = rotationDegrees[1] or pitch
-            yaw = rotationDegrees[2] or yaw
-            roll = rotationDegrees[3] or roll
-        end
-        existing.Anchored = false
-        existing.CFrame = CFrame.new(position) * CFrame.Angles(math.rad(pitch), math.rad(yaw), math.rad(roll))
-        existing.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
-        existing.AssemblyAngularVelocity = Vector3.new(0, 0, 0)
-        trackedBlocks[existing] = true
-        return existing
-    end
-    local ring = Instance.new("Part")
-    ring.Name = name
-    ring.Size = size
-    ring.Shape = Enum.PartType.Ring
     local pitch = 0
     local yaw = 0
     local roll = 0
@@ -290,7 +272,25 @@ local function createRing(name, position, colorName, rotationDegrees, size)
         yaw = rotationDegrees[2] or yaw
         roll = rotationDegrees[3] or roll
     end
-    ring.CFrame = CFrame.new(position) * CFrame.Angles(math.rad(pitch), math.rad(yaw), math.rad(roll))
+    local spawnCFrame = CFrame.new(position) * CFrame.Angles(math.rad(pitch), math.rad(yaw), math.rad(roll))
+
+    local existing = findWorkspaceChild(name)
+    if existing then
+        setPickupMetadata(existing, colorName, "Ring")
+        -- Snap ring to canonical spawn on script load so layout edits take effect without a db wipe.
+        existing.Anchored = false
+        existing.CFrame = spawnCFrame
+        existing.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
+        existing.AssemblyAngularVelocity = Vector3.new(0, 0, 0)
+        trackedBlocks[existing] = true
+        partSpawnCFrames[existing] = spawnCFrame
+        return existing
+    end
+    local ring = Instance.new("Part")
+    ring.Name = name
+    ring.Size = size
+    ring.Shape = Enum.PartType.Ring
+    ring.CFrame = spawnCFrame
     ring.Anchored = false
     ring.Material = Enum.Material.Plastic
     ring.Color = blockColors[colorName]
@@ -304,6 +304,7 @@ local function createRing(name, position, colorName, rotationDegrees, size)
     setPickupMetadata(ring, colorName, "Ring")
     ring.Parent = Workspace
     trackedBlocks[ring] = true
+    partSpawnCFrames[ring] = spawnCFrame
     return ring
 end
 
@@ -382,10 +383,11 @@ local function cleanupPlayer(player)
     local heldBlock = heldBlocksByPlayer[player]
     if heldBlock then
         heldBlocksByPlayer[player] = nil
-        if rockImpactStates[heldBlock] then
+        local spawnCFrame = partSpawnCFrames[heldBlock]
+        if spawnCFrame then
             heldBlock.Anchored = false
             heldBlock.CanCollide = true
-            heldBlock.CFrame = CFrame.new(ROCK_SPAWN_POSITION)
+            heldBlock.CFrame = spawnCFrame
             heldBlock.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
             heldBlock.AssemblyAngularVelocity = Vector3.new(0, 0, 0)
             local impactState = rockImpactStates[heldBlock]
@@ -452,6 +454,7 @@ local function destroyBlock(block)
     releaseBlockReferences(block)
     rockImpactStates[block] = nil
     trackedBlocks[block] = nil
+    partSpawnCFrames[block] = nil
     block:Destroy()
 end
 
@@ -924,9 +927,17 @@ RunService.Heartbeat:Connect(function(dt)
         if not block.Parent then
             trackedBlocks[block] = nil
             rockImpactStates[block] = nil
+            partSpawnCFrames[block] = nil
         elseif block.Position.Y < OUT_OF_BOUNDS_Y then
             if rockImpactStates[block] then
                 resetRock(block)
+            elseif partSpawnCFrames[block] then
+                releaseBlockReferences(block)
+                block.Anchored = false
+                block.CanCollide = true
+                block.CFrame = partSpawnCFrames[block]
+                block.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
+                block.AssemblyAngularVelocity = Vector3.new(0, 0, 0)
             else
                 destroyBlock(block)
             end
