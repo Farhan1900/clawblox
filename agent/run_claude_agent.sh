@@ -460,8 +460,8 @@ if [[ "$SANDBOX" == "1" ]]; then
   if [[ -f "$HOST_CLAUDE_DIR/settings.json" ]]; then
     cp "$HOST_CLAUDE_DIR/settings.json" "$SANDBOX_HOME_DIR/.claude/settings.json"
   fi
-  if [[ -f "$HOME/.claude.json" ]]; then
-    cp "$HOME/.claude.json" "$SANDBOX_HOME_DIR/.claude.json"
+  if [[ -f "$HOST_CLAUDE_DIR/.claude.json" ]]; then
+    cp "$HOST_CLAUDE_DIR/.claude.json" "$SANDBOX_HOME_DIR/.claude.json"
     chmod 600 "$SANDBOX_HOME_DIR/.claude.json"
   fi
   python3 - <<'PY' "$SANDBOX_HOME_DIR/.claude.json"
