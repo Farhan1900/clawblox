@@ -61,6 +61,7 @@ CLAWBLOX_CLAUDE_BIN="${CLAWBLOX_CLAUDE_BIN-}"
 CLAWBLOX_CLAUDE_CODE_VERSION_PIN="${CLAWBLOX_CLAUDE_CODE_VERSION_PIN-2.1.116}"
 RESET_EVERY="${RESET_EVERY-}"
 SANDBOX="${SANDBOX-0}"
+SKIP_SOUL="${SKIP_SOUL-0}"
 CLAUDE_NATIVE_SANDBOX="${CLAUDE_NATIVE_SANDBOX-$SANDBOX}"
 SANDBOX_DEPS_ROOT="${SANDBOX_DEPS_ROOT-}"
 CLAWBLOX_WORLD_HTTP_PROXY_PORT="${CLAWBLOX_WORLD_HTTP_PROXY_PORT-}"
@@ -133,6 +134,9 @@ append_prompt_workspace_files() {
   local -A seen_files=()
 
   for rel_path in "${preferred_files[@]}"; do
+    if [[ "$SKIP_SOUL" == "1" && "$rel_path" == "SOUL.md" ]]; then
+      continue
+    fi
     if [[ -f "$workspace_dir/$rel_path" ]]; then
       prompt_files+=("$rel_path")
       seen_files["$rel_path"]=1
@@ -141,6 +145,9 @@ append_prompt_workspace_files() {
 
   while IFS= read -r -d '' file_path; do
     rel_path="${file_path#"$workspace_dir"/}"
+    if [[ "$SKIP_SOUL" == "1" && "$rel_path" == "SOUL.md" ]]; then
+      continue
+    fi
     if [[ -n "${seen_files[$rel_path]:-}" ]]; then
       continue
     fi
@@ -295,14 +302,25 @@ fi
 
 mkdir -p "$WORKSPACE_DIR" "$LOG_DIR" "$RUNTIME_DIR"
 
+if [[ "$SKIP_SOUL" != "0" && "$SKIP_SOUL" != "1" ]]; then
+  echo "Error: SKIP_SOUL must be 0 or 1 (got '$SKIP_SOUL')." >&2
+  exit 1
+fi
+
 if [[ -d "$TEMPLATE_DIR" ]]; then
   for entry in "$TEMPLATE_DIR"/*; do
     [[ -e "$entry" ]] || continue
+    if [[ "$SKIP_SOUL" == "1" && "$(basename "$entry")" == "SOUL.md" ]]; then
+      continue
+    fi
     dest="$WORKSPACE_DIR/$(basename "$entry")"
     if [[ ! -e "$dest" ]]; then
       cp -r "$entry" "$dest"
     fi
   done
+fi
+if [[ "$SKIP_SOUL" == "1" ]]; then
+  rm -f "$WORKSPACE_DIR/SOUL.md"
 fi
 
 if [[ ! -f "$SESSION_ID_FILE" ]]; then
@@ -552,6 +570,9 @@ if [[ -f "$SYSTEM_PROMPT_TEMPLATE" ]]; then
   WORKSPACE_DIR="$PROMPT_WORKSPACE_DIR" \
     envsubst '${WORLD_AGENT_NAME} ${WORKSPACE_DIR} ${SESSION_LINE} ${WORLD_BASE_URL} ${SKILL_CURL} ${SKILL_URL}' \
     < "$SYSTEM_PROMPT_TEMPLATE" > "$PROMPT_FILE"
+  if [[ "$SKIP_SOUL" == "1" ]]; then
+    sed -i '/SOUL\.md/d' "$PROMPT_FILE"
+  fi
 else
   echo "Error: system prompt template not found at $SYSTEM_PROMPT_TEMPLATE" >&2
   exit 1

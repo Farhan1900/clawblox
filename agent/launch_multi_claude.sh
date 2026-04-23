@@ -58,6 +58,7 @@ CLAUDE_USE_ENV_AUTH="${CLAUDE_USE_ENV_AUTH:-0}"
 CLAWBLOX_CLAUDE_BIN="${CLAWBLOX_CLAUDE_BIN:-}"
 CLAWBLOX_CLAUDE_CODE_VERSION_PIN="${CLAWBLOX_CLAUDE_CODE_VERSION_PIN:-2.1.116}"
 SANDBOX="${SANDBOX:-0}"
+SKIP_SOUL="${SKIP_SOUL:-0}"
 WORLD_CAPABILITY_PROXY="${WORLD_CAPABILITY_PROXY:-auto}"
 CLAUDE_FAILURE_IDLE_GRACE_SECONDS="${CLAUDE_FAILURE_IDLE_GRACE_SECONDS:-180}"
 CLAUDE_FAILURE_STALL_GRACE_SECONDS="${CLAUDE_FAILURE_STALL_GRACE_SECONDS:-300}"
@@ -388,6 +389,7 @@ write_run_config() {
   CLAWBLOX_CLAUDE_BIN="$CLAWBLOX_CLAUDE_BIN" \
   CLAWBLOX_CLAUDE_CODE_VERSION_PIN="$CLAWBLOX_CLAUDE_CODE_VERSION_PIN" \
   SANDBOX="$SANDBOX" \
+  SKIP_SOUL="$SKIP_SOUL" \
   WORLD_CAPABILITY_PROXY="$WORLD_CAPABILITY_PROXY" \
   SYSTEM_PROMPT_TEMPLATE="${SYSTEM_PROMPT_TEMPLATE:-}" \
   AGENT_NAME_PREFIX="$AGENT_NAME_PREFIX" \
@@ -430,6 +432,7 @@ config = {
     },
     "agent": {
         "sandbox": _bool(os.environ["SANDBOX"]),
+        "skip_soul": _bool(os.environ["SKIP_SOUL"]),
         "world_capability_proxy": os.environ["WORLD_CAPABILITY_PROXY"],
         "system_prompt_template": os.environ.get("SYSTEM_PROMPT_TEMPLATE", ""),
         "agent_name_prefix": os.environ["AGENT_NAME_PREFIX"],
@@ -635,6 +638,9 @@ usage() {
 Usage: $(basename "$0") [--stop|--status] [options]
 
 Launch a clawblox world with Claude Code agents in tmux.
+
+Options include:
+  --skip-soul, --no-soul        Do not seed or append SOUL.md for Claude agents
 EOF
 }
 
@@ -909,6 +915,7 @@ while [[ $# -gt 0 ]]; do
     --claude-extra-args) require_value "$1" "${2:-}"; CLAUDE_EXTRA_ARGS="$2"; shift 2 ;;
     --use-env-auth) CLAUDE_USE_ENV_AUTH=1; shift ;;
     --sandbox) SANDBOX=1; shift ;;
+    --skip-soul|--no-soul) SKIP_SOUL=1; shift ;;
     --world-capability-proxy) WORLD_CAPABILITY_PROXY=true; shift ;;
     --no-world-capability-proxy) WORLD_CAPABILITY_PROXY=false; shift ;;
     --template|--template-dir) require_value "$1" "${2:-}"; TEMPLATE_DIR="$2"; shift 2 ;;
@@ -926,6 +933,11 @@ case "$ACTION" in
   stop) do_stop; exit 0 ;;
   status) do_status; exit 0 ;;
 esac
+
+if [[ "$SKIP_SOUL" != "0" && "$SKIP_SOUL" != "1" ]]; then
+  echo "Error: SKIP_SOUL must be 0 or 1 (got '$SKIP_SOUL')."
+  exit 1
+fi
 
 resolve_clawblox_bin
 require_claude_auth
@@ -1204,6 +1216,9 @@ for ((i = 0; i < NUM_WORLDS; i++)); do
     fi
     if [[ -n "$SYSTEM_PROMPT_TEMPLATE" ]]; then
       template_env_prefix+="SYSTEM_PROMPT_TEMPLATE=$(printf '%q' "$SYSTEM_PROMPT_TEMPLATE") "
+    fi
+    if [[ "$SKIP_SOUL" == "1" ]]; then
+      template_env_prefix+="SKIP_SOUL=1 "
     fi
     startup_env_prefix=""
     if [[ -n "$startup_instructions" ]]; then
