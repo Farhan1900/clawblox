@@ -1,0 +1,255 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+usage() {
+  cat <<'EOF'
+Usage:
+  scripts/krb-longrun run [--name NAME] [--check-minutes N] -- COMMAND [ARGS...]
+  scripts/krb-longrun status [--name NAME]
+  scripts/krb-longrun stop [--name NAME]
+
+Run a long command with an explicit renewable Kerberos cache and a background
+krenew process. This avoids stale KRB5CCNAME values inherited by old tmux
+servers.
+
+Environment:
+  KRB_LONGRUN_DIR       Directory for cache and pid files.
+  KRB_LONGRUN_NAME      Default name when --name is omitted.
+  KRB_LONGRUN_CHECK_MINUTES
+                        Default krenew check interval, in minutes.
+
+Examples:
+  scripts/krb-longrun run --name mesa -- bash worlds/mesa-world/launch_multi_generations_claude.sh ...
+  scripts/krb-longrun status --name mesa
+  scripts/krb-longrun stop --name mesa
+EOF
+}
+
+die() {
+  echo "Error: $*" >&2
+  exit 1
+}
+
+warn() {
+  echo "Warning: $*" >&2
+}
+
+sanitize_name() {
+  local value="$1"
+  value="$(printf '%s' "$value" | tr -c 'A-Za-z0-9._-' '_')"
+  value="${value##_}"
+  value="${value%%_}"
+  [[ -n "$value" ]] || value="longrun"
+  printf '%s\n' "$value"
+}
+
+default_state_dir() {
+  if [[ -n "${KRB_LONGRUN_DIR:-}" ]]; then
+    printf '%s\n' "$KRB_LONGRUN_DIR"
+  elif [[ -d "/storage/${USER:-}" && -w "/storage/${USER:-}" ]]; then
+    printf '%s\n' "/storage/${USER}/.krb5/longrun"
+  elif [[ -n "${HOME:-}" && -d "$HOME" && -w "$HOME" ]]; then
+    printf '%s\n' "$HOME/.krb5/longrun"
+  else
+    printf '%s\n' "/tmp/krb5cc_${UID}_longrun_state"
+  fi
+}
+
+require_command() {
+  command -v "$1" >/dev/null 2>&1 || die "required command not found: $1"
+}
+
+parse_common_opts() {
+  NAME="$(sanitize_name "${KRB_LONGRUN_NAME:-longrun}")"
+  CHECK_MINUTES="${KRB_LONGRUN_CHECK_MINUTES:-60}"
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --name)
+        [[ $# -ge 2 ]] || die "--name requires a value"
+        NAME="$(sanitize_name "$2")"
+        shift 2
+        ;;
+      --check-minutes)
+        [[ $# -ge 2 ]] || die "--check-minutes requires a value"
+        CHECK_MINUTES="$2"
+        shift 2
+        ;;
+      --help|-h)
+        usage
+        exit 0
+        ;;
+      --)
+        shift
+        break
+        ;;
+      -*)
+        die "unknown option: $1"
+        ;;
+      *)
+        break
+        ;;
+    esac
+  done
+
+  [[ "$CHECK_MINUTES" =~ ^[1-9][0-9]*$ ]] || die "--check-minutes must be a positive integer"
+
+  STATE_DIR="$(default_state_dir)"
+  CACHE_FILE="$STATE_DIR/krb5cc_${UID}_${NAME}"
+  PID_FILE="$STATE_DIR/krenew_${UID}_${NAME}.pid"
+  LOG_FILE="$STATE_DIR/krenew_${UID}_${NAME}.log"
+  export KRB5CCNAME="FILE:$CACHE_FILE"
+
+  REMAINING_ARGS=("$@")
+}
+
+cache_ok() {
+  [[ -f "$CACHE_FILE" ]] || return 1
+  KRB5CCNAME="FILE:$CACHE_FILE" klist -s >/dev/null 2>&1
+}
+
+print_paths() {
+  echo "Kerberos longrun:"
+  echo "  name:        $NAME"
+  echo "  cache:       FILE:$CACHE_FILE"
+  echo "  pid file:    $PID_FILE"
+  echo "  renew log:   $LOG_FILE"
+}
+
+stop_existing_renewer() {
+  if [[ ! -s "$PID_FILE" ]]; then
+    return 0
+  fi
+
+  local pid
+  pid="$(tr -d '[:space:]' <"$PID_FILE")"
+  if [[ -z "$pid" ]]; then
+    rm -f "$PID_FILE"
+    return 0
+  fi
+  if kill -0 "$pid" >/dev/null 2>&1; then
+    echo "Stopping existing krenew pid $pid"
+    kill "$pid" >/dev/null 2>&1 || true
+    sleep 1
+  fi
+  rm -f "$PID_FILE"
+}
+
+start_renewer() {
+  : >"$LOG_FILE"
+  krenew -b -t -K "$CHECK_MINUTES" -k "$CACHE_FILE" -p "$PID_FILE" >>"$LOG_FILE" 2>&1
+  sleep 1
+
+  [[ -s "$PID_FILE" ]] || die "krenew did not write pid file: $PID_FILE; see $LOG_FILE"
+  local pid
+  pid="$(tr -d '[:space:]' <"$PID_FILE")"
+  [[ -n "$pid" ]] || die "empty krenew pid file: $PID_FILE"
+  kill -0 "$pid" >/dev/null 2>&1 || die "krenew pid $pid is not running; see $LOG_FILE"
+}
+
+verify_credentials() {
+  echo "Verifying Kerberos cache..."
+  KRB5CCNAME="FILE:$CACHE_FILE" klist -f
+  KRB5CCNAME="FILE:$CACHE_FILE" krenew -H 120 -k "$CACHE_FILE" >/dev/null
+
+  if command -v tokens >/dev/null 2>&1; then
+    echo
+    echo "AFS tokens:"
+    tokens || warn "tokens command failed"
+  fi
+}
+
+cmd_run() {
+  parse_common_opts "$@"
+  [[ "${#REMAINING_ARGS[@]}" -gt 0 ]] || die "missing command; use -- COMMAND"
+
+  require_command kinit
+  require_command klist
+  require_command krenew
+  require_command aklog
+
+  mkdir -p "$STATE_DIR"
+  chmod 700 "$STATE_DIR"
+
+  print_paths
+  echo
+
+  if cache_ok; then
+    echo "Using existing valid cache."
+  else
+    echo "Initializing cache with kinit."
+    kinit -c "$CACHE_FILE"
+  fi
+
+  echo "Refreshing AFS token with aklog."
+  KRB5CCNAME="FILE:$CACHE_FILE" aklog
+
+  stop_existing_renewer
+  echo "Starting krenew every ${CHECK_MINUTES} minutes."
+  start_renewer
+
+  echo
+  verify_credentials
+
+  echo
+  echo "Launching command with KRB5CCNAME=FILE:$CACHE_FILE"
+  echo "Stop renewer later with: $0 stop --name $NAME"
+  echo
+
+  exec env KRB5CCNAME="FILE:$CACHE_FILE" "${REMAINING_ARGS[@]}"
+}
+
+cmd_status() {
+  parse_common_opts "$@"
+  print_paths
+  echo
+
+  if cache_ok; then
+    KRB5CCNAME="FILE:$CACHE_FILE" klist -f
+  else
+    warn "cache is missing or invalid: $CACHE_FILE"
+  fi
+
+  echo
+  if [[ -s "$PID_FILE" ]]; then
+    local pid
+    pid="$(tr -d '[:space:]' <"$PID_FILE")"
+    if [[ -n "$pid" ]] && kill -0 "$pid" >/dev/null 2>&1; then
+      echo "krenew: running pid $pid"
+    else
+      warn "krenew pid file exists but process is not running"
+    fi
+  else
+    warn "no krenew pid file"
+  fi
+
+  if command -v tokens >/dev/null 2>&1; then
+    echo
+    tokens || true
+  fi
+}
+
+cmd_stop() {
+  parse_common_opts "$@"
+  stop_existing_renewer
+  echo "Stopped krenew for '$NAME'."
+}
+
+main() {
+  [[ $# -gt 0 ]] || {
+    usage
+    exit 2
+  }
+
+  local subcommand="$1"
+  shift
+  case "$subcommand" in
+    run) cmd_run "$@" ;;
+    status) cmd_status "$@" ;;
+    stop) cmd_stop "$@" ;;
+    --help|-h|help) usage ;;
+    *) die "unknown subcommand: $subcommand" ;;
+  esac
+}
+
+main "$@"
