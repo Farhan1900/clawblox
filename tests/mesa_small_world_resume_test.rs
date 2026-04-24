@@ -18,6 +18,12 @@ fn mesa_small_world_2_dir() -> PathBuf {
         .join("mesa-small-world-2")
 }
 
+fn mesa_small_world_3_dir() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("worlds")
+        .join("mesa-small-world-3")
+}
+
 fn workspace_inventory(instance: &GameInstance) -> (i64, i64, i64, i64, i64, i64) {
     let runtime = instance.lua_runtime.as_ref().expect("runtime missing");
     runtime
@@ -67,6 +73,62 @@ fn workspace_name_by_id(instance: &GameInstance, lua_id: u64) -> Option<String> 
         .into_iter()
         .find(|inst| inst.id().0 == lua_id)
         .map(|inst| inst.name())
+}
+
+#[test]
+fn mesa_small_world_3_only_players_respawn_out_of_bounds() {
+    let mut instance = GameInstance::new(Uuid::new_v4(), None);
+    let (_config, source) = load_world_and_entry_script(&mesa_small_world_3_dir())
+        .expect("failed to load bundled mesa-small-world-3");
+    instance.load_script(&source);
+
+    let agent_id = Uuid::new_v4();
+    assert!(instance.add_player(agent_id, "OobProbe"));
+
+    for _ in 0..10 {
+        instance.tick();
+    }
+
+    {
+        let runtime = instance.lua_runtime.as_ref().expect("runtime missing");
+        runtime
+            .lua()
+            .load(
+                r#"
+                Workspace.Rock_1.Position = Vector3.new(-31.4, -250, 26.9)
+
+                local player = game:GetService("Players"):GetPlayers()[1]
+                local hrp = player.Character and player.Character:FindFirstChild("HumanoidRootPart")
+                assert(hrp ~= nil, "humanoid root part missing")
+                hrp.Position = Vector3.new(0, -250, 0)
+            "#,
+            )
+            .exec()
+            .expect("failed to set out-of-bounds probe state");
+    }
+
+    instance.tick();
+
+    let (rock_exists, player_y): (bool, f64) = {
+        let runtime = instance.lua_runtime.as_ref().expect("runtime missing");
+        runtime
+            .lua()
+            .load(
+                r#"
+                local player = game:GetService("Players"):GetPlayers()[1]
+                local hrp = player.Character and player.Character:FindFirstChild("HumanoidRootPart")
+                return Workspace:FindFirstChild("Rock_1") ~= nil, hrp.Position.Y
+            "#,
+            )
+            .eval()
+            .expect("failed to read out-of-bounds probe state")
+    };
+
+    assert!(!rock_exists, "out-of-bounds objects should be destroyed");
+    assert!(
+        (player_y - 5.0).abs() < 1e-2,
+        "out-of-bounds player should respawn at y=5, got {player_y}"
+    );
 }
 
 #[test]

@@ -887,12 +887,33 @@ cleanup_active_session() {
     return
   fi
 
+  local session="$CURRENT_SESSION"
+  local stop_status=0
+
   echo
-  echo "Stopping active session '$CURRENT_SESSION'..."
+  echo "Stopping active session '$session'..."
   audit_generation_event "cleanup_active_session" "stop_grace_seconds=$STOP_GRACE_SECONDS"
+  set +e
   CLAWBLOX_STOP_REASON="${CLAWBLOX_STOP_REASON:-generation_cleanup}" \
     CLAWBLOX_STOP_SOURCE="${CLAWBLOX_STOP_SOURCE:-launch_multi_generations_claude_cleanup}" \
-    bash "$LAUNCH_SCRIPT" --tmux-session "$CURRENT_SESSION" --stop --force --stop-grace-seconds "$STOP_GRACE_SECONDS" || true
+    bash "$LAUNCH_SCRIPT" --tmux-session "$session" --stop --force --stop-grace-seconds "$STOP_GRACE_SECONDS"
+  stop_status=$?
+  set -e
+
+  if ((stop_status != 0)); then
+    echo "Warning: stop command for '$session' exited with status $stop_status." >&2
+    audit_generation_event "cleanup_active_session_failed" "session=$session status=$stop_status"
+    return "$stop_status"
+  fi
+
+  if tmux has-session -t "$session" 2>/dev/null; then
+    echo "Warning: tmux session '$session' still exists after cleanup." >&2
+    audit_generation_event "cleanup_active_session_leftover" "session=$session"
+    return 1
+  fi
+
+  echo "Cleanup verified: tmux session '$session' is gone."
+  audit_generation_event "cleanup_active_session_verified" "session=$session"
   CURRENT_SESSION=""
 }
 
@@ -903,7 +924,7 @@ cleanup_on_signal() {
   audit_generation_event "signal_received" "signal=$signal_name"
   CLAWBLOX_STOP_REASON="generation_wrapper_signal_${signal_name}" \
     CLAWBLOX_STOP_SOURCE="launch_multi_generations_claude_signal"
-  cleanup_active_session
+  cleanup_active_session || true
   exit 130
 }
 

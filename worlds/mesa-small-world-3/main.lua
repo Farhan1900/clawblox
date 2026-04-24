@@ -48,7 +48,6 @@ local thrownBlocks = {} -- { block, elapsed, duration }
 local trackedBlocks = {}
 local impactBlockCounter = 0
 local rockImpactStates = {}
-local partSpawnCFrames = {} -- part -> CFrame to reset to on OOB
 
 local function findWorkspaceChild(name)
     return Workspace:FindFirstChild(name)
@@ -214,7 +213,6 @@ local function createBlock(name, position, colorName)
     if existing then
         setPickupMetadata(existing, colorName, "PickupObject")
         trackedBlocks[existing] = true
-        partSpawnCFrames[existing] = partSpawnCFrames[existing] or CFrame.new(position)
         return existing
     end
     local block = Instance.new("Part")
@@ -228,7 +226,6 @@ local function createBlock(name, position, colorName)
     setPickupMetadata(block, colorName, "PickupObject")
     block.Parent = Workspace
     trackedBlocks[block] = true
-    partSpawnCFrames[block] = CFrame.new(position)
     return block
 end
 
@@ -238,7 +235,6 @@ local function createRock(name, position, size)
         setPickupMetadata(existing, "Slate", "Rock")
         existing.Color = ROCK_COLOR
         trackedBlocks[existing] = true
-        partSpawnCFrames[existing] = partSpawnCFrames[existing] or CFrame.new(position)
         return existing
     end
 
@@ -259,7 +255,6 @@ local function createRock(name, position, size)
     setPickupMetadata(rock, "Slate", "Rock")
     rock.Parent = Workspace
     trackedBlocks[rock] = true
-    partSpawnCFrames[rock] = CFrame.new(position)
     return rock
 end
 
@@ -283,7 +278,6 @@ local function createRing(name, position, colorName, rotationDegrees, size)
         existing.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
         existing.AssemblyAngularVelocity = Vector3.new(0, 0, 0)
         trackedBlocks[existing] = true
-        partSpawnCFrames[existing] = spawnCFrame
         return existing
     end
     local ring = Instance.new("Part")
@@ -304,7 +298,6 @@ local function createRing(name, position, colorName, rotationDegrees, size)
     setPickupMetadata(ring, colorName, "Ring")
     ring.Parent = Workspace
     trackedBlocks[ring] = true
-    partSpawnCFrames[ring] = spawnCFrame
     return ring
 end
 
@@ -383,19 +376,9 @@ local function cleanupPlayer(player)
     local heldBlock = heldBlocksByPlayer[player]
     if heldBlock then
         heldBlocksByPlayer[player] = nil
-        local spawnCFrame = partSpawnCFrames[heldBlock]
-        if spawnCFrame then
-            heldBlock.Anchored = false
-            heldBlock.CanCollide = true
-            heldBlock.CFrame = spawnCFrame
-            heldBlock.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
-            heldBlock.AssemblyAngularVelocity = Vector3.new(0, 0, 0)
-            local impactState = rockImpactStates[heldBlock]
-            if impactState then
-                impactState.ignoreUntil = os.clock() + ROCK_IMPACT_ARM_DELAY
-                impactState.lastImpactAt = -math.huge
-            end
-        else
+        trackedBlocks[heldBlock] = nil
+        rockImpactStates[heldBlock] = nil
+        if heldBlock.Parent then
             heldBlock:Destroy()
         end
     end
@@ -454,22 +437,7 @@ local function destroyBlock(block)
     releaseBlockReferences(block)
     rockImpactStates[block] = nil
     trackedBlocks[block] = nil
-    partSpawnCFrames[block] = nil
     block:Destroy()
-end
-
-local function resetRock(rockPart)
-    releaseBlockReferences(rockPart)
-    rockPart.Anchored = false
-    rockPart.CanCollide = true
-    rockPart.CFrame = CFrame.new(ROCK_SPAWN_POSITION)
-    rockPart.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
-    rockPart.AssemblyAngularVelocity = Vector3.new(0, 0, 0)
-    local impactState = rockImpactStates[rockPart]
-    if impactState then
-        impactState.ignoreUntil = os.clock() + ROCK_IMPACT_ARM_DELAY
-        impactState.lastImpactAt = -math.huge
-    end
 end
 
 local function spawnImpactCubes(origin, count)
@@ -927,20 +895,8 @@ RunService.Heartbeat:Connect(function(dt)
         if not block.Parent then
             trackedBlocks[block] = nil
             rockImpactStates[block] = nil
-            partSpawnCFrames[block] = nil
         elseif block.Position.Y < OUT_OF_BOUNDS_Y then
-            if rockImpactStates[block] then
-                resetRock(block)
-            elseif partSpawnCFrames[block] then
-                releaseBlockReferences(block)
-                block.Anchored = false
-                block.CanCollide = true
-                block.CFrame = partSpawnCFrames[block]
-                block.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
-                block.AssemblyAngularVelocity = Vector3.new(0, 0, 0)
-            else
-                destroyBlock(block)
-            end
+            destroyBlock(block)
         end
     end
 end)
