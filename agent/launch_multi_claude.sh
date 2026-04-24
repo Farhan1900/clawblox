@@ -108,6 +108,15 @@ utc_now() {
   date -u +%Y-%m-%dT%H:%M:%SZ
 }
 
+refresh_afs_tokens() {
+  if [[ -z "${KRB5CCNAME:-}" ]] || ! command -v aklog >/dev/null 2>&1; then
+    return 0
+  fi
+  if ! aklog >/dev/null 2>&1; then
+    echo "Warning: aklog failed for KRB5CCNAME=$KRB5CCNAME; AFS paths may be unavailable." >&2
+  fi
+}
+
 append_launcher_audit() {
   local event="$1"
   local details="${2:-}"
@@ -117,7 +126,7 @@ append_launcher_audit() {
   run_dir="${RUN_DIR:-}"
   if [[ -f "$meta_file" ]]; then
     meta_run_dir="$(
-      bash -lc '
+      bash --noprofile --norc -c '
         set -euo pipefail
         # shellcheck disable=SC1090
         source "$1"
@@ -178,6 +187,17 @@ write_agent_pane_command() {
 #!/usr/bin/env bash
 set -euo pipefail
 cd $(printf '%q' "$root_dir")
+EOF
+  cat >>"$target" <<'EOF'
+refresh_afs_tokens() {
+  if [[ -z "${KRB5CCNAME:-}" ]] || ! command -v aklog >/dev/null 2>&1; then
+    return 0
+  fi
+  if ! aklog >/dev/null 2>&1; then
+    echo "Warning: aklog failed for KRB5CCNAME=$KRB5CCNAME; AFS paths may be unavailable." >&2
+  fi
+}
+refresh_afs_tokens
 EOF
   cat >>"$target" <<'EOF'
 load_claude_code_oauth_token_env() {
@@ -486,7 +506,7 @@ load_session_metadata() {
   [[ -f "$meta_file" ]] || return 1
 
   mapfile -t meta_fields < <(
-    bash -lc '
+    bash --noprofile --norc -c '
       set -euo pipefail
       # shellcheck disable=SC1090
       source "$1"
@@ -724,6 +744,7 @@ do_stop() {
   local meta_base_port=""
   local meta_launch_instance_id=""
   local meta_auto_stop_pid=""
+  refresh_afs_tokens
   append_launcher_audit "stop_requested" "force=$FORCE stop_grace_seconds=$STOP_GRACE_SECONDS"
   if tmux has-session -t "$TMUX_SESSION" 2>/dev/null; then
     echo "Cleanup: tmux session '$TMUX_SESSION' exists."
@@ -982,6 +1003,7 @@ if [[ "$SKIP_SOUL" != "0" && "$SKIP_SOUL" != "1" ]]; then
   exit 1
 fi
 
+refresh_afs_tokens
 resolve_clawblox_bin
 require_claude_auth
 require_sandbox_runtime
@@ -1167,6 +1189,9 @@ append_launcher_audit "run_metadata_written" "run_id=$RUN_ID launch_instance_id=
 echo "Starting $NUM_WORLDS world servers..."
 tmux new-session -d -s "$TMUX_SESSION" -n "world-0"
 tmux set-option -t "$TMUX_SESSION" remain-on-exit on
+if [[ -n "${KRB5CCNAME:-}" ]]; then
+  tmux set-environment -t "$TMUX_SESSION" KRB5CCNAME "$KRB5CCNAME"
+fi
 append_launcher_audit "tmux_session_created" "session=$TMUX_SESSION"
 
 for ((i = 0; i < NUM_WORLDS; i++)); do

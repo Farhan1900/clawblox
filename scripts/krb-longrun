@@ -203,7 +203,7 @@ stop_existing_renewer() {
 start_renewer() {
   : >"$LOG_FILE"
   rm -f "$PID_FILE"
-  if ! krenew -b -t -v -x -K "$CHECK_MINUTES" -k "$CACHE_FILE" -p "$PID_FILE" >>"$LOG_FILE" 2>&1; then
+  if ! krenew -a -b -t -v -x -K "$CHECK_MINUTES" -k "$CACHE_FILE" -p "$PID_FILE" >>"$LOG_FILE" 2>&1; then
     diagnose_renewer_failure "krenew failed before daemonizing" ""
     die "krenew could not start a renewal daemon"
   fi
@@ -399,7 +399,48 @@ cmd_run() {
   trap 'forward_signal_to_child TERM' TERM
   trap 'cleanup_renewer' EXIT
 
-  setsid env KRB5CCNAME="FILE:$CACHE_FILE" "${REMAINING_ARGS[@]}" &
+  setsid env \
+    KRB5CCNAME="FILE:$CACHE_FILE" \
+    KRB_LONGRUN_CHILD_AKLOG_INTERVAL_SECONDS="$((CHECK_MINUTES * 60))" \
+    bash --noprofile --norc -c '
+      set -euo pipefail
+
+      refresh_child_afs_tokens() {
+        if [[ -z "${KRB5CCNAME:-}" ]] || ! command -v aklog >/dev/null 2>&1; then
+          return 0
+        fi
+        if ! aklog >/dev/null 2>&1; then
+          echo "Warning: child aklog failed for KRB5CCNAME=$KRB5CCNAME; AFS paths may be unavailable." >&2
+        fi
+      }
+
+      aklog_loop_pid=""
+      refresh_child_afs_tokens
+      if [[ "${KRB_LONGRUN_CHILD_AKLOG_INTERVAL_SECONDS:-0}" =~ ^[1-9][0-9]*$ ]] && command -v aklog >/dev/null 2>&1; then
+        (
+          while true; do
+            sleep "$KRB_LONGRUN_CHILD_AKLOG_INTERVAL_SECONDS" || exit 0
+            refresh_child_afs_tokens
+          done
+        ) &
+        aklog_loop_pid="$!"
+      fi
+
+      cleanup_child_helpers() {
+        if [[ -n "$aklog_loop_pid" ]]; then
+          kill "$aklog_loop_pid" >/dev/null 2>&1 || true
+        fi
+      }
+      trap cleanup_child_helpers EXIT
+
+      "$@" &
+      cmd_pid="$!"
+      set +e
+      wait "$cmd_pid"
+      cmd_status="$?"
+      set -e
+      exit "$cmd_status"
+    ' _ "${REMAINING_ARGS[@]}" &
   CHILD_PID="$!"
   child_status=0
   wait_for_child_exit || child_status=$?
