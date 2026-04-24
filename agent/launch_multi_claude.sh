@@ -116,9 +116,15 @@ append_launcher_audit() {
   meta_file="$(session_meta_file)"
   run_dir="${RUN_DIR:-}"
   if [[ -f "$meta_file" ]]; then
-    # shellcheck disable=SC1090
-    source "$meta_file"
-    run_dir="${RUN_DIR:-$run_dir}"
+    meta_run_dir="$(
+      bash -lc '
+        set -euo pipefail
+        # shellcheck disable=SC1090
+        source "$1"
+        printf "%s" "${RUN_DIR:-}"
+      ' _ "$meta_file" 2>/dev/null || true
+    )"
+    run_dir="${meta_run_dir:-$run_dir}"
   fi
   if [[ -z "$run_dir" ]]; then
     return 0
@@ -631,6 +637,7 @@ kill_world_capability_proxies() {
     fi
     rm -f "$pid_file"
   done < <(find "$root" -type f -path '*/runtime/world_proxy.pid' -print0 2>/dev/null)
+  return 0
 }
 
 usage() {
@@ -708,6 +715,8 @@ do_stop() {
   local meta_file
   local i
   local port
+  local window_names=()
+  local world_window_count=0
   local snapshot_failed=0
   local meta_run_id=""
   local meta_run_dir=""
@@ -717,8 +726,11 @@ do_stop() {
   local meta_auto_stop_pid=""
   append_launcher_audit "stop_requested" "force=$FORCE stop_grace_seconds=$STOP_GRACE_SECONDS"
   if tmux has-session -t "$TMUX_SESSION" 2>/dev/null; then
+    echo "Cleanup: tmux session '$TMUX_SESSION' exists."
     mapfile -t recordings < <(collect_session_recordings)
+    mapfile -t window_names < <(tmux list-windows -t "$TMUX_SESSION" -F "#{window_name}" 2>/dev/null)
     meta_file="$(session_meta_file)"
+    echo "Cleanup: metadata file: $meta_file"
     if load_session_metadata \
       "$meta_file" \
       meta_run_id \
@@ -737,11 +749,15 @@ do_stop() {
         append_launcher_audit "stop_skipped_launch_instance_mismatch" "expected_launch_instance_id=$EXPECTED_LAUNCH_INSTANCE_ID current_launch_instance_id=${meta_launch_instance_id:-} force=$FORCE"
         return 0
       fi
+      echo "Cleanup: owner run_id=${meta_run_id:-unknown} run_dir=${meta_run_dir:-unknown} base_port=${meta_base_port:-unknown} worlds=${meta_num_worlds:-unknown}."
       kill_recorded_auto_stop_pid "$meta_file" "$CURRENT_AUTO_TIMER_PID"
       if [[ -n "$meta_run_dir" && -n "$meta_num_worlds" && -n "$meta_base_port" ]]; then
-        echo "Saving world snapshots..."
+        RUN_DIR="$meta_run_dir"
+        WORLDS_ROOT="$RUN_DIR/worlds"
+        echo "Cleanup: saving world snapshots..."
         for ((i = 0; i < meta_num_worlds; i++)); do
           port=$((meta_base_port + i))
+          echo "Cleanup: snapshot world-$i via port $port."
           if ! save_world_snapshot "$i" "$port"; then
             snapshot_failed=1
           fi
@@ -761,25 +777,33 @@ do_stop() {
       append_launcher_audit "stop_skipped_missing_metadata" "expected_run_id=$EXPECTED_RUN_ID expected_launch_instance_id=$EXPECTED_LAUNCH_INSTANCE_ID force=$FORCE meta_file=$meta_file"
       return 0
     fi
-    echo "Stopping world servers..."
-    kill_world_capability_proxies "$meta_run_dir"
-    while IFS= read -r window_name; do
+    echo "Cleanup: stopping world servers and agent panes..."
+    kill_world_capability_proxies "$meta_run_dir" || true
+    for window_name in "${window_names[@]}"; do
       [[ "$window_name" == world-* ]] || continue
+      ((++world_window_count))
+      echo "Cleanup: sending Ctrl-C to ${TMUX_SESSION}:${window_name}."
       tmux send-keys -t "${TMUX_SESSION}:${window_name}" C-c 2>/dev/null || true
-    done < <(tmux list-windows -t "$TMUX_SESSION" -F "#{window_name}" 2>/dev/null)
-    echo "Waiting ${STOP_GRACE_SECONDS}s for shutdown..."
+    done
+    echo "Cleanup: sent Ctrl-C to $world_window_count world window(s)."
+    echo "Cleanup: waiting ${STOP_GRACE_SECONDS}s for tmux panes to exit..."
     sleep "$STOP_GRACE_SECONDS"
     if tmux has-session -t "$TMUX_SESSION" 2>/dev/null; then
-      echo "Killing tmux session '$TMUX_SESSION'..."
+      echo "Cleanup: killing tmux session '$TMUX_SESSION'..."
       tmux kill-session -t "$TMUX_SESSION" 2>/dev/null || true
     fi
+    if tmux has-session -t "$TMUX_SESSION" 2>/dev/null; then
+      echo "Warning: tmux session '$TMUX_SESSION' still exists after kill-session." >&2
+    else
+      echo "Cleanup: tmux session '$TMUX_SESSION' is gone."
+    fi
     if ((${#recordings[@]} > 0)); then
-      echo "Verifying recording databases..."
+      echo "Cleanup: verifying ${#recordings[@]} recording database(s)..."
       for recording_file in "${recordings[@]}"; do
         verify_recording_db "$recording_file"
       done
     fi
-    echo "Stopped."
+    echo "Cleanup: stopped."
     append_launcher_audit "stop_completed" "recordings=${#recordings[@]} snapshot_failed=$snapshot_failed"
     rm -f "$meta_file"
   else
@@ -855,12 +879,31 @@ ensure_ports_available() {
 }
 
 require_claude_auth() {
-  if ! command -v claude >/dev/null 2>&1; then
-    echo "Error: claude CLI was not found in PATH."
-    exit 1
+  local claude_bin=""
+
+  if [[ -n "$CLAWBLOX_CLAUDE_BIN" ]]; then
+    if [[ -x "$CLAWBLOX_CLAUDE_BIN" ]]; then
+      claude_bin="$CLAWBLOX_CLAUDE_BIN"
+    else
+      echo "Error: CLAWBLOX_CLAUDE_BIN is not executable: $CLAWBLOX_CLAUDE_BIN"
+      exit 1
+    fi
+  elif [[ -n "$CLAWBLOX_CLAUDE_CODE_VERSION_PIN" ]]; then
+    local version_bin="$HOME/.local/share/claude/versions/$CLAWBLOX_CLAUDE_CODE_VERSION_PIN"
+    if [[ -x "$version_bin" ]]; then
+      claude_bin="$version_bin"
+    fi
   fi
-  if ! claude auth status --text >/dev/null 2>&1; then
-    echo "Error: Claude Code is not logged in. Run: claude auth login"
+
+  if [[ -z "$claude_bin" ]]; then
+    if ! claude_bin="$(command -v claude 2>/dev/null)"; then
+      echo "Error: claude CLI was not found in PATH."
+      exit 1
+    fi
+  fi
+
+  if ! "$claude_bin" auth status --text >/dev/null 2>&1; then
+    echo "Error: Claude Code is not logged in for $claude_bin. Run: $claude_bin auth login"
     exit 1
   fi
 }
