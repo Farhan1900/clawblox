@@ -21,6 +21,7 @@ mc-server/
 
 results/
 recordings/
+/analysis/
 
 minecraft-adapter/
 worlds/minecraft/monitor/
