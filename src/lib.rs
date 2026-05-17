@@ -3,6 +3,8 @@
 //! This module exposes the core game engine functionality for testing
 //! and potential library use.
 
+pub mod agent;
+pub mod agent_runner;
 pub mod config;
 pub mod db;
 pub mod game;

@@ -37,6 +37,7 @@ use include_dir::{include_dir, Dir};
 use tower_http::services::ServeDir;
 
 use clawblox::{
+    agent_runner::{start_agent_tmux_for_local_world, AgentKind, AgentRunnerOptions},
     config::{SpeechConfig, SpeechMode},
     db,
     game::{
@@ -74,12 +75,27 @@ enum LocalDatastore {
     NoDb,
 }
 
+#[derive(Copy, Clone, Debug, ValueEnum)]
+enum CliAgentKind {
+    Claude,
+    Codex,
+}
+
 impl LocalDatastore {
     fn as_arg(self) -> &'static str {
         match self {
             Self::Sqlite => "sqlite",
             Self::Postgres => "postgres",
             Self::NoDb => "none",
+        }
+    }
+}
+
+impl From<CliAgentKind> for AgentKind {
+    fn from(value: CliAgentKind) -> Self {
+        match value {
+            CliAgentKind::Claude => Self::Claude,
+            CliAgentKind::Codex => Self::Codex,
         }
     }
 }
@@ -125,6 +141,30 @@ enum Commands {
         /// Resume a previously snapshotted local run from this file
         #[arg(long)]
         resume: Option<PathBuf>,
+        /// Start an agent in tmux after the local world starts
+        #[arg(long, value_enum)]
+        agent: Option<CliAgentKind>,
+        /// Display name passed to the agent
+        #[arg(long, default_value = "agent")]
+        agent_name: String,
+        /// Agent model to use
+        #[arg(long)]
+        model: Option<String>,
+        /// Agent permission/approval mode
+        #[arg(long, default_value = "bypassPermissions")]
+        permission_mode: String,
+        /// tmux session name for the agent
+        #[arg(long)]
+        tmux_session: Option<String>,
+        /// Directory for agent state, logs, transcripts, and workspace
+        #[arg(long)]
+        agent_dir: Option<PathBuf>,
+        /// System/developer prompt file for the agent
+        #[arg(long)]
+        system_prompt: Option<PathBuf>,
+        /// Enable agent sandbox mode
+        #[arg(long)]
+        sandbox: bool,
     },
     /// Replay a recorded session
     Replay {
@@ -230,8 +270,33 @@ fn main() {
             record,
             record_dir,
             resume,
+            agent,
+            agent_name,
+            model,
+            permission_mode,
+            tmux_session,
+            agent_dir,
+            system_prompt,
+            sandbox,
         } => run_game(
-            path, port, &base_path, daemon, datastore, record, record_dir, resume,
+            path,
+            port,
+            &base_path,
+            daemon,
+            datastore,
+            record,
+            record_dir,
+            resume,
+            agent.map(|kind| AgentRunnerOptions {
+                kind: kind.into(),
+                name: agent_name,
+                model,
+                permission_mode,
+                tmux_session,
+                agent_dir,
+                system_prompt,
+                sandbox,
+            }),
         ),
         Commands::Replay {
             file,
@@ -1695,6 +1760,7 @@ fn run_game(
     record: bool,
     record_dir: Option<PathBuf>,
     resume: Option<PathBuf>,
+    agent_options: Option<AgentRunnerOptions>,
 ) {
     let base_path = normalize_base_path(base_path);
     let path = std::fs::canonicalize(&path).unwrap_or_else(|_| {
@@ -1735,6 +1801,10 @@ fn run_game(
     }
 
     if world_cfg.runtime.mode == "external" {
+        if agent_options.is_some() {
+            eprintln!("Error: --agent is not supported for external runtime worlds yet.");
+            std::process::exit(1);
+        }
         run_external_runtime(path, port, &base_path, daemon, &world_cfg);
         return;
     }
@@ -1751,6 +1821,7 @@ fn run_game(
     });
 
     let skill_md = read_agent_api_doc(&path, &config);
+    let agent_skill_md = skill_md.clone();
     let renderer_manifest = maybe_build_renderer_package(&path, &config.renderer, &base_path)
         .unwrap_or_else(|e| {
             eprintln!("Error: {}", e);
@@ -2142,6 +2213,34 @@ fn run_game(
                 std::process::exit(1);
             });
 
+        if let Some(agent_options) = agent_options.clone() {
+            let agent_world_dir = path.clone();
+            let agent_base_path = base_path.clone();
+            let agent_prompt = agent_skill_md.clone();
+            tokio::spawn(async move {
+                tokio::time::sleep(Duration::from_millis(200)).await;
+                match start_agent_tmux_for_local_world(
+                    &agent_world_dir,
+                    port,
+                    &agent_base_path,
+                    agent_options,
+                    agent_prompt,
+                ) {
+                    Ok(started) => {
+                        println!("Agent: {} ({})", started.name, started.kind);
+                        println!("Agent tmux: {}", started.attach_command);
+                        println!("Agent dir: {}", started.agent_dir.display());
+                        println!("Agent command: {}", started.command_file.display());
+                        println!("Agent events: {}", started.events_file.display());
+                    }
+                    Err(err) => {
+                        eprintln!("Error: {err}");
+                        std::process::exit(1);
+                    }
+                }
+            });
+        }
+
         let pid_file_clone = pid_file.clone();
         axum::serve(listener, app)
             .with_graceful_shutdown(async move {
@@ -2516,12 +2615,13 @@ async fn replay_agent_messages(
     })
 }
 
-async fn replay_metadata_route(
-    State(state): State<ReplayState>,
-) -> Json<ReplayMetadataResponse> {
+async fn replay_metadata_route(State(state): State<ReplayState>) -> Json<ReplayMetadataResponse> {
     Json(ReplayMetadataResponse {
         enabled: state.replay_metadata.is_some(),
-        metadata: state.replay_metadata.as_ref().map(|metadata| (**metadata).clone()),
+        metadata: state
+            .replay_metadata
+            .as_ref()
+            .map(|metadata| (**metadata).clone()),
     })
 }
 
@@ -4270,8 +4370,9 @@ fn validate_builtin_input(input_type: &str, data: &serde_json::Value) -> Result<
                 .as_object()
                 .and_then(|obj| obj.get("position"))
                 .ok_or_else(|| format!("{input_type} requires data.position"))?;
-            parse_json_vector3(position)
-                .ok_or_else(|| format!("{input_type} requires data.position to be a finite [x, y, z] vector"))?;
+            parse_json_vector3(position).ok_or_else(|| {
+                format!("{input_type} requires data.position to be a finite [x, y, z] vector")
+            })?;
             Ok(())
         }
         "Throw" => {
@@ -4279,8 +4380,9 @@ fn validate_builtin_input(input_type: &str, data: &serde_json::Value) -> Result<
                 .as_object()
                 .and_then(|obj| obj.get("direction"))
                 .ok_or_else(|| "Throw requires data.direction".to_string())?;
-            parse_json_vector3(direction)
-                .ok_or_else(|| "Throw requires data.direction to be a finite [x, y, z] vector".to_string())?;
+            parse_json_vector3(direction).ok_or_else(|| {
+                "Throw requires data.direction to be a finite [x, y, z] vector".to_string()
+            })?;
             if let Some(speed) = data.as_object().and_then(|obj| obj.get("speed")) {
                 parse_json_number(speed)
                     .ok_or_else(|| "Throw requires data.speed to be a finite number".to_string())?;

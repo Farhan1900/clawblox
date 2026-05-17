@@ -3,6 +3,9 @@ name = "clawblox"
 version = "0.1.4"
 edition = "2021"
 
+[workspace]
+members = [".", "python/clawblox"]
+
 [dependencies]
 home = "=0.5.9"
 axum = { version = "0.8", features = ["ws", "multipart"] }
