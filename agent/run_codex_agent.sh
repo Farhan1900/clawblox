@@ -500,7 +500,7 @@ codex_env_args() {
     HOME="$effective_home_root"
     CLAWBLOX_CODEX_RUNTIME_DIR="$runtime_dir"
     CLAWBLOX_CODEX_LOG_DIR="$log_dir"
-    CLAWBLOX_CODEX_AUTO_LOOP="$([[ -n "$CODEX_AUTO_LOOP_MESSAGE" ]] && printf 1 || printf 0)"
+    CLAWBLOX_CODEX_AUTO_LOOP="${CLAWBLOX_CODEX_AUTO_LOOP:-1}"
     CODEX_AUTO_LOOP_MESSAGE="$CODEX_AUTO_LOOP_MESSAGE"
     WORLD_BASE_URL="$WORLD_BASE_URL"
     WORLD_SESSION_ID="$WORLD_SESSION_ID"
@@ -550,7 +550,7 @@ build_bwrap_prefix() {
     --setenv WORLD_AGENT_NAME "$WORLD_AGENT_NAME"
     --setenv CLAWBLOX_CODEX_RUNTIME_DIR "$SANDBOX_RUNTIME_DIR"
     --setenv CLAWBLOX_CODEX_LOG_DIR "$SANDBOX_LOG_DIR"
-    --setenv CLAWBLOX_CODEX_AUTO_LOOP "$([[ -n "$CODEX_AUTO_LOOP_MESSAGE" ]] && printf 1 || printf 0)"
+    --setenv CLAWBLOX_CODEX_AUTO_LOOP "${CLAWBLOX_CODEX_AUTO_LOOP:-1}"
     --setenv CODEX_AUTO_LOOP_MESSAGE "$CODEX_AUTO_LOOP_MESSAGE"
     --chdir /workspace
     --die-with-parent
