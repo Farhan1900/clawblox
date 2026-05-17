@@ -34,8 +34,11 @@ CLAUDE_MODEL="${CLAUDE_MODEL:-claude-opus-4-6}"
 CLAUDE_PERMISSION_MODE="${CLAUDE_PERMISSION_MODE:-bypassPermissions}"
 CLAUDE_BARE="${CLAUDE_BARE:-0}"
 CLAUDE_EXTRA_ARGS="${CLAUDE_EXTRA_ARGS:-}"
+CLAUDE_AUTO_LOOP_MESSAGE="${CLAUDE_AUTO_LOOP_MESSAGE:-}"
 CLAUDE_USE_ENV_AUTH="${CLAUDE_USE_ENV_AUTH:-0}"
+CLAWBLOX_ENV_FILE="${CLAWBLOX_ENV_FILE:-}"
 SANDBOX="${SANDBOX:-0}"
+SKIP_SOUL="${SKIP_SOUL:-0}"
 CHECKPOINT_INTERVAL="${CHECKPOINT_INTERVAL:-1800}"
 KEEP_WORLD="${KEEP_WORLD:-0}"
 declare -a CURRENT_TEMPLATES=()
@@ -457,8 +460,11 @@ Options:
   --model MODEL_ID              Claude model id forwarded to launch_multi_claude.sh
   --permission-mode MODE        Claude permission mode forwarded to launch_multi_claude.sh
   --claude-extra-args TEXT      Extra Claude CLI args forwarded to launch_multi_claude.sh
+  --auto-loop-message TEXT      Override the Claude stop-hook continue message
   --use-env-auth                Forward auth from env to launch_multi_claude.sh
+  --env-file PATH               Read CLAUDE_CODE_OAUTH_TOKEN from PATH
   --sandbox                     Enable sandbox mode in launch_multi_claude.sh
+  --skip-soul, --no-soul        Do not seed or append SOUL.md for Claude agents
   --checkpoint-interval N       Forwarded to launch_multi_claude.sh
   --keep-world                  Keep one world/tmux session alive and reset only Claude between generations
   --template PATH               Initial template directory for generation 1
@@ -474,7 +480,7 @@ Environment overrides:
   PORT_WAIT_SECONDS, SAVE_GRACE_SECONDS, MAX_GENERATION_RETRIES, RETRY_DELAY_SECONDS,
   SAVE_PROMPT, AGENT_NAME_PREFIX, GOAL, INITIAL_TEMPLATE, SYSTEM_PROMPT_TEMPLATE,
   CLAWBLOX_BIN, CLAUDE_MODEL, CLAUDE_PERMISSION_MODE, CLAUDE_BARE, KEEP_WORLD,
-  CLAUDE_EXTRA_ARGS, CLAUDE_USE_ENV_AUTH, CLAUDE_CODE_OAUTH_TOKEN,
+  CLAUDE_EXTRA_ARGS, CLAUDE_AUTO_LOOP_MESSAGE, CLAUDE_USE_ENV_AUTH, CLAUDE_CODE_OAUTH_TOKEN, SKIP_SOUL,
   CLAWBLOX_ENV_FILE, SANDBOX, CHECKPOINT_INTERVAL
 EOF
 }
@@ -593,12 +599,26 @@ while [[ $# -gt 0 ]]; do
       CLAUDE_EXTRA_ARGS="$2"
       shift 2
       ;;
+    --auto-loop-message)
+      require_value "$1" "${2:-}"
+      CLAUDE_AUTO_LOOP_MESSAGE="$2"
+      shift 2
+      ;;
     --use-env-auth)
       CLAUDE_USE_ENV_AUTH=1
       shift
       ;;
+    --env-file)
+      require_value "$1" "${2:-}"
+      CLAWBLOX_ENV_FILE="$2"
+      shift 2
+      ;;
     --sandbox)
       SANDBOX=1
+      shift
+      ;;
+    --skip-soul|--no-soul)
+      SKIP_SOUL=1
       shift
       ;;
     --checkpoint-interval)
@@ -696,6 +716,17 @@ if [[ "$CLAUDE_USE_ENV_AUTH" != "0" && "$CLAUDE_USE_ENV_AUTH" != "1" ]]; then
 fi
 if [[ "$SANDBOX" != "0" && "$SANDBOX" != "1" ]]; then
   echo "Error: SANDBOX must be 0 or 1 (got '$SANDBOX')."
+  exit 1
+fi
+if [[ -n "$CLAWBLOX_ENV_FILE" ]]; then
+  CLAWBLOX_ENV_FILE="$(to_root_abs_path "$CLAWBLOX_ENV_FILE")"
+  if [[ ! -f "$CLAWBLOX_ENV_FILE" ]]; then
+    echo "Error: env file not found at $CLAWBLOX_ENV_FILE" >&2
+    exit 1
+  fi
+fi
+if [[ "$SKIP_SOUL" != "0" && "$SKIP_SOUL" != "1" ]]; then
+  echo "Error: SKIP_SOUL must be 0 or 1 (got '$SKIP_SOUL')."
   exit 1
 fi
 if [[ "$KEEP_WORLD" != "0" && "$KEEP_WORLD" != "1" ]]; then
@@ -1002,14 +1033,23 @@ run_generation_once() {
   if [[ -n "$SYSTEM_PROMPT_TEMPLATE" ]]; then
     launch_cmd+=(--system-prompt "$SYSTEM_PROMPT_TEMPLATE")
   fi
+  if [[ -n "$CLAWBLOX_ENV_FILE" ]]; then
+    launch_cmd+=(--env-file "$CLAWBLOX_ENV_FILE")
+  fi
   if [[ -n "$CLAUDE_EXTRA_ARGS" ]]; then
     launch_cmd+=(--claude-extra-args "$CLAUDE_EXTRA_ARGS")
+  fi
+  if [[ -n "$CLAUDE_AUTO_LOOP_MESSAGE" ]]; then
+    launch_cmd+=(--auto-loop-message "$CLAUDE_AUTO_LOOP_MESSAGE")
   fi
   if [[ "$CLAUDE_USE_ENV_AUTH" == "1" ]]; then
     launch_cmd+=(--use-env-auth)
   fi
   if [[ "$SANDBOX" == "1" ]]; then
     launch_cmd+=(--sandbox)
+  fi
+  if [[ "$SKIP_SOUL" == "1" ]]; then
+    launch_cmd+=(--skip-soul)
   fi
   for ((idx = 0; idx < AGENTS_PER_WORLD; idx++)); do
     template_in="${template_inputs[$idx]:-}"
@@ -1236,14 +1276,23 @@ run_persistent_world_generations() {
   if [[ -n "$SYSTEM_PROMPT_TEMPLATE" ]]; then
     launch_cmd+=(--system-prompt "$SYSTEM_PROMPT_TEMPLATE")
   fi
+  if [[ -n "$CLAWBLOX_ENV_FILE" ]]; then
+    launch_cmd+=(--env-file "$CLAWBLOX_ENV_FILE")
+  fi
   if [[ -n "$CLAUDE_EXTRA_ARGS" ]]; then
     launch_cmd+=(--claude-extra-args "$CLAUDE_EXTRA_ARGS")
+  fi
+  if [[ -n "$CLAUDE_AUTO_LOOP_MESSAGE" ]]; then
+    launch_cmd+=(--auto-loop-message "$CLAUDE_AUTO_LOOP_MESSAGE")
   fi
   if [[ "$CLAUDE_USE_ENV_AUTH" == "1" ]]; then
     launch_cmd+=(--use-env-auth)
   fi
   if [[ "$SANDBOX" == "1" ]]; then
     launch_cmd+=(--sandbox)
+  fi
+  if [[ "$SKIP_SOUL" == "1" ]]; then
+    launch_cmd+=(--skip-soul)
   fi
   for ((idx = 0; idx < AGENTS_PER_WORLD; idx++)); do
     template_in="${template_inputs[$idx]:-}"

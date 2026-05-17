@@ -3,6 +3,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+CLAUDE_CODE_OAUTH_TOKEN_PRESET="${CLAUDE_CODE_OAUTH_TOKEN+x}"
 
 load_claude_code_oauth_token_env() {
   local env_file="${CLAWBLOX_ENV_FILE:-$ROOT_DIR/.env}"
@@ -50,6 +51,7 @@ DURATION="${DURATION:-}"
 CHECKPOINT_INTERVAL="${CHECKPOINT_INTERVAL:-1800}"
 CHECKPOINT_WARNING_SECONDS="${CHECKPOINT_WARNING_SECONDS:-300}"
 CHECKPOINT_WARNING_PROMPT="${CHECKPOINT_WARNING_PROMPT:-You will be reset in 5 minutes. Update your workspace memory files now.}"
+CLAUDE_AUTO_LOOP_MESSAGE="${CLAUDE_AUTO_LOOP_MESSAGE:-}"
 CLAUDE_MODEL="${CLAUDE_MODEL:-claude-opus-4-6}"
 CLAUDE_PERMISSION_MODE="${CLAUDE_PERMISSION_MODE:-bypassPermissions}"
 CLAUDE_BARE="${CLAUDE_BARE:-0}"
@@ -182,12 +184,19 @@ write_agent_pane_command() {
   local startup_env_prefix="${21}"
   local claude_bin="${22}"
   local claude_code_version_pin="${23}"
+  local claude_auto_loop_message="${24}"
+  local env_file="${25:-}"
 
   cat >"$target" <<EOF
 #!/usr/bin/env bash
 set -euo pipefail
 cd $(printf '%q' "$root_dir")
 EOF
+  if [[ -n "$env_file" ]]; then
+    cat >>"$target" <<EOF
+export CLAWBLOX_ENV_FILE=$(printf '%q' "$env_file")
+EOF
+  fi
   cat >>"$target" <<'EOF'
 refresh_afs_tokens() {
   if [[ -z "${KRB5CCNAME:-}" ]] || ! command -v aklog >/dev/null 2>&1; then
@@ -225,7 +234,7 @@ load_claude_code_oauth_token_env() {
 load_claude_code_oauth_token_env
 EOF
   cat >>"$target" <<EOF
-${auth_env_prefix}WORLD_BASE_URL=$(printf '%q' "$world_url") WORLD_INTERNAL_BASE_URL=$(printf '%q' "$world_internal_url") WORLD_AGENT_NAME=$(printf '%q' "$agent_display_name") AGENT_DIR=$(printf '%q' "$agent_dir") WORKSPACE_DIR=$(printf '%q' "$agent_workspace") SESSION_ID_FILE=$(printf '%q' "$session_id_file") WORLD_SESSION_FILE=$(printf '%q' "$world_session_file") RESET_EVERY=$(printf '%q' "$reset_every_seconds") DURATION_SECONDS=$(printf '%q' "$duration_seconds") CHECKPOINT_WARNING_SECONDS=$(printf '%q' "$checkpoint_warning_seconds") CHECKPOINT_WARNING_PROMPT=$(printf '%q' "$checkpoint_warning_prompt") CLAUDE_MODEL=$(printf '%q' "$claude_model") CLAUDE_PERMISSION_MODE=$(printf '%q' "$claude_permission_mode") CLAUDE_BARE=$(printf '%q' "$claude_bare") CLAUDE_EXTRA_ARGS=$(printf '%q' "$claude_extra_args") CLAWBLOX_CLAUDE_BIN=$(printf '%q' "$claude_bin") CLAWBLOX_CLAUDE_CODE_VERSION_PIN=$(printf '%q' "$claude_code_version_pin") ${sandbox_env_prefix}${template_env_prefix}${startup_env_prefix}bash $(printf '%q' "$AGENT_SCRIPT")
+${auth_env_prefix}WORLD_BASE_URL=$(printf '%q' "$world_url") WORLD_INTERNAL_BASE_URL=$(printf '%q' "$world_internal_url") WORLD_AGENT_NAME=$(printf '%q' "$agent_display_name") AGENT_DIR=$(printf '%q' "$agent_dir") WORKSPACE_DIR=$(printf '%q' "$agent_workspace") SESSION_ID_FILE=$(printf '%q' "$session_id_file") WORLD_SESSION_FILE=$(printf '%q' "$world_session_file") RESET_EVERY=$(printf '%q' "$reset_every_seconds") DURATION_SECONDS=$(printf '%q' "$duration_seconds") CHECKPOINT_WARNING_SECONDS=$(printf '%q' "$checkpoint_warning_seconds") CHECKPOINT_WARNING_PROMPT=$(printf '%q' "$checkpoint_warning_prompt") CLAUDE_MODEL=$(printf '%q' "$claude_model") CLAUDE_PERMISSION_MODE=$(printf '%q' "$claude_permission_mode") CLAUDE_BARE=$(printf '%q' "$claude_bare") CLAUDE_EXTRA_ARGS=$(printf '%q' "$claude_extra_args") CLAWBLOX_CLAUDE_BIN=$(printf '%q' "$claude_bin") CLAWBLOX_CLAUDE_CODE_VERSION_PIN=$(printf '%q' "$claude_code_version_pin") CLAUDE_AUTO_LOOP_MESSAGE=$(printf '%q' "$claude_auto_loop_message") ${sandbox_env_prefix}${template_env_prefix}${startup_env_prefix}bash $(printf '%q' "$AGENT_SCRIPT")
 EOF
   chmod +x "$target"
 }
@@ -414,6 +423,7 @@ write_run_config() {
   CLAUDE_CODE_OAUTH_TOKEN_PRESENT="$([[ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" ]] && printf 1 || printf 0)" \
   CLAWBLOX_CLAUDE_BIN="$CLAWBLOX_CLAUDE_BIN" \
   CLAWBLOX_CLAUDE_CODE_VERSION_PIN="$CLAWBLOX_CLAUDE_CODE_VERSION_PIN" \
+  CLAUDE_AUTO_LOOP_MESSAGE="$CLAUDE_AUTO_LOOP_MESSAGE" \
   SANDBOX="$SANDBOX" \
   SKIP_SOUL="$SKIP_SOUL" \
   WORLD_CAPABILITY_PROXY="$WORLD_CAPABILITY_PROXY" \
@@ -455,6 +465,7 @@ config = {
         "uses_claude_code_oauth_token": _bool(os.environ["CLAUDE_CODE_OAUTH_TOKEN_PRESENT"]),
         "binary_override": os.environ.get("CLAWBLOX_CLAUDE_BIN", ""),
         "version_pin": os.environ.get("CLAWBLOX_CLAUDE_CODE_VERSION_PIN", ""),
+        "auto_loop_message": os.environ.get("CLAUDE_AUTO_LOOP_MESSAGE", ""),
     },
     "agent": {
         "sandbox": _bool(os.environ["SANDBOX"]),
@@ -668,6 +679,8 @@ Launch a clawblox world with Claude Code agents in tmux.
 
 Options include:
   --skip-soul, --no-soul        Do not seed or append SOUL.md for Claude agents
+  --env-file PATH               Read CLAUDE_CODE_OAUTH_TOKEN from PATH instead of .env
+  --auto-loop-message TEXT      Override the Claude stop-hook continue message
 EOF
 }
 
@@ -710,6 +723,15 @@ restore_clawblox_bin_after_resume() {
     CLAWBLOX_BIN=""
   fi
   resolve_clawblox_bin
+}
+
+to_root_abs_path() {
+  local value="$1"
+  if [[ "$value" = /* ]]; then
+    printf '%s\n' "$value"
+  else
+    printf '%s\n' "$ROOT_DIR/$value"
+  fi
 }
 
 verify_recording_db() {
@@ -954,6 +976,7 @@ CLI_TMUX_SESSION=0
 CLI_RECORD=0
 CLI_RESET_EVERY=0
 CLI_CLAWBLOX_BIN=0
+CLI_ENV_FILE=0
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --stop) ACTION="stop"; shift ;;
@@ -977,6 +1000,8 @@ while [[ $# -gt 0 ]]; do
     --model) require_value "$1" "${2:-}"; CLAUDE_MODEL="$2"; shift 2 ;;
     --permission-mode) require_value "$1" "${2:-}"; CLAUDE_PERMISSION_MODE="$2"; shift 2 ;;
     --claude-extra-args) require_value "$1" "${2:-}"; CLAUDE_EXTRA_ARGS="$2"; shift 2 ;;
+    --auto-loop-message) require_value "$1" "${2:-}"; CLAUDE_AUTO_LOOP_MESSAGE="$2"; shift 2 ;;
+    --env-file) require_value "$1" "${2:-}"; CLAWBLOX_ENV_FILE="$2"; CLI_ENV_FILE=1; shift 2 ;;
     --use-env-auth) CLAUDE_USE_ENV_AUTH=1; shift ;;
     --sandbox) SANDBOX=1; shift ;;
     --skip-soul|--no-soul) SKIP_SOUL=1; shift ;;
@@ -1001,6 +1026,17 @@ esac
 if [[ "$SKIP_SOUL" != "0" && "$SKIP_SOUL" != "1" ]]; then
   echo "Error: SKIP_SOUL must be 0 or 1 (got '$SKIP_SOUL')."
   exit 1
+fi
+if ((CLI_ENV_FILE == 1)); then
+  CLAWBLOX_ENV_FILE="$(to_root_abs_path "$CLAWBLOX_ENV_FILE")"
+  if [[ ! -f "$CLAWBLOX_ENV_FILE" ]]; then
+    echo "Error: env file not found at $CLAWBLOX_ENV_FILE" >&2
+    exit 1
+  fi
+  if [[ -z "$CLAUDE_CODE_OAUTH_TOKEN_PRESET" ]]; then
+    unset CLAUDE_CODE_OAUTH_TOKEN
+  fi
+  load_claude_code_oauth_token_env
 fi
 
 refresh_afs_tokens
@@ -1307,6 +1343,10 @@ for ((i = 0; i < NUM_WORLDS; i++)); do
     if [[ "$SANDBOX" == "1" ]]; then
       sandbox_env_prefix="SANDBOX=1 "
     fi
+    env_file_arg=""
+    if [[ -n "${CLAWBLOX_ENV_FILE:-}" ]]; then
+      env_file_arg="$CLAWBLOX_ENV_FILE"
+    fi
     agent_world_url="$url"
     agent_internal_world_url="$url"
     if world_capability_proxy_enabled; then
@@ -1350,7 +1390,9 @@ for ((i = 0; i < NUM_WORLDS; i++)); do
       "$template_env_prefix" \
       "$startup_env_prefix" \
       "$CLAWBLOX_CLAUDE_BIN" \
-      "$CLAWBLOX_CLAUDE_CODE_VERSION_PIN"
+      "$CLAWBLOX_CLAUDE_CODE_VERSION_PIN" \
+      "$CLAUDE_AUTO_LOOP_MESSAGE" \
+      "$env_file_arg"
     printf '%s\n' "$pane_target" >"$agent_runtime_dir/pane_id.txt"
     printf '%s\n' "$pane_command_file" >"$agent_runtime_dir/pane_command_file.txt"
 

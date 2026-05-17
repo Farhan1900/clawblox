@@ -86,55 +86,18 @@ pub fn load_agent_timeline(
         let Ok(value) = serde_json::from_str::<Value>(trimmed) else {
             continue;
         };
-        let Some(message) = value.get("message") else {
-            continue;
-        };
-        let top_level_type = value
-            .get("type")
-            .and_then(|v| v.as_str())
-            .unwrap_or_default();
-        let role = message
-            .get("role")
-            .and_then(|v| v.as_str())
-            .unwrap_or_default()
-            .to_string();
-        let effective_role = if role.is_empty() && matches!(top_level_type, "assistant" | "user") {
-            top_level_type.to_string()
-        } else {
-            role
-        };
-        if effective_role.is_empty() {
-            continue;
-        }
         let Some(ts_ms) = parse_agent_timestamp_ms(&value) else {
             continue;
         };
-        let id = value
-            .get("id")
-            .and_then(|v| v.as_str())
-            .unwrap_or_default()
-            .to_string();
-
-        if let Some(tick) = extract_tick_anchor(&value, message) {
+        if let Some(tick) = extract_tick_anchor(&value) {
             anchors.push(TickAnchor {
                 ts_ms,
                 tick: tick as f64,
             });
         }
-
-        if effective_role != "assistant" && effective_role != "user" {
-            continue;
+        if let Some(raw_message) = parse_raw_message(&value, ts_ms) {
+            raw_messages.push(raw_message);
         }
-        let blocks = extract_raw_blocks(message);
-        if blocks.is_empty() {
-            continue;
-        }
-        raw_messages.push(RawReplayAgentMessage {
-            id,
-            role: effective_role,
-            timestamp_ms: ts_ms,
-            blocks,
-        });
     }
 
     let raw_messages = fold_tool_results(raw_messages);
@@ -211,6 +174,192 @@ fn parse_agent_timestamp_ms(value: &Value) -> Option<i64> {
     Some(parsed.timestamp_millis())
 }
 
+fn parse_raw_message(value: &Value, timestamp_ms: i64) -> Option<RawReplayAgentMessage> {
+    if let Some(message) = value.get("message") {
+        let top_level_type = value
+            .get("type")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default();
+        let role = message
+            .get("role")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string();
+        let effective_role = if role.is_empty() && matches!(top_level_type, "assistant" | "user") {
+            top_level_type.to_string()
+        } else {
+            role
+        };
+        if effective_role == "assistant" || effective_role == "user" {
+            let blocks = extract_raw_blocks(message);
+            if !blocks.is_empty() {
+                return Some(RawReplayAgentMessage {
+                    id: extract_message_id(value),
+                    role: effective_role,
+                    timestamp_ms,
+                    blocks,
+                });
+            }
+        }
+    }
+
+    let top_level_type = value
+        .get("type")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default();
+    let payload = value.get("payload")?;
+    match top_level_type {
+        "response_item" => parse_codex_response_item(payload, value, timestamp_ms),
+        "event_msg" => parse_codex_event_msg(payload, value, timestamp_ms),
+        _ => None,
+    }
+}
+
+fn parse_codex_response_item(
+    payload: &Value,
+    value: &Value,
+    timestamp_ms: i64,
+) -> Option<RawReplayAgentMessage> {
+    let payload_type = payload
+        .get("type")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default();
+    let role = match payload_type {
+        "message" => payload
+            .get("role")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default(),
+        "function_call" | "custom_tool_call" | "function_call_output" | "custom_tool_call_output" => {
+            "assistant"
+        }
+        _ => "",
+    };
+    if role != "assistant" && role != "user" {
+        return None;
+    }
+
+    let blocks = match payload_type {
+        "message" => extract_raw_blocks(payload),
+        "function_call" => vec![RawBlock::Block(build_tool_use_block(
+            payload.get("call_id").and_then(|v| v.as_str()).unwrap_or_default(),
+            payload.get("name").and_then(|v| v.as_str()).unwrap_or("tool"),
+            parse_json_string_arg(payload.get("arguments")),
+        ))],
+        "custom_tool_call" => vec![RawBlock::Block(build_tool_use_block(
+            payload.get("call_id").and_then(|v| v.as_str()).unwrap_or_default(),
+            payload.get("name").and_then(|v| v.as_str()).unwrap_or("tool"),
+            payload.get("input").cloned().unwrap_or(Value::Null),
+        ))],
+        "function_call_output" => vec![RawBlock::ToolResult(PendingToolResult {
+            tool_use_id: payload
+                .get("call_id")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default()
+                .to_string(),
+            content: truncate(
+                payload
+                    .get("output")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default()
+                    .trim(),
+                TOOL_RESULT_MAX,
+            ),
+            is_error: false,
+        })],
+        "custom_tool_call_output" => vec![RawBlock::ToolResult(PendingToolResult {
+            tool_use_id: payload
+                .get("call_id")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default()
+                .to_string(),
+            content: truncate(
+                payload
+                    .get("output")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default()
+                    .trim(),
+                TOOL_RESULT_MAX,
+            ),
+            is_error: false,
+        })],
+        _ => Vec::new(),
+    };
+    if blocks.is_empty() {
+        return None;
+    }
+    Some(RawReplayAgentMessage {
+        id: extract_message_id(value),
+        role: role.to_string(),
+        timestamp_ms,
+        blocks,
+    })
+}
+
+fn parse_codex_event_msg(
+    payload: &Value,
+    value: &Value,
+    timestamp_ms: i64,
+) -> Option<RawReplayAgentMessage> {
+    if payload
+        .get("type")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default()
+        != "agent_message"
+    {
+        return None;
+    }
+    let text = payload
+        .get("message")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default()
+        .trim();
+    if text.is_empty() {
+        return None;
+    }
+    Some(RawReplayAgentMessage {
+        id: extract_message_id(value),
+        role: "assistant".to_string(),
+        timestamp_ms,
+        blocks: vec![RawBlock::Block(ReplayAgentBlock::Text {
+            text: truncate(text, TEXT_BLOCK_MAX),
+        })],
+    })
+}
+
+fn extract_message_id(value: &Value) -> String {
+    value
+        .get("id")
+        .and_then(|v| v.as_str())
+        .or_else(|| value.get("payload").and_then(|p| p.get("id")).and_then(|v| v.as_str()))
+        .or_else(|| {
+            value
+                .get("payload")
+                .and_then(|p| p.get("call_id"))
+                .and_then(|v| v.as_str())
+        })
+        .or_else(|| value.get("timestamp").and_then(|v| v.as_str()))
+        .unwrap_or_default()
+        .to_string()
+}
+
+fn parse_json_string_arg(value: Option<&Value>) -> Value {
+    let Some(raw) = value.and_then(|v| v.as_str()) else {
+        return Value::Null;
+    };
+    serde_json::from_str(raw).unwrap_or_else(|_| Value::String(raw.to_string()))
+}
+
+fn build_tool_use_block(id: &str, name: &str, input: Value) -> ReplayAgentBlock {
+    let summary = summarize_tool_input(&input);
+    ReplayAgentBlock::ToolUse {
+        id: id.to_string(),
+        name: name.to_string(),
+        summary,
+        input,
+        result: None,
+    }
+}
+
 const TEXT_BLOCK_MAX: usize = 4000;
 const TOOL_SUMMARY_MAX: usize = 160;
 const TOOL_RESULT_MAX: usize = 4000;
@@ -250,6 +399,18 @@ fn extract_raw_blocks(message: &Value) -> Vec<RawBlock> {
             .unwrap_or_default();
         match item_type {
             "text" => {
+                let text = item
+                    .get("text")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default()
+                    .trim();
+                if !text.is_empty() {
+                    blocks.push(RawBlock::Block(ReplayAgentBlock::Text {
+                        text: truncate(text, TEXT_BLOCK_MAX),
+                    }));
+                }
+            }
+            "input_text" | "output_text" => {
                 let text = item
                     .get("text")
                     .and_then(|v| v.as_str())
@@ -450,7 +611,7 @@ fn truncate(text: &str, max: usize) -> String {
     out
 }
 
-fn extract_tick_anchor(value: &Value, message: &Value) -> Option<u64> {
+fn extract_tick_anchor(value: &Value) -> Option<u64> {
     if let Some(stdout) = value
         .get("toolUseResult")
         .and_then(|v| v.get("stdout"))
@@ -462,15 +623,36 @@ fn extract_tick_anchor(value: &Value, message: &Value) -> Option<u64> {
         }
     }
 
-    if let Some(content) = message.get("content").and_then(|v| v.as_array()) {
-        for item in content {
-            let text = item
-                .get("content")
-                .and_then(|v| v.as_str())
-                .or_else(|| item.get("text").and_then(|v| v.as_str()))
-                .unwrap_or_default();
-            if let Some(tick) = extract_tick_from_text(text) {
+    if let Some(output) = value
+        .get("payload")
+        .and_then(|v| v.get("output"))
+        .and_then(|v| v.as_str())
+        .filter(|v| !v.is_empty())
+    {
+        if let Some(tick) = extract_tick_from_text(output) {
+            return Some(tick);
+        }
+    }
+
+    for node in [value.get("message"), value.get("payload")] {
+        let Some(node) = node else {
+            continue;
+        };
+        if let Some(message_text) = node.get("message").and_then(|v| v.as_str()) {
+            if let Some(tick) = extract_tick_from_text(message_text) {
                 return Some(tick);
+            }
+        }
+        if let Some(content) = node.get("content").and_then(|v| v.as_array()) {
+            for item in content {
+                let text = item
+                    .get("content")
+                    .and_then(|v| v.as_str())
+                    .or_else(|| item.get("text").and_then(|v| v.as_str()))
+                    .unwrap_or_default();
+                if let Some(tick) = extract_tick_from_text(text) {
+                    return Some(tick);
+                }
             }
         }
     }

@@ -19,12 +19,16 @@ if [[ -n "$log_dir" ]]; then
 fi
 
 auto_loop="${CLAWBLOX_CLAUDE_AUTO_LOOP:-0}"
+auto_loop_message="${CLAUDE_AUTO_LOOP_MESSAGE:-}"
+if [[ -z "$auto_loop_message" ]]; then
+  auto_loop_message="Please don't stop. Just continue doing whatever you want to do."
+fi
 
 if [[ "$auto_loop" == "1" ]]; then
-  node <<'EOF'
+  CLAUDE_AUTO_LOOP_MESSAGE="$auto_loop_message" node <<'EOF'
 process.stdout.write(JSON.stringify({
   decision: "block",
-  reason: "Please don't stop. Just continue doing whatever you want to do.",
+  reason: process.env.CLAUDE_AUTO_LOOP_MESSAGE,
 }));
 EOF
   exit 0

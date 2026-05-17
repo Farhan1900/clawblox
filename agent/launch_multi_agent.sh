@@ -7,7 +7,7 @@ declare -a PASSTHROUGH_ARGS=()
 
 usage() {
   cat <<EOF
-Usage: $(basename "$0") [--backend claude|pi] [launcher args...]
+Usage: $(basename "$0") [--backend claude|codex|pi] [launcher args...]
 
 Dispatch to the backend-specific multi-agent launcher.
 EOF
@@ -37,9 +37,10 @@ done
 
 case "$BACKEND" in
   claude) TARGET_SCRIPT="$SCRIPT_DIR/launch_multi_claude.sh" ;;
+  codex) TARGET_SCRIPT="$SCRIPT_DIR/launch_multi_codex.sh" ;;
   pi) TARGET_SCRIPT="$SCRIPT_DIR/launch_multi_pi.sh" ;;
   *)
-    echo "Error: unsupported backend '$BACKEND'. Expected 'claude' or 'pi'." >&2
+    echo "Error: unsupported backend '$BACKEND'. Expected 'claude', 'codex', or 'pi'." >&2
     exit 1
     ;;
 esac
