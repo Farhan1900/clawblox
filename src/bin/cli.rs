@@ -57,6 +57,7 @@ use clawblox::{
     replay_agent_log::{load_agent_timeline, ReplayAgentMessage, ReplayAgentTimeline},
     replay_metadata::{self, ReplayMetadata},
     snapshot::GameInstanceSnapshot,
+    world_runner::{run_external_world_blocking, ExternalWorldCommand},
 };
 
 static DOCS_DIR: Dir = include_dir!("$CARGO_MANIFEST_DIR/docs");
@@ -1791,7 +1792,14 @@ fn run_game(
                 );
                 std::process::exit(1);
             }
-            run_external_world_command(&path, command, port);
+            run_external_world_command(
+                &path,
+                command,
+                port,
+                record,
+                record_dir.as_ref(),
+                resume.as_ref(),
+            );
             return;
         }
     }
@@ -2796,18 +2804,18 @@ fn run_external_runtime(
     });
 }
 
-fn run_external_world_command(path: &Path, command: &[String], port: u16) {
-    let executable = command.first().cloned().unwrap_or_default();
-    if executable.trim().is_empty() {
-        eprintln!("Error: world.toml [run].command[0] must be a non-empty executable");
-        std::process::exit(1);
-    }
-    let args: Vec<String> = command.iter().skip(1).cloned().collect();
-
+fn run_external_world_command(
+    path: &Path,
+    command: &[String],
+    port: u16,
+    record: bool,
+    record_dir: Option<&PathBuf>,
+    resume: Option<&PathBuf>,
+) {
     println!("Delegating run to world.toml [run].command");
-    println!("Command: {} {}", executable, args.join(" "));
+    println!("Command: {}", command.join(" "));
     println!(
-        "Environment: CLAWBLOX_PORT={} (current dir: {})",
+        "Environment: WORLD_PORT={} (current dir: {})",
         port,
         path.display()
     );
@@ -2817,19 +2825,21 @@ fn run_external_world_command(path: &Path, command: &[String], port: u16) {
         .map(|p| p.to_string_lossy().to_string())
         .unwrap_or_else(|| "clawblox".to_string());
 
-    let status = Command::new(&executable)
-        .args(&args)
-        .current_dir(path)
-        .env("CLAWBLOX_PORT", port.to_string())
-        .env("CLAWBLOX_BIN", current_exe)
-        .status()
-        .unwrap_or_else(|e| {
-            eprintln!(
-                "Error: failed to start run.command executable '{}': {}",
-                executable, e
-            );
-            std::process::exit(1);
-        });
+    let spec = ExternalWorldCommand {
+        world_dir: path.to_path_buf(),
+        command: command.to_vec(),
+        port,
+        base_path: "/".to_string(),
+        record,
+        record_dir: record_dir.cloned(),
+        resume: resume.cloned(),
+        clawblox_bin: Some(PathBuf::from(current_exe)),
+    };
+
+    let status = run_external_world_blocking(&spec).unwrap_or_else(|err| {
+        eprintln!("Error: {err}");
+        std::process::exit(1);
+    });
 
     if !status.success() {
         if let Some(code) = status.code() {

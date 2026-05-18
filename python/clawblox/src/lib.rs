@@ -11,6 +11,9 @@ use clawblox::agent_runner::{
     send_agent, start_agent, stop_agent, AgentKind, AgentSendOptions, AgentStartOptions,
     AgentStopOptions,
 };
+use clawblox::world_runner::{
+    spawn_external_world, write_external_world_command_file, ExternalWorldCommand,
+};
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
 
@@ -417,8 +420,11 @@ impl PyWorld {
     fn start_env<'py>(&self, py: Python<'py>) -> PyResult<PyObject> {
         let env = if self.uses_run_command() {
             serde_json::json!({
-                "CLAWBLOX_PORT": "{port}",
-                "CLAWBLOX_BIN": "{clawblox_bin}",
+                "WORLD_HOST": "127.0.0.1",
+                "WORLD_PORT": "{port}",
+                "WORLD_BASE_PATH": "{base_path}",
+                "WORLD_RECORD": "{record}",
+                "WORLD_RECORD_DIR": "{record_dir}",
             })
         } else {
             serde_json::json!({})
@@ -441,19 +447,24 @@ impl PyWorld {
     ) -> PyResult<PyWorldStartResult> {
         if let Some(process) = self.process.as_mut() {
             if process.try_wait().map_err(io_error)?.is_none() {
-                return Ok(PyWorldStartResult {
-                    command: build_world_start_argv(
+                let command = if self.uses_run_command() {
+                    self.run_command().unwrap_or_default()
+                } else {
+                    build_world_start_argv(
                         &resolve_clawblox_bin()?,
                         &self.dir,
                         self.running_port()?,
                         &self.base_path,
                         self.record,
                         self.record_dir.as_ref(),
-                    ),
+                    )
+                };
+                return Ok(PyWorldStartResult {
+                    command,
                     start_command: self.start_command(),
                     delegated: self.uses_run_command(),
                     run_command: self.run_command(),
-                    env: self.resolved_start_env(self.running_port()?, &resolve_clawblox_bin()?),
+                    env: self.resolved_start_env(self.running_port()?),
                     url: self.url()?,
                     command_file: self.running_command_file()?,
                     log_file: self.running_log_file()?,
@@ -471,11 +482,6 @@ impl PyWorld {
                 "world.toml [run].command is configured, so base_path must be '/'".to_string(),
             ));
         }
-        if self.uses_run_command() && record {
-            return Err(PyAgentError::new_err(
-                "world.toml [run].command is configured, so Clawblox recording is not available for this world start".to_string(),
-            ));
-        }
         self.record = record;
         self.record_dir = record_dir;
         self.health_timeout = health_timeout;
@@ -486,57 +492,75 @@ impl PyWorld {
 
         wait_for_port_release(port, Duration::from_secs(self.port_wait))?;
 
-        let bin = resolve_clawblox_bin()?;
-        let command = build_world_start_argv(
-            &bin,
-            &self.dir,
-            port,
-            &self.base_path,
-            self.record,
-            self.record_dir.as_ref(),
-        );
         let command_file = self.running_command_file()?;
         let log_file = self.running_log_file()?;
-        write_world_command_file(&command_file, &bin, self)?;
-        if let Some(parent) = log_file.parent() {
-            std::fs::create_dir_all(parent).map_err(io_error)?;
-        }
-        let log = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&log_file)
-            .map_err(io_error)?;
-        let err_log = log.try_clone().map_err(io_error)?;
-        let child = Command::new(&bin)
-            .arg("run")
-            .arg(&self.dir)
-            .arg("--port")
-            .arg(port.to_string())
-            .arg("--base-path")
-            .arg(&self.base_path)
-            .args(if self.record {
-                vec!["--record"]
-            } else {
-                vec![]
-            })
-            .args(
-                self.record_dir
-                    .as_ref()
-                    .map(|path| vec!["--record-dir".to_string(), path.display().to_string()])
-                    .unwrap_or_default(),
-            )
-            .stdout(Stdio::from(log))
-            .stderr(Stdio::from(err_log))
-            .spawn()
-            .map_err(|err| {
+        let command = if self.uses_run_command() {
+            let spec = self.external_world_command(port)?;
+            write_external_world_command_file(&command_file, &spec, Some(&log_file))
+                .map_err(io_error)?;
+            let child = spawn_external_world(&spec, Some(&log_file)).map_err(|err| {
                 PyAgentError::new_err(format!(
-                    "failed to start world command {}: {err}\ncommand file: {}\nlog file: {}",
-                    bin.display(),
+                    "{err}\ncommand file: {}\nlog file: {}",
                     command_file.display(),
                     log_file.display()
                 ))
             })?;
-        self.process = Some(child);
+            self.process = Some(child);
+            spec.command
+        } else {
+            let bin = resolve_clawblox_bin()?;
+            let command = build_world_start_argv(
+                &bin,
+                &self.dir,
+                port,
+                &self.base_path,
+                self.record,
+                self.record_dir.as_ref(),
+            );
+            write_world_command_file(&command_file, &bin, self)?;
+            if let Some(parent) = log_file.parent() {
+                std::fs::create_dir_all(parent).map_err(io_error)?;
+            }
+            let log = OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&log_file)
+                .map_err(io_error)?;
+            let err_log = log.try_clone().map_err(io_error)?;
+            let child = Command::new(&bin)
+                .arg("run")
+                .arg(&self.dir)
+                .arg("--port")
+                .arg(port.to_string())
+                .arg("--base-path")
+                .arg(&self.base_path)
+                .args(if self.record {
+                    vec!["--record"]
+                } else {
+                    vec![]
+                })
+                .args(
+                    self.record_dir
+                        .as_ref()
+                        .map(|path| {
+                            vec!["--record-dir".to_string(), path.display().to_string()]
+                        })
+                        .unwrap_or_default(),
+                )
+                .stdout(Stdio::from(log))
+                .stderr(Stdio::from(err_log))
+                .spawn()
+                .map_err(|err| {
+                    PyAgentError::new_err(format!(
+                        "failed to start world command {}: {err}\ncommand file: {}\nlog file: {}",
+                        bin.display(),
+                        command_file.display(),
+                        log_file.display()
+                    ))
+                })?;
+            self.process = Some(child);
+            command
+        };
 
         let health_path = join_url_path(&self.base_path, "/api.md");
         let deadline = Instant::now() + Duration::from_secs(self.health_timeout);
@@ -558,7 +582,7 @@ impl PyWorld {
                     start_command: self.start_command(),
                     delegated: self.uses_run_command(),
                     run_command: self.run_command(),
-                    env: self.resolved_start_env(port, &bin),
+                    env: self.resolved_start_env(port),
                     url: self.url()?,
                     command_file,
                     log_file,
@@ -681,12 +705,39 @@ impl PyWorld {
         )
     }
 
-    fn resolved_start_env(&self, port: u16, bin: &PathBuf) -> Vec<(String, String)> {
+    fn external_world_command(&self, port: u16) -> PyResult<ExternalWorldCommand> {
+        Ok(ExternalWorldCommand {
+            world_dir: self.dir.clone(),
+            command: self.run_command().ok_or_else(|| {
+                PyAgentError::new_err("world.toml [run].command is not configured".to_string())
+            })?,
+            port,
+            base_path: self.base_path.clone(),
+            record: self.record,
+            record_dir: self.record_dir.clone(),
+            resume: None,
+            clawblox_bin: None,
+        })
+    }
+
+    fn resolved_start_env(&self, port: u16) -> Vec<(String, String)> {
         if self.uses_run_command() {
-            vec![
-                ("CLAWBLOX_PORT".to_string(), port.to_string()),
-                ("CLAWBLOX_BIN".to_string(), bin.display().to_string()),
-            ]
+            let mut env = vec![
+                ("WORLD_HOST".to_string(), "127.0.0.1".to_string()),
+                ("WORLD_PORT".to_string(), port.to_string()),
+                ("WORLD_BASE_PATH".to_string(), self.base_path.clone()),
+                (
+                    "WORLD_RECORD".to_string(),
+                    if self.record { "true" } else { "false" }.to_string(),
+                ),
+            ];
+            if let Some(record_dir) = &self.record_dir {
+                env.push((
+                    "WORLD_RECORD_DIR".to_string(),
+                    record_dir.display().to_string(),
+                ));
+            }
+            env
         } else {
             Vec::new()
         }

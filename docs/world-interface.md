@@ -86,8 +86,23 @@ startup with:
 command = ["bash", "./run-stack.sh"]
 ```
 
-That is enough to launch some external worlds because `clawblox run` passes
-`CLAWBLOX_PORT` and `CLAWBLOX_BIN`.
+That is enough to launch external worlds because `clawblox run` starts the
+command with a small environment contract:
+
+```text
+WORLD_HOST
+WORLD_PORT
+WORLD_BASE_PATH
+WORLD_RECORD
+WORLD_RECORD_DIR
+WORLD_RESUME_PATH
+CLAWBLOX_BIN
+```
+
+External runtimes should treat `WORLD_*` values as defaults. Explicit command
+line flags should still override environment defaults. `CLAWBLOX_BIN` is
+namespaced because it points back to the Clawblox executable rather than to a
+world runtime setting.
 
 If we add schema, it should be justified by engine-agnostic needs that the
 current schema cannot express clearly:
