@@ -1241,8 +1241,8 @@ const CLAUDE_SESSION_START_SH: &str = r#"#!/usr/bin/env bash
 set -euo pipefail
 
 input="$(cat)"
-session_id="$(INPUT_JSON="$input" node -e 'const data = JSON.parse(process.env.INPUT_JSON ?? "{}"); process.stdout.write(String(data.session_id ?? ""));')"
-transcript_path="$(INPUT_JSON="$input" node -e 'const data = JSON.parse(process.env.INPUT_JSON ?? "{}"); process.stdout.write(String(data.transcript_path ?? ""));')"
+session_id="$(INPUT_JSON="$input" node -e 'var data = JSON.parse(process.env.INPUT_JSON || "{}"); process.stdout.write(String(data.session_id || ""));')"
+transcript_path="$(INPUT_JSON="$input" node -e 'var data = JSON.parse(process.env.INPUT_JSON || "{}"); process.stdout.write(String(data.transcript_path || ""));')"
 log_dir="${CLAWBLOX_CLAUDE_LOG_DIR:-}"
 metadata_file="${CLAWBLOX_CLAUDE_METADATA_FILE:-}"
 
@@ -1267,7 +1267,7 @@ const CLAUDE_SESSION_END_SH: &str = r#"#!/usr/bin/env bash
 set -euo pipefail
 
 input="$(cat)"
-session_id="$(INPUT_JSON="$input" node -e 'const data = JSON.parse(process.env.INPUT_JSON ?? "{}"); process.stdout.write(String(data.session_id ?? ""));')"
+session_id="$(INPUT_JSON="$input" node -e 'var data = JSON.parse(process.env.INPUT_JSON || "{}"); process.stdout.write(String(data.session_id || ""));')"
 log_dir="${CLAWBLOX_CLAUDE_LOG_DIR:-}"
 
 if [[ -n "$log_dir" ]]; then
@@ -1284,7 +1284,7 @@ set -euo pipefail
 
 input="$(cat)"
 log_dir="${CLAWBLOX_CLAUDE_LOG_DIR:-}"
-session_id="$(INPUT_JSON="$input" node -e 'const data = JSON.parse(process.env.INPUT_JSON ?? "{}"); process.stdout.write(String(data.session_id ?? ""));')"
+session_id="$(INPUT_JSON="$input" node -e 'var data = JSON.parse(process.env.INPUT_JSON || "{}"); process.stdout.write(String(data.session_id || ""));')"
 
 if [[ -n "$log_dir" ]]; then
   mkdir -p "$log_dir"
@@ -1485,6 +1485,14 @@ mod tests {
         assert!(start.args.contains(&"--session-id".to_string()));
         assert!(ctx.paths.session_id_file.is_file());
         assert!(claude_plugin_dir(&ctx).join("bin/stop.sh").is_file());
+        for hook in ["session_start.sh", "session_end.sh", "stop.sh"] {
+            let script =
+                std::fs::read_to_string(claude_plugin_dir(&ctx).join("bin").join(hook)).unwrap();
+            assert!(
+                !script.contains("??") && !script.contains("?."),
+                "{hook} should stay compatible with older Node runtimes"
+            );
+        }
         assert!(start.env.contains(&(
             "CLAUDE_AUTO_LOOP_MESSAGE".to_string(),
             "Keep going".to_string()

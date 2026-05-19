@@ -356,14 +356,15 @@ def build_system_prompt(
     api_access: dict,
     skill_path: str,
 ) -> str:
+    world_base_url = api_access.get("base_url") or world.url
     prompt = render_system_prompt_template(
         SYSTEM_PROMPT_TEMPLATE,
         world_agent_name=agent.name,
         workspace_dir=agent.visible_workspace_dir,
         session_line=api_headers_text(api_access),
-        world_base_url=world.url,
+        world_base_url=world_base_url,
         skill_curl=api_curl(api_access),
-        skill_url=f"{world.url}{skill_path}",
+        skill_url=f"{world_base_url}{skill_path}",
     )
 
     if SKIP_SOUL:
