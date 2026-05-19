@@ -32,6 +32,18 @@ struct ExternalReplayManifest {
     command: Vec<String>,
     #[serde(default)]
     cwd: Option<String>,
+    #[serde(default)]
+    agents: Vec<ExternalReplayAgentManifest>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ExternalReplayAgentManifest {
+    #[serde(default)]
+    id: Option<String>,
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    transcript: Option<String>,
 }
 
 #[derive(Clone)]
@@ -41,6 +53,7 @@ struct ExternalReplaySession {
     recording_path: PathBuf,
     manifest_path: PathBuf,
     format: Option<String>,
+    agent_timeline: Option<Arc<ReplayAgentTimeline>>,
 }
 
 struct ExternalReplayProcess {
@@ -723,6 +736,86 @@ async fn wait_for_external_replay(
     }
 }
 
+async fn external_replay_info(url: &str) -> Result<serde_json::Value, String> {
+    let info_url = join_external_replay_url(url, "/replay/info");
+    let resp = reqwest::Client::new()
+        .get(&info_url)
+        .send()
+        .await
+        .map_err(|e| format!("external replay info request failed '{}': {}", info_url, e))?;
+    if !resp.status().is_success() {
+        return Err(format!(
+            "external replay info request '{}' returned {}",
+            info_url,
+            resp.status()
+        ));
+    }
+    resp.json::<serde_json::Value>().await.map_err(|e| {
+        format!(
+            "external replay info response was not JSON '{}': {}",
+            info_url, e
+        )
+    })
+}
+
+fn load_external_agent_timeline(
+    manifest: &ExternalReplayManifest,
+    manifest_dir: &Path,
+    info: &serde_json::Value,
+) -> Option<Arc<ReplayAgentTimeline>> {
+    let tick_rate = info
+        .get("tick_rate")
+        .and_then(|value| value.as_u64())
+        .and_then(|value| u32::try_from(value).ok())
+        .unwrap_or(60);
+    let first_tick = info
+        .get("first_tick")
+        .and_then(|value| value.as_u64())
+        .unwrap_or(0);
+    let mut messages = Vec::new();
+    let mut anchor_count = 0usize;
+
+    for agent in &manifest.agents {
+        let Some(transcript) = agent.transcript.as_deref() else {
+            continue;
+        };
+        let path = resolve_manifest_path(manifest_dir, transcript);
+        match load_agent_timeline(&path, tick_rate, first_tick) {
+            Ok(timeline) => {
+                anchor_count += timeline.anchor_count;
+                messages.extend(timeline.messages);
+            }
+            Err(err) => {
+                let label = agent
+                    .name
+                    .as_deref()
+                    .or(agent.id.as_deref())
+                    .unwrap_or("agent");
+                eprintln!(
+                    "Warning: failed to load external replay transcript for {} '{}': {}",
+                    label,
+                    path.display(),
+                    err
+                );
+            }
+        }
+    }
+
+    if messages.is_empty() {
+        return None;
+    }
+    messages.sort_by(|a, b| {
+        a.tick
+            .partial_cmp(&b.tick)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| a.timestamp_ms.cmp(&b.timestamp_ms))
+    });
+    Some(Arc::new(ReplayAgentTimeline {
+        messages,
+        anchor_count,
+    }))
+}
+
 async fn open_external_replay_manifest(
     manifest_path: PathBuf,
 ) -> Result<ExternalReplaySession, String> {
@@ -809,6 +902,8 @@ async fn open_external_replay_manifest(
     });
     let url = format!("http://127.0.0.1:{}/", port);
     wait_for_external_replay(&url, &process).await?;
+    let info = external_replay_info(&url).await?;
+    let agent_timeline = load_external_agent_timeline(&manifest, &manifest_dir, &info);
 
     Ok(ExternalReplaySession {
         _process: process,
@@ -816,6 +911,7 @@ async fn open_external_replay_manifest(
         recording_path,
         manifest_path,
         format: manifest.format,
+        agent_timeline,
     })
 }
 
@@ -1117,12 +1213,21 @@ async fn app_replay_agent_messages(
             .tick
             .or_else(|| info.as_ref()?.get("current_tick")?.as_u64())
             .unwrap_or(0);
+        let Some(timeline) = session.agent_timeline.as_ref() else {
+            return Ok(Json(ReplayAgentMessagesResponse {
+                enabled: false,
+                current_tick,
+                start_tick: 0,
+                end_tick: current_tick,
+                messages: Vec::new(),
+            }));
+        };
         return Ok(Json(ReplayAgentMessagesResponse {
-            enabled: false,
+            enabled: true,
             current_tick,
             start_tick: 0,
             end_tick: current_tick,
-            messages: Vec::new(),
+            messages: timeline.messages.clone(),
         }));
     }
     let replay_state = get_app_replay_state(&state, &id)?;
