@@ -67,6 +67,11 @@ impl SandboxLayout {
         self
     }
 
+    pub fn with_host_deps_root(mut self, root: Option<PathBuf>) -> Self {
+        self.host_deps_root = root;
+        self
+    }
+
     pub fn with_codex_binary_root(mut self, host_root: PathBuf, rel: PathBuf) -> Self {
         self.host_binary_root = Some(host_root);
         self.guest_binary_root = Some(PathBuf::from("/sandbox-codex"));
@@ -108,6 +113,34 @@ pub fn validate_runtime(layout: &SandboxLayout) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+pub fn detect_sandbox_deps_root(kind: SandboxAgentKind) -> Result<Option<PathBuf>, String> {
+    if let Some(root) = std::env::var_os("SANDBOX_DEPS_ROOT").map(PathBuf::from) {
+        return Ok(Some(root));
+    }
+    if kind != SandboxAgentKind::Claude {
+        return Ok(None);
+    }
+
+    let bwrap = find_program("bwrap", "bubblewrap (bwrap)")?;
+    let socat = find_program("socat", "socat for Claude Code's native Linux sandbox")?;
+    let bwrap_root = program_prefix_root(&bwrap)?;
+    let socat_root = program_prefix_root(&socat)?;
+    let bwrap_non_system = non_system_prefix(&bwrap_root);
+    let socat_non_system = non_system_prefix(&socat_root);
+
+    match (bwrap_non_system, socat_non_system) {
+        (false, false) => Ok(None),
+        (true, false) => Ok(Some(bwrap_root)),
+        (false, true) => Ok(Some(socat_root)),
+        (true, true) if bwrap_root == socat_root => Ok(Some(bwrap_root)),
+        (true, true) => Err(format!(
+            "bwrap and socat are in different non-system prefixes; set SANDBOX_DEPS_ROOT explicitly.\n  bwrap root: {}\n  socat root: {}",
+            bwrap_root.display(),
+            socat_root.display()
+        )),
+    }
 }
 
 pub fn wrap_command(
@@ -334,15 +367,35 @@ fn sandbox_path(ctx: &AgentContext, layout: &SandboxLayout) -> String {
 }
 
 fn require_program(name: &str, label: &str) -> Result<(), String> {
+    find_program(name, label).map(|_| ())
+}
+
+fn find_program(name: &str, label: &str) -> Result<PathBuf, String> {
     let Some(paths) = std::env::var_os("PATH") else {
         return Err(format!("{label} was not found in PATH"));
     };
     for dir in std::env::split_paths(&paths) {
         if dir.join(name).exists() {
-            return Ok(());
+            return Ok(dir.join(name));
         }
     }
     Err(format!("{label} was not found in PATH"))
+}
+
+fn program_prefix_root(path: &Path) -> Result<PathBuf, String> {
+    let path = std::fs::canonicalize(path)
+        .map_err(|err| format!("failed to canonicalize {}: {err}", path.display()))?;
+    let bin_dir = path
+        .parent()
+        .ok_or_else(|| format!("failed to find parent directory for {}", path.display()))?;
+    Ok(bin_dir
+        .parent()
+        .unwrap_or_else(|| Path::new("/"))
+        .to_path_buf())
+}
+
+fn non_system_prefix(root: &Path) -> bool {
+    root != Path::new("/") && root != Path::new("/usr")
 }
 
 fn agent_dir_from_context(ctx: &AgentContext) -> PathBuf {

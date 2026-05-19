@@ -13,7 +13,9 @@ use crate::agent::{
     Agent, AgentContext, AgentPaths, AgentSettings, ClaudeAgent, CodexAgent, CommandSpec,
 };
 use crate::agent_recovery::{start_agent_recovery_watchdog, AgentRecoveryConfig};
-use crate::agent_sandbox::{wrap_command, SandboxAgentKind, SandboxLayout};
+use crate::agent_sandbox::{
+    detect_sandbox_deps_root, wrap_command, SandboxAgentKind, SandboxLayout,
+};
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum AgentKind {
@@ -120,6 +122,17 @@ struct ActiveAgent {
     tmux_window: Option<String>,
     command_file: PathBuf,
     started_at: String,
+}
+
+#[derive(Clone, Debug)]
+struct ProcessEventContext {
+    agent_name: String,
+    agent_kind: String,
+    agent_dir: PathBuf,
+    events_file: PathBuf,
+    log_file: PathBuf,
+    tmux_session: Option<String>,
+    command_file: PathBuf,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -293,8 +306,20 @@ pub fn start_agent(options: AgentStartOptions) -> Result<StartedAgent, String> {
         command
     };
     let command_file = ctx.paths.runtime_dir.join("start.sh");
-    let shell_command = command_spec_to_shell(&command);
-    if let Err(err) = write_command_file(&command_file, &shell_command) {
+    let shell_command = command_spec_to_shell(&command, false);
+    if let Err(err) = write_agent_command_file(
+        &command_file,
+        &shell_command,
+        &ProcessEventContext {
+            agent_name: options.name.clone(),
+            agent_kind: agent.name().to_string(),
+            agent_dir: agent_dir.clone(),
+            events_file: events_file.clone(),
+            log_file: ctx.paths.log_file.clone(),
+            tmux_session: Some(tmux_session.clone()),
+            command_file: command_file.clone(),
+        },
+    ) {
         let message = format!(
             "failed to write command file {}: {err}",
             command_file.display()
@@ -566,8 +591,20 @@ pub fn send_agent(options: AgentSendOptions) -> Result<StartedAgent, String> {
         command
     };
     let command_file = ctx.paths.runtime_dir.join("send.sh");
-    let shell_command = command_spec_to_shell(&command);
-    if let Err(err) = write_command_file(&command_file, &shell_command) {
+    let shell_command = command_spec_to_shell(&command, false);
+    if let Err(err) = write_agent_command_file(
+        &command_file,
+        &shell_command,
+        &ProcessEventContext {
+            agent_name: options.name.clone(),
+            agent_kind: agent.name().to_string(),
+            agent_dir: agent_dir.clone(),
+            events_file: events_file.clone(),
+            log_file: ctx.paths.log_file.clone(),
+            tmux_session: Some(tmux_session.clone()),
+            command_file: command_file.clone(),
+        },
+    ) {
         let message = format!(
             "failed to write command file {}: {err}",
             command_file.display()
@@ -876,6 +913,7 @@ fn build_sandbox_layout(
         AgentKind::Codex => SandboxAgentKind::Codex,
     };
     let mut layout = SandboxLayout::for_agent(ctx, sandbox_kind, host_binary.clone())
+        .with_host_deps_root(detect_sandbox_deps_root(sandbox_kind)?)
         .with_hosts_file(ctx.paths.runtime_dir.join("sandbox_hosts"));
     match kind {
         AgentKind::Claude => {
@@ -1142,6 +1180,7 @@ fn kill_tmux_target(tmux_session: &str, tmux_window: Option<&str>) {
     let _ = command.status();
 }
 
+#[cfg(test)]
 fn write_command_file(path: &Path, shell_command: &str) -> std::io::Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
@@ -1149,6 +1188,80 @@ fn write_command_file(path: &Path, shell_command: &str) -> std::io::Result<()> {
     std::fs::write(
         path,
         format!("#!/usr/bin/env bash\nset -euo pipefail\n{shell_command}\n"),
+    )?;
+    make_executable(path)
+}
+
+fn write_agent_command_file(
+    path: &Path,
+    shell_command: &str,
+    event: &ProcessEventContext,
+) -> std::io::Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let tmux_session = event.tmux_session.as_deref().unwrap_or("");
+    std::fs::write(
+        path,
+        format!(
+            "#!/usr/bin/env bash\n\
+set -uo pipefail\n\
+CLAWBLOX_AGENT_NAME={agent_name}\n\
+CLAWBLOX_AGENT_KIND={agent_kind}\n\
+CLAWBLOX_AGENT_DIR={agent_dir}\n\
+CLAWBLOX_AGENT_EVENTS_FILE={events_file}\n\
+CLAWBLOX_AGENT_LOG_FILE={log_file}\n\
+CLAWBLOX_AGENT_TMUX_SESSION={tmux_session}\n\
+CLAWBLOX_AGENT_COMMAND_FILE={command_file}\n\
+json_escape() {{\n\
+  local s=${{1-}}\n\
+  s=${{s//\\\\/\\\\\\\\}}\n\
+  s=${{s//\\\"/\\\\\\\"}}\n\
+  s=${{s//$'\\n'/\\\\n}}\n\
+  s=${{s//$'\\r'/\\\\r}}\n\
+  s=${{s//$'\\t'/\\\\t}}\n\
+  printf '%s' \"$s\"\n\
+}}\n\
+append_process_event() {{\n\
+  local status=$1 exit_code=$2 error_json=$3 now\n\
+  now=$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u)\n\
+  mkdir -p \"$(dirname \"$CLAWBLOX_AGENT_EVENTS_FILE\")\" \"$(dirname \"$CLAWBLOX_AGENT_LOG_FILE\")\"\n\
+  printf '{{\"time\":\"%s\",\"operation\":\"agent.process\",\"status\":\"%s\",\"agent_name\":\"%s\",\"agent_kind\":\"%s\",\"agent_dir\":\"%s\",\"tmux_session\":%s,\"attach_command\":%s,\"command_file\":\"%s\",\"log_file\":\"%s\",\"events_file\":\"%s\",\"exit_code\":%s,\"error\":%s}}\\n' \\\n\
+    \"$(json_escape \"$now\")\" \\\n\
+    \"$(json_escape \"$status\")\" \\\n\
+    \"$(json_escape \"$CLAWBLOX_AGENT_NAME\")\" \\\n\
+    \"$(json_escape \"$CLAWBLOX_AGENT_KIND\")\" \\\n\
+    \"$(json_escape \"$CLAWBLOX_AGENT_DIR\")\" \\\n\
+    \"$(if [[ -n \"$CLAWBLOX_AGENT_TMUX_SESSION\" ]]; then printf '\\\"%s\\\"' \"$(json_escape \"$CLAWBLOX_AGENT_TMUX_SESSION\")\"; else printf 'null'; fi)\" \\\n\
+    \"$(if [[ -n \"$CLAWBLOX_AGENT_TMUX_SESSION\" ]]; then printf '\\\"tmux attach -t %s\\\"' \"$(json_escape \"$CLAWBLOX_AGENT_TMUX_SESSION\")\"; else printf 'null'; fi)\" \\\n\
+    \"$(json_escape \"$CLAWBLOX_AGENT_COMMAND_FILE\")\" \\\n\
+    \"$(json_escape \"$CLAWBLOX_AGENT_LOG_FILE\")\" \\\n\
+    \"$(json_escape \"$CLAWBLOX_AGENT_EVENTS_FILE\")\" \\\n\
+    \"$exit_code\" \\\n\
+    \"$error_json\" >>\"$CLAWBLOX_AGENT_EVENTS_FILE\"\n\
+}}\n\
+append_process_event running null null\n\
+printf '[clawblox] agent process starting: %s\\n' \"$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u)\" >>\"$CLAWBLOX_AGENT_LOG_FILE\"\n\
+set +e\n\
+{shell_command}\n\
+status=$?\n\
+set -e\n\
+if [[ \"$status\" -eq 0 ]]; then\n\
+  append_process_event exited \"$status\" null\n\
+else\n\
+  error=\"agent command exited with status $status\"\n\
+  printf '[clawblox] %s\\n' \"$error\" >>\"$CLAWBLOX_AGENT_LOG_FILE\"\n\
+  append_process_event exited \"$status\" \"\\\"$(json_escape \"$error\")\\\"\"\n\
+fi\n\
+exit \"$status\"\n",
+            agent_name = shell_quote(&event.agent_name),
+            agent_kind = shell_quote(&event.agent_kind),
+            agent_dir = shell_quote(&event.agent_dir.display().to_string()),
+            events_file = shell_quote(&event.events_file.display().to_string()),
+            log_file = shell_quote(&event.log_file.display().to_string()),
+            tmux_session = shell_quote(tmux_session),
+            command_file = shell_quote(&event.command_file.display().to_string()),
+        ),
     )?;
     make_executable(path)
 }
@@ -1311,12 +1424,14 @@ fn utc_now() -> String {
     Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true)
 }
 
-fn command_spec_to_shell(command: &CommandSpec) -> String {
+fn command_spec_to_shell(command: &CommandSpec, exec_program: bool) -> String {
     let mut parts = Vec::new();
     parts.push("cd".to_string());
     parts.push(shell_quote(&command.cwd.display().to_string()));
     parts.push("&&".to_string());
-    parts.push("exec".to_string());
+    if exec_program {
+        parts.push("exec".to_string());
+    }
     if !command.env.is_empty() {
         parts.push("env".to_string());
         for (key, value) in &command.env {
@@ -1391,7 +1506,7 @@ mod tests {
         };
 
         assert_eq!(
-            command_spec_to_shell(&command),
+            command_spec_to_shell(&command, true),
             "cd '/tmp/a b' && exec env A='b c' '/bin/echo' 'hello world' 'it'\\''s ok'"
         );
     }
@@ -1413,7 +1528,7 @@ mod tests {
             ],
             cwd: PathBuf::from("/tmp"),
         };
-        let shell = command_spec_to_shell(&command);
+        let shell = command_spec_to_shell(&command, true);
 
         assert!(!shell.contains("super-secret"));
         assert!(shell.contains(
@@ -1438,6 +1553,43 @@ mod tests {
         let contents = std::fs::read_to_string(&command_file).unwrap();
         assert!(contents.starts_with("#!/usr/bin/env bash\nset -euo pipefail\n"));
         assert!(contents.contains("exec '/bin/echo' 'hi'"));
+    }
+
+    #[test]
+    fn agent_command_files_record_process_exit() {
+        let root = test_root();
+        let command_file = root.join("runtime/start.sh");
+        let events_file = root.join("events.jsonl");
+        let log_file = root.join("logs/agent.log");
+        let event = ProcessEventContext {
+            agent_name: "Eko".to_string(),
+            agent_kind: "claude".to_string(),
+            agent_dir: root.clone(),
+            events_file: events_file.clone(),
+            log_file,
+            tmux_session: Some("test-session".to_string()),
+            command_file: command_file.clone(),
+        };
+
+        write_agent_command_file(&command_file, "cd '/' && /bin/sh -c 'exit 7'", &event).unwrap();
+        let status = std::process::Command::new("bash")
+            .arg(&command_file)
+            .status()
+            .unwrap();
+
+        assert_eq!(status.code(), Some(7));
+        let lines: Vec<serde_json::Value> = std::fs::read_to_string(events_file)
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        assert_eq!(lines[0]["operation"], "agent.process");
+        assert_eq!(lines[0]["status"], "running");
+        assert!(lines[0]["exit_code"].is_null());
+        assert_eq!(lines[1]["operation"], "agent.process");
+        assert_eq!(lines[1]["status"], "exited");
+        assert_eq!(lines[1]["exit_code"], 7);
+        assert_eq!(lines[1]["error"], "agent command exited with status 7");
     }
 
     #[test]
