@@ -2,7 +2,7 @@ use std::{
     fs::OpenOptions,
     io::{Read, Write},
     net::TcpStream,
-    path::PathBuf,
+    path::{Path, PathBuf},
     process::{Child, Command, Stdio},
     sync::{Arc, Mutex},
     time::{Duration, Instant},
@@ -115,6 +115,7 @@ impl PyAgent {
             .lock()
             .map_err(|_| PyAgentError::new_err("agent world env lock was poisoned".to_string()))?;
         let mut merged = world_env.clone();
+        merged.extend(self.workspace_runtime_env()?);
         merged.append(&mut env);
         Ok(merged)
     }
@@ -126,6 +127,45 @@ impl PyAgent {
             .map_err(|_| PyAgentError::new_err("agent world env lock was poisoned".to_string()))?;
         *world_env = env;
         Ok(())
+    }
+
+    fn prepare_workspace_runtime(&self) -> PyResult<()> {
+        let pyproject = self.workspace_dir().join("pyproject.toml");
+        if !pyproject.is_file() {
+            return Ok(());
+        }
+        if !command_exists("uv") {
+            return Err(PyAgentError::new_err(format!(
+                "workspace has pyproject.toml, but uv was not found in PATH: {}",
+                pyproject.display()
+            )));
+        }
+        if self.sandbox && command_exists("bwrap") {
+            run_workspace_uv_sync_in_sandbox(&self.workspace_dir(), &self.runtime_dir())
+        } else {
+            run_workspace_uv_sync_on_host(&self.workspace_dir(), &self.runtime_dir())
+        }
+    }
+
+    fn workspace_runtime_env(&self) -> PyResult<Vec<(String, String)>> {
+        if !self.workspace_dir().join(".venv").is_dir() {
+            return Ok(Vec::new());
+        }
+        if self.sandbox {
+            return Ok(Vec::new());
+        }
+        let venv = self.workspace_dir().join(".venv");
+        let path = std::env::var_os("PATH")
+            .map(|value| value.to_string_lossy().to_string())
+            .unwrap_or_default();
+        Ok(vec![
+            ("VIRTUAL_ENV".to_string(), venv.display().to_string()),
+            (
+                "PATH".to_string(),
+                format!("{}:{path}", venv.join("bin").display()),
+            ),
+            ("PYTHONNOUSERSITE".to_string(), "1".to_string()),
+        ])
     }
 }
 
@@ -215,6 +255,7 @@ impl PyAgent {
         system_prompt: String,
         env: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<PyAgentStartResult> {
+        self.prepare_workspace_runtime()?;
         let env = self.merged_env(dict_to_env(env)?)?;
         let kind = parse_agent_kind(&self.agent)?;
         let run_tmux = self.hidden_run_tmux()?;
@@ -1275,6 +1316,138 @@ fn command_exists(program: &str) -> bool {
     std::env::var_os("PATH")
         .map(|paths| std::env::split_paths(&paths).any(|dir| dir.join(program).exists()))
         .unwrap_or(false)
+}
+
+fn run_workspace_uv_sync_on_host(workspace_dir: &Path, runtime_dir: &Path) -> PyResult<()> {
+    std::fs::create_dir_all(runtime_dir).map_err(io_error)?;
+    let mut command = Command::new("uv");
+    command
+        .args([
+            "sync",
+            "--no-install-project",
+            "--no-dev",
+            "--link-mode",
+            "copy",
+        ])
+        .current_dir(workspace_dir)
+        .env_remove("UV_NO_SYNC")
+        .env_remove("VIRTUAL_ENV")
+        .env("UV_PYTHON_INSTALL_DIR", runtime_dir.join("python"));
+    run_checked(command, "failed to prepare workspace Python environment")
+}
+
+fn run_workspace_uv_sync_in_sandbox(workspace_dir: &Path, runtime_dir: &Path) -> PyResult<()> {
+    std::fs::create_dir_all(workspace_dir).map_err(io_error)?;
+    std::fs::create_dir_all(runtime_dir).map_err(io_error)?;
+    let uv = resolve_program("uv").ok_or_else(|| {
+        PyAgentError::new_err(
+            "workspace has pyproject.toml, but uv was not found in PATH".to_string(),
+        )
+    })?;
+    let mut args = vec![
+        "--ro-bind".to_string(),
+        "/usr".to_string(),
+        "/usr".to_string(),
+        "--ro-bind".to_string(),
+        "/bin".to_string(),
+        "/bin".to_string(),
+        "--ro-bind".to_string(),
+        "/sbin".to_string(),
+        "/sbin".to_string(),
+        "--ro-bind".to_string(),
+        "/lib".to_string(),
+        "/lib".to_string(),
+        "--ro-bind".to_string(),
+        "/etc".to_string(),
+        "/etc".to_string(),
+        "--ro-bind".to_string(),
+        "/run".to_string(),
+        "/run".to_string(),
+        "--proc".to_string(),
+        "/proc".to_string(),
+        "--dev".to_string(),
+        "/dev".to_string(),
+        "--tmpfs".to_string(),
+        "/tmp".to_string(),
+        "--dir".to_string(),
+        "/sandbox-bin".to_string(),
+        "--ro-bind".to_string(),
+        uv.display().to_string(),
+        "/sandbox-bin/uv".to_string(),
+        "--bind".to_string(),
+        workspace_dir.display().to_string(),
+        "/workspace".to_string(),
+        "--bind".to_string(),
+        runtime_dir.display().to_string(),
+        "/runtime".to_string(),
+        "--chdir".to_string(),
+        "/workspace".to_string(),
+        "--setenv".to_string(),
+        "PATH".to_string(),
+        "/sandbox-bin:/usr/local/bin:/usr/bin:/bin".to_string(),
+        "--setenv".to_string(),
+        "UV_PYTHON_INSTALL_DIR".to_string(),
+        "/runtime/python".to_string(),
+    ];
+    if Path::new("/lib64").is_dir() {
+        args.extend([
+            "--ro-bind".to_string(),
+            "/lib64".to_string(),
+            "/lib64".to_string(),
+        ]);
+    }
+    if Path::new("/mnt/wsl/resolv.conf").is_file() {
+        args.extend([
+            "--ro-bind".to_string(),
+            "/mnt/wsl/resolv.conf".to_string(),
+            "/mnt/wsl/resolv.conf".to_string(),
+        ]);
+    }
+    args.extend([
+        "--".to_string(),
+        "/sandbox-bin/uv".to_string(),
+        "sync".to_string(),
+        "--no-install-project".to_string(),
+        "--no-dev".to_string(),
+        "--link-mode".to_string(),
+        "copy".to_string(),
+    ]);
+
+    let mut command = Command::new("bwrap");
+    command
+        .args(args)
+        .env_remove("UV_NO_SYNC")
+        .env_remove("VIRTUAL_ENV");
+    run_checked(
+        command,
+        "failed to prepare sandboxed workspace Python environment",
+    )
+}
+
+fn resolve_program(program: &str) -> Option<PathBuf> {
+    let paths = std::env::var_os("PATH")?;
+    for dir in std::env::split_paths(&paths) {
+        let path = dir.join(program);
+        if path.exists() {
+            return Some(path);
+        }
+    }
+    None
+}
+
+fn run_checked(mut command: Command, label: &str) -> PyResult<()> {
+    let output = command
+        .output()
+        .map_err(|err| PyAgentError::new_err(format!("{label}: failed to run command: {err}")))?;
+    if output.status.success() {
+        return Ok(());
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    Err(PyAgentError::new_err(format!(
+        "{label}: command exited with status {}\nstdout:\n{}\nstderr:\n{}",
+        output.status, stdout, stderr
+    )))
 }
 
 fn build_world_start_argv(

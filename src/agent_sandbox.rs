@@ -246,6 +246,9 @@ fn wrap_command_unchecked(
             "--setenv".to_string(),
             "VIRTUAL_ENV".to_string(),
             layout.guest_workspace.join(".venv").display().to_string(),
+            "--setenv".to_string(),
+            "PYTHONNOUSERSITE".to_string(),
+            "1".to_string(),
         ]);
     }
     if layout.kind == SandboxAgentKind::Claude {
@@ -486,6 +489,10 @@ mod tests {
             .args
             .windows(3)
             .any(|window| window == ["--setenv", "VIRTUAL_ENV", "/workspace/.venv"]));
+        assert!(wrapped
+            .args
+            .windows(3)
+            .any(|window| window == ["--setenv", "PYTHONNOUSERSITE", "1"]));
     }
 
     fn has_arg_triple(args: &[String], flag: &str, host: &str, guest: &str) -> bool {
