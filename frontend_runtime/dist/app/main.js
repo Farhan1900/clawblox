@@ -125,6 +125,7 @@ function shortMeta(payload) {
   const parts = []
   const world = String(payload.world_dir || '').split('/').filter(Boolean).pop() || ''
   if (world) parts.push(world)
+  if (payload.replay_format) parts.push(payload.replay_format)
   if (payload.agent_log) parts.push('agent linked')
   return parts.join(' · ')
 }
