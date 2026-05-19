@@ -3,6 +3,7 @@ use std::{
     io::Write,
     path::{Path, PathBuf},
     process::Command,
+    time::{Duration, Instant},
 };
 
 use chrono::{SecondsFormat, Utc};
@@ -11,6 +12,8 @@ use serde::{Deserialize, Serialize};
 use crate::agent::{
     Agent, AgentContext, AgentPaths, AgentSettings, ClaudeAgent, CodexAgent, CommandSpec,
 };
+use crate::agent_recovery::{start_agent_recovery_watchdog, AgentRecoveryConfig};
+use crate::agent_sandbox::{wrap_command, SandboxAgentKind, SandboxLayout};
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum AgentKind {
@@ -42,6 +45,7 @@ pub struct AgentStartOptions {
     pub system_prompt: String,
     pub auto_continue_prompt: String,
     pub tmux_session: Option<String>,
+    pub tmux_window: Option<String>,
     pub env: Vec<(String, String)>,
     pub extra_args: Vec<String>,
     pub sandbox: bool,
@@ -59,6 +63,7 @@ pub struct AgentSendOptions {
     pub prompt: String,
     pub auto_continue_prompt: String,
     pub tmux_session: Option<String>,
+    pub tmux_window: Option<String>,
     pub env: Vec<(String, String)>,
     pub extra_args: Vec<String>,
     pub sandbox: bool,
@@ -75,6 +80,7 @@ pub struct AgentStopOptions {
     pub permission_mode: String,
     pub auto_continue_prompt: String,
     pub tmux_session: Option<String>,
+    pub tmux_window: Option<String>,
     pub env: Vec<(String, String)>,
     pub extra_args: Vec<String>,
     pub sandbox: bool,
@@ -87,6 +93,8 @@ pub struct StartedAgent {
     pub name: String,
     pub kind: &'static str,
     pub tmux_session: String,
+    pub tmux_window: Option<String>,
+    pub tmux_pane_id: Option<String>,
     pub agent_dir: PathBuf,
     pub command_file: PathBuf,
     pub events_file: PathBuf,
@@ -109,6 +117,7 @@ struct ActiveAgent {
     kind: String,
     operation: String,
     tmux_session: String,
+    tmux_window: Option<String>,
     command_file: PathBuf,
     started_at: String,
 }
@@ -161,6 +170,7 @@ pub fn start_agent_tmux_for_local_world(
         auto_continue_prompt: "Please don't stop. Just continue doing whatever you want to do."
             .to_string(),
         tmux_session: options.tmux_session,
+        tmux_window: None,
         env: vec![
             (
                 "WORLD_BASE_URL".to_string(),
@@ -188,7 +198,7 @@ pub fn start_agent(options: AgentStartOptions) -> Result<StartedAgent, String> {
     let runtime_dir = agent_dir.join("runtime");
     let log_dir = agent_dir.join("logs");
     let events_file = agent_dir.join("events.jsonl");
-    let ctx = AgentContext {
+    let mut ctx = AgentContext {
         paths: AgentPaths {
             workspace_dir: agent_dir.join("workspace"),
             prompt_file: runtime_dir.join("system_prompt.md"),
@@ -210,6 +220,7 @@ pub fn start_agent(options: AgentStartOptions) -> Result<StartedAgent, String> {
             env: options.env.clone(),
             sandbox_enabled: options.sandbox,
         },
+        sandbox: None,
     };
 
     if let Err(err) = ctx.prepare_paths() {
@@ -227,6 +238,13 @@ pub fn start_agent(options: AgentStartOptions) -> Result<StartedAgent, String> {
     }
 
     let agent = build_agent(options.kind, options.binary.clone(), options.bare);
+    if options.sandbox {
+        ctx.sandbox = Some(build_sandbox_layout(
+            &ctx,
+            options.kind,
+            options.binary.clone(),
+        )?);
+    }
 
     if let Err(err) = agent.check_setup(&ctx) {
         let message = format!("{} setup failed: {err}", agent.name());
@@ -251,11 +269,12 @@ pub fn start_agent(options: AgentStartOptions) -> Result<StartedAgent, String> {
         .tmux_session
         .clone()
         .unwrap_or_else(|| format!("clawblox-{}-{}", agent.name(), safe_name));
+    let tmux_window = options.tmux_window.clone();
     if let Err(message) = ensure_no_active_agent(&ctx) {
         let _ = append_operation_report(&events_file, failure_report(&ctx, &options, &message));
         return Err(message);
     }
-    if tmux_session_exists(&tmux_session) {
+    if tmux_window.is_none() && tmux_session_exists(&tmux_session) {
         let message = format!(
             "tmux session '{}' already exists. Use --tmux-session or close the old session.",
             tmux_session
@@ -264,6 +283,15 @@ pub fn start_agent(options: AgentStartOptions) -> Result<StartedAgent, String> {
         return Err(message);
     }
 
+    let command = if let Some(layout) = &ctx.sandbox {
+        wrap_command(&ctx, layout, command).map_err(|err| {
+            let message = format!("failed to build {} sandbox command: {err}", agent.name());
+            let _ = append_operation_report(&events_file, failure_report(&ctx, &options, &message));
+            message
+        })?
+    } else {
+        command
+    };
     let command_file = ctx.paths.runtime_dir.join("start.sh");
     let shell_command = command_spec_to_shell(&command);
     if let Err(err) = write_command_file(&command_file, &shell_command) {
@@ -300,21 +328,75 @@ pub fn start_agent(options: AgentStartOptions) -> Result<StartedAgent, String> {
         )
     })?;
 
-    if let Err(err) = start_tmux_session(
+    let pane_id = match start_tmux_target(
         &tmux_session,
+        tmux_window.as_deref(),
         &command_file,
         &ctx.paths.log_file,
         &command.env,
     ) {
-        let message = format!(
-            "{err}\nagent dir: {}\ncommand file: {}\nevents file: {}\nattach: {}",
-            agent_dir.display(),
-            command_file.display(),
-            events_file.display(),
-            attach_command
-        );
-        let _ = append_operation_report(&events_file, failure_report(&ctx, &options, &message));
-        return Err(message);
+        Ok(pane_id) => Some(pane_id),
+        Err(err) => {
+            let message = format!(
+                "{err}\nagent dir: {}\ncommand file: {}\nevents file: {}\nattach: {}",
+                agent_dir.display(),
+                command_file.display(),
+                events_file.display(),
+                attach_command
+            );
+            let _ = append_operation_report(&events_file, failure_report(&ctx, &options, &message));
+            return Err(message);
+        }
+    };
+    if options.kind == AgentKind::Claude && recovery_watchdog_enabled() {
+        if let Some(pane_id) = &pane_id {
+            if let Err(err) = start_agent_recovery_watchdog(AgentRecoveryConfig {
+                pane_id: pane_id.clone(),
+                agent_dir: agent_dir.clone(),
+                command_file: command_file.clone(),
+                agent_log_file: ctx.paths.log_file.clone(),
+                idle_grace_seconds: env_u64("CLAUDE_FAILURE_IDLE_GRACE_SECONDS", 180),
+                stall_grace_seconds: env_u64("CLAUDE_FAILURE_STALL_GRACE_SECONDS", 300),
+                restart_backoff_seconds: env_u64("CLAUDE_FAILURE_RESTART_BACKOFF_SECONDS", 5),
+                poll_seconds: env_u64("CLAUDE_FAILURE_POLL_SECONDS", 2),
+            }) {
+                let _ = append_operation_report(
+                    &events_file,
+                    OperationReport {
+                        time: utc_now(),
+                        operation: "agent.recovery".to_string(),
+                        status: "failed".to_string(),
+                        agent_name: options.name.clone(),
+                        agent_kind: agent.name().to_string(),
+                        agent_dir: agent_dir.clone(),
+                        tmux_session: Some(tmux_session.clone()),
+                        attach_command: Some(attach_command.clone()),
+                        command_file: Some(command_file.clone()),
+                        log_file: Some(ctx.paths.log_file.clone()),
+                        events_file: events_file.clone(),
+                        error: Some(err),
+                    },
+                );
+            } else {
+                let _ = append_operation_report(
+                    &events_file,
+                    OperationReport {
+                        time: utc_now(),
+                        operation: "agent.recovery".to_string(),
+                        status: "started".to_string(),
+                        agent_name: options.name.clone(),
+                        agent_kind: agent.name().to_string(),
+                        agent_dir: agent_dir.clone(),
+                        tmux_session: Some(tmux_session.clone()),
+                        attach_command: Some(attach_command.clone()),
+                        command_file: Some(command_file.clone()),
+                        log_file: Some(ctx.paths.log_file.clone()),
+                        events_file: events_file.clone(),
+                        error: None,
+                    },
+                );
+            }
+        }
     }
     if let Err(err) = write_active_agent(
         &ctx,
@@ -323,6 +405,7 @@ pub fn start_agent(options: AgentStartOptions) -> Result<StartedAgent, String> {
             kind: agent.name().to_string(),
             operation: "agent.start".to_string(),
             tmux_session: tmux_session.clone(),
+            tmux_window: tmux_window.clone(),
             command_file: command_file.clone(),
             started_at: utc_now(),
         },
@@ -363,6 +446,8 @@ pub fn start_agent(options: AgentStartOptions) -> Result<StartedAgent, String> {
         name: options.name,
         kind: agent.name(),
         tmux_session,
+        tmux_window,
+        tmux_pane_id: pane_id,
         agent_dir,
         command_file,
         events_file,
@@ -380,7 +465,7 @@ pub fn send_agent(options: AgentSendOptions) -> Result<StartedAgent, String> {
     let runtime_dir = agent_dir.join("runtime");
     let log_dir = agent_dir.join("logs");
     let events_file = agent_dir.join("events.jsonl");
-    let ctx = AgentContext {
+    let mut ctx = AgentContext {
         paths: AgentPaths {
             workspace_dir: agent_dir.join("workspace"),
             prompt_file: runtime_dir.join("system_prompt.md"),
@@ -402,6 +487,7 @@ pub fn send_agent(options: AgentSendOptions) -> Result<StartedAgent, String> {
             env: options.env.clone(),
             sandbox_enabled: options.sandbox,
         },
+        sandbox: None,
     };
 
     if let Err(err) = ctx.prepare_paths() {
@@ -412,6 +498,13 @@ pub fn send_agent(options: AgentSendOptions) -> Result<StartedAgent, String> {
     }
 
     let agent = build_agent(options.kind, options.binary.clone(), options.bare);
+    if options.sandbox {
+        ctx.sandbox = Some(build_sandbox_layout(
+            &ctx,
+            options.kind,
+            options.binary.clone(),
+        )?);
+    }
 
     if let Err(err) = agent.check_setup(&ctx) {
         let message = format!("{} setup failed: {err}", agent.name());
@@ -441,12 +534,16 @@ pub fn send_agent(options: AgentSendOptions) -> Result<StartedAgent, String> {
         .tmux_session
         .clone()
         .unwrap_or_else(|| format!("clawblox-{}-{}-send", agent.name(), safe_name));
+    let tmux_window = options
+        .tmux_window
+        .as_ref()
+        .map(|window| format!("{window}-send"));
     if let Err(message) = ensure_no_active_agent(&ctx) {
         let _ =
             append_operation_report(&events_file, send_failure_report(&ctx, &options, &message));
         return Err(message);
     }
-    if tmux_session_exists(&tmux_session) {
+    if tmux_window.is_none() && tmux_session_exists(&tmux_session) {
         let message = format!(
             "tmux session '{}' already exists. Stop the current agent process before sending another prompt.",
             tmux_session
@@ -456,6 +553,18 @@ pub fn send_agent(options: AgentSendOptions) -> Result<StartedAgent, String> {
         return Err(message);
     }
 
+    let command = if let Some(layout) = &ctx.sandbox {
+        wrap_command(&ctx, layout, command).map_err(|err| {
+            let message = format!("failed to build {} sandbox command: {err}", agent.name());
+            let _ = append_operation_report(
+                &events_file,
+                send_failure_report(&ctx, &options, &message),
+            );
+            message
+        })?
+    } else {
+        command
+    };
     let command_file = ctx.paths.runtime_dir.join("send.sh");
     let shell_command = command_spec_to_shell(&command);
     if let Err(err) = write_command_file(&command_file, &shell_command) {
@@ -493,23 +602,29 @@ pub fn send_agent(options: AgentSendOptions) -> Result<StartedAgent, String> {
         )
     })?;
 
-    if let Err(err) = start_tmux_session(
+    let pane_id = match start_tmux_target(
         &tmux_session,
+        tmux_window.as_deref(),
         &command_file,
         &ctx.paths.log_file,
         &command.env,
     ) {
-        let message = format!(
-            "{err}\nagent dir: {}\ncommand file: {}\nevents file: {}\nattach: {}",
-            agent_dir.display(),
-            command_file.display(),
-            events_file.display(),
-            attach_command
-        );
-        let _ =
-            append_operation_report(&events_file, send_failure_report(&ctx, &options, &message));
-        return Err(message);
-    }
+        Ok(pane_id) => Some(pane_id),
+        Err(err) => {
+            let message = format!(
+                "{err}\nagent dir: {}\ncommand file: {}\nevents file: {}\nattach: {}",
+                agent_dir.display(),
+                command_file.display(),
+                events_file.display(),
+                attach_command
+            );
+            let _ = append_operation_report(
+                &events_file,
+                send_failure_report(&ctx, &options, &message),
+            );
+            return Err(message);
+        }
+    };
     if let Err(err) = write_active_agent(
         &ctx,
         ActiveAgent {
@@ -517,6 +632,7 @@ pub fn send_agent(options: AgentSendOptions) -> Result<StartedAgent, String> {
             kind: agent.name().to_string(),
             operation: "agent.send".to_string(),
             tmux_session: tmux_session.clone(),
+            tmux_window: tmux_window.clone(),
             command_file: command_file.clone(),
             started_at: utc_now(),
         },
@@ -558,6 +674,8 @@ pub fn send_agent(options: AgentSendOptions) -> Result<StartedAgent, String> {
         name: options.name,
         kind: agent.name(),
         tmux_session,
+        tmux_window,
+        tmux_pane_id: pane_id,
         agent_dir,
         command_file,
         events_file,
@@ -596,6 +714,7 @@ pub fn stop_agent(options: AgentStopOptions) -> Result<StoppedAgent, String> {
             env: options.env.clone(),
             sandbox_enabled: options.sandbox,
         },
+        sandbox: None,
     };
 
     if let Err(err) = ctx.prepare_paths() {
@@ -625,6 +744,10 @@ pub fn stop_agent(options: AgentStopOptions) -> Result<StoppedAgent, String> {
         .as_ref()
         .map(|active| active.tmux_session.clone())
         .or_else(|| options.tmux_session.clone());
+    let tmux_window = active
+        .as_ref()
+        .and_then(|active| active.tmux_window.clone())
+        .or_else(|| options.tmux_window.clone());
 
     append_operation_report(
         &events_file,
@@ -653,16 +776,23 @@ pub fn stop_agent(options: AgentStopOptions) -> Result<StoppedAgent, String> {
     })?;
 
     if let Some(session) = &tmux_session {
-        if tmux_session_exists(session) {
-            send_tmux_ctrl_c(session);
-            std::thread::sleep(std::time::Duration::from_secs(options.grace_seconds));
-            if tmux_session_exists(session) {
-                kill_tmux_session(session);
+        if tmux_target_exists(session, tmux_window.as_deref()) {
+            send_tmux_ctrl_c(session, tmux_window.as_deref());
+            let deadline = Instant::now() + Duration::from_secs(options.grace_seconds);
+            while Instant::now() < deadline {
+                if !tmux_target_exists(session, tmux_window.as_deref()) {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(100));
             }
-            if tmux_session_exists(session) {
+            if tmux_target_exists(session, tmux_window.as_deref()) {
+                kill_tmux_target(session, tmux_window.as_deref());
+            }
+            if tmux_target_exists(session, tmux_window.as_deref()) {
                 let message = format!(
-                    "tmux session '{}' still exists after stop. Attach with: tmux attach -t {}",
-                    session, session
+                    "tmux target '{}' still exists after stop. Attach with: tmux attach -t {}",
+                    tmux_target(session, tmux_window.as_deref()),
+                    session
                 );
                 let _ = append_operation_report(
                     &events_file,
@@ -735,6 +865,114 @@ fn build_agent(kind: AgentKind, binary: Option<PathBuf>, bare: bool) -> Box<dyn 
     }
 }
 
+fn build_sandbox_layout(
+    ctx: &AgentContext,
+    kind: AgentKind,
+    binary: Option<PathBuf>,
+) -> Result<SandboxLayout, String> {
+    let host_binary = resolve_agent_binary(kind, binary)?;
+    let sandbox_kind = match kind {
+        AgentKind::Claude => SandboxAgentKind::Claude,
+        AgentKind::Codex => SandboxAgentKind::Codex,
+    };
+    let mut layout = SandboxLayout::for_agent(ctx, sandbox_kind, host_binary.clone())
+        .with_hosts_file(ctx.paths.runtime_dir.join("sandbox_hosts"));
+    match kind {
+        AgentKind::Claude => {
+            layout = layout.with_claude_plugin();
+        }
+        AgentKind::Codex => {
+            if let Some((root, rel)) = codex_bind_root_for_bin(&host_binary) {
+                layout = layout.with_codex_binary_root(root, rel);
+            }
+            if let Some(root) = node_root_for_path(&host_binary) {
+                layout = layout.with_node_root(root);
+            } else if let Some(root) = resolve_node_root() {
+                layout = layout.with_node_root(root);
+            }
+        }
+    }
+    Ok(layout)
+}
+
+fn resolve_agent_binary(kind: AgentKind, binary: Option<PathBuf>) -> Result<PathBuf, String> {
+    let candidate = binary.unwrap_or_else(|| match kind {
+        AgentKind::Claude => ClaudeAgent::default().binary,
+        AgentKind::Codex => CodexAgent::default().binary,
+    });
+    if candidate.components().count() > 1 || candidate.is_absolute() {
+        return canonicalize_if_possible(&candidate);
+    }
+    let Some(paths) = std::env::var_os("PATH") else {
+        return Err(format!(
+            "{} CLI was not found in PATH",
+            default_binary_label(kind)
+        ));
+    };
+    for dir in std::env::split_paths(&paths) {
+        let path = dir.join(&candidate);
+        if path.exists() {
+            return canonicalize_if_possible(&path);
+        }
+    }
+    Err(format!(
+        "{} CLI was not found in PATH",
+        default_binary_label(kind)
+    ))
+}
+
+fn default_binary_label(kind: AgentKind) -> &'static str {
+    match kind {
+        AgentKind::Claude => "claude",
+        AgentKind::Codex => "codex",
+    }
+}
+
+fn canonicalize_if_possible(path: &Path) -> Result<PathBuf, String> {
+    if !path.exists() {
+        return Err(format!("agent binary was not found at {}", path.display()));
+    }
+    std::fs::canonicalize(path)
+        .map_err(|err| format!("failed to canonicalize {}: {err}", path.display()))
+}
+
+fn codex_bind_root_for_bin(path: &Path) -> Option<(PathBuf, PathBuf)> {
+    let path = std::fs::canonicalize(path).ok()?;
+    let text = path.to_string_lossy();
+    for marker in [
+        "/node_modules/.bin/codex",
+        "/node_modules/@openai/codex/bin/codex.js",
+    ] {
+        if let Some(root) = text.strip_suffix(marker) {
+            return Some((PathBuf::from(root), PathBuf::from(marker)));
+        }
+    }
+    None
+}
+
+fn node_root_for_path(path: &Path) -> Option<PathBuf> {
+    let path = std::fs::canonicalize(path).ok()?;
+    let components: Vec<_> = path.components().collect();
+    for index in (2..components.len()).rev() {
+        let candidate: PathBuf = components[..index].iter().collect();
+        if candidate.join("bin/node").is_file() {
+            return Some(candidate);
+        }
+    }
+    None
+}
+
+fn resolve_node_root() -> Option<PathBuf> {
+    let paths = std::env::var_os("PATH")?;
+    for dir in std::env::split_paths(&paths) {
+        let node = dir.join("node");
+        if node.exists() {
+            return node_root_for_path(&node);
+        }
+    }
+    None
+}
+
 fn local_world_url(port: u16, base_path: &str) -> String {
     format!("http://localhost:{port}{}", base_path.trim_end_matches('/'))
 }
@@ -742,20 +980,55 @@ fn local_world_url(port: u16, base_path: &str) -> String {
 fn tmux_session_exists(name: &str) -> bool {
     Command::new("tmux")
         .args(["has-session", "-t", name])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
         .status()
         .map(|status| status.success())
         .unwrap_or(false)
 }
 
-fn start_tmux_session(
+fn tmux_target(session: &str, window: Option<&str>) -> String {
+    match window {
+        Some(window) => format!("{session}:{window}"),
+        None => session.to_string(),
+    }
+}
+
+fn tmux_target_exists(session: &str, window: Option<&str>) -> bool {
+    match window {
+        Some(window) => Command::new("tmux")
+            .args(["list-windows", "-t", session, "-F", "#{window_name}"])
+            .stderr(std::process::Stdio::null())
+            .output()
+            .map(|output| {
+                output.status.success()
+                    && String::from_utf8_lossy(&output.stdout)
+                        .lines()
+                        .any(|name| name == window)
+            })
+            .unwrap_or(false),
+        None => tmux_session_exists(session),
+    }
+}
+
+fn start_tmux_target(
     tmux_session: &str,
+    tmux_window: Option<&str>,
     command_file: &Path,
     log_file: &Path,
     env: &[(String, String)],
-) -> Result<(), String> {
+) -> Result<String, String> {
     let tmux_command = format!("exec {}", shell_quote(&command_file.display().to_string()));
     let mut command = Command::new("tmux");
-    command.args(["new-session", "-d", "-s", tmux_session]);
+    if let Some(window) = tmux_window {
+        if tmux_session_exists(tmux_session) {
+            command.args(["new-window", "-d", "-t", tmux_session, "-n", window]);
+        } else {
+            command.args(["new-session", "-d", "-s", tmux_session, "-n", window]);
+        }
+    } else {
+        command.args(["new-session", "-d", "-s", tmux_session]);
+    }
     for (key, value) in env {
         command.args(["-e", &format!("{key}={value}")]);
         command.env(key, value);
@@ -766,8 +1039,8 @@ fn start_tmux_session(
         .map_err(|err| format!("failed to start tmux: {err}"))?;
     if !status.success() {
         return Err(format!(
-            "tmux failed to start agent session '{}'",
-            tmux_session
+            "tmux failed to start agent target '{}'",
+            tmux_target(tmux_session, tmux_window)
         ));
     }
     if let Some(parent) = log_file.parent() {
@@ -776,29 +1049,97 @@ fn start_tmux_session(
     }
     let pipe_command = format!("cat >> {}", shell_quote(&log_file.display().to_string()));
     let status = Command::new("tmux")
-        .args(["pipe-pane", "-o", "-t", tmux_session, &pipe_command])
+        .args([
+            "pipe-pane",
+            "-o",
+            "-t",
+            &tmux_target(tmux_session, tmux_window),
+            &pipe_command,
+        ])
         .status()
         .map_err(|err| format!("failed to attach tmux log pipe: {err}"))?;
     if !status.success() {
-        kill_tmux_session(tmux_session);
+        kill_tmux_target(tmux_session, tmux_window);
         return Err(format!(
-            "tmux failed to attach log pipe for agent session '{}'",
-            tmux_session
+            "tmux failed to attach log pipe for agent target '{}'",
+            tmux_target(tmux_session, tmux_window)
         ));
     }
-    Ok(())
+    tmux_pane_id(tmux_session, tmux_window)
 }
 
-fn send_tmux_ctrl_c(tmux_session: &str) {
+fn tmux_pane_id(tmux_session: &str, tmux_window: Option<&str>) -> Result<String, String> {
+    let output = Command::new("tmux")
+        .args([
+            "display-message",
+            "-p",
+            "-t",
+            &tmux_target(tmux_session, tmux_window),
+            "#{pane_id}",
+        ])
+        .output()
+        .map_err(|err| format!("failed to read tmux pane id: {err}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "tmux failed to report pane id for target '{}'",
+            tmux_target(tmux_session, tmux_window)
+        ));
+    }
+    let pane_id = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if pane_id.is_empty() {
+        return Err(format!(
+            "tmux reported an empty pane id for target '{}'",
+            tmux_target(tmux_session, tmux_window)
+        ));
+    }
+    Ok(pane_id)
+}
+
+fn recovery_watchdog_enabled() -> bool {
+    !matches!(
+        std::env::var("CLAWBLOX_CLAUDE_RECOVERY")
+            .unwrap_or_else(|_| "1".to_string())
+            .to_ascii_lowercase()
+            .as_str(),
+        "0" | "false" | "no" | "off"
+    )
+}
+
+fn env_u64(name: &str, default: u64) -> u64 {
+    std::env::var(name)
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .unwrap_or(default)
+}
+
+fn send_tmux_ctrl_c(tmux_session: &str, tmux_window: Option<&str>) {
     let _ = Command::new("tmux")
-        .args(["send-keys", "-t", tmux_session, "C-c"])
+        .args([
+            "send-keys",
+            "-t",
+            &tmux_target(tmux_session, tmux_window),
+            "C-c",
+        ])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
         .status();
 }
 
-fn kill_tmux_session(tmux_session: &str) {
-    let _ = Command::new("tmux")
-        .args(["kill-session", "-t", tmux_session])
-        .status();
+fn kill_tmux_target(tmux_session: &str, tmux_window: Option<&str>) {
+    let mut command = Command::new("tmux");
+    if let Some(window) = tmux_window {
+        command.args([
+            "kill-window",
+            "-t",
+            &tmux_target(tmux_session, Some(window)),
+        ]);
+    } else {
+        command.args(["kill-session", "-t", tmux_session]);
+    }
+    command
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    let _ = command.status();
 }
 
 fn write_command_file(path: &Path, shell_command: &str) -> std::io::Result<()> {
@@ -866,10 +1207,12 @@ fn ensure_no_active_agent(ctx: &AgentContext) -> Result<(), String> {
     let Some(active) = read_active_agent(ctx)? else {
         return Ok(());
     };
-    if tmux_session_exists(&active.tmux_session) {
+    if tmux_target_exists(&active.tmux_session, active.tmux_window.as_deref()) {
         return Err(format!(
-            "agent '{}' already has an active process in tmux session '{}'. Stop it before starting another prompt. Attach with: tmux attach -t {}",
-            active.name, active.tmux_session, active.tmux_session
+            "agent '{}' already has an active process in tmux target '{}'. Stop it before starting another prompt. Attach with: tmux attach -t {}",
+            active.name,
+            tmux_target(&active.tmux_session, active.tmux_window.as_deref()),
+            active.tmux_session
         ));
     }
     let _ = std::fs::remove_file(active_agent_file(ctx));
@@ -1134,6 +1477,7 @@ mod tests {
             kind: "claude".to_string(),
             operation: "agent.start".to_string(),
             tmux_session: "session".to_string(),
+            tmux_window: None,
             command_file: ctx.paths.runtime_dir.join("start.sh"),
             started_at: "2026-05-17T00:00:00Z".to_string(),
         };
@@ -1154,6 +1498,7 @@ mod tests {
                 kind: "claude".to_string(),
                 operation: "agent.start".to_string(),
                 tmux_session: "definitely-not-running".to_string(),
+                tmux_window: None,
                 command_file: ctx.paths.runtime_dir.join("start.sh"),
                 started_at: "2026-05-17T00:00:00Z".to_string(),
             },
@@ -1198,6 +1543,7 @@ mod tests {
                 env: Vec::new(),
                 sandbox_enabled: false,
             },
+            sandbox: None,
         }
     }
 }

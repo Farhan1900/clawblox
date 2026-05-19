@@ -4,12 +4,16 @@ use std::{
     net::TcpStream,
     path::PathBuf,
     process::{Child, Command, Stdio},
+    sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
 
 use clawblox::agent_runner::{
     send_agent, start_agent, stop_agent, AgentKind, AgentSendOptions, AgentStartOptions,
     AgentStopOptions,
+};
+use clawblox::world_capability_proxy::{
+    start_world_capability_proxy, WorldCapabilityProxy, WorldCapabilityProxyConfig,
 };
 use clawblox::world_runner::{
     spawn_external_world, write_external_world_command_file, ExternalWorldCommand,
@@ -31,12 +35,22 @@ struct PyAgent {
     bare: bool,
     extra_args: Vec<String>,
     sandbox: bool,
+    run_tmux: Arc<Mutex<Option<AgentRunTmux>>>,
+    world_env: Arc<Mutex<Vec<(String, String)>>>,
+}
+
+#[derive(Clone, Debug)]
+struct AgentRunTmux {
+    session: String,
+    window: String,
 }
 
 #[pyclass(name = "AgentStartResult")]
 #[derive(Clone, Debug)]
 struct PyAgentStartResult {
     tmux_session: String,
+    tmux_window: Option<String>,
+    tmux_pane_id: Option<String>,
     agent_dir: PathBuf,
     command_file: PathBuf,
     events_file: PathBuf,
@@ -66,6 +80,12 @@ struct PyWorld {
     command_file: Option<PathBuf>,
     log_file: Option<PathBuf>,
     process: Option<Child>,
+    tmux_session: Option<String>,
+    tmux_window: Option<String>,
+    owns_tmux_session: bool,
+    next_agent_index: u32,
+    world_proxies: Vec<WorldCapabilityProxy>,
+    connected_sessions: Vec<String>,
 }
 
 #[pyclass(name = "WorldStartResult")]
@@ -79,6 +99,34 @@ struct PyWorldStartResult {
     url: String,
     command_file: PathBuf,
     log_file: PathBuf,
+}
+
+impl PyAgent {
+    fn hidden_run_tmux(&self) -> PyResult<Option<AgentRunTmux>> {
+        self.run_tmux
+            .lock()
+            .map(|guard| guard.clone())
+            .map_err(|_| PyAgentError::new_err("agent tmux state lock was poisoned".to_string()))
+    }
+
+    fn merged_env(&self, mut env: Vec<(String, String)>) -> PyResult<Vec<(String, String)>> {
+        let world_env = self
+            .world_env
+            .lock()
+            .map_err(|_| PyAgentError::new_err("agent world env lock was poisoned".to_string()))?;
+        let mut merged = world_env.clone();
+        merged.append(&mut env);
+        Ok(merged)
+    }
+
+    fn set_world_env(&self, env: Vec<(String, String)>) -> PyResult<()> {
+        let mut world_env = self
+            .world_env
+            .lock()
+            .map_err(|_| PyAgentError::new_err("agent world env lock was poisoned".to_string()))?;
+        *world_env = env;
+        Ok(())
+    }
 }
 
 #[pymethods]
@@ -111,6 +159,8 @@ impl PyAgent {
             bare,
             extra_args,
             sandbox,
+            run_tmux: Arc::new(Mutex::new(None)),
+            world_env: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
@@ -165,8 +215,14 @@ impl PyAgent {
         system_prompt: String,
         env: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<PyAgentStartResult> {
-        let env = dict_to_env(env)?;
+        let env = self.merged_env(dict_to_env(env)?)?;
         let kind = parse_agent_kind(&self.agent)?;
+        let run_tmux = self.hidden_run_tmux()?;
+        let tmux_session = run_tmux
+            .as_ref()
+            .map(|value| value.session.clone())
+            .or_else(|| self.tmux.clone());
+        let tmux_window = run_tmux.as_ref().map(|value| value.window.clone());
         let started = start_agent(AgentStartOptions {
             kind,
             name: self.name.clone(),
@@ -177,7 +233,8 @@ impl PyAgent {
             initial_prompt,
             system_prompt,
             auto_continue_prompt: self.auto_continue_prompt.clone(),
-            tmux_session: self.tmux.clone(),
+            tmux_session,
+            tmux_window,
             env,
             extra_args: self.extra_args.clone(),
             sandbox: self.sandbox,
@@ -187,6 +244,8 @@ impl PyAgent {
 
         Ok(PyAgentStartResult {
             tmux_session: started.tmux_session,
+            tmux_window: started.tmux_window,
+            tmux_pane_id: started.tmux_pane_id,
             agent_dir: started.agent_dir,
             command_file: started.command_file,
             events_file: started.events_file,
@@ -200,8 +259,14 @@ impl PyAgent {
         prompt: String,
         env: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<PyAgentStartResult> {
-        let env = dict_to_env(env)?;
+        let env = self.merged_env(dict_to_env(env)?)?;
         let kind = parse_agent_kind(&self.agent)?;
+        let run_tmux = self.hidden_run_tmux()?;
+        let tmux_session = run_tmux
+            .as_ref()
+            .map(|value| value.session.clone())
+            .or_else(|| self.tmux.clone());
+        let tmux_window = run_tmux.as_ref().map(|value| value.window.clone());
         let started = send_agent(AgentSendOptions {
             kind,
             name: self.name.clone(),
@@ -211,7 +276,8 @@ impl PyAgent {
             permission_mode: self.permission_mode.clone(),
             prompt,
             auto_continue_prompt: self.auto_continue_prompt.clone(),
-            tmux_session: self.tmux.clone(),
+            tmux_session,
+            tmux_window,
             env,
             extra_args: self.extra_args.clone(),
             sandbox: self.sandbox,
@@ -221,6 +287,8 @@ impl PyAgent {
 
         Ok(PyAgentStartResult {
             tmux_session: started.tmux_session,
+            tmux_window: started.tmux_window,
+            tmux_pane_id: started.tmux_pane_id,
             agent_dir: started.agent_dir,
             command_file: started.command_file,
             events_file: started.events_file,
@@ -234,8 +302,14 @@ impl PyAgent {
         grace_seconds: u64,
         env: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<PyAgentStopResult> {
-        let env = dict_to_env(env)?;
+        let env = self.merged_env(dict_to_env(env)?)?;
         let kind = parse_agent_kind(&self.agent)?;
+        let run_tmux = self.hidden_run_tmux()?;
+        let tmux_session = run_tmux
+            .as_ref()
+            .map(|value| value.session.clone())
+            .or_else(|| self.tmux.clone());
+        let tmux_window = run_tmux.as_ref().map(|value| value.window.clone());
         let stopped = stop_agent(AgentStopOptions {
             kind,
             name: self.name.clone(),
@@ -244,7 +318,8 @@ impl PyAgent {
             model: self.model.clone(),
             permission_mode: self.permission_mode.clone(),
             auto_continue_prompt: self.auto_continue_prompt.clone(),
-            tmux_session: self.tmux.clone(),
+            tmux_session,
+            tmux_window,
             env,
             extra_args: self.extra_args.clone(),
             sandbox: self.sandbox,
@@ -287,6 +362,12 @@ impl PyWorld {
             command_file: None,
             log_file: None,
             process: None,
+            tmux_session: None,
+            tmux_window: None,
+            owns_tmux_session: false,
+            next_agent_index: 0,
+            world_proxies: Vec::new(),
+            connected_sessions: Vec::new(),
         })
     }
 
@@ -432,7 +513,7 @@ impl PyWorld {
         json_to_py(py, &env)
     }
 
-    #[pyo3(signature = (*, port, base_path = "/".to_string(), record = false, record_dir = None, health_timeout = 30, port_wait = 120, command_file = None, log_file = None))]
+    #[pyo3(signature = (*, port, base_path = "/".to_string(), record = false, record_dir = None, health_timeout = 30, port_wait = 120, command_file = None, log_file = None, _tmux_session = None))]
     #[allow(clippy::too_many_arguments)]
     fn start(
         &mut self,
@@ -444,6 +525,7 @@ impl PyWorld {
         port_wait: u64,
         command_file: Option<PathBuf>,
         log_file: Option<PathBuf>,
+        _tmux_session: Option<String>,
     ) -> PyResult<PyWorldStartResult> {
         if let Some(process) = self.process.as_mut() {
             if process.try_wait().map_err(io_error)?.is_none() {
@@ -461,6 +543,31 @@ impl PyWorld {
                 };
                 return Ok(PyWorldStartResult {
                     command,
+                    start_command: self.start_command(),
+                    delegated: self.uses_run_command(),
+                    run_command: self.run_command(),
+                    env: self.resolved_start_env(self.running_port()?),
+                    url: self.url()?,
+                    command_file: self.running_command_file()?,
+                    log_file: self.running_log_file()?,
+                });
+            }
+        }
+        if let Some(session) = &self.tmux_session {
+            if tmux_target_exists(session, self.tmux_window.as_deref()) {
+                return Ok(PyWorldStartResult {
+                    command: if self.uses_run_command() {
+                        self.run_command().unwrap_or_default()
+                    } else {
+                        build_world_start_argv(
+                            &resolve_clawblox_bin()?,
+                            &self.dir,
+                            self.running_port()?,
+                            &self.base_path,
+                            self.record,
+                            self.record_dir.as_ref(),
+                        )
+                    },
                     start_command: self.start_command(),
                     delegated: self.uses_run_command(),
                     run_command: self.run_command(),
@@ -494,18 +601,43 @@ impl PyWorld {
 
         let command_file = self.running_command_file()?;
         let log_file = self.running_log_file()?;
+        let tmux_session = _tmux_session.filter(|value| !value.trim().is_empty());
+        let tmux_window = tmux_session.as_ref().map(|_| "world-0".to_string());
         let command = if self.uses_run_command() {
             let spec = self.external_world_command(port)?;
-            write_external_world_command_file(&command_file, &spec, Some(&log_file))
-                .map_err(io_error)?;
-            let child = spawn_external_world(&spec, Some(&log_file)).map_err(|err| {
-                PyAgentError::new_err(format!(
-                    "{err}\ncommand file: {}\nlog file: {}",
-                    command_file.display(),
-                    log_file.display()
-                ))
-            })?;
-            self.process = Some(child);
+            write_external_world_command_file(
+                &command_file,
+                &spec,
+                if tmux_session.is_some() {
+                    None
+                } else {
+                    Some(&log_file)
+                },
+            )
+            .map_err(io_error)?;
+            if let Some(session) = &tmux_session {
+                start_tmux_command_file(
+                    session,
+                    tmux_window.as_deref().unwrap_or("world-0"),
+                    &command_file,
+                    &log_file,
+                    &spec.env(),
+                )?;
+                self.tmux_session = Some(session.clone());
+                self.tmux_window = tmux_window.clone();
+                self.owns_tmux_session = true;
+                self.process = None;
+                start_tmux_parent_watchdog(session, Duration::from_secs(1), &log_file)?;
+            } else {
+                let child = spawn_external_world(&spec, Some(&log_file)).map_err(|err| {
+                    PyAgentError::new_err(format!(
+                        "{err}\ncommand file: {}\nlog file: {}",
+                        command_file.display(),
+                        log_file.display()
+                    ))
+                })?;
+                self.process = Some(child);
+            }
             spec.command
         } else {
             let bin = resolve_clawblox_bin()?;
@@ -517,7 +649,7 @@ impl PyWorld {
                 self.record,
                 self.record_dir.as_ref(),
             );
-            write_world_command_file(&command_file, &bin, self)?;
+            write_world_command_file(&command_file, &bin, self, tmux_session.is_none())?;
             if let Some(parent) = log_file.parent() {
                 std::fs::create_dir_all(parent).map_err(io_error)?;
             }
@@ -527,38 +659,55 @@ impl PyWorld {
                 .open(&log_file)
                 .map_err(io_error)?;
             let err_log = log.try_clone().map_err(io_error)?;
-            let child = Command::new(&bin)
-                .arg("run")
-                .arg(&self.dir)
-                .arg("--port")
-                .arg(port.to_string())
-                .arg("--base-path")
-                .arg(&self.base_path)
-                .args(if self.record {
-                    vec!["--record"]
-                } else {
-                    vec![]
-                })
-                .args(
-                    self.record_dir
-                        .as_ref()
-                        .map(|path| {
-                            vec!["--record-dir".to_string(), path.display().to_string()]
-                        })
-                        .unwrap_or_default(),
-                )
-                .stdout(Stdio::from(log))
-                .stderr(Stdio::from(err_log))
-                .spawn()
-                .map_err(|err| {
-                    PyAgentError::new_err(format!(
-                        "failed to start world command {}: {err}\ncommand file: {}\nlog file: {}",
-                        bin.display(),
-                        command_file.display(),
-                        log_file.display()
-                    ))
-                })?;
-            self.process = Some(child);
+            if let Some(session) = &tmux_session {
+                drop(log);
+                drop(err_log);
+                start_tmux_command_file(
+                    session,
+                    tmux_window.as_deref().unwrap_or("world-0"),
+                    &command_file,
+                    &log_file,
+                    &[],
+                )?;
+                self.tmux_session = Some(session.clone());
+                self.tmux_window = tmux_window.clone();
+                self.owns_tmux_session = true;
+                self.process = None;
+                start_tmux_parent_watchdog(session, Duration::from_secs(1), &log_file)?;
+            } else {
+                let child = Command::new(&bin)
+                    .arg("run")
+                    .arg(&self.dir)
+                    .arg("--port")
+                    .arg(port.to_string())
+                    .arg("--base-path")
+                    .arg(&self.base_path)
+                    .args(if self.record {
+                        vec!["--record"]
+                    } else {
+                        vec![]
+                    })
+                    .args(
+                        self.record_dir
+                            .as_ref()
+                            .map(|path| {
+                                vec!["--record-dir".to_string(), path.display().to_string()]
+                            })
+                            .unwrap_or_default(),
+                    )
+                    .stdout(Stdio::from(log))
+                    .stderr(Stdio::from(err_log))
+                    .spawn()
+                    .map_err(|err| {
+                        PyAgentError::new_err(format!(
+                            "failed to start world command {}: {err}\ncommand file: {}\nlog file: {}",
+                            bin.display(),
+                            command_file.display(),
+                            log_file.display()
+                        ))
+                    })?;
+                self.process = Some(child);
+            }
             command
         };
 
@@ -568,9 +717,20 @@ impl PyWorld {
             if let Some(process) = self.process.as_mut() {
                 if let Some(status) = process.try_wait().map_err(io_error)? {
                     return Err(PyAgentError::new_err(format!(
-                        "world process exited before becoming healthy with status {status}\ncommand file: {}\nlog file: {}",
+                        "world process exited before becoming healthy with status {status}\ncommand file: {}\nlog file: {}\n\n{}",
                         command_file.display(),
-                        log_file.display()
+                        log_file.display(),
+                        format_log_tail(&log_file, 80)
+                    )));
+                }
+            }
+            if let Some(session) = &self.tmux_session {
+                if !tmux_target_exists(session, self.tmux_window.as_deref()) {
+                    return Err(PyAgentError::new_err(format!(
+                        "world tmux target exited before becoming healthy\ncommand file: {}\nlog file: {}\n\n{}",
+                        command_file.display(),
+                        log_file.display(),
+                        format_log_tail(&log_file, 80)
                     )));
                 }
             }
@@ -591,23 +751,33 @@ impl PyWorld {
             std::thread::sleep(Duration::from_millis(250));
         }
         Err(PyAgentError::new_err(format!(
-            "world did not become healthy at {} within {}s\ncommand file: {}\nlog file: {}",
+            "world did not become healthy at {} within {}s\ncommand file: {}\nlog file: {}\n\n{}",
             self.url()?,
             self.health_timeout,
             command_file.display(),
-            log_file.display()
+            log_file.display(),
+            format_log_tail(&log_file, 80)
         )))
     }
 
     #[pyo3(signature = (*, agent))]
-    fn connect<'py>(&self, py: Python<'py>, agent: &PyAgent) -> PyResult<Bound<'py, PyDict>> {
+    fn connect<'py>(&mut self, py: Python<'py>, agent: &PyAgent) -> PyResult<Bound<'py, PyDict>> {
         let port = self.running_port()?;
+        let session_file = agent.dir.join("world_session.txt");
+        let existing_session = std::fs::read_to_string(&session_file)
+            .ok()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty());
+        let join_headers = existing_session
+            .as_ref()
+            .map(|session| vec![("X-Session".to_string(), session.clone())])
+            .unwrap_or_default();
         let path = format!(
             "{}?name={}",
             join_url_path(&self.base_path, "/join"),
             percent_encode(agent.name())
         );
-        let response = http_request("POST", port, &path, &[], "")?;
+        let response = http_request("POST", port, &path, &join_headers, "")?;
         if response.status != 200 {
             return Err(PyAgentError::new_err(format!(
                 "failed to join world at {}{}: HTTP {}\nbody: {}",
@@ -626,16 +796,63 @@ impl PyWorld {
             .ok_or_else(|| {
                 PyAgentError::new_err("world join response missing session".to_string())
             })?;
+        if let Some(expected) = &existing_session {
+            if session != expected {
+                return Err(PyAgentError::new_err(format!(
+                    "resume error: expected world session {expected} but server returned {session}"
+                )));
+            }
+        }
         let agent_id = value
             .get("agent_id")
             .and_then(|value| value.as_str())
             .unwrap_or("");
 
-        let session_file = agent.dir.join("world_session.txt");
         if let Some(parent) = session_file.parent() {
             std::fs::create_dir_all(parent).map_err(io_error)?;
         }
         std::fs::write(&session_file, format!("{session}\n")).map_err(io_error)?;
+        if !self.connected_sessions.iter().any(|value| value == session) {
+            self.connected_sessions.push(session.to_string());
+        }
+
+        if let Some(tmux_session) = &self.tmux_session {
+            let window = format!("agent-0-{}", self.next_agent_index);
+            self.next_agent_index += 1;
+            let mut guard = agent.run_tmux.lock().map_err(|_| {
+                PyAgentError::new_err("agent tmux state lock was poisoned".to_string())
+            })?;
+            *guard = Some(AgentRunTmux {
+                session: tmux_session.clone(),
+                window,
+            });
+        }
+
+        let internal_base_url = self.url()?;
+        let mut base_url = internal_base_url.clone();
+        let mut world_env = vec![
+            ("WORLD_BASE_URL".to_string(), base_url.clone()),
+            (
+                "WORLD_INTERNAL_BASE_URL".to_string(),
+                internal_base_url.clone(),
+            ),
+            ("WORLD_SESSION_ID".to_string(), session.to_string()),
+            ("WORLD_AGENT_NAME".to_string(), agent.name().to_string()),
+        ];
+        if agent.sandbox {
+            let proxy_port = self.start_capability_proxy(agent, &internal_base_url)?;
+            base_url = if parse_agent_kind(&agent.agent)? == AgentKind::Codex {
+                format!("http://world:{proxy_port}")
+            } else {
+                "http://world".to_string()
+            };
+            world_env[0] = ("WORLD_BASE_URL".to_string(), base_url.clone());
+            world_env.push((
+                "CLAWBLOX_WORLD_HTTP_PROXY_PORT".to_string(),
+                proxy_port.to_string(),
+            ));
+        }
+        agent.set_world_env(world_env)?;
 
         let headers = PyDict::new_bound(py);
         headers.set_item("X-Session", session)?;
@@ -643,6 +860,8 @@ impl PyWorld {
         access.set_item("headers", headers)?;
         access.set_item("session", session)?;
         access.set_item("agent_id", agent_id)?;
+        access.set_item("base_url", base_url)?;
+        access.set_item("internal_base_url", internal_base_url)?;
         Ok(access)
     }
 
@@ -663,6 +882,28 @@ impl PyWorld {
 
     #[pyo3(signature = (*, grace_seconds = 10))]
     fn stop(&mut self, grace_seconds: u64) -> PyResult<()> {
+        self.leave_connected_sessions();
+        self.stop_world_proxies();
+        if let Some(session) = self.tmux_session.take() {
+            let target_window = self.tmux_window.take();
+            if tmux_target_exists(&session, target_window.as_deref()) {
+                send_tmux_ctrl_c(&session, target_window.as_deref());
+                let deadline = Instant::now() + Duration::from_secs(grace_seconds);
+                while Instant::now() < deadline {
+                    if !tmux_target_exists(&session, target_window.as_deref()) {
+                        break;
+                    }
+                    std::thread::sleep(Duration::from_millis(100));
+                }
+            }
+            if self.owns_tmux_session {
+                kill_tmux_session(&session);
+            } else if tmux_target_exists(&session, target_window.as_deref()) {
+                kill_tmux_window(&session, target_window.as_deref());
+            }
+            self.owns_tmux_session = false;
+            return Ok(());
+        }
         let Some(mut process) = self.process.take() else {
             return Ok(());
         };
@@ -764,6 +1005,45 @@ impl PyWorld {
             PyAgentError::new_err("world has not been started; no log file exists yet".to_string())
         })
     }
+
+    fn start_capability_proxy(&mut self, agent: &PyAgent, target_base_url: &str) -> PyResult<u16> {
+        let session_token_file = agent.dir.join("world_session.txt");
+        let proxy = start_world_capability_proxy(WorldCapabilityProxyConfig {
+            target_base_url: target_base_url.to_string(),
+            public_host: "world".to_string(),
+            session_token_file,
+            session_header: "X-Session".to_string(),
+        })
+        .map_err(PyAgentError::new_err)?;
+        let port = proxy.port();
+        self.world_proxies.push(proxy);
+        Ok(port)
+    }
+
+    fn stop_world_proxies(&mut self) {
+        for proxy in &mut self.world_proxies {
+            proxy.stop();
+        }
+        self.world_proxies.clear();
+    }
+
+    fn leave_connected_sessions(&mut self) {
+        let leave_path = std::env::var("CLAWBLOX_WORLD_LEAVE_PATH")
+            .ok()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty());
+        let Some(leave_path) = leave_path else {
+            return;
+        };
+        let Ok(port) = self.running_port() else {
+            return;
+        };
+        let request_path = join_url_path(&self.base_path, &leave_path);
+        for session in std::mem::take(&mut self.connected_sessions) {
+            let headers = vec![("X-Session".to_string(), session)];
+            let _ = http_request("POST", port, &request_path, &headers, "");
+        }
+    }
 }
 
 impl Drop for PyWorld {
@@ -824,6 +1104,16 @@ impl PyAgentStartResult {
     #[getter]
     fn tmux_session(&self) -> &str {
         &self.tmux_session
+    }
+
+    #[getter]
+    fn tmux_window(&self) -> Option<&str> {
+        self.tmux_window.as_deref()
+    }
+
+    #[getter]
+    fn tmux_pane_id(&self) -> Option<&str> {
+        self.tmux_pane_id.as_deref()
     }
 
     #[getter]
@@ -1014,7 +1304,12 @@ fn build_world_start_argv(
     argv
 }
 
-fn write_world_command_file(path: &PathBuf, bin: &PathBuf, world: &PyWorld) -> PyResult<()> {
+fn write_world_command_file(
+    path: &PathBuf,
+    bin: &PathBuf,
+    world: &PyWorld,
+    redirect_to_log: bool,
+) -> PyResult<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(io_error)?;
     }
@@ -1034,11 +1329,13 @@ fn write_world_command_file(path: &PathBuf, bin: &PathBuf, world: &PyWorld) -> P
         parts.push("--record-dir".to_string());
         parts.push(shell_quote(&record_dir.display().to_string()));
     }
-    parts.push(">>".to_string());
-    parts.push(shell_quote(
-        &world.running_log_file()?.display().to_string(),
-    ));
-    parts.push("2>&1".to_string());
+    if redirect_to_log {
+        parts.push(">>".to_string());
+        parts.push(shell_quote(
+            &world.running_log_file()?.display().to_string(),
+        ));
+        parts.push("2>&1".to_string());
+    }
     std::fs::write(
         path,
         format!(
@@ -1148,6 +1445,218 @@ fn shell_quote(value: &str) -> String {
         return "''".to_string();
     }
     format!("'{}'", value.replace('\'', "'\\''"))
+}
+
+fn format_log_tail(path: &PathBuf, max_lines: usize) -> String {
+    let contents = match std::fs::read_to_string(path) {
+        Ok(contents) => contents,
+        Err(err) => return format!("failed to read log file: {err}"),
+    };
+    let lines: Vec<&str> = contents.lines().collect();
+    if lines.is_empty() {
+        return "log file is empty".to_string();
+    }
+    let start = lines.len().saturating_sub(max_lines);
+    format!("last {max_lines} log lines:\n{}", lines[start..].join("\n"))
+}
+
+fn tmux_target(session: &str, window: Option<&str>) -> String {
+    match window {
+        Some(window) => format!("{session}:{window}"),
+        None => session.to_string(),
+    }
+}
+
+fn tmux_session_exists(session: &str) -> bool {
+    Command::new("tmux")
+        .args(["has-session", "-t", session])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map(|status| status.success())
+        .unwrap_or(false)
+}
+
+fn tmux_target_exists(session: &str, window: Option<&str>) -> bool {
+    match window {
+        Some(window) => Command::new("tmux")
+            .args(["list-windows", "-t", session, "-F", "#{window_name}"])
+            .stderr(Stdio::null())
+            .output()
+            .map(|output| {
+                output.status.success()
+                    && String::from_utf8_lossy(&output.stdout)
+                        .lines()
+                        .any(|name| name == window)
+            })
+            .unwrap_or(false),
+        None => tmux_session_exists(session),
+    }
+}
+
+fn tmux_session_created(session: &str) -> Option<String> {
+    let output = Command::new("tmux")
+        .args(["display-message", "-p", "-t", session, "#{session_created}"])
+        .stderr(Stdio::null())
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let value = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if value.is_empty() {
+        None
+    } else {
+        Some(value)
+    }
+}
+
+fn process_start_time(pid: u32) -> Option<String> {
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    stat.rsplit_once(") ")?
+        .1
+        .split_whitespace()
+        .nth(19)
+        .map(ToString::to_string)
+}
+
+fn start_tmux_parent_watchdog(session: &str, grace: Duration, log_file: &PathBuf) -> PyResult<()> {
+    let Some(session_created) = tmux_session_created(session) else {
+        return Ok(());
+    };
+    let parent_pid = std::process::id();
+    let parent_start = process_start_time(parent_pid).unwrap_or_default();
+    let watchdog_log = log_file.with_extension("watchdog.log");
+    let command = format!(
+        r#"
+parent_pid={parent_pid}
+parent_start={parent_start}
+session={session}
+session_created={session_created}
+grace={grace}
+log_file={log_file}
+same_parent() {{
+  if [ -n "$parent_start" ] && [ -r "/proc/$parent_pid/stat" ]; then
+    current="$(awk '{{print $22}}' "/proc/$parent_pid/stat" 2>/dev/null || true)"
+    [ "$current" = "$parent_start" ]
+  else
+    kill -0 "$parent_pid" 2>/dev/null
+  fi
+}}
+while same_parent; do
+  sleep 0.2
+done
+tmux has-session -t "$session" 2>/dev/null || exit 0
+current_created="$(tmux display-message -p -t "$session" '##{{session_created}}' 2>/dev/null || true)"
+[ "$current_created" = "$session_created" ] || exit 0
+printf '%s parent process exited; stopping tmux session %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$session" >> "$log_file"
+tmux list-panes -a -t "$session" -F '##{{pane_id}}' 2>/dev/null | while IFS= read -r pane; do
+  [ -n "$pane" ] && tmux send-keys -t "$pane" C-c 2>/dev/null || true
+done
+sleep "$grace"
+tmux has-session -t "$session" 2>/dev/null || exit 0
+current_created="$(tmux display-message -p -t "$session" '##{{session_created}}' 2>/dev/null || true)"
+[ "$current_created" = "$session_created" ] || exit 0
+tmux kill-session -t "$session" 2>/dev/null || true
+"#,
+        parent_pid = parent_pid,
+        parent_start = shell_quote(&parent_start),
+        session = shell_quote(session),
+        session_created = shell_quote(&session_created),
+        grace = grace.as_secs(),
+        log_file = shell_quote(&watchdog_log.display().to_string()),
+    );
+    let status = Command::new("tmux")
+        .args(["run-shell", "-b", &command])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map_err(|err| PyAgentError::new_err(format!("failed to start tmux watchdog: {err}")))?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(PyAgentError::new_err(format!(
+            "tmux failed to start parent watchdog for session '{session}'"
+        )))
+    }
+}
+
+fn start_tmux_command_file(
+    session: &str,
+    window: &str,
+    command_file: &PathBuf,
+    log_file: &PathBuf,
+    env: &[(String, String)],
+) -> PyResult<()> {
+    let tmux_command = format!("exec {}", shell_quote(&command_file.display().to_string()));
+    let mut command = Command::new("tmux");
+    if tmux_session_exists(session) {
+        command.args(["new-window", "-d", "-t", session, "-n", window]);
+    } else {
+        command.args(["new-session", "-d", "-s", session, "-n", window]);
+    }
+    for (key, value) in env {
+        command.args(["-e", &format!("{key}={value}")]);
+        command.env(key, value);
+    }
+    let status = command
+        .arg(&tmux_command)
+        .status()
+        .map_err(|err| PyAgentError::new_err(format!("failed to start tmux: {err}")))?;
+    if !status.success() {
+        return Err(PyAgentError::new_err(format!(
+            "tmux failed to start world target '{}'",
+            tmux_target(session, Some(window))
+        )));
+    }
+    if let Some(parent) = log_file.parent() {
+        std::fs::create_dir_all(parent).map_err(io_error)?;
+    }
+    let pipe_command = format!("cat >> {}", shell_quote(&log_file.display().to_string()));
+    let status = Command::new("tmux")
+        .args([
+            "pipe-pane",
+            "-o",
+            "-t",
+            &tmux_target(session, Some(window)),
+            &pipe_command,
+        ])
+        .status()
+        .map_err(|err| PyAgentError::new_err(format!("failed to attach tmux log pipe: {err}")))?;
+    if !status.success() {
+        kill_tmux_window(session, Some(window));
+        return Err(PyAgentError::new_err(format!(
+            "tmux failed to attach log pipe for world target '{}'",
+            tmux_target(session, Some(window))
+        )));
+    }
+    Ok(())
+}
+
+fn send_tmux_ctrl_c(session: &str, window: Option<&str>) {
+    let _ = Command::new("tmux")
+        .args(["send-keys", "-t", &tmux_target(session, window), "C-c"])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+}
+
+fn kill_tmux_window(session: &str, window: Option<&str>) {
+    if let Some(window) = window {
+        let _ = Command::new("tmux")
+            .args(["kill-window", "-t", &tmux_target(session, Some(window))])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+    }
+}
+
+fn kill_tmux_session(session: &str) {
+    let _ = Command::new("tmux")
+        .args(["kill-session", "-t", session])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
 }
 
 fn terminate_process(pid: u32) {

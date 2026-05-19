@@ -4,6 +4,8 @@ use std::{
     path::{Path, PathBuf},
 };
 
+use crate::agent_sandbox::SandboxLayout;
+
 pub type AgentResult<T> = Result<T, AgentError>;
 
 #[derive(Debug)]
@@ -99,6 +101,7 @@ impl AgentSettings {
 pub struct AgentContext {
     pub paths: AgentPaths,
     pub settings: AgentSettings,
+    pub sandbox: Option<SandboxLayout>,
 }
 
 impl AgentContext {
@@ -251,6 +254,11 @@ impl Agent for ClaudeAgent {
             &bin_dir.join("notification.sh"),
             "#!/usr/bin/env bash\nexit 0\n",
         )?;
+        if let Some(layout) = &ctx.sandbox {
+            prepare_claude_sandbox_home(ctx, layout)?;
+            write_claude_sandbox_settings(ctx)?;
+            write_sandbox_hosts_file(ctx)?;
+        }
         Ok(())
     }
 
@@ -290,32 +298,50 @@ impl Agent for ClaudeAgent {
 
 impl ClaudeAgent {
     fn base_command(&self, ctx: &AgentContext) -> CommandSpec {
-        let mut command = CommandSpec::new(&self.binary, &ctx.paths.workspace_dir)
+        let sandbox = ctx.sandbox.as_ref();
+        let program = sandbox
+            .map(|layout| layout.guest_binary.clone())
+            .unwrap_or_else(|| self.binary.clone());
+        let cwd = sandbox
+            .map(|layout| layout.guest_workspace.clone())
+            .unwrap_or_else(|| ctx.paths.workspace_dir.clone());
+        let plugin_dir = sandbox
+            .and_then(|layout| layout.guest_plugin.clone())
+            .unwrap_or_else(|| claude_plugin_dir(ctx));
+        let prompt_file = sandbox
+            .map(|layout| layout.guest_prompt.clone())
+            .unwrap_or_else(|| ctx.paths.prompt_file.clone());
+        let log_dir = sandbox
+            .map(|layout| layout.guest_logs.clone())
+            .unwrap_or_else(|| {
+                ctx.paths
+                    .log_file
+                    .parent()
+                    .unwrap_or_else(|| Path::new(""))
+                    .to_path_buf()
+            });
+        let metadata_file = sandbox
+            .map(|layout| layout.guest_runtime.join("hook_session.env"))
+            .unwrap_or_else(|| claude_hook_metadata_file(ctx));
+        let agent_dir = sandbox
+            .map(|layout| layout.guest_workspace.clone())
+            .unwrap_or_else(|| ctx.paths.agent_home_dir.clone());
+
+        let mut command = CommandSpec::new(program, cwd)
             .arg("--plugin-dir")
-            .arg(claude_plugin_dir(ctx).display().to_string())
+            .arg(plugin_dir.display().to_string())
             .arg("--append-system-prompt-file")
-            .arg(ctx.paths.prompt_file.display().to_string())
+            .arg(prompt_file.display().to_string())
             .arg("--permission-mode")
             .arg(&ctx.settings.permission_mode)
             .arg("--model")
             .arg(&ctx.settings.model)
             .envs(ctx.settings.env.clone())
-            .env(
-                "CLAWBLOX_CLAUDE_AGENT_DIR",
-                ctx.paths.agent_home_dir.display().to_string(),
-            )
-            .env(
-                "CLAWBLOX_CLAUDE_LOG_DIR",
-                ctx.paths
-                    .log_file
-                    .parent()
-                    .unwrap_or_else(|| Path::new(""))
-                    .display()
-                    .to_string(),
-            )
+            .env("CLAWBLOX_CLAUDE_AGENT_DIR", agent_dir.display().to_string())
+            .env("CLAWBLOX_CLAUDE_LOG_DIR", log_dir.display().to_string())
             .env(
                 "CLAWBLOX_CLAUDE_METADATA_FILE",
-                claude_hook_metadata_file(ctx).display().to_string(),
+                metadata_file.display().to_string(),
             )
             .env("CLAWBLOX_CLAUDE_AUTO_LOOP", "1")
             .env(
@@ -323,7 +349,10 @@ impl ClaudeAgent {
                 &ctx.settings.auto_continue_prompt,
             );
 
-        if ctx.settings.sandbox_enabled {
+        if ctx.sandbox.is_some() {
+            command = command
+                .arg("--settings")
+                .arg("/runtime/claude_sandbox_settings.json");
             if let Some(disallowed_tools) = &self.disallowed_tools {
                 if !disallowed_tools.trim().is_empty() {
                     command = command.arg("--disallowedTools").arg(disallowed_tools);
@@ -381,8 +410,16 @@ impl Agent for CodexAgent {
 
     fn configure_auto_continue(&self, ctx: &AgentContext) -> AgentResult<()> {
         ctx.validate()?;
+        if let Some(layout) = &ctx.sandbox {
+            prepare_codex_sandbox_home(layout)?;
+            write_sandbox_hosts_file(ctx)?;
+        }
         prepare_codex_home(ctx)?;
-        let stop_hook_command = format!("python3 {}", codex_stop_hook_path(ctx).display());
+        let stop_hook_command = if ctx.sandbox.is_some() {
+            "python3 /home/agent/.codex/stop_hook.py".to_string()
+        } else {
+            format!("python3 {}", codex_stop_hook_path(ctx).display())
+        };
         let hooks_json = serde_json::json!({
             "hooks": {
                 "Stop": [
@@ -441,15 +478,50 @@ impl Agent for CodexAgent {
 
 impl CodexAgent {
     fn base_command(&self, ctx: &AgentContext) -> CommandSpec {
-        let sandbox_mode = if ctx.settings.sandbox_enabled {
+        let sandbox = ctx.sandbox.as_ref();
+        let sandbox_mode = if ctx.sandbox.is_some() {
             "workspace-write"
         } else {
             "danger-full-access"
         };
-        CommandSpec::new(&self.binary, &ctx.paths.workspace_dir)
+        let program = sandbox
+            .and_then(|layout| layout.codex_guest_node())
+            .or_else(|| sandbox.map(|layout| layout.codex_guest_program()))
+            .unwrap_or_else(|| self.binary.clone());
+        let codex_program_arg = sandbox.and_then(|layout| {
+            layout
+                .codex_guest_node()
+                .map(|_| layout.codex_guest_program().display().to_string())
+        });
+        let cwd = sandbox
+            .map(|layout| layout.guest_workspace.clone())
+            .unwrap_or_else(|| ctx.paths.workspace_dir.clone());
+        let effective_workspace = sandbox
+            .map(|layout| layout.guest_workspace.clone())
+            .unwrap_or_else(|| ctx.paths.workspace_dir.clone());
+        let home = sandbox
+            .map(|layout| layout.guest_home.clone())
+            .unwrap_or_else(|| ctx.paths.agent_home_dir.clone());
+        let runtime_dir = sandbox
+            .map(|layout| layout.guest_runtime.clone())
+            .unwrap_or_else(|| ctx.paths.runtime_dir.clone());
+        let log_dir = sandbox
+            .map(|layout| layout.guest_logs.clone())
+            .unwrap_or_else(|| {
+                ctx.paths
+                    .log_file
+                    .parent()
+                    .unwrap_or_else(|| Path::new(""))
+                    .to_path_buf()
+            });
+        let mut command = CommandSpec::new(program, cwd);
+        if let Some(codex_program_arg) = codex_program_arg {
+            command = command.arg(codex_program_arg);
+        }
+        command
             .arg("--no-alt-screen")
             .arg("-C")
-            .arg(ctx.paths.workspace_dir.display().to_string())
+            .arg(effective_workspace.display().to_string())
             .arg("-m")
             .arg(&ctx.settings.model)
             .arg("-s")
@@ -457,20 +529,12 @@ impl CodexAgent {
             .arg("-a")
             .arg(codex_approval_policy(&ctx.settings.permission_mode))
             .envs(ctx.settings.env.clone())
-            .env("HOME", ctx.paths.agent_home_dir.display().to_string())
+            .env("HOME", home.display().to_string())
             .env(
                 "CLAWBLOX_CODEX_RUNTIME_DIR",
-                ctx.paths.runtime_dir.display().to_string(),
+                runtime_dir.display().to_string(),
             )
-            .env(
-                "CLAWBLOX_CODEX_LOG_DIR",
-                ctx.paths
-                    .log_file
-                    .parent()
-                    .unwrap_or_else(|| Path::new(""))
-                    .display()
-                    .to_string(),
-            )
+            .env("CLAWBLOX_CODEX_LOG_DIR", log_dir.display().to_string())
             .env("CLAWBLOX_CODEX_AUTO_LOOP", "1")
             .env(
                 "CODEX_AUTO_LOOP_MESSAGE",
@@ -580,7 +644,27 @@ fn claude_hook_metadata_file(ctx: &AgentContext) -> PathBuf {
 }
 
 fn codex_home_dir(ctx: &AgentContext) -> PathBuf {
-    ctx.paths.agent_home_dir.join(".codex")
+    agent_home_dir(ctx).join(".codex")
+}
+
+fn agent_home_dir(ctx: &AgentContext) -> PathBuf {
+    if ctx.settings.sandbox_enabled {
+        sandbox_home_dir(ctx)
+    } else {
+        ctx.paths.agent_home_dir.clone()
+    }
+}
+
+fn sandbox_home_dir(ctx: &AgentContext) -> PathBuf {
+    agent_dir_from_context(ctx).join("sandbox-home")
+}
+
+fn agent_dir_from_context(ctx: &AgentContext) -> PathBuf {
+    ctx.paths
+        .runtime_dir
+        .parent()
+        .unwrap_or_else(|| Path::new(""))
+        .to_path_buf()
 }
 
 fn codex_history_file(ctx: &AgentContext) -> PathBuf {
@@ -657,6 +741,223 @@ fn copy_path(source: &Path, target: &Path) -> AgentResult<()> {
     Ok(())
 }
 
+fn prepare_claude_sandbox_home(ctx: &AgentContext, layout: &SandboxLayout) -> AgentResult<()> {
+    let claude_dir = layout.host_home_dir.join(".claude");
+    for rel in [
+        ".local/bin",
+        ".claude/projects",
+        ".claude/session-env",
+        ".claude/sessions",
+        ".claude/plugins",
+        ".claude/cache",
+        ".claude/backups",
+        ".claude/downloads",
+        ".claude/file-history",
+        ".claude/paste-cache",
+        ".claude/plans",
+        ".claude/shell-snapshots",
+    ] {
+        std::fs::create_dir_all(layout.host_home_dir.join(rel))?;
+    }
+    symlink_or_copy_file(
+        &layout.guest_binary,
+        &layout.host_home_dir.join(".local/bin/claude"),
+    )?;
+
+    let host_claude_dir = std::env::var_os("CLAUDE_CONFIG_DIR")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".claude")));
+    if let Some(token) = std::env::var_os("ANTHROPIC_OAUTH_TOKEN") {
+        let token = token.to_string_lossy();
+        write_file(
+            &claude_dir.join(".credentials.json"),
+            &format!(
+                "{{\"claudeAiOauth\":{{\"accessToken\":{}}}}}\n",
+                serde_json::to_string(&token)
+                    .map_err(|err| AgentError::InvalidConfig(err.to_string()))?
+            ),
+        )?;
+    } else if std::env::var_os("CLAUDE_CODE_OAUTH_TOKEN").is_some() {
+        let _ = std::fs::remove_file(claude_dir.join(".credentials.json"));
+    } else if let Some(host_dir) = &host_claude_dir {
+        copy_if_exists(
+            &host_dir.join(".credentials.json"),
+            &claude_dir.join(".credentials.json"),
+        )?;
+    }
+    if let Some(host_dir) = &host_claude_dir {
+        copy_if_exists(
+            &host_dir.join("settings.json"),
+            &claude_dir.join("settings.json"),
+        )?;
+        copy_if_exists(
+            &host_dir.join(".claude.json"),
+            &layout.host_home_dir.join(".claude.json"),
+        )?;
+    }
+    write_claude_workspace_trust(ctx, layout)?;
+    Ok(())
+}
+
+fn write_claude_workspace_trust(_ctx: &AgentContext, layout: &SandboxLayout) -> AgentResult<()> {
+    let path = layout.host_home_dir.join(".claude.json");
+    let mut data = if path.is_file() {
+        serde_json::from_str::<serde_json::Value>(&std::fs::read_to_string(&path)?)
+            .unwrap_or_else(|_| serde_json::json!({}))
+    } else {
+        serde_json::json!({})
+    };
+    let Some(obj) = data.as_object_mut() else {
+        data = serde_json::json!({});
+        let obj = data.as_object_mut().expect("object");
+        obj.insert("projects".to_string(), serde_json::json!({}));
+        return write_json_file(&path, &data);
+    };
+    let projects = obj
+        .entry("projects".to_string())
+        .or_insert_with(|| serde_json::json!({}));
+    let project_obj = projects.as_object_mut().ok_or_else(|| {
+        AgentError::InvalidConfig("Claude projects config is not an object".into())
+    })?;
+    project_obj.insert(
+        "/workspace".to_string(),
+        serde_json::json!({
+            "hasTrustDialogAccepted": true,
+            "allowedTools": [],
+            "mcpContextUris": [],
+            "mcpServers": {},
+            "enabledMcpjsonServers": [],
+            "disabledMcpjsonServers": [],
+        }),
+    );
+    obj.insert(
+        "hasCompletedOnboarding".to_string(),
+        serde_json::json!(true),
+    );
+    obj.entry("lastOnboardingVersion".to_string())
+        .or_insert_with(|| serde_json::json!("2.1.116"));
+    write_json_file(&path, &data)
+}
+
+fn write_claude_sandbox_settings(ctx: &AgentContext) -> AgentResult<()> {
+    let world_base_url = env_value(ctx, "WORLD_BASE_URL").unwrap_or_default();
+    let host = parse_http_host(&world_base_url).unwrap_or_default();
+    let mut allowed_domains = Vec::new();
+    if !host.is_empty() && !matches!(host.as_str(), "localhost" | "127.0.0.1" | "::1") {
+        allowed_domains.push(host);
+    }
+    let mut network = serde_json::json!({
+        "allowedDomains": allowed_domains,
+        "deniedDomains": ["localhost", "127.0.0.1"],
+    });
+    if let Some(port) = world_proxy_port(ctx) {
+        network["httpProxyPort"] = serde_json::json!(port);
+    }
+    let settings = serde_json::json!({
+        "sandbox": {
+            "enabled": true,
+            "failIfUnavailable": true,
+            "allowUnsandboxedCommands": false,
+            "autoAllowBashIfSandboxed": true,
+            "network": network,
+        }
+    });
+    write_json_file(
+        &ctx.paths.runtime_dir.join("claude_sandbox_settings.json"),
+        &settings,
+    )
+}
+
+fn prepare_codex_sandbox_home(layout: &SandboxLayout) -> AgentResult<()> {
+    for rel in [
+        ".local/bin",
+        ".codex/log",
+        ".codex/sessions",
+        ".codex/tmp",
+        ".codex/cache",
+        ".codex/memories",
+    ] {
+        std::fs::create_dir_all(layout.host_home_dir.join(rel))?;
+    }
+    symlink_or_copy_file(
+        &layout.guest_binary,
+        &layout.host_home_dir.join(".local/bin/codex"),
+    )
+}
+
+fn write_sandbox_hosts_file(ctx: &AgentContext) -> AgentResult<()> {
+    let path = ctx.paths.runtime_dir.join("sandbox_hosts");
+    let mut hosts = std::fs::read_to_string("/etc/hosts")
+        .unwrap_or_else(|_| "127.0.0.1 localhost\n".to_string());
+    if let Some(host) = env_value(ctx, "WORLD_BASE_URL").and_then(|url| parse_http_host(&url)) {
+        if !matches!(host.as_str(), "localhost" | "127.0.0.1" | "::1") && !hosts.contains(&host) {
+            hosts = format!("{}\n127.0.0.1 {host}\n", hosts.trim_end());
+        }
+    }
+    write_file(&path, &hosts)
+}
+
+fn copy_if_exists(source: &Path, target: &Path) -> AgentResult<()> {
+    if source.exists() {
+        copy_path(source, target)?;
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn symlink_or_copy_file(source: &Path, target: &Path) -> AgentResult<()> {
+    create_parent_dir(target)?;
+    let _ = std::fs::remove_file(target);
+    std::os::unix::fs::symlink(source, target)?;
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn symlink_or_copy_file(source: &Path, target: &Path) -> AgentResult<()> {
+    create_parent_dir(target)?;
+    std::fs::copy(source, target)?;
+    Ok(())
+}
+
+fn write_json_file(path: &Path, value: &serde_json::Value) -> AgentResult<()> {
+    write_file(
+        path,
+        &format!(
+            "{}\n",
+            serde_json::to_string_pretty(value)
+                .map_err(|err| AgentError::InvalidConfig(err.to_string()))?
+        ),
+    )
+}
+
+fn env_value(ctx: &AgentContext, key: &str) -> Option<String> {
+    ctx.settings
+        .env
+        .iter()
+        .rev()
+        .find_map(|(name, value)| (name == key).then(|| value.clone()))
+}
+
+fn world_proxy_port(ctx: &AgentContext) -> Option<u16> {
+    env_value(ctx, "CLAWBLOX_WORLD_HTTP_PROXY_PORT").and_then(|value| value.parse().ok())
+}
+
+fn parse_http_host(url: &str) -> Option<String> {
+    let without_scheme = url
+        .strip_prefix("http://")
+        .or_else(|| url.strip_prefix("https://"))?;
+    let authority = without_scheme.split('/').next().unwrap_or("");
+    let host = authority
+        .rsplit('@')
+        .next()
+        .unwrap_or(authority)
+        .split(':')
+        .next()
+        .unwrap_or("")
+        .trim();
+    (!host.is_empty()).then(|| host.to_string())
+}
+
 #[cfg(unix)]
 fn symlink_path(source: &Path, target: &Path) -> AgentResult<()> {
     std::os::unix::fs::symlink(source, target)?;
@@ -682,10 +983,37 @@ fn write_codex_config(ctx: &AgentContext) -> AgentResult<()> {
         )
         .map_err(|err| AgentError::InvalidConfig(err.to_string()))?,
     );
-    config.push_str("\n\n[features]\nhooks = true\n\n");
+    if let Some(port) = ctx.sandbox.as_ref().and_then(|_| world_proxy_port(ctx)) {
+        config.push_str(
+            "\ndefault_permissions = \"workspace\"\n\n\
+             [sandbox_workspace_write]\n\
+             writable_roots = [\"/workspace\"]\n\
+             network_access = true\n\n\
+             [permissions.workspace.network]\n\
+             enabled = true\n",
+        );
+        config.push_str(&format!("proxy_url = \"http://127.0.0.1:{port}\"\n"));
+        config.push_str(
+            "enable_socks5 = false\n\
+             allow_upstream_proxy = false\n\
+             allow_local_binding = true\n\n\
+             [permissions.workspace.network.domains]\n\
+             \"world\" = \"allow\"\n\n",
+        );
+    }
+    config.push_str("\n[features]\nhooks = true\n");
+    if ctx.sandbox.is_some() && world_proxy_port(ctx).is_some() {
+        config.push_str("network_proxy = true\n");
+    }
+    config.push('\n');
+    let project_workspace = ctx
+        .sandbox
+        .as_ref()
+        .map(|layout| layout.guest_workspace.display().to_string())
+        .unwrap_or_else(|| ctx.paths.workspace_dir.display().to_string());
     config.push_str(&format!(
         "[projects.{}]\ntrust_level = \"trusted\"\n",
-        serde_json::to_string(&ctx.paths.workspace_dir.display().to_string())
+        serde_json::to_string(&project_workspace)
             .map_err(|err| AgentError::InvalidConfig(err.to_string()))?
     ));
     write_file(&codex_home_dir(ctx).join("config.toml"), &config)
@@ -726,7 +1054,7 @@ fn collect_claude_transcript(ctx: &AgentContext) -> AgentResult<()> {
     if transcript_path.trim().is_empty() {
         return Ok(());
     }
-    let src = PathBuf::from(transcript_path);
+    let src = map_sandbox_path(ctx, transcript_path.trim());
     if src.is_file() {
         std::fs::create_dir_all(&ctx.paths.transcript_dir)?;
         let dst = ctx.paths.transcript_dir.join(
@@ -774,6 +1102,29 @@ fn collect_codex_transcript(ctx: &AgentContext) -> AgentResult<()> {
         )?;
     }
     Ok(())
+}
+
+fn map_sandbox_path(ctx: &AgentContext, path: &str) -> PathBuf {
+    if ctx.settings.sandbox_enabled {
+        if let Some(rel) = path.strip_prefix("/home/agent/") {
+            return sandbox_home_dir(ctx).join(rel);
+        }
+        if let Some(rel) = path.strip_prefix("/workspace/") {
+            return ctx.paths.workspace_dir.join(rel);
+        }
+        if let Some(rel) = path.strip_prefix("/runtime/") {
+            return ctx.paths.runtime_dir.join(rel);
+        }
+        if let Some(rel) = path.strip_prefix("/logs/") {
+            return ctx
+                .paths
+                .log_file
+                .parent()
+                .unwrap_or_else(|| Path::new(""))
+                .join(rel);
+        }
+    }
+    PathBuf::from(path)
 }
 
 fn find_latest_matching_jsonl(root: &Path, needle: &str) -> AgentResult<Option<PathBuf>> {
@@ -1169,6 +1520,110 @@ mod tests {
     }
 
     #[test]
+    fn claude_agent_uses_guest_paths_when_sandboxed() {
+        let mut ctx = test_context();
+        ctx.settings.sandbox_enabled = true;
+        ctx.settings.env = vec![
+            ("WORLD_BASE_URL".to_string(), "http://world".to_string()),
+            (
+                "CLAWBLOX_WORLD_HTTP_PROXY_PORT".to_string(),
+                "43210".to_string(),
+            ),
+        ];
+        ctx.prepare_paths().unwrap();
+        std::fs::write(&ctx.paths.prompt_file, "System prompt").unwrap();
+        ctx.sandbox = Some(
+            SandboxLayout::for_agent(
+                &ctx,
+                crate::agent_sandbox::SandboxAgentKind::Claude,
+                PathBuf::from("/bin/echo"),
+            )
+            .with_claude_plugin()
+            .with_hosts_file(ctx.paths.runtime_dir.join("sandbox_hosts")),
+        );
+        let agent = ClaudeAgent {
+            binary: PathBuf::from("/bin/echo"),
+            bare: false,
+            disallowed_tools: Some("WebFetch,WebSearch".to_string()),
+        };
+
+        agent.configure_auto_continue(&ctx).unwrap();
+        let start = agent.start(&ctx).unwrap();
+
+        assert_eq!(start.program, PathBuf::from("/sandbox-bin/claude"));
+        assert_eq!(start.cwd, PathBuf::from("/workspace"));
+        assert!(start.args.contains(&"/plugin".to_string()));
+        assert!(start.args.contains(&"/tmp/system_prompt.md".to_string()));
+        assert!(start
+            .args
+            .windows(2)
+            .any(|window| window == ["--settings", "/runtime/claude_sandbox_settings.json"]));
+        assert!(start
+            .env
+            .contains(&("CLAWBLOX_CLAUDE_LOG_DIR".to_string(), "/logs".to_string())));
+        assert!(start.env.contains(&(
+            "CLAWBLOX_CLAUDE_METADATA_FILE".to_string(),
+            "/runtime/hook_session.env".to_string()
+        )));
+        let settings =
+            std::fs::read_to_string(ctx.paths.runtime_dir.join("claude_sandbox_settings.json"))
+                .unwrap();
+        assert!(settings.contains("\"httpProxyPort\": 43210"));
+        assert!(ctx.paths.runtime_dir.join("sandbox_hosts").is_file());
+    }
+
+    #[test]
+    fn codex_agent_uses_guest_paths_and_proxy_config_when_sandboxed() {
+        let mut ctx = test_context();
+        ctx.settings.sandbox_enabled = true;
+        ctx.settings.env = vec![
+            ("WORLD_BASE_URL".to_string(), "http://world".to_string()),
+            (
+                "CLAWBLOX_WORLD_HTTP_PROXY_PORT".to_string(),
+                "43210".to_string(),
+            ),
+        ];
+        ctx.prepare_paths().unwrap();
+        std::fs::write(&ctx.paths.prompt_file, "System prompt").unwrap();
+        std::fs::write(&ctx.paths.session_id_file, "codex-session\n").unwrap();
+        ctx.sandbox = Some(SandboxLayout::for_agent(
+            &ctx,
+            crate::agent_sandbox::SandboxAgentKind::Codex,
+            PathBuf::from("/bin/echo"),
+        ));
+        let agent = CodexAgent {
+            binary: PathBuf::from("/bin/echo"),
+        };
+
+        agent.configure_auto_continue(&ctx).unwrap();
+        let start = agent.start(&ctx).unwrap();
+
+        assert_eq!(start.program, PathBuf::from("/sandbox-bin/codex"));
+        assert_eq!(start.cwd, PathBuf::from("/workspace"));
+        assert!(start
+            .args
+            .windows(2)
+            .any(|window| window == ["-C", "/workspace"]));
+        assert!(start
+            .args
+            .windows(2)
+            .any(|window| window == ["-s", "workspace-write"]));
+        assert!(start
+            .env
+            .contains(&("HOME".to_string(), "/home/agent".to_string())));
+        assert!(start.env.contains(&(
+            "CLAWBLOX_CODEX_RUNTIME_DIR".to_string(),
+            "/runtime".to_string()
+        )));
+        let config = std::fs::read_to_string(codex_home_dir(&ctx).join("config.toml")).unwrap();
+        assert!(config.contains("proxy_url = \"http://127.0.0.1:43210\""));
+        assert!(config.contains("[projects.\"/workspace\"]"));
+        assert!(std::fs::read_to_string(codex_hooks_path(&ctx))
+            .unwrap()
+            .contains("/home/agent/.codex/stop_hook.py"));
+    }
+
+    #[test]
     fn codex_agent_collects_session_id_and_transcript_from_history() {
         let ctx = test_context();
         ctx.prepare_paths().unwrap();
@@ -1225,6 +1680,7 @@ mod tests {
                 env: vec![("WORLD_BASE_URL".to_string(), "http://world".to_string())],
                 sandbox_enabled: true,
             },
+            sandbox: None,
         }
     }
 }
