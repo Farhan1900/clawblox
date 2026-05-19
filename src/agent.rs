@@ -887,8 +887,7 @@ fn prepare_codex_sandbox_home(layout: &SandboxLayout) -> AgentResult<()> {
 
 fn write_sandbox_hosts_file(ctx: &AgentContext) -> AgentResult<()> {
     let path = ctx.paths.runtime_dir.join("sandbox_hosts");
-    let mut hosts = std::fs::read_to_string("/etc/hosts")
-        .unwrap_or_else(|_| "127.0.0.1 localhost\n".to_string());
+    let mut hosts = "127.0.0.1 localhost\n::1 localhost ip6-localhost ip6-loopback\n".to_string();
     if let Some(host) = env_value(ctx, "WORLD_BASE_URL").and_then(|url| parse_http_host(&url)) {
         if !matches!(host.as_str(), "localhost" | "127.0.0.1" | "::1") && !hosts.contains(&host) {
             hosts = format!("{}\n127.0.0.1 {host}\n", hosts.trim_end());
