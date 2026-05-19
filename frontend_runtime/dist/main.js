@@ -104,6 +104,8 @@ const replayState = {
   metadataEnabled: false,
   metadataLoaded: false,
   metadata: null,
+  externalViewEnabled: false,
+  externalViewUrl: null,
   behaviorPanelOpen: readStoredBool('clawblox_behavior_panel_open', false),
   selectedBehaviorId: null,
   selectedOccurrenceId: null,
@@ -911,6 +913,28 @@ async function fetchReplayMetadata() {
   const resp = await fetch(withBasePath('/replay/metadata'), { cache: 'no-store' })
   if (!resp.ok) throw new Error(`replay metadata HTTP ${resp.status}`)
   return resp.json()
+}
+
+async function fetchExternalReplayView() {
+  const resp = await fetch(withBasePath('/replay/external-view'), { cache: 'no-store' })
+  if (!resp.ok) throw new Error(`external replay view HTTP ${resp.status}`)
+  return resp.json()
+}
+
+function mountExternalReplayView(url) {
+  replayState.externalViewEnabled = true
+  replayState.externalViewUrl = url
+  canvas.hidden = true
+  let frame = document.getElementById('external-replay-view')
+  if (!frame) {
+    frame = document.createElement('iframe')
+    frame.id = 'external-replay-view'
+    frame.className = 'external-replay-view'
+    frame.title = 'Replay viewport'
+    frame.allow = 'fullscreen; clipboard-read; clipboard-write'
+    canvas.insertAdjacentElement('afterend', frame)
+  }
+  frame.src = url
 }
 
 function applyReplayMetadata(payload) {
@@ -1851,6 +1875,18 @@ async function bootstrap() {
     })
     if (logs) renderAgentLogMessages(replayInfo?.current_tick || 0, logs)
     startReplayPolling()
+    const externalView = await fetchExternalReplayView().catch((err) => {
+      console.error(err)
+      return null
+    })
+    if (externalView?.enabled && externalView?.url) {
+      mountExternalReplayView(externalView.url)
+      setStatus('Connected | Replay | External viewport', 'ok')
+      window.addEventListener('beforeunload', () => {
+        if (replayState.pollTimer) clearInterval(replayState.pollTimer)
+      })
+      return
+    }
   }
 
   let manifest

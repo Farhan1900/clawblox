@@ -84,6 +84,13 @@ struct AppOpenReplayResponse {
     agent_log: Option<String>,
 }
 
+#[derive(Serialize)]
+struct ExternalReplayViewResponse {
+    enabled: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    url: Option<String>,
+}
+
 async fn build_replay_state(
     file: PathBuf,
     speed: f32,
@@ -226,6 +233,10 @@ pub fn run_app(path: PathBuf, port: u16, base_path: &str) {
                     get(app_replay_renderer_manifest),
                 )
                 .route("/sessions/{id}/replay/info", get(app_replay_info))
+                .route(
+                    "/sessions/{id}/replay/external-view",
+                    get(app_replay_external_view),
+                )
                 .route("/sessions/{id}/replay/state", get(app_replay_state_at))
                 .route(
                     "/sessions/{id}/replay/agent",
@@ -818,6 +829,99 @@ fn get_app_replay_state(
     ))
 }
 
+fn get_app_external_session(
+    state: &AppState,
+    id: &str,
+) -> Result<ExternalReplaySession, (axum::http::StatusCode, String)> {
+    state
+        .external_sessions
+        .get(id)
+        .map(|entry| entry.clone())
+        .ok_or((
+            axum::http::StatusCode::NOT_FOUND,
+            format!("unknown external replay session '{}'", id),
+        ))
+}
+
+fn get_app_session_exists(
+    state: &AppState,
+    id: &str,
+) -> Result<(), (axum::http::StatusCode, String)> {
+    if state.sessions.contains_key(id) || state.external_sessions.contains_key(id) {
+        Ok(())
+    } else {
+        Err((
+            axum::http::StatusCode::NOT_FOUND,
+            format!("unknown replay session '{}'", id),
+        ))
+    }
+}
+
+fn join_external_replay_url(base: &str, path: &str) -> String {
+    let base = base.trim_end_matches('/');
+    let path = if path.starts_with('/') {
+        path.to_string()
+    } else {
+        format!("/{}", path)
+    };
+    format!("{}{}", base, path)
+}
+
+async fn proxy_external_replay_json(
+    session: &ExternalReplaySession,
+    path: &str,
+) -> Result<serde_json::Value, (axum::http::StatusCode, String)> {
+    let url = join_external_replay_url(&session.url, path);
+    let resp = reqwest::Client::new().get(&url).send().await.map_err(|e| {
+        (
+            axum::http::StatusCode::BAD_GATEWAY,
+            format!("external replay request failed '{}': {}", url, e),
+        )
+    })?;
+    let status = resp.status();
+    if !status.is_success() {
+        return Err((
+            axum::http::StatusCode::BAD_GATEWAY,
+            format!("external replay request '{}' returned {}", url, status),
+        ));
+    }
+    resp.json::<serde_json::Value>().await.map_err(|e| {
+        (
+            axum::http::StatusCode::BAD_GATEWAY,
+            format!("external replay response was not JSON '{}': {}", url, e),
+        )
+    })
+}
+
+async fn post_external_replay(
+    session: &ExternalReplaySession,
+    path: &str,
+) -> Result<axum::http::StatusCode, (axum::http::StatusCode, String)> {
+    let url = join_external_replay_url(&session.url, path);
+    let resp = reqwest::Client::new()
+        .post(&url)
+        .send()
+        .await
+        .map_err(|e| {
+            (
+                axum::http::StatusCode::BAD_GATEWAY,
+                format!("external replay request failed '{}': {}", url, e),
+            )
+        })?;
+    if resp.status().is_success() {
+        Ok(axum::http::StatusCode::OK)
+    } else {
+        Err((
+            axum::http::StatusCode::BAD_GATEWAY,
+            format!(
+                "external replay request '{}' returned {}",
+                url,
+                resp.status()
+            ),
+        ))
+    }
+}
+
 async fn app_ui_index(State(state): State<AppState>) -> impl IntoResponse {
     embedded_index_response("app/index.html", &state.base_path)
 }
@@ -860,7 +964,6 @@ async fn app_open_replay(
         let session = open_external_replay_manifest(recording_path.clone())
             .await
             .map_err(|e| (axum::http::StatusCode::BAD_REQUEST, e))?;
-        let url = session.url.clone();
         let resolved_recording_path = session.recording_path.display().to_string();
         let world_dir = session
             .manifest_path
@@ -869,10 +972,11 @@ async fn app_open_replay(
             .unwrap_or_default();
         let replay_format = session.format.clone();
         state.external_sessions.insert(session_id.clone(), session);
+        let session_url = app_session_base_path(&state, &session_id);
 
         return Ok(Json(AppOpenReplayResponse {
             session_id,
-            url,
+            url: session_url,
             recording_path: resolved_recording_path,
             world_dir,
             replay_format,
@@ -916,7 +1020,7 @@ async fn app_session_ui_index(
     AxumPath(id): AxumPath<String>,
     State(state): State<AppState>,
 ) -> Result<impl IntoResponse, (axum::http::StatusCode, String)> {
-    get_app_replay_state(&state, &id)?;
+    get_app_session_exists(&state, &id)?;
     Ok(embedded_ui_index_response(&app_session_base_path(
         &state, &id,
     )))
@@ -942,10 +1046,37 @@ async fn app_replay_renderer_manifest(
 async fn app_replay_info(
     AxumPath(id): AxumPath<String>,
     State(state): State<AppState>,
-) -> Result<Json<replay::ReplayInfo>, (axum::http::StatusCode, String)> {
+) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, String)> {
+    if let Ok(session) = get_app_external_session(&state, &id) {
+        return proxy_external_replay_json(&session, "/replay/info")
+            .await
+            .map(Json);
+    }
     let replay_state = get_app_replay_state(&state, &id)?;
     let pb = replay_state.playback.lock().await;
-    Ok(Json(pb.info()))
+    serde_json::to_value(pb.info()).map(Json).map_err(|e| {
+        (
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            format!("failed to serialize replay info: {}", e),
+        )
+    })
+}
+
+async fn app_replay_external_view(
+    AxumPath(id): AxumPath<String>,
+    State(state): State<AppState>,
+) -> Result<Json<ExternalReplayViewResponse>, (axum::http::StatusCode, String)> {
+    if let Ok(session) = get_app_external_session(&state, &id) {
+        return Ok(Json(ExternalReplayViewResponse {
+            enabled: true,
+            url: Some(join_external_replay_url(&session.url, "/replay/view")),
+        }));
+    }
+    get_app_replay_state(&state, &id)?;
+    Ok(Json(ExternalReplayViewResponse {
+        enabled: false,
+        url: None,
+    }))
 }
 
 async fn app_replay_state_at(
@@ -978,6 +1109,22 @@ async fn app_replay_agent_messages(
     State(state): State<AppState>,
     Query(query): Query<ReplayAgentQuery>,
 ) -> Result<Json<ReplayAgentMessagesResponse>, (axum::http::StatusCode, String)> {
+    if let Ok(session) = get_app_external_session(&state, &id) {
+        let info = proxy_external_replay_json(&session, "/replay/info")
+            .await
+            .ok();
+        let current_tick = query
+            .tick
+            .or_else(|| info.as_ref()?.get("current_tick")?.as_u64())
+            .unwrap_or(0);
+        return Ok(Json(ReplayAgentMessagesResponse {
+            enabled: false,
+            current_tick,
+            start_tick: 0,
+            end_tick: current_tick,
+            messages: Vec::new(),
+        }));
+    }
     let replay_state = get_app_replay_state(&state, &id)?;
     let current_tick = if let Some(tick) = query.tick {
         tick
@@ -1009,6 +1156,12 @@ async fn app_replay_metadata(
     AxumPath(id): AxumPath<String>,
     State(state): State<AppState>,
 ) -> Result<Json<ReplayMetadataResponse>, (axum::http::StatusCode, String)> {
+    if get_app_external_session(&state, &id).is_ok() {
+        return Ok(Json(ReplayMetadataResponse {
+            enabled: false,
+            metadata: None,
+        }));
+    }
     let replay_state = get_app_replay_state(&state, &id)?;
     Ok(Json(ReplayMetadataResponse {
         enabled: replay_state.replay_metadata.is_some(),
@@ -1024,6 +1177,9 @@ async fn app_replay_seek(
     State(state): State<AppState>,
     Query(q): Query<SeekQuery>,
 ) -> Result<axum::http::StatusCode, (axum::http::StatusCode, String)> {
+    if let Ok(session) = get_app_external_session(&state, &id) {
+        return post_external_replay(&session, &format!("/replay/seek?tick={}", q.tick)).await;
+    }
     let replay_state = get_app_replay_state(&state, &id)?;
     let mut pb = replay_state.playback.lock().await;
     pb.seek(q.tick);
@@ -1035,6 +1191,9 @@ async fn app_replay_speed(
     State(state): State<AppState>,
     Query(q): Query<SpeedQuery>,
 ) -> Result<axum::http::StatusCode, (axum::http::StatusCode, String)> {
+    if let Ok(session) = get_app_external_session(&state, &id) {
+        return post_external_replay(&session, &format!("/replay/speed?value={}", q.value)).await;
+    }
     let replay_state = get_app_replay_state(&state, &id)?;
     let mut pb = replay_state.playback.lock().await;
     pb.set_speed(q.value);
@@ -1046,6 +1205,13 @@ async fn app_replay_skip_idle(
     State(state): State<AppState>,
     Query(q): Query<SkipIdleQuery>,
 ) -> Result<axum::http::StatusCode, (axum::http::StatusCode, String)> {
+    if let Ok(session) = get_app_external_session(&state, &id) {
+        return post_external_replay(
+            &session,
+            &format!("/replay/skip-idle?enabled={}", q.enabled),
+        )
+        .await;
+    }
     let replay_state = get_app_replay_state(&state, &id)?;
     let mut pb = replay_state.playback.lock().await;
     pb.set_skip_idle(q.enabled);
@@ -1056,6 +1222,9 @@ async fn app_replay_pause(
     AxumPath(id): AxumPath<String>,
     State(state): State<AppState>,
 ) -> Result<axum::http::StatusCode, (axum::http::StatusCode, String)> {
+    if let Ok(session) = get_app_external_session(&state, &id) {
+        return post_external_replay(&session, "/replay/pause").await;
+    }
     let replay_state = get_app_replay_state(&state, &id)?;
     let mut pb = replay_state.playback.lock().await;
     pb.set_paused(true);
@@ -1066,6 +1235,9 @@ async fn app_replay_play(
     AxumPath(id): AxumPath<String>,
     State(state): State<AppState>,
 ) -> Result<axum::http::StatusCode, (axum::http::StatusCode, String)> {
+    if let Ok(session) = get_app_external_session(&state, &id) {
+        return post_external_replay(&session, "/replay/play").await;
+    }
     let replay_state = get_app_replay_state(&state, &id)?;
     let mut pb = replay_state.playback.lock().await;
     pb.play();
@@ -1077,6 +1249,16 @@ async fn app_replay_play_range(
     State(state): State<AppState>,
     Query(q): Query<PlayRangeQuery>,
 ) -> Result<axum::http::StatusCode, (axum::http::StatusCode, String)> {
+    if let Ok(session) = get_app_external_session(&state, &id) {
+        return post_external_replay(
+            &session,
+            &format!(
+                "/replay/play-range?start_tick={}&end_tick={}",
+                q.start_tick, q.end_tick
+            ),
+        )
+        .await;
+    }
     let replay_state = get_app_replay_state(&state, &id)?;
     let mut pb = replay_state.playback.lock().await;
     pb.play_range(q.start_tick, q.end_tick);
