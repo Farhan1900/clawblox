@@ -2,7 +2,7 @@
 
 use axum::{
     extract::{
-        ws::{Message, WebSocket, WebSocketUpgrade},
+        ws::{rejection::WebSocketUpgradeRejection, Message, WebSocket, WebSocketUpgrade},
         OriginalUri, Path as AxumPath, Query, State,
     },
     response::IntoResponse,
@@ -27,6 +27,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::sync::{broadcast, watch};
 use tokio::task::JoinHandle;
 use tokio::time::interval;
+use tokio_tungstenite::tungstenite;
 use tower_http::cors::{Any, CorsLayer};
 use uuid::Uuid;
 
@@ -53,6 +54,7 @@ use clawblox::{
         script_bundle::load_world_and_entry_script,
         GameManager, GameManagerHandle,
     },
+    manifest,
     recording, replay,
     replay_agent_log::{load_agent_timeline, ReplayAgentMessage, ReplayAgentTimeline},
     replay_metadata::{self, ReplayMetadata},
@@ -2013,6 +2015,10 @@ fn run_game(
             {
                 Ok(writer) => {
                     println!("Recording to: {}", rec_path.display());
+                    if let Some(state_root) = rec_dir.parent() {
+                        let manifest_path = manifest::manifest_path_for_state_root(state_root);
+                        let _ = manifest::record_recording(&manifest_path, &rec_path, "clawrec");
+                    }
                     Some(Arc::new(tokio::sync::Mutex::new(writer)))
                 }
                 Err(e) => {
@@ -2832,6 +2838,7 @@ fn run_external_world_command(
         base_path: "/".to_string(),
         record,
         record_dir: record_dir.cloned(),
+        manifest_path: None,
         resume: resume.cloned(),
         clawblox_bin: Some(PathBuf::from(current_exe)),
     };

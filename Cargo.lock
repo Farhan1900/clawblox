@@ -416,6 +416,7 @@ dependencies = [
  "sqlx",
  "tar",
  "tokio",
+ "tokio-tungstenite",
  "toml",
  "tower-http",
  "tower_governor",

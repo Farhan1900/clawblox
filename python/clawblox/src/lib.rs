@@ -12,6 +12,10 @@ use clawblox::agent_runner::{
     send_agent, start_agent, stop_agent, AgentKind, AgentSendOptions, AgentStartOptions,
     AgentStopOptions,
 };
+use clawblox::manifest::{
+    manifest_path_for_state_root, record_agent_connected, record_world_started,
+    refresh_agent_from_dir, AgentConnected, WorldStarted,
+};
 use clawblox::world_capability_proxy::{
     start_world_capability_proxy, WorldCapabilityProxy, WorldCapabilityProxyConfig,
 };
@@ -83,6 +87,7 @@ struct PyWorld {
     tmux_session: Option<String>,
     tmux_window: Option<String>,
     owns_tmux_session: bool,
+    manifest_path: Option<PathBuf>,
     next_agent_index: u32,
     world_proxies: Vec<WorldCapabilityProxy>,
     connected_sessions: Vec<String>,
@@ -99,6 +104,7 @@ struct PyWorldStartResult {
     url: String,
     command_file: PathBuf,
     log_file: PathBuf,
+    manifest_path: Option<PathBuf>,
 }
 
 impl PyAgent {
@@ -257,6 +263,7 @@ impl PyAgent {
     ) -> PyResult<PyAgentStartResult> {
         self.prepare_workspace_runtime()?;
         let env = self.merged_env(dict_to_env(env)?)?;
+        let manifest_path = manifest_path_from_env(&env);
         let kind = parse_agent_kind(&self.agent)?;
         let run_tmux = self.hidden_run_tmux()?;
         let tmux_session = run_tmux
@@ -282,6 +289,17 @@ impl PyAgent {
             bare: self.bare,
         })
         .map_err(PyAgentError::new_err)?;
+        if let Some(manifest_path) = manifest_path {
+            refresh_agent_from_dir(
+                &manifest_path,
+                &self.dir,
+                &self.name,
+                &self.name,
+                &self.agent,
+                &self.model,
+            )
+            .map_err(PyAgentError::new_err)?;
+        }
 
         Ok(PyAgentStartResult {
             tmux_session: started.tmux_session,
@@ -301,6 +319,7 @@ impl PyAgent {
         env: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<PyAgentStartResult> {
         let env = self.merged_env(dict_to_env(env)?)?;
+        let manifest_path = manifest_path_from_env(&env);
         let kind = parse_agent_kind(&self.agent)?;
         let run_tmux = self.hidden_run_tmux()?;
         let tmux_session = run_tmux
@@ -325,6 +344,17 @@ impl PyAgent {
             bare: self.bare,
         })
         .map_err(PyAgentError::new_err)?;
+        if let Some(manifest_path) = manifest_path {
+            refresh_agent_from_dir(
+                &manifest_path,
+                &self.dir,
+                &self.name,
+                &self.name,
+                &self.agent,
+                &self.model,
+            )
+            .map_err(PyAgentError::new_err)?;
+        }
 
         Ok(PyAgentStartResult {
             tmux_session: started.tmux_session,
@@ -344,6 +374,7 @@ impl PyAgent {
         env: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<PyAgentStopResult> {
         let env = self.merged_env(dict_to_env(env)?)?;
+        let manifest_path = manifest_path_from_env(&env);
         let kind = parse_agent_kind(&self.agent)?;
         let run_tmux = self.hidden_run_tmux()?;
         let tmux_session = run_tmux
@@ -368,6 +399,17 @@ impl PyAgent {
             grace_seconds,
         })
         .map_err(PyAgentError::new_err)?;
+        if let Some(manifest_path) = manifest_path {
+            refresh_agent_from_dir(
+                &manifest_path,
+                &self.dir,
+                &self.name,
+                &self.name,
+                &self.agent,
+                &self.model,
+            )
+            .map_err(PyAgentError::new_err)?;
+        }
 
         Ok(PyAgentStopResult {
             tmux_session: stopped.tmux_session,
@@ -406,6 +448,7 @@ impl PyWorld {
             tmux_session: None,
             tmux_window: None,
             owns_tmux_session: false,
+            manifest_path: None,
             next_agent_index: 0,
             world_proxies: Vec::new(),
             connected_sessions: Vec::new(),
@@ -476,6 +519,20 @@ impl PyWorld {
         self.config
             .get("run")
             .and_then(|run| run.get("command"))
+            .and_then(|command| command.as_array())
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(|item| item.as_str().map(ToString::to_string))
+                    .collect()
+            })
+    }
+
+    #[getter]
+    fn replay_command(&self) -> Option<Vec<String>> {
+        self.config
+            .get("replay")
+            .and_then(|replay| replay.get("command"))
             .and_then(|command| command.as_array())
             .map(|items| {
                 items
@@ -591,6 +648,7 @@ impl PyWorld {
                     url: self.url()?,
                     command_file: self.running_command_file()?,
                     log_file: self.running_log_file()?,
+                    manifest_path: self.manifest_path.clone(),
                 });
             }
         }
@@ -616,6 +674,7 @@ impl PyWorld {
                     url: self.url()?,
                     command_file: self.running_command_file()?,
                     log_file: self.running_log_file()?,
+                    manifest_path: self.manifest_path.clone(),
                 });
             }
         }
@@ -637,6 +696,7 @@ impl PyWorld {
         self.command_file =
             Some(command_file.unwrap_or_else(|| state_root.join("runtime/world.sh")));
         self.log_file = Some(log_file.unwrap_or_else(|| state_root.join("logs/world.log")));
+        self.manifest_path = Some(manifest_path_for_state_root(&state_root));
 
         wait_for_port_release(port, Duration::from_secs(self.port_wait))?;
 
@@ -778,15 +838,34 @@ impl PyWorld {
             if http_request("GET", port, &health_path, &[], "")
                 .is_ok_and(|response| response.status == 200)
             {
+                let url = self.url()?;
+                if let Some(manifest_path) = &self.manifest_path {
+                    record_world_started(
+                        manifest_path,
+                        WorldStarted {
+                            source_dir: &self.dir,
+                            runtime_mode: &self.runtime_mode(),
+                            url: &url,
+                            port,
+                            record_dir: self.record_dir.as_ref().map(PathBuf::as_path),
+                            command_file: &command_file,
+                            log_file: &log_file,
+                            command: command.clone(),
+                            replay_command: self.replay_command().unwrap_or_default(),
+                        },
+                    )
+                    .map_err(PyAgentError::new_err)?;
+                }
                 return Ok(PyWorldStartResult {
                     command,
                     start_command: self.start_command(),
                     delegated: self.uses_run_command(),
                     run_command: self.run_command(),
                     env: self.resolved_start_env(port),
-                    url: self.url()?,
+                    url,
                     command_file,
                     log_file,
+                    manifest_path: self.manifest_path.clone(),
                 });
             }
             std::thread::sleep(Duration::from_millis(250));
@@ -893,6 +972,27 @@ impl PyWorld {
                 proxy_port.to_string(),
             ));
         }
+        if let Some(manifest_path) = &self.manifest_path {
+            world_env.push((
+                "CLAWBLOX_MANIFEST_PATH".to_string(),
+                manifest_path.display().to_string(),
+            ));
+            record_agent_connected(
+                manifest_path,
+                AgentConnected {
+                    id: if agent_id.is_empty() { agent.name() } else { agent_id },
+                    name: agent.name(),
+                    backend: &agent.agent,
+                    model: &agent.model,
+                    agent_dir: &agent.dir,
+                    world_session: session,
+                    world_agent_id: agent_id,
+                    base_url: &base_url,
+                    internal_base_url: &internal_base_url,
+                },
+            )
+            .map_err(PyAgentError::new_err)?;
+        }
         agent.set_world_env(world_env)?;
 
         let headers = PyDict::new_bound(py);
@@ -997,6 +1097,7 @@ impl PyWorld {
             base_path: self.base_path.clone(),
             record: self.record,
             record_dir: self.record_dir.clone(),
+            manifest_path: self.manifest_path.clone(),
             resume: None,
             clawblox_bin: None,
         })
@@ -1017,6 +1118,12 @@ impl PyWorld {
                 env.push((
                     "WORLD_RECORD_DIR".to_string(),
                     record_dir.display().to_string(),
+                ));
+            }
+            if let Some(manifest_path) = &self.manifest_path {
+                env.push((
+                    "CLAWBLOX_MANIFEST_PATH".to_string(),
+                    manifest_path.display().to_string(),
                 ));
             }
             env
@@ -1138,6 +1245,11 @@ impl PyWorldStartResult {
     fn log_file(&self) -> PathBuf {
         self.log_file.clone()
     }
+
+    #[getter]
+    fn manifest_path(&self) -> Option<PathBuf> {
+        self.manifest_path.clone()
+    }
 }
 
 #[pymethods]
@@ -1229,6 +1341,13 @@ fn dict_to_env(env: Option<&Bound<'_, PyDict>>) -> PyResult<Vec<(String, String)
         out.push((key.extract()?, value.extract()?));
     }
     Ok(out)
+}
+
+fn manifest_path_from_env(env: &[(String, String)]) -> Option<PathBuf> {
+    env.iter()
+        .rev()
+        .find(|(key, value)| key == "CLAWBLOX_MANIFEST_PATH" && !value.trim().is_empty())
+        .map(|(_, value)| PathBuf::from(value))
 }
 
 #[derive(Debug)]

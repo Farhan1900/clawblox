@@ -10,6 +10,7 @@ pub mod agent_sandbox;
 pub mod config;
 pub mod db;
 pub mod game;
+pub mod manifest;
 pub mod r2;
 pub mod recording;
 pub mod replay;

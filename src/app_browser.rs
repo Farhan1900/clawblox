@@ -104,6 +104,12 @@ struct ExternalReplayViewResponse {
     url: Option<String>,
 }
 
+#[derive(Deserialize)]
+struct ExternalReplayProxyPath {
+    id: String,
+    path: String,
+}
+
 async fn build_replay_state(
     file: PathBuf,
     speed: f32,
@@ -250,6 +256,14 @@ pub fn run_app(path: PathBuf, port: u16, base_path: &str) {
                     "/sessions/{id}/replay/external-view",
                     get(app_replay_external_view),
                 )
+                .route(
+                    "/sessions/{id}/replay/external",
+                    get(app_external_replay_proxy_root),
+                )
+                .route(
+                    "/sessions/{id}/replay/external/{*path}",
+                    get(app_external_replay_proxy_path),
+                )
                 .route("/sessions/{id}/replay/state", get(app_replay_state_at))
                 .route(
                     "/sessions/{id}/replay/agent",
@@ -357,6 +371,12 @@ fn is_replay_entry_path(path: &Path) -> bool {
     if path.extension().and_then(|ext| ext.to_str()) == Some("clawrec") {
         return true;
     }
+    if path.extension().and_then(|ext| ext.to_str()) == Some("h5") {
+        return find_clawblox_manifest_near(path)
+            .and_then(|manifest_path| manifest::load(&manifest_path).ok())
+            .and_then(|manifest| manifest.world)
+            .is_some_and(|world| !world.replay_command.is_empty());
+    }
     path.file_name()
         .and_then(|name| name.to_str())
         .is_some_and(|name| name.ends_with(".replay.toml"))
@@ -439,6 +459,27 @@ fn find_world_instance_dir_near_recording(file: &Path) -> Option<PathBuf> {
         current = dir.parent();
     }
     None
+}
+
+fn find_clawblox_manifest_near(file: &Path) -> Option<PathBuf> {
+    let mut current = file.parent();
+    while let Some(dir) = current {
+        let manifest_path = dir.join(".clawblox").join("manifest.json");
+        if manifest_path.is_file() {
+            return Some(manifest_path);
+        }
+        current = dir.parent();
+    }
+    None
+}
+
+fn resolve_clawblox_manifest_path(manifest_path: &Path, value: &str) -> PathBuf {
+    let path = PathBuf::from(value);
+    if path.is_absolute() {
+        path
+    } else {
+        manifest::manifest_state_root(manifest_path).join(path)
+    }
 }
 
 fn collect_session_transcripts_recursive(dir: &Path, out: &mut Vec<PathBuf>) {
@@ -572,6 +613,19 @@ fn collect_transcript_candidates_for_agent(agent_dir: &Path, out: &mut Vec<PathB
 }
 
 fn find_agent_log_near_recording(file: &Path) -> Option<PathBuf> {
+    if let Some(manifest_path) = find_clawblox_manifest_near(file) {
+        if let Ok(manifest) = manifest::load(&manifest_path) {
+            for agent in &manifest.agents {
+                for transcript in &agent.transcripts {
+                    let path = resolve_clawblox_manifest_path(&manifest_path, transcript);
+                    if path.is_file() {
+                        return Some(path);
+                    }
+                }
+            }
+        }
+    }
+
     let world_instance_dir = find_world_instance_dir_near_recording(file)?;
     let agents_dir = world_instance_dir.join("agents");
     if !agents_dir.is_dir() {
@@ -816,6 +870,115 @@ fn load_external_agent_timeline(
     }))
 }
 
+fn load_agent_timeline_from_manifest_paths(
+    transcript_paths: &[PathBuf],
+    info: &serde_json::Value,
+) -> Option<Arc<ReplayAgentTimeline>> {
+    let tick_rate = info
+        .get("tick_rate")
+        .and_then(|value| value.as_u64())
+        .and_then(|value| u32::try_from(value).ok())
+        .unwrap_or(60);
+    let first_tick = info
+        .get("first_tick")
+        .and_then(|value| value.as_u64())
+        .unwrap_or(0);
+    let mut messages = Vec::new();
+    let mut anchor_count = 0usize;
+
+    for path in transcript_paths {
+        match load_agent_timeline(path, tick_rate, first_tick) {
+            Ok(timeline) => {
+                anchor_count += timeline.anchor_count;
+                messages.extend(timeline.messages);
+            }
+            Err(err) => {
+                eprintln!(
+                    "Warning: failed to load manifest transcript '{}': {}",
+                    path.display(),
+                    err
+                );
+            }
+        }
+    }
+
+    if messages.is_empty() {
+        return None;
+    }
+    messages.sort_by(|a, b| {
+        a.tick
+            .partial_cmp(&b.tick)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| a.timestamp_ms.cmp(&b.timestamp_ms))
+    });
+    Some(Arc::new(ReplayAgentTimeline {
+        messages,
+        anchor_count,
+    }))
+}
+
+async fn open_external_replay_command(
+    manifest_path: PathBuf,
+    manifest_dir: PathBuf,
+    recording_path: PathBuf,
+    command_template: Vec<String>,
+    cwd: PathBuf,
+    format: Option<String>,
+    transcript_paths: Vec<PathBuf>,
+) -> Result<ExternalReplaySession, String> {
+    if command_template.is_empty() {
+        return Err(format!(
+            "manifest '{}' does not declare a replay command",
+            manifest_path.display()
+        ));
+    }
+    if !recording_path.is_file() {
+        return Err(format!("recording not found: {}", recording_path.display()));
+    }
+    if !cwd.is_dir() {
+        return Err(format!("replay cwd not found: {}", cwd.display()));
+    }
+
+    let port = choose_external_replay_port()?;
+    let command = command_template
+        .iter()
+        .map(|arg| {
+            substitute_external_replay_arg(arg, &recording_path, &manifest_path, &manifest_dir, port)
+        })
+        .collect::<Vec<_>>();
+    let executable = command[0].clone();
+    let args = command.get(1..).unwrap_or(&[]);
+    let child = Command::new(&executable)
+        .args(args)
+        .current_dir(&cwd)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::inherit())
+        .stderr(std::process::Stdio::inherit())
+        .spawn()
+        .map_err(|e| {
+            format!(
+                "failed to start external replay command '{}': {}",
+                executable, e
+            )
+        })?;
+    let process = Arc::new(ExternalReplayProcess {
+        child: Mutex::new(child),
+    });
+    let url = format!("http://127.0.0.1:{}/", port);
+    wait_for_external_replay(&url, &process).await?;
+    let info = external_replay_info(&url).await?;
+    let agent_timeline = load_agent_timeline_from_manifest_paths(&transcript_paths, &info);
+
+    Ok(ExternalReplaySession {
+        _process: process,
+        url,
+        recording_path,
+        manifest_path,
+        format,
+        agent_timeline,
+    })
+}
+
 async fn open_external_replay_manifest(
     manifest_path: PathBuf,
 ) -> Result<ExternalReplaySession, String> {
@@ -915,6 +1078,59 @@ async fn open_external_replay_manifest(
     })
 }
 
+async fn open_external_replay_from_clawblox_manifest(
+    recording_path: PathBuf,
+) -> Result<ExternalReplaySession, String> {
+    let manifest_path = find_clawblox_manifest_near(&recording_path).ok_or_else(|| {
+        format!(
+            "no .clawblox/manifest.json found near recording '{}'",
+            recording_path.display()
+        )
+    })?;
+    let manifest = manifest::load(&manifest_path)?;
+    let world = manifest.world.ok_or_else(|| {
+        format!(
+            "manifest '{}' does not contain world metadata",
+            manifest_path.display()
+        )
+    })?;
+    if world.replay_command.is_empty() {
+        return Err(format!(
+            "manifest '{}' does not contain a replay command",
+            manifest_path.display()
+        ));
+    }
+
+    let state_root = manifest::manifest_state_root(&manifest_path);
+    let cwd = if world.source_dir.is_empty() {
+        state_root.clone()
+    } else {
+        resolve_clawblox_manifest_path(&manifest_path, &world.source_dir)
+    };
+    let transcript_paths = manifest
+        .agents
+        .iter()
+        .flat_map(|agent| agent.transcripts.iter())
+        .map(|path| resolve_clawblox_manifest_path(&manifest_path, path))
+        .filter(|path| path.is_file())
+        .collect::<Vec<_>>();
+    let format = recording_path
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .map(ToString::to_string);
+
+    open_external_replay_command(
+        manifest_path,
+        state_root.clone(),
+        recording_path,
+        world.replay_command,
+        cwd,
+        format,
+        transcript_paths,
+    )
+    .await
+}
+
 fn get_app_replay_state(
     state: &AppState,
     id: &str,
@@ -963,6 +1179,96 @@ fn join_external_replay_url(base: &str, path: &str) -> String {
     format!("{}{}", base, path)
 }
 
+fn app_external_replay_base_path(state: &AppState, id: &str) -> String {
+    join_base_path(
+        &app_session_base_path(state, id),
+        "/replay/external",
+    )
+}
+
+fn app_external_replay_path(state: &AppState, id: &str, path: &str) -> String {
+    join_base_path(&app_external_replay_base_path(state, id), path)
+}
+
+fn external_replay_target_path(path: &str, original_uri: &axum::http::Uri) -> String {
+    let mut target = if path.is_empty() {
+        "/".to_string()
+    } else if path.starts_with('/') {
+        path.to_string()
+    } else {
+        format!("/{}", path)
+    };
+    if let Some(query) = original_uri.query() {
+        target.push('?');
+        target.push_str(query);
+    }
+    target
+}
+
+fn external_replay_ws_url(base: &str, path: &str) -> Result<String, String> {
+    let url = join_external_replay_url(base, path);
+    if let Some(rest) = url.strip_prefix("http://") {
+        Ok(format!("ws://{}", rest))
+    } else if let Some(rest) = url.strip_prefix("https://") {
+        Ok(format!("wss://{}", rest))
+    } else {
+        Err(format!("unsupported external replay URL '{}'", url))
+    }
+}
+
+fn selected_ws_protocols(headers: &axum::http::HeaderMap) -> Vec<String> {
+    headers
+        .get(axum::http::header::SEC_WEBSOCKET_PROTOCOL)
+        .and_then(|value| value.to_str().ok())
+        .map(|value| {
+            value
+                .split(',')
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(ToString::to_string)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn is_ws_upgrade(headers: &axum::http::HeaderMap) -> bool {
+    headers
+        .get(axum::http::header::UPGRADE)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| value.eq_ignore_ascii_case("websocket"))
+}
+
+fn map_ws_message_to_tungstenite(message: Message) -> Option<tungstenite::Message> {
+    match message {
+        Message::Text(value) => Some(tungstenite::Message::Text(value.to_string().into())),
+        Message::Binary(value) => Some(tungstenite::Message::Binary(value.to_vec().into())),
+        Message::Ping(value) => Some(tungstenite::Message::Ping(value.to_vec().into())),
+        Message::Pong(value) => Some(tungstenite::Message::Pong(value.to_vec().into())),
+        Message::Close(frame) => Some(tungstenite::Message::Close(frame.map(|frame| {
+            tungstenite::protocol::CloseFrame {
+                code: tungstenite::protocol::frame::coding::CloseCode::from(u16::from(frame.code)),
+                reason: frame.reason.to_string().into(),
+            }
+        }))),
+    }
+}
+
+fn map_tungstenite_message_to_ws(message: tungstenite::Message) -> Option<Message> {
+    match message {
+        tungstenite::Message::Text(value) => Some(Message::Text(value.to_string().into())),
+        tungstenite::Message::Binary(value) => Some(Message::Binary(value.to_vec().into())),
+        tungstenite::Message::Ping(value) => Some(Message::Ping(value.to_vec().into())),
+        tungstenite::Message::Pong(value) => Some(Message::Pong(value.to_vec().into())),
+        tungstenite::Message::Close(frame) => Some(Message::Close(frame.map(|frame| {
+            axum::extract::ws::CloseFrame {
+                code: u16::from(frame.code),
+                reason: frame.reason.to_string().into(),
+            }
+        }))),
+        tungstenite::Message::Frame(_) => None,
+    }
+}
+
 async fn proxy_external_replay_json(
     session: &ExternalReplaySession,
     path: &str,
@@ -987,6 +1293,137 @@ async fn proxy_external_replay_json(
             format!("external replay response was not JSON '{}': {}", url, e),
         )
     })
+}
+
+async fn proxy_external_replay_http(
+    session: &ExternalReplaySession,
+    path: &str,
+) -> Result<axum::response::Response, (axum::http::StatusCode, String)> {
+    let url = join_external_replay_url(&session.url, path);
+    let resp = reqwest::Client::new().get(&url).send().await.map_err(|e| {
+        (
+            axum::http::StatusCode::BAD_GATEWAY,
+            format!("external replay request failed '{}': {}", url, e),
+        )
+    })?;
+    let status = resp.status();
+    let headers = resp.headers().clone();
+    let bytes = resp.bytes().await.map_err(|e| {
+        (
+            axum::http::StatusCode::BAD_GATEWAY,
+            format!("external replay response read failed '{}': {}", url, e),
+        )
+    })?;
+
+    let mut builder = axum::response::Response::builder().status(status);
+    for name in [
+        axum::http::header::CONTENT_TYPE,
+        axum::http::header::CACHE_CONTROL,
+        axum::http::header::ETAG,
+        axum::http::header::LAST_MODIFIED,
+    ] {
+        if let Some(value) = headers.get(&name) {
+            builder = builder.header(name, value);
+        }
+    }
+    builder
+        .body(axum::body::Body::from(bytes))
+        .map_err(|e| {
+            (
+                axum::http::StatusCode::BAD_GATEWAY,
+                format!("failed to build external replay response: {}", e),
+            )
+        })
+}
+
+async fn proxy_external_replay_ws(
+    socket: WebSocket,
+    target_url: String,
+    protocols: Vec<String>,
+) {
+    let mut request = match tungstenite::client::IntoClientRequest::into_client_request(&target_url)
+    {
+        Ok(request) => request,
+        Err(_) => return,
+    };
+    if !protocols.is_empty() {
+        if let Ok(value) = axum::http::HeaderValue::from_str(&protocols.join(", ")) {
+            request.headers_mut().insert(
+                axum::http::header::SEC_WEBSOCKET_PROTOCOL,
+                value,
+            );
+        }
+    }
+
+    let Ok((upstream, _)) = tokio_tungstenite::connect_async(request).await else {
+        return;
+    };
+
+    let (mut browser_tx, mut browser_rx) = socket.split();
+    let (mut upstream_tx, mut upstream_rx) = upstream.split();
+
+    let browser_to_upstream = async {
+        while let Some(result) = browser_rx.next().await {
+            let Ok(message) = result else {
+                break;
+            };
+            let Some(message) = map_ws_message_to_tungstenite(message) else {
+                continue;
+            };
+            if upstream_tx.send(message).await.is_err() {
+                break;
+            }
+        }
+    };
+
+    let upstream_to_browser = async {
+        while let Some(result) = upstream_rx.next().await {
+            let Ok(message) = result else {
+                break;
+            };
+            let Some(message) = map_tungstenite_message_to_ws(message) else {
+                continue;
+            };
+            if browser_tx.send(message).await.is_err() {
+                break;
+            }
+        }
+    };
+
+    tokio::select! {
+        _ = browser_to_upstream => {},
+        _ = upstream_to_browser => {},
+    }
+}
+
+async fn app_external_replay_proxy(
+    state: AppState,
+    id: String,
+    path: String,
+    original_uri: axum::http::Uri,
+    headers: axum::http::HeaderMap,
+    ws: Result<WebSocketUpgrade, WebSocketUpgradeRejection>,
+) -> Result<axum::response::Response, (axum::http::StatusCode, String)> {
+    let session = get_app_external_session(&state, &id)?;
+    let target_path = external_replay_target_path(&path, &original_uri);
+    if is_ws_upgrade(&headers) {
+        let ws = ws.map_err(|_| (
+            axum::http::StatusCode::BAD_REQUEST,
+            "invalid websocket upgrade request".to_string(),
+        ))?;
+        let protocols = selected_ws_protocols(&headers);
+        let target_url = external_replay_ws_url(&session.url, &target_path)
+            .map_err(|e| (axum::http::StatusCode::BAD_GATEWAY, e))?;
+        let response = if protocols.is_empty() {
+            ws.on_upgrade(move |socket| proxy_external_replay_ws(socket, target_url, protocols))
+        } else {
+            ws.protocols(protocols.clone()).on_upgrade(move |socket| {
+                proxy_external_replay_ws(socket, target_url, protocols)
+            })
+        };
+        return Ok(response.into_response());
+    }
+    proxy_external_replay_http(&session, &target_path).await
 }
 
 async fn post_external_replay(
@@ -1080,10 +1517,33 @@ async fn app_open_replay(
         }));
     }
 
+    if recording_path.extension().and_then(|ext| ext.to_str()) == Some("h5") {
+        let session_id = Uuid::new_v4().to_string();
+        let session = open_external_replay_from_clawblox_manifest(recording_path.clone())
+            .await
+            .map_err(|e| (axum::http::StatusCode::BAD_REQUEST, e))?;
+        let resolved_recording_path = session.recording_path.display().to_string();
+        let world_dir = manifest::manifest_state_root(&session.manifest_path)
+            .display()
+            .to_string();
+        let replay_format = session.format.clone();
+        state.external_sessions.insert(session_id.clone(), session);
+        let session_url = app_session_base_path(&state, &session_id);
+
+        return Ok(Json(AppOpenReplayResponse {
+            session_id,
+            url: session_url,
+            recording_path: resolved_recording_path,
+            world_dir,
+            replay_format,
+            agent_log: None,
+        }));
+    }
+
     if recording_path.extension().and_then(|ext| ext.to_str()) != Some("clawrec") {
         return Err((
             axum::http::StatusCode::BAD_REQUEST,
-            "selected file is not a .clawrec recording or .replay.toml manifest".to_string(),
+            "selected file is not a .clawrec recording, .h5 manifest recording, or .replay.toml manifest".to_string(),
         ));
     }
 
@@ -1163,9 +1623,10 @@ async fn app_replay_external_view(
     State(state): State<AppState>,
 ) -> Result<Json<ExternalReplayViewResponse>, (axum::http::StatusCode, String)> {
     if let Ok(session) = get_app_external_session(&state, &id) {
+        let _ = session;
         return Ok(Json(ExternalReplayViewResponse {
             enabled: true,
-            url: Some(join_external_replay_url(&session.url, "/replay/view")),
+            url: Some(app_external_replay_path(&state, &id, "/replay/view")),
         }));
     }
     get_app_replay_state(&state, &id)?;
@@ -1173,6 +1634,34 @@ async fn app_replay_external_view(
         enabled: false,
         url: None,
     }))
+}
+
+async fn app_external_replay_proxy_root(
+    AxumPath(id): AxumPath<String>,
+    State(state): State<AppState>,
+    OriginalUri(original_uri): OriginalUri,
+    headers: axum::http::HeaderMap,
+    ws: Result<WebSocketUpgrade, WebSocketUpgradeRejection>,
+) -> Result<axum::response::Response, (axum::http::StatusCode, String)> {
+    app_external_replay_proxy(state, id, String::new(), original_uri, headers, ws).await
+}
+
+async fn app_external_replay_proxy_path(
+    AxumPath(params): AxumPath<ExternalReplayProxyPath>,
+    State(state): State<AppState>,
+    OriginalUri(original_uri): OriginalUri,
+    headers: axum::http::HeaderMap,
+    ws: Result<WebSocketUpgrade, WebSocketUpgradeRejection>,
+) -> Result<axum::response::Response, (axum::http::StatusCode, String)> {
+    app_external_replay_proxy(
+        state,
+        params.id,
+        params.path,
+        original_uri,
+        headers,
+        ws,
+    )
+    .await
 }
 
 async fn app_replay_state_at(

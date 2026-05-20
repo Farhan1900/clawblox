@@ -13,6 +13,7 @@ pub struct ExternalWorldCommand {
     pub base_path: String,
     pub record: bool,
     pub record_dir: Option<PathBuf>,
+    pub manifest_path: Option<PathBuf>,
     pub resume: Option<PathBuf>,
     pub clawblox_bin: Option<PathBuf>,
 }
@@ -32,6 +33,12 @@ impl ExternalWorldCommand {
             env.push((
                 "WORLD_RECORD_DIR".to_string(),
                 record_dir.display().to_string(),
+            ));
+        }
+        if let Some(manifest_path) = &self.manifest_path {
+            env.push((
+                "CLAWBLOX_MANIFEST_PATH".to_string(),
+                manifest_path.display().to_string(),
             ));
         }
         if let Some(resume) = &self.resume {

@@ -846,6 +846,7 @@ pub fn stop_agent(options: AgentStopOptions) -> Result<StoppedAgent, String> {
             append_operation_report(&events_file, stop_failure_report(&ctx, &options, &message));
         return Err(message);
     }
+    prune_recreateable_agent_artifacts(&ctx, &options, agent.name(), &events_file)?;
     let _ = std::fs::remove_file(active_agent_file(&ctx));
 
     append_operation_report(
@@ -880,6 +881,71 @@ pub fn stop_agent(options: AgentStopOptions) -> Result<StoppedAgent, String> {
         events_file,
         log_file: ctx.paths.log_file,
     })
+}
+
+fn prune_recreateable_agent_artifacts(
+    ctx: &AgentContext,
+    options: &AgentStopOptions,
+    agent_kind: &str,
+    events_file: &Path,
+) -> Result<(), String> {
+    let agent_dir = agent_dir_from_context(ctx);
+    let mut removed = Vec::new();
+    for path in [
+        ctx.paths.workspace_dir.join(".venv"),
+        ctx.paths.runtime_dir.join("python"),
+        agent_dir
+            .join("sandbox-home")
+            .join(".local")
+            .join("share")
+            .join("claude")
+            .join("versions"),
+    ] {
+        if !path.exists() {
+            continue;
+        }
+        remove_recreateable_artifact(&path).map_err(|err| {
+            format!(
+                "failed to prune recreateable agent artifact '{}': {err}",
+                path.display()
+            )
+        })?;
+        removed.push(path);
+    }
+    if removed.is_empty() {
+        return Ok(());
+    }
+    append_operation_report(
+        events_file,
+        OperationReport {
+            time: utc_now(),
+            operation: "agent.cleanup".to_string(),
+            status: "pruned_recreateable_artifacts".to_string(),
+            agent_name: options.name.clone(),
+            agent_kind: agent_kind.to_string(),
+            agent_dir,
+            tmux_session: options.tmux_session.clone(),
+            attach_command: None,
+            command_file: None,
+            log_file: Some(ctx.paths.log_file.clone()),
+            events_file: events_file.to_path_buf(),
+            error: None,
+        },
+    )
+    .map_err(|err| {
+        format!(
+            "failed to write cleanup event {}: {err}",
+            events_file.display()
+        )
+    })
+}
+
+fn remove_recreateable_artifact(path: &Path) -> std::io::Result<()> {
+    if path.is_dir() {
+        std::fs::remove_dir_all(path)
+    } else {
+        std::fs::remove_file(path)
+    }
 }
 
 fn default_model(kind: AgentKind) -> &'static str {
