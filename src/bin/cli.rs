@@ -56,7 +56,10 @@ use clawblox::{
     },
     manifest,
     recording, replay,
-    replay_agent_log::{load_agent_timeline, ReplayAgentMessage, ReplayAgentTimeline},
+    replay_agent_log::{
+        load_agent_timeline, load_agent_timeline_with_external_anchors, ReplayAgentMessage,
+        ReplayAgentTimeline, ReplayTickAnchor,
+    },
     replay_metadata::{self, ReplayMetadata},
     snapshot::GameInstanceSnapshot,
     world_runner::{run_external_world_blocking, ExternalWorldCommand},

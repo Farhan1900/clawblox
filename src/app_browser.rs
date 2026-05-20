@@ -29,6 +29,8 @@ struct ExternalReplayManifest {
     #[serde(default)]
     format: Option<String>,
     recording: String,
+    #[serde(default)]
+    events: Option<String>,
     command: Vec<String>,
     #[serde(default)]
     cwd: Option<String>,
@@ -38,10 +40,6 @@ struct ExternalReplayManifest {
 
 #[derive(Debug, Deserialize)]
 struct ExternalReplayAgentManifest {
-    #[serde(default)]
-    id: Option<String>,
-    #[serde(default)]
-    name: Option<String>,
     #[serde(default)]
     transcript: Option<String>,
 }
@@ -812,67 +810,10 @@ async fn external_replay_info(url: &str) -> Result<serde_json::Value, String> {
     })
 }
 
-fn load_external_agent_timeline(
-    manifest: &ExternalReplayManifest,
-    manifest_dir: &Path,
-    info: &serde_json::Value,
-) -> Option<Arc<ReplayAgentTimeline>> {
-    let tick_rate = info
-        .get("tick_rate")
-        .and_then(|value| value.as_u64())
-        .and_then(|value| u32::try_from(value).ok())
-        .unwrap_or(60);
-    let first_tick = info
-        .get("first_tick")
-        .and_then(|value| value.as_u64())
-        .unwrap_or(0);
-    let mut messages = Vec::new();
-    let mut anchor_count = 0usize;
-
-    for agent in &manifest.agents {
-        let Some(transcript) = agent.transcript.as_deref() else {
-            continue;
-        };
-        let path = resolve_manifest_path(manifest_dir, transcript);
-        match load_agent_timeline(&path, tick_rate, first_tick) {
-            Ok(timeline) => {
-                anchor_count += timeline.anchor_count;
-                messages.extend(timeline.messages);
-            }
-            Err(err) => {
-                let label = agent
-                    .name
-                    .as_deref()
-                    .or(agent.id.as_deref())
-                    .unwrap_or("agent");
-                eprintln!(
-                    "Warning: failed to load external replay transcript for {} '{}': {}",
-                    label,
-                    path.display(),
-                    err
-                );
-            }
-        }
-    }
-
-    if messages.is_empty() {
-        return None;
-    }
-    messages.sort_by(|a, b| {
-        a.tick
-            .partial_cmp(&b.tick)
-            .unwrap_or(std::cmp::Ordering::Equal)
-            .then_with(|| a.timestamp_ms.cmp(&b.timestamp_ms))
-    });
-    Some(Arc::new(ReplayAgentTimeline {
-        messages,
-        anchor_count,
-    }))
-}
-
 fn load_agent_timeline_from_manifest_paths(
     transcript_paths: &[PathBuf],
     info: &serde_json::Value,
+    anchors: &[ReplayTickAnchor],
 ) -> Option<Arc<ReplayAgentTimeline>> {
     let tick_rate = info
         .get("tick_rate")
@@ -887,7 +828,7 @@ fn load_agent_timeline_from_manifest_paths(
     let mut anchor_count = 0usize;
 
     for path in transcript_paths {
-        match load_agent_timeline(path, tick_rate, first_tick) {
+        match load_agent_timeline_with_external_anchors(path, tick_rate, first_tick, anchors) {
             Ok(timeline) => {
                 anchor_count += timeline.anchor_count;
                 messages.extend(timeline.messages);
@@ -917,6 +858,42 @@ fn load_agent_timeline_from_manifest_paths(
     }))
 }
 
+fn load_replay_tick_anchors(paths: &[PathBuf]) -> Vec<ReplayTickAnchor> {
+    let mut anchors = Vec::new();
+    for path in paths {
+        load_replay_tick_anchors_from_jsonl(path, &mut anchors);
+    }
+    anchors.sort_by_key(|anchor| (anchor.timestamp_ms, anchor.tick));
+    anchors.dedup_by_key(|anchor| (anchor.timestamp_ms, anchor.tick));
+    anchors
+}
+
+fn load_replay_tick_anchors_from_jsonl(path: &Path, out: &mut Vec<ReplayTickAnchor>) {
+    let Ok(raw) = std::fs::read_to_string(path) else {
+        return;
+    };
+    for line in raw.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(line) else {
+            continue;
+        };
+        let Some(tick) = value.get("tick").and_then(|value| value.as_u64()) else {
+            continue;
+        };
+        let Some(timestamp_ms) = value
+            .get("wall_time")
+            .and_then(|value| value.as_f64())
+            .map(|seconds| (seconds * 1000.0).round() as i64)
+        else {
+            continue;
+        };
+        out.push(ReplayTickAnchor { timestamp_ms, tick });
+    }
+}
+
 async fn open_external_replay_command(
     manifest_path: PathBuf,
     manifest_dir: PathBuf,
@@ -925,6 +902,7 @@ async fn open_external_replay_command(
     cwd: PathBuf,
     format: Option<String>,
     transcript_paths: Vec<PathBuf>,
+    event_paths: Vec<PathBuf>,
 ) -> Result<ExternalReplaySession, String> {
     if command_template.is_empty() {
         return Err(format!(
@@ -967,7 +945,9 @@ async fn open_external_replay_command(
     let url = format!("http://127.0.0.1:{}/", port);
     wait_for_external_replay(&url, &process).await?;
     let info = external_replay_info(&url).await?;
-    let agent_timeline = load_agent_timeline_from_manifest_paths(&transcript_paths, &info);
+    let anchors = load_replay_tick_anchors(&event_paths);
+    let agent_timeline =
+        load_agent_timeline_from_manifest_paths(&transcript_paths, &info, &anchors);
 
     Ok(ExternalReplaySession {
         _process: process,
@@ -1031,51 +1011,32 @@ async fn open_external_replay_manifest(
         return Err(format!("manifest cwd not found: {}", cwd.display()));
     }
 
-    let port = choose_external_replay_port()?;
-    let command = manifest
-        .command
+    let transcript_paths = manifest
+        .agents
         .iter()
-        .map(|arg| {
-            substitute_external_replay_arg(
-                arg,
-                &recording_path,
-                &manifest_path,
-                &manifest_dir,
-                port,
-            )
-        })
+        .filter_map(|agent| agent.transcript.as_deref())
+        .map(|path| resolve_manifest_path(&manifest_dir, path))
+        .filter(|path| path.is_file())
         .collect::<Vec<_>>();
-    let executable = command[0].clone();
-    let args = command.get(1..).unwrap_or(&[]);
-    let child = Command::new(&executable)
-        .args(args)
-        .current_dir(&cwd)
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::inherit())
-        .stderr(std::process::Stdio::inherit())
-        .spawn()
-        .map_err(|e| {
-            format!(
-                "failed to start external replay command '{}': {}",
-                executable, e
-            )
-        })?;
-    let process = Arc::new(ExternalReplayProcess {
-        child: Mutex::new(child),
-    });
-    let url = format!("http://127.0.0.1:{}/", port);
-    wait_for_external_replay(&url, &process).await?;
-    let info = external_replay_info(&url).await?;
-    let agent_timeline = load_external_agent_timeline(&manifest, &manifest_dir, &info);
+    let event_paths = manifest
+        .events
+        .as_deref()
+        .map(|path| resolve_manifest_path(&manifest_dir, path))
+        .filter(|path| path.is_file())
+        .into_iter()
+        .collect::<Vec<_>>();
 
-    Ok(ExternalReplaySession {
-        _process: process,
-        url,
-        recording_path,
+    open_external_replay_command(
         manifest_path,
-        format: manifest.format,
-        agent_timeline,
-    })
+        manifest_dir,
+        recording_path,
+        manifest.command,
+        cwd,
+        manifest.format,
+        transcript_paths,
+        event_paths,
+    )
+    .await
 }
 
 async fn open_external_replay_from_clawblox_manifest(
@@ -1114,6 +1075,16 @@ async fn open_external_replay_from_clawblox_manifest(
         .map(|path| resolve_clawblox_manifest_path(&manifest_path, path))
         .filter(|path| path.is_file())
         .collect::<Vec<_>>();
+    let event_paths = manifest
+        .recordings
+        .iter()
+        .filter(|recording| {
+            resolve_clawblox_manifest_path(&manifest_path, &recording.path) == recording_path
+        })
+        .filter_map(|recording| recording.events.as_deref())
+        .map(|path| resolve_clawblox_manifest_path(&manifest_path, path))
+        .filter(|path| path.is_file())
+        .collect::<Vec<_>>();
     let format = recording_path
         .extension()
         .and_then(|ext| ext.to_str())
@@ -1127,6 +1098,7 @@ async fn open_external_replay_from_clawblox_manifest(
         cwd,
         format,
         transcript_paths,
+        event_paths,
     )
     .await
 }

@@ -59,6 +59,12 @@ struct TickAnchor {
     tick: f64,
 }
 
+#[derive(Clone)]
+pub struct ReplayTickAnchor {
+    pub timestamp_ms: i64,
+    pub tick: u64,
+}
+
 struct RawReplayAgentMessage {
     id: String,
     role: String,
@@ -71,11 +77,31 @@ pub fn load_agent_timeline(
     tick_rate: u32,
     first_tick: u64,
 ) -> Result<ReplayAgentTimeline, String> {
+    // Legacy fallback: callers without recording timeline anchors still infer ticks
+    // from transcript contents and align the first message to first_tick. Prefer
+    // load_agent_timeline_with_external_anchors for all replay formats; remove this
+    // fallback once old recordings without event anchors are no longer supported.
+    load_agent_timeline_with_external_anchors(path, tick_rate, first_tick, &[])
+}
+
+pub fn load_agent_timeline_with_external_anchors(
+    path: &Path,
+    tick_rate: u32,
+    first_tick: u64,
+    external_anchors: &[ReplayTickAnchor],
+) -> Result<ReplayAgentTimeline, String> {
     let file = File::open(path).map_err(|e| format!("open failed: {}", e))?;
     let reader = BufReader::new(file);
 
-    let mut anchors: Vec<TickAnchor> = Vec::new();
+    let mut anchors: Vec<TickAnchor> = external_anchors
+        .iter()
+        .map(|anchor| TickAnchor {
+            ts_ms: anchor.timestamp_ms,
+            tick: anchor.tick as f64,
+        })
+        .collect();
     let mut raw_messages: Vec<RawReplayAgentMessage> = Vec::new();
+    let first_external_anchor_ts = external_anchors.iter().map(|anchor| anchor.timestamp_ms).min();
 
     for line in reader.lines() {
         let line = line.map_err(|e| format!("read failed: {}", e))?;
@@ -89,6 +115,12 @@ pub fn load_agent_timeline(
         let Some(ts_ms) = parse_agent_timestamp_ms(&value) else {
             continue;
         };
+        if first_external_anchor_ts.is_some_and(|first_ts| ts_ms < first_ts) {
+            continue;
+        }
+        // Legacy fallback: old agent transcripts sometimes contain tool output with
+        // a serialized {"tick": ...}. New replay integrations should use external
+        // recording event anchors instead of depending on transcript text.
         if let Some(tick) = extract_tick_anchor(&value) {
             anchors.push(TickAnchor {
                 ts_ms,
@@ -103,6 +135,7 @@ pub fn load_agent_timeline(
     let raw_messages = fold_tool_results(raw_messages);
 
     anchors.sort_by_key(|a| a.ts_ms);
+    anchors.dedup_by(|a, b| a.ts_ms == b.ts_ms && (a.tick - b.tick).abs() < f64::EPSILON);
 
     let tick_rate_per_ms = tick_rate as f64 / 1000.0;
     let mut messages = raw_messages
@@ -139,7 +172,13 @@ pub fn load_agent_timeline(
             .then_with(|| a.timestamp_ms.cmp(&b.timestamp_ms))
     });
 
-    align_timeline_to_first_tick(&mut messages, first_tick);
+    if external_anchors.is_empty() {
+        // Legacy fallback for recordings that predate event anchors. This can place
+        // stale transcript messages at replay start, so anchored callers bypass it.
+        align_timeline_to_first_tick(&mut messages, first_tick);
+    } else {
+        messages.retain(|msg| msg.tick >= first_tick as f64);
+    }
 
     Ok(ReplayAgentTimeline {
         messages,
