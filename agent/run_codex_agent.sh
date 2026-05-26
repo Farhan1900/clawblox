@@ -140,12 +140,6 @@ print("", end="")
 PY
 }
 
-version_at_least() {
-  local actual="$1"
-  local minimum="$2"
-  [[ "$(printf '%s\n%s\n' "$minimum" "$actual" | sort -V | head -n 1)" == "$minimum" ]]
-}
-
 codex_version_for_bin() {
   local bin_path="$1"
   "$bin_path" --version 2>/dev/null | awk '{print $NF}'
@@ -161,6 +155,7 @@ resolve_codex_bin() {
     canonical_path "$CLAWBLOX_CODEX_BIN"
     return 0
   fi
+
   if ! codex_cmd="$(command -v codex 2>/dev/null)"; then
     echo "Error: codex CLI was not found in PATH." >&2
     exit 1
@@ -170,9 +165,9 @@ resolve_codex_bin() {
     echo "Error: could not determine codex CLI version from $codex_cmd --version" >&2
     exit 1
   fi
-  if ! version_at_least "$codex_version" "$CLAWBLOX_CODEX_VERSION_PIN"; then
-    echo "Error: codex CLI $codex_version is too old." >&2
-    echo "Need Codex CLI >= $CLAWBLOX_CODEX_VERSION_PIN for model $CODEX_MODEL." >&2
+  if [[ -n "$CLAWBLOX_CODEX_VERSION_PIN" && "$codex_version" != "$CLAWBLOX_CODEX_VERSION_PIN" ]]; then
+    echo "Error: Codex CLI version $codex_version does not match pin $CLAWBLOX_CODEX_VERSION_PIN." >&2
+    echo "Set CLAWBLOX_CODEX_BIN to the pinned binary, or set CLAWBLOX_CODEX_VERSION_PIN= to opt out." >&2
     exit 1
   fi
   canonical_path "$codex_cmd"

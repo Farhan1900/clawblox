@@ -865,7 +865,7 @@ ensure_ports_available() {
 require_codex_auth() {
   local codex_bin=""
   local codex_version=""
-  local minimum_version="$CLAWBLOX_CODEX_VERSION_PIN"
+  local pinned_version="$CLAWBLOX_CODEX_VERSION_PIN"
 
   if [[ -n "$CLAWBLOX_CODEX_BIN" ]]; then
     if [[ -x "$CLAWBLOX_CODEX_BIN" ]]; then
@@ -878,11 +878,8 @@ require_codex_auth() {
 
   if [[ -z "$codex_bin" ]]; then
     if ! codex_bin="$(command -v codex 2>/dev/null)"; then
-      if ! command -v npx >/dev/null 2>&1; then
-        echo "Error: neither codex nor npx is available in PATH." >&2
-        exit 1
-      fi
-      codex_bin=""
+      echo "Error: codex CLI was not found in PATH." >&2
+      exit 1
     fi
   fi
 
@@ -898,15 +895,10 @@ require_codex_auth() {
       echo "Error: could not determine Codex CLI version from $codex_bin --version" >&2
       exit 1
     fi
-    if [[ "$(printf '%s\n%s\n' "$minimum_version" "$codex_version" | sort -V | head -n 1)" != "$minimum_version" ]]; then
-      if ! command -v npx >/dev/null 2>&1; then
-        echo "Error: Codex CLI $codex_version is too old for this launcher and npx is unavailable." >&2
-        echo "This Codex path defaults to model gpt-5.5 and requires Codex CLI >= $minimum_version." >&2
-        echo "Upgrade with: codex update" >&2
-        echo "Or install: npm install -g @openai/codex@$minimum_version" >&2
-        exit 1
-      fi
-      echo "Notice: installed Codex CLI $codex_version is older than $minimum_version; the runner will use a pinned npx fallback." >&2
+    if [[ -n "$pinned_version" && "$codex_version" != "$pinned_version" ]]; then
+      echo "Error: Codex CLI version $codex_version does not match pin $pinned_version." >&2
+      echo "Set CLAWBLOX_CODEX_BIN to the pinned binary, or set CLAWBLOX_CODEX_VERSION_PIN= to opt out." >&2
+      exit 1
     fi
   fi
 }
