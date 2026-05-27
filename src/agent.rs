@@ -243,6 +243,10 @@ impl Agent for ClaudeAgent {
         write_executable_file(&bin_dir.join("session_end.sh"), CLAUDE_SESSION_END_SH)?;
         write_executable_file(&bin_dir.join("stop.sh"), CLAUDE_STOP_SH)?;
         write_executable_file(
+            &bin_dir.join("post_tool_use_chat.py"),
+            CLAUDE_POST_TOOL_USE_CHAT_PY,
+        )?;
+        write_executable_file(
             &bin_dir.join("user_prompt_submit.sh"),
             "#!/usr/bin/env bash\nexit 0\n",
         )?;
@@ -290,6 +294,8 @@ impl Agent for ClaudeAgent {
                 "PATH".to_string(),
                 "CLAWBLOX_CLAUDE_AUTO_LOOP".to_string(),
                 "CLAUDE_AUTO_LOOP_MESSAGE".to_string(),
+                "CLAWBLOX_CLAUDE_RUNTIME_DIR".to_string(),
+                "WORLD_INTERNAL_BASE_URL".to_string(),
             ],
             needs_network: ctx.settings.sandbox_enabled,
         })
@@ -323,6 +329,9 @@ impl ClaudeAgent {
         let metadata_file = sandbox
             .map(|layout| layout.guest_runtime.join("hook_session.env"))
             .unwrap_or_else(|| claude_hook_metadata_file(ctx));
+        let runtime_dir = sandbox
+            .map(|layout| layout.guest_runtime.clone())
+            .unwrap_or_else(|| ctx.paths.runtime_dir.clone());
         let agent_dir = sandbox
             .map(|layout| layout.guest_workspace.clone())
             .unwrap_or_else(|| ctx.paths.agent_home_dir.clone());
@@ -343,6 +352,7 @@ impl ClaudeAgent {
                 "CLAWBLOX_CLAUDE_METADATA_FILE",
                 metadata_file.display().to_string(),
             )
+            .env("CLAWBLOX_CLAUDE_RUNTIME_DIR", runtime_dir.display().to_string())
             .env("CLAWBLOX_CLAUDE_AUTO_LOOP", "1")
             .env(
                 "CLAUDE_AUTO_LOOP_MESSAGE",
@@ -1192,6 +1202,16 @@ const CLAUDE_HOOKS_JSON: &str = r#"{
         ]
       }
     ],
+    "PostToolUse": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/bin/post_tool_use_chat.py\""
+          }
+        ]
+      }
+    ],
     "Stop": [
       {
         "hooks": [
@@ -1302,6 +1322,181 @@ fi
 if [[ "${CLAWBLOX_CLAUDE_AUTO_LOOP:-0}" == "1" ]]; then
   CLAUDE_AUTO_LOOP_MESSAGE="$auto_loop_message" node -e 'process.stdout.write(JSON.stringify({ decision: "block", reason: process.env.CLAUDE_AUTO_LOOP_MESSAGE }))'
 fi
+"#;
+
+const CLAUDE_POST_TOOL_USE_CHAT_PY: &str = r#"#!/usr/bin/env python3
+import json
+import os
+import sys
+from pathlib import Path
+from urllib.error import URLError
+from urllib.parse import urlencode
+from urllib.request import Request, urlopen
+
+
+CHAT_MESSAGES_LIMIT = 20
+
+
+def normalize_name(value):
+    return str(value or "").strip().lower()
+
+
+def truncate_chat_content(value):
+    trimmed = str(value or "").strip()
+    if len(trimmed) <= 80:
+        return trimmed
+    return trimmed[:77] + "..."
+
+
+def format_self_chat_feedback(message, world_agent_name):
+    content = str(message.get("content") or "").strip()
+    if not content:
+        return None
+
+    audibility = message.get("audibility")
+    if not isinstance(audibility, list):
+        audibility = []
+
+    hearers = []
+    for entry in audibility:
+        if not isinstance(entry, dict) or not entry.get("heard"):
+            continue
+        name = str(entry.get("agent_name") or "").strip()
+        if name and normalize_name(name) != world_agent_name:
+            hearers.append(name)
+    unique_hearers = list(dict.fromkeys(hearers))
+    quoted_content = '"' + truncate_chat_content(content) + '"'
+
+    if unique_hearers:
+        return "Your message " + quoted_content + " was heard by " + ", ".join(unique_hearers) + "."
+    if audibility:
+        return "Your message " + quoted_content + " was not heard by anyone else."
+    return "Your message " + quoted_content + " was sent, but hearing feedback was unavailable."
+
+
+def format_chat_notification(message, world_agent_name):
+    content = str(message.get("content") or "").strip()
+    if not content:
+        return None
+    sender = str(message.get("agent_name") or "Someone").strip() or "Someone"
+    if world_agent_name and normalize_name(sender) == world_agent_name:
+        return format_self_chat_feedback(message, world_agent_name)
+    return "New chat message from " + sender + ": " + content
+
+
+def message_key(message):
+    message_id = str(message.get("id") or "").strip()
+    if message_id:
+        return "id:" + message_id
+    return "anon:" + "|".join(
+        str(message.get(key) or "").strip()
+        for key in ("created_at", "agent_name", "content")
+    )
+
+
+def load_state(path):
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return {"baseline_loaded": False, "seen": [], "after": ""}
+
+
+def save_state(path, state):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(json.dumps(state, separators=(",", ":")) + "\n", encoding="utf-8")
+    tmp.replace(path)
+
+
+def fetch_messages(base_url, session_id, after):
+    query = {"limit": str(CHAT_MESSAGES_LIMIT)}
+    if after:
+        query["after"] = after
+    url = base_url.rstrip("/") + "/chat/messages?" + urlencode(query)
+    request = Request(url, headers={"X-Session": session_id})
+    with urlopen(request, timeout=2) as response:
+        if response.status in (404, 405):
+            return []
+        if response.status != 200:
+            raise RuntimeError("chat messages returned HTTP " + str(response.status))
+        payload = json.loads(response.read().decode("utf-8"))
+    messages = payload.get("messages")
+    return messages if isinstance(messages, list) else []
+
+
+def main():
+    try:
+        sys.stdin.read()
+    except Exception:
+        pass
+
+    base_url = (
+        os.environ.get("WORLD_INTERNAL_BASE_URL", "").strip()
+        or os.environ.get("WORLD_BASE_URL", "").strip()
+    )
+    session_id = os.environ.get("WORLD_SESSION_ID", "").strip()
+    world_agent_name = normalize_name(os.environ.get("WORLD_AGENT_NAME", ""))
+    runtime_dir = os.environ.get("CLAWBLOX_CLAUDE_RUNTIME_DIR", "").strip()
+    if not base_url or not session_id or not runtime_dir:
+        return
+
+    state_path = Path(runtime_dir) / "chat_post_tool_use_state.json"
+    lock_path = Path(runtime_dir) / "chat_post_tool_use_state.lock"
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+
+    lock_handle = lock_path.open("a+", encoding="utf-8")
+    try:
+        try:
+            import fcntl
+
+            fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX)
+        except Exception:
+            pass
+
+        state = load_state(state_path)
+        seen = set(str(value) for value in state.get("seen", []) if value)
+        messages = fetch_messages(base_url, session_id, str(state.get("after") or ""))
+
+        notifications = []
+        for message in reversed(messages):
+            if not isinstance(message, dict):
+                continue
+            key = message_key(message)
+            if key in seen:
+                continue
+            seen.add(key)
+
+            created_at = str(message.get("created_at") or "").strip()
+            if created_at and created_at > str(state.get("after") or ""):
+                state["after"] = created_at
+
+            if state.get("baseline_loaded"):
+                text = format_chat_notification(message, world_agent_name)
+                if text:
+                    notifications.append(text)
+
+        state["baseline_loaded"] = True
+        state["seen"] = sorted(seen)[-200:]
+        save_state(state_path, state)
+
+        if notifications:
+            print(json.dumps({
+                "hookSpecificOutput": {
+                    "hookEventName": "PostToolUse",
+                    "additionalContext": "\n".join(notifications),
+                }
+            }))
+    except (OSError, URLError, TimeoutError, RuntimeError, json.JSONDecodeError):
+        return
+    finally:
+        try:
+            lock_handle.close()
+        except Exception:
+            pass
+
+
+if __name__ == "__main__":
+    main()
 "#;
 
 const CODEX_STOP_HOOK_PY: &str = r#"#!/usr/bin/env python3
@@ -1485,7 +1680,15 @@ mod tests {
         assert!(start.args.contains(&"--session-id".to_string()));
         assert!(ctx.paths.session_id_file.is_file());
         assert!(claude_plugin_dir(&ctx).join("bin/stop.sh").is_file());
-        for hook in ["session_start.sh", "session_end.sh", "stop.sh"] {
+        assert!(claude_plugin_dir(&ctx)
+            .join("bin/post_tool_use_chat.py")
+            .is_file());
+        for hook in [
+            "session_start.sh",
+            "session_end.sh",
+            "stop.sh",
+            "post_tool_use_chat.py",
+        ] {
             let script =
                 std::fs::read_to_string(claude_plugin_dir(&ctx).join("bin").join(hook)).unwrap();
             assert!(
@@ -1496,6 +1699,10 @@ mod tests {
         assert!(start.env.contains(&(
             "CLAUDE_AUTO_LOOP_MESSAGE".to_string(),
             "Keep going".to_string()
+        )));
+        assert!(start.env.contains(&(
+            "CLAWBLOX_CLAUDE_RUNTIME_DIR".to_string(),
+            ctx.paths.runtime_dir.display().to_string()
         )));
 
         let next = agent.continue_session(&ctx, "Later").unwrap();
@@ -1571,6 +1778,10 @@ mod tests {
         assert!(start.env.contains(&(
             "CLAWBLOX_CLAUDE_METADATA_FILE".to_string(),
             "/runtime/hook_session.env".to_string()
+        )));
+        assert!(start.env.contains(&(
+            "CLAWBLOX_CLAUDE_RUNTIME_DIR".to_string(),
+            "/runtime".to_string()
         )));
         let settings =
             std::fs::read_to_string(ctx.paths.runtime_dir.join("claude_sandbox_settings.json"))
