@@ -1,4 +1,5 @@
 use super::*;
+use clawblox::workspace_recording::{load_workspace_events, WorkspaceChange};
 
 #[derive(Clone)]
 struct AppState {
@@ -52,6 +53,39 @@ struct ExternalReplaySession {
     manifest_path: PathBuf,
     format: Option<String>,
     agent_timeline: Option<Arc<ReplayAgentTimeline>>,
+    workspace_timeline: Option<Arc<ReplayWorkspaceTimeline>>,
+}
+
+#[derive(Clone, Serialize)]
+struct ReplayWorkspaceEvent {
+    pub event_type: String,
+    pub wall_time: f64,
+    pub time: String,
+    pub agent_id: String,
+    pub agent_name: String,
+    pub initial: bool,
+    pub tick: f64,
+    pub approx: bool,
+    pub changes: Vec<WorkspaceChange>,
+}
+
+#[derive(Clone)]
+struct ReplayWorkspaceTimeline {
+    events: Vec<ReplayWorkspaceEvent>,
+}
+
+#[derive(Deserialize)]
+struct ReplayWorkspaceQuery {
+    tick: Option<u64>,
+}
+
+#[derive(Serialize)]
+struct ReplayWorkspaceEventsResponse {
+    enabled: bool,
+    current_tick: u64,
+    start_tick: u64,
+    end_tick: u64,
+    events: Vec<ReplayWorkspaceEvent>,
 }
 
 struct ExternalReplayProcess {
@@ -266,6 +300,10 @@ pub fn run_app(path: PathBuf, port: u16, base_path: &str) {
                 .route(
                     "/sessions/{id}/replay/agent",
                     get(app_replay_agent_messages),
+                )
+                .route(
+                    "/sessions/{id}/replay/workspace",
+                    get(app_replay_workspace_events),
                 )
                 .route("/sessions/{id}/replay/metadata", get(app_replay_metadata))
                 .route("/sessions/{id}/replay/seek", post(app_replay_seek))
@@ -858,6 +896,125 @@ fn load_agent_timeline_from_manifest_paths(
     }))
 }
 
+fn load_workspace_timeline_from_manifest_paths(
+    event_paths: &[PathBuf],
+    info: &serde_json::Value,
+    anchors: &[ReplayTickAnchor],
+) -> Option<Arc<ReplayWorkspaceTimeline>> {
+    let tick_rate = info
+        .get("tick_rate")
+        .and_then(|value| value.as_u64())
+        .unwrap_or(60) as f64;
+    let first_tick = info
+        .get("first_tick")
+        .and_then(|value| value.as_u64())
+        .unwrap_or(0) as f64;
+    let ticks_per_ms = tick_rate / 1000.0;
+    let mut events = Vec::new();
+
+    for path in event_paths {
+        match load_workspace_events(path) {
+            Ok(workspace_events) => {
+                for event in workspace_events {
+                    let timestamp_ms = (event.wall_time * 1000.0).round() as i64;
+                    let (tick, approx) = infer_external_replay_tick(
+                        timestamp_ms,
+                        anchors,
+                        ticks_per_ms,
+                        first_tick,
+                    );
+                    events.push(ReplayWorkspaceEvent {
+                        event_type: event.event_type,
+                        wall_time: event.wall_time,
+                        time: event.time,
+                        agent_id: event.agent_id,
+                        agent_name: event.agent_name,
+                        initial: event.initial,
+                        tick,
+                        approx,
+                        changes: event.changes,
+                    });
+                }
+            }
+            Err(err) => {
+                eprintln!(
+                    "Warning: failed to load workspace recording '{}': {}",
+                    path.display(),
+                    err
+                );
+            }
+        }
+    }
+
+    if events.is_empty() {
+        return None;
+    }
+    events.sort_by(|a, b| {
+        a.tick
+            .partial_cmp(&b.tick)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| a.time.cmp(&b.time))
+    });
+    Some(Arc::new(ReplayWorkspaceTimeline { events }))
+}
+
+fn infer_external_replay_tick(
+    timestamp_ms: i64,
+    anchors: &[ReplayTickAnchor],
+    fallback_ticks_per_ms: f64,
+    first_tick: f64,
+) -> (f64, bool) {
+    if anchors.is_empty() {
+        return (first_tick.max(0.0), true);
+    }
+    match anchors.binary_search_by_key(&timestamp_ms, |anchor| anchor.timestamp_ms) {
+        Ok(index) => (anchors[index].tick as f64, false),
+        Err(0) => {
+            let slope = if anchors.len() >= 2 {
+                external_replay_slope(&anchors[0], &anchors[1], fallback_ticks_per_ms)
+            } else {
+                fallback_ticks_per_ms
+            };
+            let dt = (timestamp_ms - anchors[0].timestamp_ms) as f64;
+            ((anchors[0].tick as f64 + dt * slope).max(0.0), true)
+        }
+        Err(index) if index >= anchors.len() => {
+            let last = anchors.len() - 1;
+            let slope = if anchors.len() >= 2 {
+                external_replay_slope(&anchors[last - 1], &anchors[last], fallback_ticks_per_ms)
+            } else {
+                fallback_ticks_per_ms
+            };
+            let dt = (timestamp_ms - anchors[last].timestamp_ms) as f64;
+            ((anchors[last].tick as f64 + dt * slope).max(0.0), true)
+        }
+        Err(index) => {
+            let a = &anchors[index - 1];
+            let b = &anchors[index];
+            let dt = (b.timestamp_ms - a.timestamp_ms) as f64;
+            if dt.abs() < f64::EPSILON {
+                return (a.tick as f64, true);
+            }
+            let t = (timestamp_ms - a.timestamp_ms) as f64 / dt;
+            let tick = a.tick as f64 + (b.tick as f64 - a.tick as f64) * t;
+            (tick.max(0.0), true)
+        }
+    }
+}
+
+fn external_replay_slope(
+    a: &ReplayTickAnchor,
+    b: &ReplayTickAnchor,
+    fallback_ticks_per_ms: f64,
+) -> f64 {
+    let dt = (b.timestamp_ms - a.timestamp_ms) as f64;
+    if dt.abs() < f64::EPSILON {
+        fallback_ticks_per_ms
+    } else {
+        (b.tick as f64 - a.tick as f64) / dt
+    }
+}
+
 fn load_replay_tick_anchors(paths: &[PathBuf]) -> Vec<ReplayTickAnchor> {
     let mut anchors = Vec::new();
     for path in paths {
@@ -903,6 +1060,7 @@ async fn open_external_replay_command(
     format: Option<String>,
     transcript_paths: Vec<PathBuf>,
     event_paths: Vec<PathBuf>,
+    workspace_event_paths: Vec<PathBuf>,
 ) -> Result<ExternalReplaySession, String> {
     if command_template.is_empty() {
         return Err(format!(
@@ -948,6 +1106,8 @@ async fn open_external_replay_command(
     let anchors = load_replay_tick_anchors(&event_paths);
     let agent_timeline =
         load_agent_timeline_from_manifest_paths(&transcript_paths, &info, &anchors);
+    let workspace_timeline =
+        load_workspace_timeline_from_manifest_paths(&workspace_event_paths, &info, &anchors);
 
     Ok(ExternalReplaySession {
         _process: process,
@@ -956,6 +1116,7 @@ async fn open_external_replay_command(
         manifest_path,
         format,
         agent_timeline,
+        workspace_timeline,
     })
 }
 
@@ -1035,6 +1196,7 @@ async fn open_external_replay_manifest(
         manifest.format,
         transcript_paths,
         event_paths,
+        Vec::new(),
     )
     .await
 }
@@ -1085,6 +1247,13 @@ async fn open_external_replay_from_clawblox_manifest(
         .map(|path| resolve_clawblox_manifest_path(&manifest_path, path))
         .filter(|path| path.is_file())
         .collect::<Vec<_>>();
+    let workspace_event_paths = manifest
+        .agents
+        .iter()
+        .filter_map(|agent| agent.workspace_recording.as_ref())
+        .map(|recording| resolve_clawblox_manifest_path(&manifest_path, &recording.events))
+        .filter(|path| path.is_file())
+        .collect::<Vec<_>>();
     let format = recording_path
         .extension()
         .and_then(|ext| ext.to_str())
@@ -1099,6 +1268,7 @@ async fn open_external_replay_from_clawblox_manifest(
         format,
         transcript_paths,
         event_paths,
+        workspace_event_paths,
     )
     .await
 }
@@ -1715,6 +1885,52 @@ async fn app_replay_agent_messages(
         start_tick,
         end_tick,
         messages: timeline.messages.clone(),
+    }))
+}
+
+async fn app_replay_workspace_events(
+    AxumPath(id): AxumPath<String>,
+    State(state): State<AppState>,
+    Query(query): Query<ReplayWorkspaceQuery>,
+) -> Result<Json<ReplayWorkspaceEventsResponse>, (axum::http::StatusCode, String)> {
+    if let Ok(session) = get_app_external_session(&state, &id) {
+        let info = proxy_external_replay_json(&session, "/replay/info")
+            .await
+            .ok();
+        let current_tick = query
+            .tick
+            .or_else(|| info.as_ref()?.get("current_tick")?.as_u64())
+            .unwrap_or(0);
+        let Some(timeline) = session.workspace_timeline.as_ref() else {
+            return Ok(Json(ReplayWorkspaceEventsResponse {
+                enabled: false,
+                current_tick,
+                start_tick: 0,
+                end_tick: current_tick,
+                events: Vec::new(),
+            }));
+        };
+        return Ok(Json(ReplayWorkspaceEventsResponse {
+            enabled: true,
+            current_tick,
+            start_tick: 0,
+            end_tick: current_tick,
+            events: timeline.events.clone(),
+        }));
+    }
+    let replay_state = get_app_replay_state(&state, &id)?;
+    let current_tick = if let Some(tick) = query.tick {
+        tick
+    } else {
+        let pb = replay_state.playback.lock().await;
+        pb.current_tick()
+    };
+    Ok(Json(ReplayWorkspaceEventsResponse {
+        enabled: false,
+        current_tick,
+        start_tick: 0,
+        end_tick: current_tick,
+        events: Vec::new(),
     }))
 }
 

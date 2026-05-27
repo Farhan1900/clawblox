@@ -1,8 +1,10 @@
 use std::{
+    collections::HashMap,
     fs::OpenOptions,
     io::Write,
     path::{Path, PathBuf},
     process::Command,
+    sync::{Mutex, OnceLock},
     time::{Duration, Instant},
 };
 
@@ -16,6 +18,13 @@ use crate::agent_recovery::{start_agent_recovery_watchdog, AgentRecoveryConfig};
 use crate::agent_sandbox::{
     detect_sandbox_deps_root, wrap_command, SandboxAgentKind, SandboxLayout,
 };
+use crate::manifest::record_agent_workspace_recording;
+use crate::workspace_recording::{
+    start_workspace_recorder, WorkspaceRecorderConfig, WorkspaceRecorderHandle,
+};
+
+static WORKSPACE_RECORDERS: OnceLock<Mutex<HashMap<PathBuf, WorkspaceRecorderHandle>>> =
+    OnceLock::new();
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum AgentKind {
@@ -353,6 +362,12 @@ pub fn start_agent(options: AgentStartOptions) -> Result<StartedAgent, String> {
         )
     })?;
 
+    if let Err(err) = start_workspace_recording_for_agent(&ctx, &options.name, &options.name) {
+        let message = format!("failed to start workspace recorder: {err}");
+        let _ = append_operation_report(&events_file, failure_report(&ctx, &options, &message));
+        return Err(message);
+    }
+
     let pane_id = match start_tmux_target(
         &tmux_session,
         tmux_window.as_deref(),
@@ -370,6 +385,7 @@ pub fn start_agent(options: AgentStartOptions) -> Result<StartedAgent, String> {
                 attach_command
             );
             let _ = append_operation_report(&events_file, failure_report(&ctx, &options, &message));
+            stop_workspace_recording_for_agent(&agent_dir);
             return Err(message);
         }
     };
@@ -639,6 +655,13 @@ pub fn send_agent(options: AgentSendOptions) -> Result<StartedAgent, String> {
         )
     })?;
 
+    if let Err(err) = start_workspace_recording_for_agent(&ctx, &options.name, &options.name) {
+        let message = format!("failed to start workspace recorder: {err}");
+        let _ =
+            append_operation_report(&events_file, send_failure_report(&ctx, &options, &message));
+        return Err(message);
+    }
+
     let pane_id = match start_tmux_target(
         &tmux_session,
         tmux_window.as_deref(),
@@ -659,6 +682,7 @@ pub fn send_agent(options: AgentSendOptions) -> Result<StartedAgent, String> {
                 &events_file,
                 send_failure_report(&ctx, &options, &message),
             );
+            stop_workspace_recording_for_agent(&agent_dir);
             return Err(message);
         }
     };
@@ -840,6 +864,8 @@ pub fn stop_agent(options: AgentStopOptions) -> Result<StoppedAgent, String> {
         }
     }
 
+    stop_workspace_recording_for_agent(&agent_dir);
+
     if let Err(err) = agent.collect_transcripts(&ctx) {
         let message = format!("failed to collect {} transcript: {err}", agent.name());
         let _ =
@@ -937,6 +963,58 @@ fn prune_recreateable_agent_artifacts(
             "failed to write cleanup event {}: {err}",
             events_file.display()
         )
+    })
+}
+
+fn start_workspace_recording_for_agent(
+    ctx: &AgentContext,
+    agent_id: &str,
+    agent_name: &str,
+) -> Result<(), String> {
+    let agent_dir = agent_dir_from_context(ctx);
+    let config = WorkspaceRecorderConfig::for_agent(agent_id, agent_name, &agent_dir);
+    if let Some(manifest_path) = manifest_path_from_env(&ctx.settings.env) {
+        record_agent_workspace_recording(
+            &manifest_path,
+            &agent_dir,
+            agent_id,
+            agent_name,
+            &config.events_file,
+            &config.blobs_dir,
+        )?;
+    }
+
+    let registry = WORKSPACE_RECORDERS.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut recorders = registry
+        .lock()
+        .map_err(|_| "workspace recorder registry lock was poisoned".to_string())?;
+    if recorders.contains_key(&agent_dir) {
+        return Ok(());
+    }
+    let handle = start_workspace_recorder(config)?;
+    recorders.insert(agent_dir, handle);
+    Ok(())
+}
+
+fn stop_workspace_recording_for_agent(agent_dir: &Path) {
+    let Some(registry) = WORKSPACE_RECORDERS.get() else {
+        return;
+    };
+    let Ok(mut recorders) = registry.lock() else {
+        return;
+    };
+    if let Some(handle) = recorders.remove(agent_dir) {
+        handle.stop();
+    }
+}
+
+fn manifest_path_from_env(env: &[(String, String)]) -> Option<PathBuf> {
+    env.iter().find_map(|(key, value)| {
+        if key == "CLAWBLOX_MANIFEST" && !value.trim().is_empty() {
+            Some(PathBuf::from(value))
+        } else {
+            None
+        }
     })
 }
 

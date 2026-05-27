@@ -4,6 +4,8 @@ use std::{
     path::{Path, PathBuf},
 };
 
+use crate::workspace_recording::WorkspaceRecordingManifest;
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ClawbloxManifest {
     pub schema_version: u32,
@@ -75,6 +77,8 @@ pub struct ManifestAgent {
     pub provider_session: String,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub transcripts: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace_recording: Option<WorkspaceRecordingManifest>,
 }
 
 pub struct WorldStarted<'a> {
@@ -226,6 +230,35 @@ pub fn refresh_agent_from_dir(
     })
 }
 
+pub fn record_agent_workspace_recording(
+    path: &Path,
+    agent_dir: &Path,
+    id: &str,
+    agent_name: &str,
+    events_path: &Path,
+    blobs_dir: &Path,
+) -> Result<(), String> {
+    update(path, |manifest| {
+        let state_root = manifest_state_root(path);
+        let mut agent = agent_from_dir(path, agent_dir, id);
+        agent.id = if id.trim().is_empty() {
+            agent_name.to_string()
+        } else {
+            id.to_string()
+        };
+        if !agent_name.trim().is_empty() {
+            agent.name = agent_name.to_string();
+        }
+        agent.workspace_recording = Some(WorkspaceRecordingManifest {
+            events: path_value(&state_root, events_path),
+            blobs: path_value(&state_root, blobs_dir),
+            format: "clawblox-workspace-v1".to_string(),
+        });
+        upsert_agent(&mut manifest.agents, agent);
+        Ok(())
+    })
+}
+
 pub fn record_recording(path: &Path, recording_path: &Path, format: &str) -> Result<(), String> {
     update(path, |manifest| {
         let state_root = manifest_state_root(path);
@@ -288,6 +321,9 @@ fn merge_agent(existing: &mut ManifestAgent, next: ManifestAgent) {
         if !existing.transcripts.iter().any(|item| item == &transcript) {
             existing.transcripts.push(transcript);
         }
+    }
+    if next.workspace_recording.is_some() {
+        existing.workspace_recording = next.workspace_recording;
     }
 }
 

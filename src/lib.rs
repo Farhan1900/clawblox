@@ -17,5 +17,6 @@ pub mod replay;
 pub mod replay_agent_log;
 pub mod replay_metadata;
 pub mod snapshot;
+pub mod workspace_recording;
 pub mod world_capability_proxy;
 pub mod world_runner;
