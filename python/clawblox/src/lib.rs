@@ -717,7 +717,7 @@ impl PyWorld {
             )
             .map_err(io_error)?;
             if let Some(session) = &tmux_session {
-                start_tmux_command_file(
+                let created_tmux_session = start_tmux_command_file(
                     session,
                     tmux_window.as_deref().unwrap_or("world-0"),
                     &command_file,
@@ -726,9 +726,15 @@ impl PyWorld {
                 )?;
                 self.tmux_session = Some(session.clone());
                 self.tmux_window = tmux_window.clone();
-                self.owns_tmux_session = true;
+                self.owns_tmux_session = created_tmux_session;
                 self.process = None;
-                start_tmux_parent_watchdog(session, Duration::from_secs(1), &log_file)?;
+                start_tmux_parent_watchdog(
+                    session,
+                    tmux_window.as_deref(),
+                    created_tmux_session,
+                    Duration::from_secs(1),
+                    &log_file,
+                )?;
             } else {
                 let child = spawn_external_world(&spec, Some(&log_file)).map_err(|err| {
                     PyAgentError::new_err(format!(
@@ -763,7 +769,7 @@ impl PyWorld {
             if let Some(session) = &tmux_session {
                 drop(log);
                 drop(err_log);
-                start_tmux_command_file(
+                let created_tmux_session = start_tmux_command_file(
                     session,
                     tmux_window.as_deref().unwrap_or("world-0"),
                     &command_file,
@@ -772,9 +778,15 @@ impl PyWorld {
                 )?;
                 self.tmux_session = Some(session.clone());
                 self.tmux_window = tmux_window.clone();
-                self.owns_tmux_session = true;
+                self.owns_tmux_session = created_tmux_session;
                 self.process = None;
-                start_tmux_parent_watchdog(session, Duration::from_secs(1), &log_file)?;
+                start_tmux_parent_watchdog(
+                    session,
+                    tmux_window.as_deref(),
+                    created_tmux_session,
+                    Duration::from_secs(1),
+                    &log_file,
+                )?;
             } else {
                 let child = Command::new(&bin)
                     .arg("run")
@@ -1635,7 +1647,22 @@ fn write_world_command_file(
             parts.join(" ")
         ),
     )
-    .map_err(io_error)
+    .map_err(io_error)?;
+    make_command_file_executable(path).map_err(io_error)
+}
+
+#[cfg(unix)]
+fn make_command_file_executable(path: &PathBuf) -> std::io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let mut permissions = std::fs::metadata(path)?.permissions();
+    permissions.set_mode(0o755);
+    std::fs::set_permissions(path, permissions)
+}
+
+#[cfg(not(unix))]
+fn make_command_file_executable(_path: &PathBuf) -> std::io::Result<()> {
+    Ok(())
 }
 
 fn wait_for_port_release(port: u16, timeout: Duration) -> PyResult<()> {
@@ -1812,18 +1839,57 @@ fn process_start_time(pid: u32) -> Option<String> {
         .map(ToString::to_string)
 }
 
-fn start_tmux_parent_watchdog(session: &str, grace: Duration, log_file: &PathBuf) -> PyResult<()> {
+fn start_tmux_parent_watchdog(
+    session: &str,
+    window: Option<&str>,
+    owns_session: bool,
+    grace: Duration,
+    log_file: &PathBuf,
+) -> PyResult<()> {
     let Some(session_created) = tmux_session_created(session) else {
         return Ok(());
     };
     let parent_pid = std::process::id();
     let parent_start = process_start_time(parent_pid).unwrap_or_default();
     let watchdog_log = log_file.with_extension("watchdog.log");
+    let target = tmux_target(session, window);
+    let stop_target = if owns_session {
+        format!(
+            r#"
+tmux list-panes -a -t "$session" -F '##{{pane_id}}' 2>/dev/null | while IFS= read -r pane; do
+  [ -n "$pane" ] && tmux send-keys -t "$pane" C-c 2>/dev/null || true
+done
+sleep "$grace"
+tmux has-session -t "$session" 2>/dev/null || exit 0
+current_created="$(tmux display-message -p -t "$session" '##{{session_created}}' 2>/dev/null || true)"
+[ "$current_created" = "$session_created" ] || exit 0
+tmux kill-session -t "$session" 2>/dev/null || true
+"#
+        )
+    } else {
+        format!(
+            r#"
+tmux has-session -t "$session" 2>/dev/null || exit 0
+current_created="$(tmux display-message -p -t "$session" '##{{session_created}}' 2>/dev/null || true)"
+[ "$current_created" = "$session_created" ] || exit 0
+tmux list-windows -t "$session" -F '##{{window_name}}' 2>/dev/null | grep -Fx -- "$window" >/dev/null || exit 0
+tmux send-keys -t "$target" C-c 2>/dev/null || true
+sleep "$grace"
+tmux has-session -t "$session" 2>/dev/null || exit 0
+current_created="$(tmux display-message -p -t "$session" '##{{session_created}}' 2>/dev/null || true)"
+[ "$current_created" = "$session_created" ] || exit 0
+tmux list-windows -t "$session" -F '##{{window_name}}' 2>/dev/null | grep -Fx -- "$window" >/dev/null || exit 0
+tmux kill-window -t "$target" 2>/dev/null || true
+"#
+        )
+    };
     let command = format!(
         r#"
 parent_pid={parent_pid}
 parent_start={parent_start}
 session={session}
+window={window}
+target={target}
 session_created={session_created}
 grace={grace}
 log_file={log_file}
@@ -1841,22 +1907,18 @@ done
 tmux has-session -t "$session" 2>/dev/null || exit 0
 current_created="$(tmux display-message -p -t "$session" '##{{session_created}}' 2>/dev/null || true)"
 [ "$current_created" = "$session_created" ] || exit 0
-printf '%s parent process exited; stopping tmux session %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$session" >> "$log_file"
-tmux list-panes -a -t "$session" -F '##{{pane_id}}' 2>/dev/null | while IFS= read -r pane; do
-  [ -n "$pane" ] && tmux send-keys -t "$pane" C-c 2>/dev/null || true
-done
-sleep "$grace"
-tmux has-session -t "$session" 2>/dev/null || exit 0
-current_created="$(tmux display-message -p -t "$session" '##{{session_created}}' 2>/dev/null || true)"
-[ "$current_created" = "$session_created" ] || exit 0
-tmux kill-session -t "$session" 2>/dev/null || true
+printf '%s parent process exited; stopping tmux target %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$target" >> "$log_file"
+{stop_target}
 "#,
         parent_pid = parent_pid,
         parent_start = shell_quote(&parent_start),
         session = shell_quote(session),
+        window = shell_quote(window.unwrap_or("")),
+        target = shell_quote(&target),
         session_created = shell_quote(&session_created),
         grace = grace.as_secs(),
         log_file = shell_quote(&watchdog_log.display().to_string()),
+        stop_target = stop_target,
     );
     let status = Command::new("tmux")
         .args(["run-shell", "-b", &command])
@@ -1879,9 +1941,10 @@ fn start_tmux_command_file(
     command_file: &PathBuf,
     log_file: &PathBuf,
     env: &[(String, String)],
-) -> PyResult<()> {
+) -> PyResult<bool> {
     let tmux_command = format!("exec {}", shell_quote(&command_file.display().to_string()));
     let mut command = Command::new("tmux");
+    let created_session = !tmux_session_exists(session);
     if tmux_session_exists(session) {
         command.args(["new-window", "-d", "-t", session, "-n", window]);
     } else {
@@ -1922,7 +1985,7 @@ fn start_tmux_command_file(
             tmux_target(session, Some(window))
         )));
     }
-    Ok(())
+    Ok(created_session)
 }
 
 fn send_tmux_ctrl_c(session: &str, window: Option<&str>) {
