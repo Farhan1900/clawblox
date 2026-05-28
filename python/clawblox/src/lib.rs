@@ -31,6 +31,7 @@ struct PyAgent {
     agent: String,
     name: String,
     binary: Option<PathBuf>,
+    version: Option<String>,
     dir: PathBuf,
     model: String,
     permission_mode: String,
@@ -178,7 +179,7 @@ impl PyAgent {
 #[pymethods]
 impl PyAgent {
     #[new]
-    #[pyo3(signature = (*, agent, name, dir, model, binary = None, permission_mode = "bypassPermissions".to_string(), auto_continue_prompt = "Please don't stop. Just continue doing whatever you want to do.".to_string(), tmux = None, bare = false, extra_args = Vec::new(), sandbox = false))]
+    #[pyo3(signature = (*, agent, name, dir, model, binary = None, version = None, permission_mode = "bypassPermissions".to_string(), auto_continue_prompt = "Please don't stop. Just continue doing whatever you want to do.".to_string(), tmux = None, bare = false, extra_args = Vec::new(), sandbox = false))]
     #[allow(clippy::too_many_arguments)]
     fn new(
         agent: String,
@@ -186,6 +187,7 @@ impl PyAgent {
         dir: PathBuf,
         model: String,
         binary: Option<PathBuf>,
+        version: Option<String>,
         permission_mode: String,
         auto_continue_prompt: String,
         tmux: Option<String>,
@@ -197,6 +199,7 @@ impl PyAgent {
             agent,
             name,
             binary,
+            version,
             dir,
             model,
             permission_mode,
@@ -274,6 +277,7 @@ impl PyAgent {
             kind: self.agent.clone(),
             name: self.name.clone(),
             binary: self.binary.clone(),
+            version: self.version.clone(),
             agent_dir: self.dir.clone(),
             model: self.model.clone(),
             permission_mode: self.permission_mode.clone(),
@@ -329,6 +333,7 @@ impl PyAgent {
             kind: self.agent.clone(),
             name: self.name.clone(),
             binary: self.binary.clone(),
+            version: self.version.clone(),
             agent_dir: self.dir.clone(),
             model: self.model.clone(),
             permission_mode: self.permission_mode.clone(),

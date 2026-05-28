@@ -87,6 +87,9 @@ pub struct AgentSettings {
     pub extra_args: Vec<String>,
     pub env: Vec<(String, String)>,
     pub sandbox_enabled: bool,
+    /// Pinned CLI version. When set, the backend verifies the binary reports
+    /// this exact version at setup (for reproducibility).
+    pub version: Option<String>,
 }
 
 impl AgentSettings {
@@ -191,6 +194,18 @@ pub trait Agent {
     fn binary(&self) -> &Path;
 
     fn needs_recovery_watchdog(&self) -> bool {
+        false
+    }
+
+    /// Whether clawblox should run the driver-side auto-continue watcher for
+    /// this agent (see `start_kimi_autoloop_watcher` in `agent_runner`).
+    ///
+    /// Only Kimi needs it. Claude and Codex keep looping entirely inside their
+    /// Stop hook (it returns `decision:block` on every stop and the runtime
+    /// re-blocks forever). Kimi's Stop hook is capped at one continuation per
+    /// turn by its runtime, so the hook alone cannot loop — the watcher drives
+    /// the loop instead. Default off.
+    fn needs_autoloop_watcher(&self) -> bool {
         false
     }
 
@@ -671,9 +686,16 @@ impl Agent for KimiAgent {
         &self.binary
     }
 
+    fn needs_autoloop_watcher(&self) -> bool {
+        true
+    }
+
     fn check_setup(&self, ctx: &AgentContext) -> AgentResult<()> {
         ctx.validate()?;
         require_program(&self.binary, "kimi CLI")?;
+        if let Some(pin) = ctx.settings.version.as_deref() {
+            verify_kimi_version(&self.binary, pin)?;
+        }
         Ok(())
     }
 
@@ -710,6 +732,12 @@ impl Agent for KimiAgent {
         std::fs::create_dir_all(home.join("logs"))?;
         write_kimi_config(ctx)?;
         write_executable_file(&kimi_stop_hook_path(ctx), KIMI_STOP_HOOK_PY)?;
+        // Kimi Code checks for a newer release at startup and, in a TTY, drops
+        // into an interactive "install update" picker. Under clawblox the CLI runs
+        // headlessly in a tmux pane, so that picker breaks the run and would also
+        // change the CLI version mid-experiment. Seed the update cache with no
+        // newer version so the preflight finds no update target.
+        write_kimi_update_freeze(&home)?;
         if ctx.settings.sandbox_enabled {
             write_sandbox_hosts_file(ctx)?;
         }
@@ -774,6 +802,39 @@ impl KimiAgent {
         }
         cmd
     }
+}
+
+fn verify_kimi_version(binary: &Path, pin: &str) -> AgentResult<()> {
+    let output = std::process::Command::new(binary)
+        .arg("--version")
+        .output()
+        .map_err(AgentError::Io)?;
+    if !output.status.success() {
+        return Err(AgentError::InvalidConfig(format!(
+            "could not determine kimi CLI version from `{} --version`",
+            binary.display()
+        )));
+    }
+    let actual = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if actual != pin {
+        return Err(AgentError::InvalidConfig(format!(
+            "kimi CLI version {actual} does not match the pinned version {pin}; \
+             install the pinned version or change the requested version"
+        )));
+    }
+    Ok(())
+}
+
+fn write_kimi_update_freeze(home: &Path) -> AgentResult<()> {
+    // `<KIMI_CODE_HOME>/updates/latest.json`; `latest: null` makes
+    // selectUpdateTarget() return no target, so the update preflight is a no-op.
+    let updates = home.join("updates");
+    std::fs::create_dir_all(&updates)?;
+    std::fs::write(
+        updates.join("latest.json"),
+        "{\"source\":\"cdn\",\"checkedAt\":null,\"latest\":null}",
+    )?;
+    Ok(())
 }
 
 fn create_parent_dir(path: &Path) -> AgentResult<()> {
@@ -1857,13 +1918,37 @@ if auto_loop == "1":
     print(json.dumps({"decision": "block", "reason": auto_loop_message}))
 "#;
 
+// Kimi Stop hook — a non-blocking turn-ended SIGNAL, NOT an in-hook loop.
+//
+// The intuitive approach (what Claude and Codex do) is to BLOCK the stop: return
+// `decision:block` / exit 2 from the Stop hook so the runtime re-prompts and the
+// turn never ends. That does not work on Kimi. Kimi's Stop hook is documented to
+// continue a turn *at most once* ("the turn may continue once"), and the cap is
+// enforced in Kimi's runtime ABOVE the hook: after one block-continuation it
+// returns early and stops invoking the Stop hook for the rest of that turn
+// (verified in agent-core `turn/index.ts` and empirically — exactly one
+// continuation per turn). So an exit-2 hook buys one extra step and then the
+// agent goes idle. The cap is not configurable and cannot be overridden from the
+// hook; the only code-level fix would be patching Kimi, which we do not do.
+//
+// Instead we keep the hook NON-BLOCKING (exit 0). A hook that never blocks never
+// trips the one-continuation cap, so Kimi invokes it on EVERY turn-end. The hook
+// just appends one line to <CLAWBLOX_KIMI_LOG_DIR>/autoloop_fires; clawblox's
+// driver-side auto-continue watcher (see `start_kimi_autoloop_watcher`) tails
+// that file and types the auto-continue message into the live TUI to start the
+// next turn. From the model's point of view the conversation is identical to
+// Claude/Codex (`assistant stop -> "please don't stop" -> continue`).
 const KIMI_STOP_HOOK_PY: &str = r#"#!/usr/bin/env python3
 import json
 import os
 import sys
+import time
 from pathlib import Path
 
-payload = json.load(sys.stdin)
+try:
+    payload = json.load(sys.stdin)
+except Exception:
+    payload = {}
 log_dir = os.environ.get("CLAWBLOX_KIMI_LOG_DIR", "")
 session_id = str(payload.get("session_id") or "").strip()
 
@@ -1874,15 +1959,13 @@ if log_dir:
     (path / "stop.json").write_text(raw + "\n", encoding="utf-8")
     if session_id:
         (path / f"stop.{session_id}.json").write_text(raw + "\n", encoding="utf-8")
+    # Turn-ended signal tailed by clawblox's auto-continue watcher: one line per
+    # turn-end. Append-only so the watcher can detect new fires by line count.
+    with open(path / "autoloop_fires", "a", encoding="utf-8") as handle:
+        handle.write(f"{time.time():.3f} {session_id}\n")
 
-auto_loop = os.environ.get("CLAWBLOX_KIMI_AUTO_LOOP", "0")
-auto_loop_message = os.environ.get("KIMI_AUTO_LOOP_MESSAGE", "")
-if not auto_loop_message:
-    auto_loop_message = "Please don't stop. Just continue doing whatever you want to do."
-
-if auto_loop == "1":
-    sys.stderr.write(auto_loop_message)
-    sys.exit(2)
+# Exit 0 (do NOT block). Continuation is driven by clawblox's watcher, not the
+# hook — see the comment above for why an exit-2 block cannot loop on Kimi.
 "#;
 
 pub fn codex_bind_root_for_bin(path: &Path) -> Option<(std::path::PathBuf, std::path::PathBuf)> {
@@ -2323,8 +2406,94 @@ mod tests {
                 extra_args: vec!["--flag".to_string()],
                 env: vec![("WORLD_BASE_URL".to_string(), "http://world".to_string())],
                 sandbox_enabled: true,
+                version: None,
             },
             sandbox: None,
         }
+    }
+
+    #[test]
+    fn only_kimi_requests_the_autoloop_watcher() {
+        // Claude/Codex loop inside their Stop hook; Kimi cannot (its hook is
+        // capped at one continuation per turn) and relies on the driver-side
+        // watcher instead.
+        assert!(!EchoAgent.needs_autoloop_watcher());
+        assert!(KimiAgent::default().needs_autoloop_watcher());
+    }
+
+    /// Guard the load-bearing decision: the Kimi Stop hook must be NON-blocking
+    /// and emit one `autoloop_fires` line per turn-end. If someone "fixes" it
+    /// back to the intuitive exit-2 block, the loop silently dies on Kimi (the
+    /// runtime caps the hook at one continuation per turn), so this test fails
+    /// loudly instead.
+    #[test]
+    fn kimi_stop_hook_is_nonblocking_and_signals_each_fire() {
+        if std::process::Command::new("python3")
+            .arg("--version")
+            .output()
+            .is_err()
+        {
+            eprintln!("skipping: python3 not available");
+            return;
+        }
+
+        let dir = std::env::temp_dir().join(format!(
+            "clawblox-kimi-hook-test-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let log_dir = dir.join("logs");
+        std::fs::create_dir_all(&log_dir).unwrap();
+        let hook = dir.join("stop_hook.py");
+        write_executable_file(&hook, KIMI_STOP_HOOK_PY).unwrap();
+
+        let run = || {
+            use std::io::Write;
+            let mut child = std::process::Command::new("python3")
+                .arg(&hook)
+                .env("CLAWBLOX_KIMI_LOG_DIR", &log_dir)
+                .env("CLAWBLOX_KIMI_AUTO_LOOP", "1")
+                .env(
+                    "KIMI_AUTO_LOOP_MESSAGE",
+                    "Please don't stop. Just continue doing whatever you want to do.",
+                )
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped())
+                .spawn()
+                .unwrap();
+            child
+                .stdin
+                .take()
+                .unwrap()
+                .write_all(br#"{"session_id":"s1"}"#)
+                .unwrap();
+            child.wait_with_output().unwrap()
+        };
+
+        let first = run();
+        // Non-blocking: exit 0, and the message must NOT be written to stderr
+        // (stderr + exit 2 is the blocking path that cannot loop on Kimi).
+        assert_eq!(first.status.code(), Some(0), "hook must exit 0 (non-blocking)");
+        assert!(
+            String::from_utf8_lossy(&first.stderr).trim().is_empty(),
+            "hook must not emit a block reason on stderr"
+        );
+
+        let fires = log_dir.join("autoloop_fires");
+        let count = |p: &Path| {
+            std::fs::read_to_string(p)
+                .map(|t| t.lines().filter(|l| !l.trim().is_empty()).count())
+                .unwrap_or(0)
+        };
+        assert_eq!(count(&fires), 1, "one fire line per turn-end");
+
+        run();
+        assert_eq!(count(&fires), 2, "each turn-end appends another fire line");
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

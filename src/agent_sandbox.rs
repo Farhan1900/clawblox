@@ -599,6 +599,7 @@ mod tests {
                 extra_args: Vec::new(),
                 env: Vec::new(),
                 sandbox_enabled: true,
+                version: None,
             },
             sandbox: None,
         }

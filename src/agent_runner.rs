@@ -53,6 +53,7 @@ pub struct AgentStartOptions {
     pub extra_args: Vec<String>,
     pub sandbox: bool,
     pub bare: bool,
+    pub version: Option<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -71,6 +72,7 @@ pub struct AgentSendOptions {
     pub extra_args: Vec<String>,
     pub sandbox: bool,
     pub bare: bool,
+    pub version: Option<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -169,6 +171,7 @@ pub fn start_agent_tmux_for_local_world(
         kind: options.kind,
         name: options.name,
         binary: None,
+        version: None,
         agent_dir,
         model: options
             .model
@@ -232,6 +235,7 @@ pub fn start_agent(options: AgentStartOptions) -> Result<StartedAgent, String> {
             extra_args: options.extra_args.clone(),
             env: options.env.clone(),
             sandbox_enabled: options.sandbox,
+            version: options.version.clone(),
         },
         sandbox: None,
     };
@@ -390,6 +394,20 @@ pub fn start_agent(options: AgentStartOptions) -> Result<StartedAgent, String> {
             tmux_send_literal(&session, window.as_deref(), &input);
         });
     }
+    if agent.needs_autoloop_watcher() && kimi_autoloop_enabled() {
+        start_kimi_autoloop_watcher(KimiAutoloopConfig {
+            tmux_session: tmux_session.clone(),
+            tmux_window: tmux_window.clone(),
+            marker_file: ctx
+                .paths
+                .log_file
+                .parent()
+                .unwrap_or(Path::new(""))
+                .join("autoloop_fires"),
+            message: ctx.settings.auto_continue_prompt.clone(),
+            poll: Duration::from_millis(env_u64("CLAWBLOX_KIMI_AUTOLOOP_POLL_MS", 500)),
+        });
+    }
     if agent.needs_recovery_watchdog() && recovery_watchdog_enabled() {
         if let Some(pane_id) = &pane_id {
             if let Err(err) = start_agent_recovery_watchdog(AgentRecoveryConfig {
@@ -526,6 +544,7 @@ pub fn send_agent(options: AgentSendOptions) -> Result<StartedAgent, String> {
             extra_args: options.extra_args.clone(),
             env: options.env.clone(),
             sandbox_enabled: options.sandbox,
+            version: options.version.clone(),
         },
         sandbox: None,
     };
@@ -778,6 +797,7 @@ pub fn stop_agent(options: AgentStopOptions) -> Result<StoppedAgent, String> {
             extra_args: options.extra_args.clone(),
             env: options.env.clone(),
             sandbox_enabled: options.sandbox,
+            version: None,
         },
         sandbox: None,
     };
@@ -1189,13 +1209,46 @@ fn tmux_pane_id(tmux_session: &str, tmux_window: Option<&str>) -> Result<String,
 
 fn tmux_send_literal(session: &str, window: Option<&str>, text: &str) {
     let target = tmux_target(session, window);
-    // Send text literally (no escape interpretation), then Enter separately.
-    let _ = Command::new("tmux")
-        .args(["send-keys", "-t", &target, "-l", text])
-        .status();
+    // Deliver the text through a tmux paste buffer rather than `send-keys -l`.
+    // `send-keys` passes the whole string as one command over tmux's
+    // client/server socket, which rejects payloads larger than ~16 KiB with
+    // "command too long" and silently drops the input. `load-buffer -` reads the
+    // text from stdin (no length limit); `paste-buffer -p` then pastes it using
+    // bracketed paste, so multi-line text is delivered as a single input instead
+    // of being submitted line by line. Enter is sent separately to submit,
+    // matching the previous behaviour.
+    let buffer = format!("clawblox-{}", target.replace([':', '.'], "-"));
+    let loaded = load_tmux_buffer(&buffer, text);
+    if loaded {
+        let _ = Command::new("tmux")
+            .args(["paste-buffer", "-d", "-p", "-b", &buffer, "-t", &target])
+            .status();
+    } else {
+        // Fallback for the small-input case if the buffer could not be loaded.
+        let _ = Command::new("tmux")
+            .args(["send-keys", "-t", &target, "-l", text])
+            .status();
+    }
     let _ = Command::new("tmux")
         .args(["send-keys", "-t", &target, "", "Enter"])
         .status();
+}
+
+fn load_tmux_buffer(buffer: &str, text: &str) -> bool {
+    let mut child = match Command::new("tmux")
+        .args(["load-buffer", "-b", buffer, "-"])
+        .stdin(std::process::Stdio::piped())
+        .spawn()
+    {
+        Ok(child) => child,
+        Err(_) => return false,
+    };
+    if let Some(mut stdin) = child.stdin.take() {
+        if stdin.write_all(text.as_bytes()).is_err() {
+            return false;
+        }
+    }
+    child.wait().map(|status| status.success()).unwrap_or(false)
 }
 
 fn recovery_watchdog_enabled() -> bool {
@@ -1206,6 +1259,83 @@ fn recovery_watchdog_enabled() -> bool {
             .as_str(),
         "0" | "false" | "no" | "off"
     )
+}
+
+fn kimi_autoloop_enabled() -> bool {
+    !matches!(
+        std::env::var("CLAWBLOX_KIMI_AUTOLOOP_WATCHER")
+            .unwrap_or_else(|_| "1".to_string())
+            .to_ascii_lowercase()
+            .as_str(),
+        "0" | "false" | "no" | "off"
+    )
+}
+
+struct KimiAutoloopConfig {
+    tmux_session: String,
+    tmux_window: Option<String>,
+    marker_file: PathBuf,
+    message: String,
+    poll: Duration,
+}
+
+/// Driver-side auto-continue loop for Kimi — the analogue of Claude/Codex's
+/// self-looping Stop hook, implemented here because Kimi cannot loop in the hook.
+///
+/// WHY THIS EXISTS, AND WHY WE DON'T JUST USE THE KIMI STOP HOOK:
+/// Claude and Codex keep an agent running by returning `decision:block` from
+/// their Stop hook on every stop; their runtimes re-block indefinitely so the
+/// turn never ends. Kimi is different: its Stop hook is documented to continue a
+/// turn *at most once* ("the turn may continue once"), and the cap is enforced in
+/// Kimi's runtime above the hook — after one block-continuation Kimi stops
+/// invoking the Stop hook for that turn (verified in agent-core `turn/index.ts`
+/// and empirically: exactly one continuation per turn). So a blocking Kimi Stop
+/// hook gives one extra step and then the agent goes idle, and the cap is not
+/// liftable from config or the hook script (only by patching Kimi, which we
+/// don't do).
+///
+/// So the Kimi Stop hook is configured NON-BLOCKING and used purely as a
+/// turn-ended signal: it appends a line to `marker_file` on every turn-end (a
+/// non-blocking hook never trips the one-continuation cap, so it fires every
+/// turn). This watcher tails that file and, on each new line, types the same
+/// auto-continue message into the live Kimi TUI via tmux, starting the next
+/// turn. The model-visible conversation is identical to Claude/Codex
+/// (`assistant stop -> "please don't stop" -> continue`); the only difference is
+/// a sub-second driver round-trip per turn instead of an in-process block.
+///
+/// Lifetime: the thread runs inside the process that called `start_agent` (the
+/// orchestrator, which stays alive for the generation). It exits when the
+/// agent's tmux window disappears — `stop_agent` kills the window at generation
+/// end, so the watcher never re-prompts during the SAVE_PROMPT / shutdown phase.
+fn start_kimi_autoloop_watcher(cfg: KimiAutoloopConfig) {
+    std::thread::spawn(move || {
+        // Baseline at the current count so pre-existing fires are never replayed.
+        let mut last = count_nonempty_lines(&cfg.marker_file);
+        loop {
+            std::thread::sleep(cfg.poll);
+            if !tmux_target_exists(&cfg.tmux_session, cfg.tmux_window.as_deref()) {
+                return; // agent window gone (stopped) — end the loop
+            }
+            let fires = count_nonempty_lines(&cfg.marker_file);
+            if fires > last {
+                // The hook only fires at turn-end, after which the TUI is idle,
+                // so it is safe to type the next prompt now. Only the watcher
+                // starts new turns, so fires increment one at a time.
+                tmux_send_literal(
+                    &cfg.tmux_session,
+                    cfg.tmux_window.as_deref(),
+                    &cfg.message,
+                );
+                last = fires;
+            }
+        }
+    });
+}
+
+fn count_nonempty_lines(path: &Path) -> u64 {
+    std::fs::read_to_string(path)
+        .map(|text| text.lines().filter(|line| !line.trim().is_empty()).count() as u64)
+        .unwrap_or(0)
 }
 
 fn env_u64(name: &str, default: u64) -> u64 {
@@ -1743,6 +1873,7 @@ mod tests {
                 extra_args: Vec::new(),
                 env: Vec::new(),
                 sandbox_enabled: false,
+                version: None,
             },
             sandbox: None,
         }
