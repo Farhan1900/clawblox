@@ -38,7 +38,7 @@ use include_dir::{include_dir, Dir};
 use tower_http::services::ServeDir;
 
 use clawblox::{
-    agent_runner::{start_agent_tmux_for_local_world, AgentKind, AgentRunnerOptions},
+    agent_runner::{start_agent_tmux_for_local_world, AgentRunnerOptions},
     config::{SpeechConfig, SpeechMode},
     db,
     game::{
@@ -57,7 +57,7 @@ use clawblox::{
     manifest,
     recording, replay,
     replay_agent_log::{
-        load_agent_timeline, load_agent_timeline_with_external_anchors, ReplayAgentMessage,
+        load_agent_timeline, ReplayAgentMessage,
         ReplayAgentTimeline, ReplayTickAnchor,
     },
     replay_metadata::{self, ReplayMetadata},
@@ -85,6 +85,7 @@ enum LocalDatastore {
 enum CliAgentKind {
     Claude,
     Codex,
+    Kimi,
 }
 
 impl LocalDatastore {
@@ -97,11 +98,12 @@ impl LocalDatastore {
     }
 }
 
-impl From<CliAgentKind> for AgentKind {
-    fn from(value: CliAgentKind) -> Self {
-        match value {
-            CliAgentKind::Claude => Self::Claude,
-            CliAgentKind::Codex => Self::Codex,
+impl CliAgentKind {
+    fn as_str(&self) -> &'static str {
+        match self {
+            Self::Claude => "claude",
+            Self::Codex => "codex",
+            Self::Kimi => "kimi",
         }
     }
 }
@@ -294,7 +296,7 @@ fn main() {
             record_dir,
             resume,
             agent.map(|kind| AgentRunnerOptions {
-                kind: kind.into(),
+                kind: kind.as_str().to_string(),
                 name: agent_name,
                 model,
                 permission_mode,

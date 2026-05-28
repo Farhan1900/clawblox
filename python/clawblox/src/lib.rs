@@ -8,9 +8,9 @@ use std::{
     time::{Duration, Instant},
 };
 
+use clawblox::agent::build_agent;
 use clawblox::agent_runner::{
-    send_agent, start_agent, stop_agent, AgentKind, AgentSendOptions, AgentStartOptions,
-    AgentStopOptions,
+    send_agent, start_agent, stop_agent, AgentSendOptions, AgentStartOptions, AgentStopOptions,
 };
 use clawblox::manifest::{
     manifest_path_for_state_root, record_agent_connected, record_world_started,
@@ -264,7 +264,6 @@ impl PyAgent {
         self.prepare_workspace_runtime()?;
         let env = self.merged_env(dict_to_env(env)?)?;
         let manifest_path = manifest_path_from_env(&env);
-        let kind = parse_agent_kind(&self.agent)?;
         let run_tmux = self.hidden_run_tmux()?;
         let tmux_session = run_tmux
             .as_ref()
@@ -272,7 +271,7 @@ impl PyAgent {
             .or_else(|| self.tmux.clone());
         let tmux_window = run_tmux.as_ref().map(|value| value.window.clone());
         let started = start_agent(AgentStartOptions {
-            kind,
+            kind: self.agent.clone(),
             name: self.name.clone(),
             binary: self.binary.clone(),
             agent_dir: self.dir.clone(),
@@ -320,7 +319,6 @@ impl PyAgent {
     ) -> PyResult<PyAgentStartResult> {
         let env = self.merged_env(dict_to_env(env)?)?;
         let manifest_path = manifest_path_from_env(&env);
-        let kind = parse_agent_kind(&self.agent)?;
         let run_tmux = self.hidden_run_tmux()?;
         let tmux_session = run_tmux
             .as_ref()
@@ -328,7 +326,7 @@ impl PyAgent {
             .or_else(|| self.tmux.clone());
         let tmux_window = run_tmux.as_ref().map(|value| value.window.clone());
         let started = send_agent(AgentSendOptions {
-            kind,
+            kind: self.agent.clone(),
             name: self.name.clone(),
             binary: self.binary.clone(),
             agent_dir: self.dir.clone(),
@@ -375,7 +373,6 @@ impl PyAgent {
     ) -> PyResult<PyAgentStopResult> {
         let env = self.merged_env(dict_to_env(env)?)?;
         let manifest_path = manifest_path_from_env(&env);
-        let kind = parse_agent_kind(&self.agent)?;
         let run_tmux = self.hidden_run_tmux()?;
         let tmux_session = run_tmux
             .as_ref()
@@ -383,7 +380,7 @@ impl PyAgent {
             .or_else(|| self.tmux.clone());
         let tmux_window = run_tmux.as_ref().map(|value| value.window.clone());
         let stopped = stop_agent(AgentStopOptions {
-            kind,
+            kind: self.agent.clone(),
             name: self.name.clone(),
             binary: self.binary.clone(),
             agent_dir: self.dir.clone(),
@@ -973,10 +970,13 @@ impl PyWorld {
         ];
         if agent.sandbox {
             let proxy_port = self.start_capability_proxy(agent, &internal_base_url)?;
-            base_url = if parse_agent_kind(&agent.agent)? == AgentKind::Codex {
-                format!("http://world:{proxy_port}")
-            } else {
+            let uses_socat = build_agent(&agent.agent, None, false)
+                .map(|a| a.needs_socat_sandbox())
+                .unwrap_or(false);
+            base_url = if uses_socat {
                 "http://world".to_string()
+            } else {
+                format!("http://world:{proxy_port}")
             };
             world_env[0] = ("WORLD_BASE_URL".to_string(), base_url.clone());
             world_env.push((
@@ -1331,16 +1331,6 @@ struct PyAgentError;
 impl PyAgentError {
     fn new_err(message: String) -> PyErr {
         pyo3::exceptions::PyRuntimeError::new_err(message)
-    }
-}
-
-fn parse_agent_kind(value: &str) -> PyResult<AgentKind> {
-    match value {
-        "claude" => Ok(AgentKind::Claude),
-        "codex" => Ok(AgentKind::Codex),
-        other => Err(pyo3::exceptions::PyValueError::new_err(format!(
-            "unsupported agent '{other}' (expected 'claude' or 'codex')"
-        ))),
     }
 }
 

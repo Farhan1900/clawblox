@@ -1,4 +1,8 @@
 use super::*;
+use clawblox::agent::build_agent;
+use clawblox::replay_agent_log::{
+    detect_transcript_parser, load_agent_timeline_with_parser, TranscriptLineParser,
+};
 use clawblox::workspace_recording::{load_workspace_events, WorkspaceChange};
 
 #[derive(Clone)]
@@ -849,7 +853,7 @@ async fn external_replay_info(url: &str) -> Result<serde_json::Value, String> {
 }
 
 fn load_agent_timeline_from_manifest_paths(
-    transcript_paths: &[PathBuf],
+    transcript_paths: &[(PathBuf, Box<dyn TranscriptLineParser>)],
     info: &serde_json::Value,
     anchors: &[ReplayTickAnchor],
 ) -> Option<Arc<ReplayAgentTimeline>> {
@@ -865,8 +869,8 @@ fn load_agent_timeline_from_manifest_paths(
     let mut messages = Vec::new();
     let mut anchor_count = 0usize;
 
-    for path in transcript_paths {
-        match load_agent_timeline_with_external_anchors(path, tick_rate, first_tick, anchors) {
+    for (path, parser) in transcript_paths {
+        match load_agent_timeline_with_parser(path, tick_rate, first_tick, anchors, parser.as_ref()) {
             Ok(timeline) => {
                 anchor_count += timeline.anchor_count;
                 messages.extend(timeline.messages);
@@ -1058,7 +1062,7 @@ async fn open_external_replay_command(
     command_template: Vec<String>,
     cwd: PathBuf,
     format: Option<String>,
-    transcript_paths: Vec<PathBuf>,
+    transcript_paths: Vec<(PathBuf, Box<dyn TranscriptLineParser>)>,
     event_paths: Vec<PathBuf>,
     workspace_event_paths: Vec<PathBuf>,
 ) -> Result<ExternalReplaySession, String> {
@@ -1172,13 +1176,17 @@ async fn open_external_replay_manifest(
         return Err(format!("manifest cwd not found: {}", cwd.display()));
     }
 
-    let transcript_paths = manifest
+    let transcript_paths: Vec<(PathBuf, Box<dyn TranscriptLineParser>)> = manifest
         .agents
         .iter()
         .filter_map(|agent| agent.transcript.as_deref())
-        .map(|path| resolve_manifest_path(&manifest_dir, path))
-        .filter(|path| path.is_file())
-        .collect::<Vec<_>>();
+        .map(|path| {
+            let resolved = resolve_manifest_path(&manifest_dir, path);
+            let parser = detect_transcript_parser(&resolved);
+            (resolved, parser)
+        })
+        .filter(|(path, _)| path.is_file())
+        .collect();
     let event_paths = manifest
         .events
         .as_deref()
@@ -1230,13 +1238,22 @@ async fn open_external_replay_from_clawblox_manifest(
     } else {
         resolve_clawblox_manifest_path(&manifest_path, &world.source_dir)
     };
-    let transcript_paths = manifest
+    let transcript_paths: Vec<(PathBuf, Box<dyn TranscriptLineParser>)> = manifest
         .agents
         .iter()
-        .flat_map(|agent| agent.transcripts.iter())
-        .map(|path| resolve_clawblox_manifest_path(&manifest_path, path))
-        .filter(|path| path.is_file())
-        .collect::<Vec<_>>();
+        .flat_map(|agent| {
+            let backend = agent.backend.clone();
+            let mp = manifest_path.clone();
+            agent.transcripts.iter().map(move |path| {
+                let resolved = resolve_clawblox_manifest_path(&mp, path);
+                let parser: Box<dyn TranscriptLineParser> = build_agent(&backend, None, false)
+                    .map(|a| a.transcript_parser())
+                    .unwrap_or_else(|_| detect_transcript_parser(&resolved));
+                (resolved, parser)
+            })
+        })
+        .filter(|(path, _)| path.is_file())
+        .collect();
     let event_paths = manifest
         .recordings
         .iter()

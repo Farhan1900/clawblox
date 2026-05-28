@@ -5,6 +5,9 @@ use std::{
 };
 
 use crate::agent_sandbox::SandboxLayout;
+use crate::replay_agent_log::{
+    ClaudeTranscriptParser, CodexTranscriptParser, KimiTranscriptParser, TranscriptLineParser,
+};
 
 pub type AgentResult<T> = Result<T, AgentError>;
 
@@ -114,6 +117,23 @@ impl AgentContext {
     pub fn prepare_paths(&self) -> AgentResult<()> {
         self.paths.create_dirs()
     }
+
+    /// Return the sandbox-equivalent of a host path when running sandboxed,
+    /// or the path unchanged when not. Agents use this to inject correct paths
+    /// into env vars without needing to know sandbox internals.
+    pub fn guest_path(&self, host_path: &Path) -> PathBuf {
+        match &self.sandbox {
+            Some(layout) => layout.host_to_guest(host_path),
+            None => host_path.to_path_buf(),
+        }
+    }
+
+    /// Return the guest HOME directory when sandboxed, or the agent home dir otherwise.
+    pub fn guest_home(&self) -> PathBuf {
+        self.sandbox.as_ref()
+            .map(|layout| layout.guest_home.clone())
+            .unwrap_or_else(|| self.paths.agent_home_dir.clone())
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -166,6 +186,40 @@ pub struct SandboxRequirements {
 pub trait Agent {
     fn name(&self) -> &'static str;
 
+    fn default_model(&self) -> &'static str;
+
+    fn binary(&self) -> &Path;
+
+    fn needs_recovery_watchdog(&self) -> bool {
+        false
+    }
+
+    fn needs_socat_sandbox(&self) -> bool {
+        false
+    }
+
+    fn initial_tmux_input(&self, _ctx: &AgentContext) -> Option<String> {
+        None
+    }
+
+    fn send_tmux_input(&self, _ctx: &AgentContext, _prompt: &str) -> Option<String> {
+        None
+    }
+
+    fn sandbox_guest_binary_name(&self) -> &str {
+        self.name()
+    }
+
+    fn configure_sandbox_layout(
+        &self,
+        layout: SandboxLayout,
+        _host_binary: &Path,
+    ) -> AgentResult<SandboxLayout> {
+        Ok(layout)
+    }
+
+    fn transcript_parser(&self) -> Box<dyn TranscriptLineParser>;
+
     fn check_setup(&self, ctx: &AgentContext) -> AgentResult<()>;
 
     fn start(&self, ctx: &AgentContext) -> AgentResult<CommandSpec>;
@@ -199,6 +253,34 @@ impl Default for ClaudeAgent {
 impl Agent for ClaudeAgent {
     fn name(&self) -> &'static str {
         "claude"
+    }
+
+    fn default_model(&self) -> &'static str {
+        "claude-opus-4-6"
+    }
+
+    fn binary(&self) -> &Path {
+        &self.binary
+    }
+
+    fn needs_recovery_watchdog(&self) -> bool {
+        true
+    }
+
+    fn needs_socat_sandbox(&self) -> bool {
+        true
+    }
+
+    fn sandbox_guest_binary_name(&self) -> &str {
+        "claude"
+    }
+
+    fn configure_sandbox_layout(
+        &self,
+        layout: SandboxLayout,
+        _host_binary: &Path,
+    ) -> AgentResult<SandboxLayout> {
+        Ok(layout.with_claude_plugin())
     }
 
     fn check_setup(&self, ctx: &AgentContext) -> AgentResult<()> {
@@ -266,6 +348,10 @@ impl Agent for ClaudeAgent {
         Ok(())
     }
 
+    fn transcript_parser(&self) -> Box<dyn TranscriptLineParser> {
+        Box::new(ClaudeTranscriptParser)
+    }
+
     fn collect_transcripts(&self, ctx: &AgentContext) -> AgentResult<()> {
         collect_claude_transcript(ctx)
     }
@@ -308,33 +394,16 @@ impl ClaudeAgent {
         let program = sandbox
             .map(|layout| layout.guest_binary.clone())
             .unwrap_or_else(|| self.binary.clone());
-        let cwd = sandbox
-            .map(|layout| layout.guest_workspace.clone())
-            .unwrap_or_else(|| ctx.paths.workspace_dir.clone());
         let plugin_dir = sandbox
             .and_then(|layout| layout.guest_plugin.clone())
             .unwrap_or_else(|| claude_plugin_dir(ctx));
-        let prompt_file = sandbox
-            .map(|layout| layout.guest_prompt.clone())
-            .unwrap_or_else(|| ctx.paths.prompt_file.clone());
-        let log_dir = sandbox
-            .map(|layout| layout.guest_logs.clone())
-            .unwrap_or_else(|| {
-                ctx.paths
-                    .log_file
-                    .parent()
-                    .unwrap_or_else(|| Path::new(""))
-                    .to_path_buf()
-            });
-        let metadata_file = sandbox
-            .map(|layout| layout.guest_runtime.join("hook_session.env"))
-            .unwrap_or_else(|| claude_hook_metadata_file(ctx));
-        let runtime_dir = sandbox
-            .map(|layout| layout.guest_runtime.clone())
-            .unwrap_or_else(|| ctx.paths.runtime_dir.clone());
-        let agent_dir = sandbox
-            .map(|layout| layout.guest_workspace.clone())
-            .unwrap_or_else(|| ctx.paths.agent_home_dir.clone());
+        let log_dir = ctx.guest_path(ctx.paths.log_file.parent().unwrap_or(Path::new("")));
+        let metadata_file = ctx.guest_path(&claude_hook_metadata_file(ctx));
+        let runtime_dir = ctx.guest_path(&ctx.paths.runtime_dir);
+        let cwd = ctx.guest_path(&ctx.paths.workspace_dir);
+        let prompt_file = ctx.guest_path(&ctx.paths.prompt_file);
+        // Claude hooks use agent_dir to locate workspace files — map to guest workspace.
+        let agent_dir = cwd.clone();
 
         let mut command = CommandSpec::new(program, cwd)
             .arg("--plugin-dir")
@@ -397,6 +466,35 @@ impl Agent for CodexAgent {
         "codex"
     }
 
+    fn default_model(&self) -> &'static str {
+        "gpt-5.5"
+    }
+
+    fn binary(&self) -> &Path {
+        &self.binary
+    }
+
+    fn sandbox_guest_binary_name(&self) -> &str {
+        "codex"
+    }
+
+    fn configure_sandbox_layout(
+        &self,
+        layout: SandboxLayout,
+        host_binary: &Path,
+    ) -> AgentResult<SandboxLayout> {
+        let mut layout = layout;
+        if let Some((root, rel)) = codex_bind_root_for_bin(host_binary) {
+            layout = layout.with_codex_binary_root(root, rel);
+        }
+        if let Some(root) = node_root_for_path(host_binary) {
+            layout = layout.with_node_root(root);
+        } else if let Some(root) = resolve_node_root() {
+            layout = layout.with_node_root(root);
+        }
+        Ok(layout)
+    }
+
     fn check_setup(&self, ctx: &AgentContext) -> AgentResult<()> {
         ctx.validate()?;
         require_program(&self.binary, "codex CLI")?;
@@ -456,6 +554,10 @@ impl Agent for CodexAgent {
         Ok(())
     }
 
+    fn transcript_parser(&self) -> Box<dyn TranscriptLineParser> {
+        Box::new(CodexTranscriptParser)
+    }
+
     fn collect_transcripts(&self, ctx: &AgentContext) -> AgentResult<()> {
         collect_codex_transcript(ctx)
     }
@@ -503,35 +605,18 @@ impl CodexAgent {
                 .codex_guest_node()
                 .map(|_| layout.codex_guest_program().display().to_string())
         });
-        let cwd = sandbox
-            .map(|layout| layout.guest_workspace.clone())
-            .unwrap_or_else(|| ctx.paths.workspace_dir.clone());
-        let effective_workspace = sandbox
-            .map(|layout| layout.guest_workspace.clone())
-            .unwrap_or_else(|| ctx.paths.workspace_dir.clone());
-        let home = sandbox
-            .map(|layout| layout.guest_home.clone())
-            .unwrap_or_else(|| ctx.paths.agent_home_dir.clone());
-        let runtime_dir = sandbox
-            .map(|layout| layout.guest_runtime.clone())
-            .unwrap_or_else(|| ctx.paths.runtime_dir.clone());
-        let log_dir = sandbox
-            .map(|layout| layout.guest_logs.clone())
-            .unwrap_or_else(|| {
-                ctx.paths
-                    .log_file
-                    .parent()
-                    .unwrap_or_else(|| Path::new(""))
-                    .to_path_buf()
-            });
-        let mut command = CommandSpec::new(program, cwd);
+        let workspace = ctx.guest_path(&ctx.paths.workspace_dir);
+        let home = ctx.guest_home();
+        let runtime_dir = ctx.guest_path(&ctx.paths.runtime_dir);
+        let log_dir = ctx.guest_path(ctx.paths.log_file.parent().unwrap_or(Path::new("")));
+        let mut command = CommandSpec::new(program, workspace.clone());
         if let Some(codex_program_arg) = codex_program_arg {
             command = command.arg(codex_program_arg);
         }
         command
             .arg("--no-alt-screen")
             .arg("-C")
-            .arg(effective_workspace.display().to_string())
+            .arg(workspace.display().to_string())
             .arg("-m")
             .arg(&ctx.settings.model)
             .arg("-s")
@@ -557,6 +642,137 @@ impl CodexAgent {
         let mut command = self.base_command(ctx);
         command.args.insert(0, "resume".to_string());
         command
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct KimiAgent {
+    pub binary: PathBuf,
+}
+
+impl Default for KimiAgent {
+    fn default() -> Self {
+        Self {
+            binary: PathBuf::from("kimi"),
+        }
+    }
+}
+
+impl Agent for KimiAgent {
+    fn name(&self) -> &'static str {
+        "kimi"
+    }
+
+    fn default_model(&self) -> &'static str {
+        "kimi-code/kimi-for-coding"
+    }
+
+    fn binary(&self) -> &Path {
+        &self.binary
+    }
+
+    fn check_setup(&self, ctx: &AgentContext) -> AgentResult<()> {
+        ctx.validate()?;
+        require_program(&self.binary, "kimi CLI")?;
+        Ok(())
+    }
+
+    fn initial_tmux_input(&self, ctx: &AgentContext) -> Option<String> {
+        ctx.validate().ok()?;
+        let system_prompt = std::fs::read_to_string(&ctx.paths.prompt_file).unwrap_or_default();
+        Some(if system_prompt.trim().is_empty() {
+            ctx.settings.initial_prompt.clone()
+        } else {
+            format!("{}\n\n{}", system_prompt.trim(), ctx.settings.initial_prompt)
+        })
+    }
+
+    fn send_tmux_input(&self, _ctx: &AgentContext, prompt: &str) -> Option<String> {
+        Some(prompt.to_string())
+    }
+
+    fn start(&self, ctx: &AgentContext) -> AgentResult<CommandSpec> {
+        ctx.validate()?;
+        Ok(self.base_command(ctx))
+    }
+
+    fn continue_session(&self, ctx: &AgentContext, prompt: &str) -> AgentResult<CommandSpec> {
+        ctx.validate()?;
+        require_nonempty("prompt", prompt)?;
+        let session_id = read_required_session_id(&ctx.paths.session_id_file)?;
+        Ok(self.base_command(ctx).arg("-S").arg(session_id))
+    }
+
+    fn configure_auto_continue(&self, ctx: &AgentContext) -> AgentResult<()> {
+        ctx.validate()?;
+        let home = kimi_home_dir(ctx);
+        std::fs::create_dir_all(home.join("sessions"))?;
+        std::fs::create_dir_all(home.join("logs"))?;
+        write_kimi_config(ctx)?;
+        write_executable_file(&kimi_stop_hook_path(ctx), KIMI_STOP_HOOK_PY)?;
+        if ctx.settings.sandbox_enabled {
+            write_sandbox_hosts_file(ctx)?;
+        }
+        Ok(())
+    }
+
+    fn transcript_parser(&self) -> Box<dyn TranscriptLineParser> {
+        Box::new(KimiTranscriptParser)
+    }
+
+    fn collect_transcripts(&self, ctx: &AgentContext) -> AgentResult<()> {
+        collect_kimi_transcript(ctx)
+    }
+
+    fn sandbox_requirements(&self, ctx: &AgentContext) -> AgentResult<SandboxRequirements> {
+        ctx.validate()?;
+        Ok(SandboxRequirements {
+            read_only_paths: vec![ctx.paths.prompt_file.clone(), self.binary.clone()],
+            writable_paths: vec![
+                ctx.paths.workspace_dir.clone(),
+                ctx.paths.agent_home_dir.clone(),
+                ctx.paths.runtime_dir.clone(),
+                ctx.paths.transcript_dir.clone(),
+                ctx.paths
+                    .log_file
+                    .parent()
+                    .unwrap_or_else(|| Path::new(""))
+                    .to_path_buf(),
+            ],
+            env_vars: vec![
+                "HOME".to_string(),
+                "PATH".to_string(),
+                "KIMI_CODE_HOME".to_string(),
+                "CLAWBLOX_KIMI_AUTO_LOOP".to_string(),
+                "KIMI_AUTO_LOOP_MESSAGE".to_string(),
+            ],
+            needs_network: ctx.settings.sandbox_enabled,
+        })
+    }
+}
+
+impl KimiAgent {
+    fn base_command(&self, ctx: &AgentContext) -> CommandSpec {
+        let program = ctx.sandbox.as_ref()
+            .map(|layout| layout.guest_binary.clone())
+            .unwrap_or_else(|| self.binary.clone());
+        let cwd = ctx.guest_path(&ctx.paths.workspace_dir);
+        let log_dir = ctx.guest_path(ctx.paths.log_file.parent().unwrap_or(Path::new("")));
+        let mut cmd = CommandSpec::new(program, cwd)
+            .arg("-m")
+            .arg(&ctx.settings.model)
+            .envs(ctx.settings.env.clone())
+            .env("CLAWBLOX_KIMI_AUTO_LOOP", "1")
+            .env("CLAWBLOX_KIMI_LOG_DIR", log_dir.display().to_string())
+            .env("KIMI_AUTO_LOOP_MESSAGE", &ctx.settings.auto_continue_prompt)
+            .with_extra_args(ctx.settings.extra_args.clone());
+        // In sandbox mode HOME is remapped to the guest home dir, so kimi finds
+        // ~/.kimi-code there automatically. Outside the sandbox we set KIMI_CODE_HOME
+        // explicitly to keep each agent isolated from the user's own ~/.kimi-code.
+        if !ctx.settings.sandbox_enabled {
+            cmd = cmd.env("KIMI_CODE_HOME", kimi_home_dir(ctx).display().to_string());
+        }
+        cmd
     }
 }
 
@@ -687,6 +903,121 @@ fn codex_stop_hook_path(ctx: &AgentContext) -> PathBuf {
 
 fn codex_hooks_path(ctx: &AgentContext) -> PathBuf {
     codex_home_dir(ctx).join("hooks.json")
+}
+
+fn kimi_home_dir(ctx: &AgentContext) -> PathBuf {
+    agent_home_dir(ctx).join(".kimi-code")
+}
+
+fn kimi_stop_hook_path(ctx: &AgentContext) -> PathBuf {
+    kimi_home_dir(ctx).join("stop_hook.py")
+}
+
+fn user_kimi_home() -> Option<PathBuf> {
+    if let Ok(val) = std::env::var("KIMI_CODE_HOME") {
+        let path = PathBuf::from(val);
+        if path.is_dir() {
+            return Some(path);
+        }
+    }
+    std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".kimi-code"))
+}
+
+fn sync_kimi_user_credentials(ctx: &AgentContext) -> AgentResult<()> {
+    let Some(user_home) = user_kimi_home() else {
+        return Ok(());
+    };
+    let target = kimi_home_dir(ctx);
+    sync_codex_user_entry(
+        &user_home.join("credentials"),
+        &target.join("credentials"),
+        ctx.settings.sandbox_enabled,
+    )
+}
+
+fn write_kimi_config(ctx: &AgentContext) -> AgentResult<()> {
+    // Inside the bwrap sandbox the home dir is remapped to /home/agent, so we
+    // must use the guest path for the stop hook command in config.toml.
+    let stop_hook = if ctx.settings.sandbox_enabled {
+        PathBuf::from("/home/agent/.kimi-code/stop_hook.py")
+    } else {
+        kimi_stop_hook_path(ctx)
+    };
+    let api_key = env_value(ctx, "KIMI_API_KEY").unwrap_or_default();
+    let config = format!(
+        "default_model = \"{model}\"\n\
+         default_permission_mode = \"yolo\"\n\
+         \n\
+         [providers.\"managed:kimi-code\"]\n\
+         type = \"kimi\"\n\
+         api_key = \"{api_key}\"\n\
+         base_url = \"https://api.kimi.com/coding/v1\"\n\
+         \n\
+         [models.\"kimi-code/kimi-for-coding\"]\n\
+         provider = \"managed:kimi-code\"\n\
+         model = \"kimi-for-coding\"\n\
+         max_context_size = 262144\n\
+         capabilities = [\"thinking\", \"image_in\", \"video_in\", \"tool_use\"]\n\
+         display_name = \"Kimi-k2.6\"\n\
+         \n\
+         [[hooks]]\n\
+         event = \"Stop\"\n\
+         command = \"python3 {stop_hook}\"\n\
+         timeout = 30\n",
+        model = ctx.settings.model,
+        stop_hook = stop_hook.display(),
+    );
+    write_file(&kimi_home_dir(ctx).join("config.toml"), &config)
+}
+
+fn collect_kimi_transcript(ctx: &AgentContext) -> AgentResult<()> {
+    let session_index = kimi_home_dir(ctx).join("session_index.jsonl");
+    if !session_index.exists() {
+        return Ok(());
+    }
+    let content = std::fs::read_to_string(&session_index)?;
+    let Some(last_line) = content.lines().filter(|l| !l.trim().is_empty()).last() else {
+        return Ok(());
+    };
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(last_line) else {
+        return Ok(());
+    };
+    let session_id = value
+        .get("sessionId")
+        .and_then(|v| v.as_str())
+        .map(|s| s.trim().to_string())
+        .unwrap_or_default();
+    let session_dir = value
+        .get("sessionDir")
+        .and_then(|v| v.as_str())
+        .map(|s| s.trim().to_string())
+        .unwrap_or_default();
+    if session_id.is_empty() {
+        return Ok(());
+    }
+    create_parent_dir(&ctx.paths.session_id_file)?;
+    std::fs::write(&ctx.paths.session_id_file, format!("{session_id}\n"))?;
+    if session_dir.is_empty() {
+        return Ok(());
+    }
+    // sessionDir is a guest path (/home/agent/...) when running in the sandbox.
+    // Translate it to the corresponding host path (sandbox-home/...).
+    const GUEST_HOME: &str = "/home/agent";
+    let session_dir_host = if ctx.settings.sandbox_enabled {
+        if let Ok(rel) = Path::new(&session_dir).strip_prefix(GUEST_HOME) {
+            sandbox_home_dir(ctx).join(rel)
+        } else {
+            PathBuf::from(&session_dir)
+        }
+    } else {
+        PathBuf::from(&session_dir)
+    };
+    let wire = session_dir_host.join("agents/main/wire.jsonl");
+    if wire.is_file() {
+        std::fs::create_dir_all(&ctx.paths.transcript_dir)?;
+        std::fs::copy(wire, ctx.paths.transcript_dir.join(format!("{session_id}.jsonl")))?;
+    }
+    Ok(())
 }
 
 fn prepare_codex_home(ctx: &AgentContext) -> AgentResult<()> {
@@ -1526,6 +1857,71 @@ if auto_loop == "1":
     print(json.dumps({"decision": "block", "reason": auto_loop_message}))
 "#;
 
+const KIMI_STOP_HOOK_PY: &str = r#"#!/usr/bin/env python3
+import json
+import os
+import sys
+from pathlib import Path
+
+payload = json.load(sys.stdin)
+log_dir = os.environ.get("CLAWBLOX_KIMI_LOG_DIR", "")
+session_id = str(payload.get("session_id") or "").strip()
+
+if log_dir:
+    path = Path(log_dir)
+    path.mkdir(parents=True, exist_ok=True)
+    raw = json.dumps(payload)
+    (path / "stop.json").write_text(raw + "\n", encoding="utf-8")
+    if session_id:
+        (path / f"stop.{session_id}.json").write_text(raw + "\n", encoding="utf-8")
+
+auto_loop = os.environ.get("CLAWBLOX_KIMI_AUTO_LOOP", "0")
+auto_loop_message = os.environ.get("KIMI_AUTO_LOOP_MESSAGE", "")
+if not auto_loop_message:
+    auto_loop_message = "Please don't stop. Just continue doing whatever you want to do."
+
+if auto_loop == "1":
+    sys.stderr.write(auto_loop_message)
+    sys.exit(2)
+"#;
+
+pub fn codex_bind_root_for_bin(path: &Path) -> Option<(std::path::PathBuf, std::path::PathBuf)> {
+    let path = std::fs::canonicalize(path).ok()?;
+    let text = path.to_string_lossy();
+    for marker in [
+        "/node_modules/.bin/codex",
+        "/node_modules/@openai/codex/bin/codex.js",
+    ] {
+        if let Some(root) = text.strip_suffix(marker) {
+            return Some((PathBuf::from(root), PathBuf::from(marker)));
+        }
+    }
+    None
+}
+
+pub fn node_root_for_path(path: &Path) -> Option<PathBuf> {
+    let path = std::fs::canonicalize(path).ok()?;
+    let components: Vec<_> = path.components().collect();
+    for index in (2..components.len()).rev() {
+        let candidate: PathBuf = components[..index].iter().collect();
+        if candidate.join("bin/node").is_file() {
+            return Some(candidate);
+        }
+    }
+    None
+}
+
+pub fn resolve_node_root() -> Option<PathBuf> {
+    let paths = std::env::var_os("PATH")?;
+    for dir in std::env::split_paths(&paths) {
+        let node = dir.join("node");
+        if node.exists() {
+            return node_root_for_path(&node);
+        }
+    }
+    None
+}
+
 fn require_nonempty(name: &str, value: &str) -> AgentResult<()> {
     if value.trim().is_empty() {
         return Err(AgentError::InvalidConfig(format!("{name} is required")));
@@ -1540,6 +1936,24 @@ fn require_nonempty_path(name: &str, value: &Path) -> AgentResult<()> {
     Ok(())
 }
 
+/// Construct an agent by name. This is the single place to register a new agent.
+pub fn build_agent(kind: &str, binary: Option<PathBuf>, bare: bool) -> Result<Box<dyn Agent>, String> {
+    match kind {
+        "claude" => Ok(Box::new(ClaudeAgent {
+            binary: binary.unwrap_or_else(|| ClaudeAgent::default().binary),
+            bare,
+            ..ClaudeAgent::default()
+        })),
+        "codex" => Ok(Box::new(CodexAgent {
+            binary: binary.unwrap_or_else(|| CodexAgent::default().binary),
+        })),
+        "kimi" => Ok(Box::new(KimiAgent {
+            binary: binary.unwrap_or_else(|| KimiAgent::default().binary),
+        })),
+        other => Err(format!("unknown agent kind '{other}'")),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1550,6 +1964,14 @@ mod tests {
     impl Agent for EchoAgent {
         fn name(&self) -> &'static str {
             "echo"
+        }
+
+        fn default_model(&self) -> &'static str {
+            "echo-model"
+        }
+
+        fn binary(&self) -> &Path {
+            Path::new("echo")
         }
 
         fn check_setup(&self, ctx: &AgentContext) -> AgentResult<()> {
@@ -1580,6 +2002,10 @@ mod tests {
 
         fn configure_auto_continue(&self, ctx: &AgentContext) -> AgentResult<()> {
             ctx.settings.validate()
+        }
+
+        fn transcript_parser(&self) -> Box<dyn TranscriptLineParser> {
+            Box::new(ClaudeTranscriptParser)
         }
 
         fn collect_transcripts(&self, ctx: &AgentContext) -> AgentResult<()> {
@@ -1749,8 +2175,8 @@ mod tests {
         ctx.sandbox = Some(
             SandboxLayout::for_agent(
                 &ctx,
-                crate::agent_sandbox::SandboxAgentKind::Claude,
                 PathBuf::from("/bin/echo"),
+                "claude",
             )
             .with_claude_plugin()
             .with_hosts_file(ctx.paths.runtime_dir.join("sandbox_hosts")),
@@ -1806,8 +2232,8 @@ mod tests {
         std::fs::write(&ctx.paths.session_id_file, "codex-session\n").unwrap();
         ctx.sandbox = Some(SandboxLayout::for_agent(
             &ctx,
-            crate::agent_sandbox::SandboxAgentKind::Codex,
             PathBuf::from("/bin/echo"),
+            "codex",
         ));
         let agent = CodexAgent {
             binary: PathBuf::from("/bin/echo"),

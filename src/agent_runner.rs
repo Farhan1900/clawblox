@@ -12,12 +12,10 @@ use chrono::{SecondsFormat, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::agent::{
-    Agent, AgentContext, AgentPaths, AgentSettings, ClaudeAgent, CodexAgent, CommandSpec,
+    build_agent, Agent, AgentContext, AgentPaths, AgentSettings, CommandSpec,
 };
 use crate::agent_recovery::{start_agent_recovery_watchdog, AgentRecoveryConfig};
-use crate::agent_sandbox::{
-    detect_sandbox_deps_root, wrap_command, SandboxAgentKind, SandboxLayout,
-};
+use crate::agent_sandbox::{detect_sandbox_deps_root, wrap_command, SandboxLayout};
 use crate::manifest::record_agent_workspace_recording;
 use crate::workspace_recording::{
     start_workspace_recorder, WorkspaceRecorderConfig, WorkspaceRecorderHandle,
@@ -26,15 +24,9 @@ use crate::workspace_recording::{
 static WORKSPACE_RECORDERS: OnceLock<Mutex<HashMap<PathBuf, WorkspaceRecorderHandle>>> =
     OnceLock::new();
 
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
-pub enum AgentKind {
-    Claude,
-    Codex,
-}
-
 #[derive(Clone, Debug)]
 pub struct AgentRunnerOptions {
-    pub kind: AgentKind,
+    pub kind: String,
     pub name: String,
     pub model: Option<String>,
     pub permission_mode: String,
@@ -46,7 +38,7 @@ pub struct AgentRunnerOptions {
 
 #[derive(Clone, Debug)]
 pub struct AgentStartOptions {
-    pub kind: AgentKind,
+    pub kind: String,
     pub name: String,
     pub binary: Option<PathBuf>,
     pub agent_dir: PathBuf,
@@ -65,7 +57,7 @@ pub struct AgentStartOptions {
 
 #[derive(Clone, Debug)]
 pub struct AgentSendOptions {
-    pub kind: AgentKind,
+    pub kind: String,
     pub name: String,
     pub binary: Option<PathBuf>,
     pub agent_dir: PathBuf,
@@ -83,7 +75,7 @@ pub struct AgentSendOptions {
 
 #[derive(Clone, Debug)]
 pub struct AgentStopOptions {
-    pub kind: AgentKind,
+    pub kind: String,
     pub name: String,
     pub binary: Option<PathBuf>,
     pub agent_dir: PathBuf,
@@ -172,6 +164,7 @@ pub fn start_agent_tmux_for_local_world(
         .agent_dir
         .clone()
         .unwrap_or_else(|| world_dir.join(".clawblox").join("agents").join(&safe_name));
+    let agent = build_agent(&options.kind, None, false)?;
     start_agent(AgentStartOptions {
         kind: options.kind,
         name: options.name,
@@ -179,7 +172,7 @@ pub fn start_agent_tmux_for_local_world(
         agent_dir,
         model: options
             .model
-            .unwrap_or_else(|| default_model(options.kind).to_string()),
+            .unwrap_or_else(|| agent.default_model().to_string()),
         permission_mode: options.permission_mode,
         initial_prompt: "Begin".to_string(),
         system_prompt: match options.system_prompt.as_ref() {
@@ -213,10 +206,8 @@ pub fn start_agent_tmux_for_local_world(
 pub fn start_agent(options: AgentStartOptions) -> Result<StartedAgent, String> {
     let safe_name = sanitize_agent_name(&options.name);
     let agent_dir = absolutize_path(&options.agent_dir);
-    let kind_name = match options.kind {
-        AgentKind::Claude => "claude",
-        AgentKind::Codex => "codex",
-    };
+    let agent = build_agent(&options.kind, options.binary.clone(), options.bare)?;
+    let kind_name = agent.name();
     let runtime_dir = agent_dir.join("runtime");
     let log_dir = agent_dir.join("logs");
     let events_file = agent_dir.join("events.jsonl");
@@ -259,11 +250,10 @@ pub fn start_agent(options: AgentStartOptions) -> Result<StartedAgent, String> {
         return Err(message);
     }
 
-    let agent = build_agent(options.kind, options.binary.clone(), options.bare);
     if options.sandbox {
         ctx.sandbox = Some(build_sandbox_layout(
             &ctx,
-            options.kind,
+            agent.as_ref(),
             options.binary.clone(),
         )?);
     }
@@ -306,7 +296,7 @@ pub fn start_agent(options: AgentStartOptions) -> Result<StartedAgent, String> {
     }
 
     let command = if let Some(layout) = &ctx.sandbox {
-        wrap_command(&ctx, layout, command).map_err(|err| {
+        wrap_command(&ctx, layout, command, agent.needs_socat_sandbox()).map_err(|err| {
             let message = format!("failed to build {} sandbox command: {err}", agent.name());
             let _ = append_operation_report(&events_file, failure_report(&ctx, &options, &message));
             message
@@ -389,7 +379,18 @@ pub fn start_agent(options: AgentStartOptions) -> Result<StartedAgent, String> {
             return Err(message);
         }
     };
-    if options.kind == AgentKind::Claude && recovery_watchdog_enabled() {
+    if let Some(input) = agent.initial_tmux_input(&ctx) {
+        let session = tmux_session.clone();
+        let window = tmux_window.clone();
+        std::thread::spawn(move || {
+            // Fixed delay waiting for the TUI to be ready. If the agent's TUI
+            // takes longer than this to start, the keys will be lost. A more
+            // robust solution would poll the pane content for a ready signal.
+            std::thread::sleep(std::time::Duration::from_secs(5));
+            tmux_send_literal(&session, window.as_deref(), &input);
+        });
+    }
+    if agent.needs_recovery_watchdog() && recovery_watchdog_enabled() {
         if let Some(pane_id) = &pane_id {
             if let Err(err) = start_agent_recovery_watchdog(AgentRecoveryConfig {
                 pane_id: pane_id.clone(),
@@ -499,10 +500,8 @@ pub fn start_agent(options: AgentStartOptions) -> Result<StartedAgent, String> {
 pub fn send_agent(options: AgentSendOptions) -> Result<StartedAgent, String> {
     let safe_name = sanitize_agent_name(&options.name);
     let agent_dir = absolutize_path(&options.agent_dir);
-    let kind_name = match options.kind {
-        AgentKind::Claude => "claude",
-        AgentKind::Codex => "codex",
-    };
+    let agent = build_agent(&options.kind, options.binary.clone(), options.bare)?;
+    let kind_name = agent.name();
     let runtime_dir = agent_dir.join("runtime");
     let log_dir = agent_dir.join("logs");
     let events_file = agent_dir.join("events.jsonl");
@@ -538,11 +537,10 @@ pub fn send_agent(options: AgentSendOptions) -> Result<StartedAgent, String> {
         return Err(message);
     }
 
-    let agent = build_agent(options.kind, options.binary.clone(), options.bare);
     if options.sandbox {
         ctx.sandbox = Some(build_sandbox_layout(
             &ctx,
-            options.kind,
+            agent.as_ref(),
             options.binary.clone(),
         )?);
     }
@@ -595,7 +593,7 @@ pub fn send_agent(options: AgentSendOptions) -> Result<StartedAgent, String> {
     }
 
     let command = if let Some(layout) = &ctx.sandbox {
-        wrap_command(&ctx, layout, command).map_err(|err| {
+        wrap_command(&ctx, layout, command, agent.needs_socat_sandbox()).map_err(|err| {
             let message = format!("failed to build {} sandbox command: {err}", agent.name());
             let _ = append_operation_report(
                 &events_file,
@@ -686,6 +684,14 @@ pub fn send_agent(options: AgentSendOptions) -> Result<StartedAgent, String> {
             return Err(message);
         }
     };
+    if let Some(input) = agent.send_tmux_input(&ctx, &options.prompt) {
+        let session = tmux_session.clone();
+        let window = tmux_window.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_secs(5));
+            tmux_send_literal(&session, window.as_deref(), &input);
+        });
+    }
     if let Err(err) = write_active_agent(
         &ctx,
         ActiveAgent {
@@ -746,10 +752,8 @@ pub fn send_agent(options: AgentSendOptions) -> Result<StartedAgent, String> {
 
 pub fn stop_agent(options: AgentStopOptions) -> Result<StoppedAgent, String> {
     let agent_dir = absolutize_path(&options.agent_dir);
-    let kind_name = match options.kind {
-        AgentKind::Claude => "claude",
-        AgentKind::Codex => "codex",
-    };
+    let agent = build_agent(&options.kind, options.binary.clone(), options.bare)?;
+    let kind_name = agent.name();
     let runtime_dir = agent_dir.join("runtime");
     let log_dir = agent_dir.join("logs");
     let events_file = agent_dir.join("events.jsonl");
@@ -784,8 +788,6 @@ pub fn stop_agent(options: AgentStopOptions) -> Result<StoppedAgent, String> {
             append_operation_report(&events_file, stop_failure_report(&ctx, &options, &message));
         return Err(message);
     }
-
-    let agent = build_agent(options.kind, options.binary.clone(), options.bare);
 
     let active = match read_active_agent(&ctx) {
         Ok(active) => active,
@@ -1010,7 +1012,7 @@ fn stop_workspace_recording_for_agent(agent_dir: &Path) {
 
 fn manifest_path_from_env(env: &[(String, String)]) -> Option<PathBuf> {
     env.iter().find_map(|(key, value)| {
-        if key == "CLAWBLOX_MANIFEST" && !value.trim().is_empty() {
+        if key == "CLAWBLOX_MANIFEST_PATH" && !value.trim().is_empty() {
             Some(PathBuf::from(value))
         } else {
             None
@@ -1026,70 +1028,25 @@ fn remove_recreateable_artifact(path: &Path) -> std::io::Result<()> {
     }
 }
 
-fn default_model(kind: AgentKind) -> &'static str {
-    match kind {
-        AgentKind::Claude => "claude-opus-4-6",
-        AgentKind::Codex => "gpt-5.5",
-    }
-}
-
-fn build_agent(kind: AgentKind, binary: Option<PathBuf>, bare: bool) -> Box<dyn Agent> {
-    match kind {
-        AgentKind::Claude => Box::new(ClaudeAgent {
-            binary: binary.unwrap_or_else(|| ClaudeAgent::default().binary),
-            bare,
-            ..ClaudeAgent::default()
-        }),
-        AgentKind::Codex => Box::new(CodexAgent {
-            binary: binary.unwrap_or_else(|| CodexAgent::default().binary),
-        }),
-    }
-}
-
 fn build_sandbox_layout(
     ctx: &AgentContext,
-    kind: AgentKind,
+    agent: &dyn Agent,
     binary: Option<PathBuf>,
 ) -> Result<SandboxLayout, String> {
-    let host_binary = resolve_agent_binary(kind, binary)?;
-    let sandbox_kind = match kind {
-        AgentKind::Claude => SandboxAgentKind::Claude,
-        AgentKind::Codex => SandboxAgentKind::Codex,
-    };
-    let mut layout = SandboxLayout::for_agent(ctx, sandbox_kind, host_binary.clone())
-        .with_host_deps_root(detect_sandbox_deps_root(sandbox_kind)?)
+    let host_binary = resolve_agent_binary(agent, binary)?;
+    let layout = SandboxLayout::for_agent(ctx, host_binary.clone(), agent.sandbox_guest_binary_name())
+        .with_host_deps_root(detect_sandbox_deps_root(agent.needs_socat_sandbox())?)
         .with_hosts_file(ctx.paths.runtime_dir.join("sandbox_hosts"));
-    match kind {
-        AgentKind::Claude => {
-            layout = layout.with_claude_plugin();
-        }
-        AgentKind::Codex => {
-            if let Some((root, rel)) = codex_bind_root_for_bin(&host_binary) {
-                layout = layout.with_codex_binary_root(root, rel);
-            }
-            if let Some(root) = node_root_for_path(&host_binary) {
-                layout = layout.with_node_root(root);
-            } else if let Some(root) = resolve_node_root() {
-                layout = layout.with_node_root(root);
-            }
-        }
-    }
-    Ok(layout)
+    agent.configure_sandbox_layout(layout, &host_binary).map_err(|e| e.to_string())
 }
 
-fn resolve_agent_binary(kind: AgentKind, binary: Option<PathBuf>) -> Result<PathBuf, String> {
-    let candidate = binary.unwrap_or_else(|| match kind {
-        AgentKind::Claude => ClaudeAgent::default().binary,
-        AgentKind::Codex => CodexAgent::default().binary,
-    });
+fn resolve_agent_binary(agent: &dyn Agent, binary: Option<PathBuf>) -> Result<PathBuf, String> {
+    let candidate = binary.unwrap_or_else(|| agent.binary().to_path_buf());
     if candidate.components().count() > 1 || candidate.is_absolute() {
         return canonicalize_if_possible(&candidate);
     }
     let Some(paths) = std::env::var_os("PATH") else {
-        return Err(format!(
-            "{} CLI was not found in PATH",
-            default_binary_label(kind)
-        ));
+        return Err(format!("{} CLI was not found in PATH", agent.name()));
     };
     for dir in std::env::split_paths(&paths) {
         let path = dir.join(&candidate);
@@ -1097,17 +1054,7 @@ fn resolve_agent_binary(kind: AgentKind, binary: Option<PathBuf>) -> Result<Path
             return canonicalize_if_possible(&path);
         }
     }
-    Err(format!(
-        "{} CLI was not found in PATH",
-        default_binary_label(kind)
-    ))
-}
-
-fn default_binary_label(kind: AgentKind) -> &'static str {
-    match kind {
-        AgentKind::Claude => "claude",
-        AgentKind::Codex => "codex",
-    }
+    Err(format!("{} CLI was not found in PATH", agent.name()))
 }
 
 fn canonicalize_if_possible(path: &Path) -> Result<PathBuf, String> {
@@ -1116,43 +1063,6 @@ fn canonicalize_if_possible(path: &Path) -> Result<PathBuf, String> {
     }
     std::fs::canonicalize(path)
         .map_err(|err| format!("failed to canonicalize {}: {err}", path.display()))
-}
-
-fn codex_bind_root_for_bin(path: &Path) -> Option<(PathBuf, PathBuf)> {
-    let path = std::fs::canonicalize(path).ok()?;
-    let text = path.to_string_lossy();
-    for marker in [
-        "/node_modules/.bin/codex",
-        "/node_modules/@openai/codex/bin/codex.js",
-    ] {
-        if let Some(root) = text.strip_suffix(marker) {
-            return Some((PathBuf::from(root), PathBuf::from(marker)));
-        }
-    }
-    None
-}
-
-fn node_root_for_path(path: &Path) -> Option<PathBuf> {
-    let path = std::fs::canonicalize(path).ok()?;
-    let components: Vec<_> = path.components().collect();
-    for index in (2..components.len()).rev() {
-        let candidate: PathBuf = components[..index].iter().collect();
-        if candidate.join("bin/node").is_file() {
-            return Some(candidate);
-        }
-    }
-    None
-}
-
-fn resolve_node_root() -> Option<PathBuf> {
-    let paths = std::env::var_os("PATH")?;
-    for dir in std::env::split_paths(&paths) {
-        let node = dir.join("node");
-        if node.exists() {
-            return node_root_for_path(&node);
-        }
-    }
-    None
 }
 
 fn local_world_url(port: u16, base_path: &str) -> String {
@@ -1275,6 +1185,17 @@ fn tmux_pane_id(tmux_session: &str, tmux_window: Option<&str>) -> Result<String,
         ));
     }
     Ok(pane_id)
+}
+
+fn tmux_send_literal(session: &str, window: Option<&str>, text: &str) {
+    let target = tmux_target(session, window);
+    // Send text literally (no escape interpretation), then Enter separately.
+    let _ = Command::new("tmux")
+        .args(["send-keys", "-t", &target, "-l", text])
+        .status();
+    let _ = Command::new("tmux")
+        .args(["send-keys", "-t", &target, "", "Enter"])
+        .status();
 }
 
 fn recovery_watchdog_enabled() -> bool {
@@ -1482,11 +1403,7 @@ fn failure_report(ctx: &AgentContext, options: &AgentStartOptions, error: &str) 
         operation: "agent.start".to_string(),
         status: "failed".to_string(),
         agent_name: options.name.clone(),
-        agent_kind: match options.kind {
-            AgentKind::Claude => "claude",
-            AgentKind::Codex => "codex",
-        }
-        .to_string(),
+        agent_kind: options.kind.clone(),
         agent_dir: agent_dir_from_context(ctx),
         tmux_session: options.tmux_session.clone(),
         attach_command: options
@@ -1510,11 +1427,7 @@ fn send_failure_report(
         operation: "agent.send".to_string(),
         status: "failed".to_string(),
         agent_name: options.name.clone(),
-        agent_kind: match options.kind {
-            AgentKind::Claude => "claude",
-            AgentKind::Codex => "codex",
-        }
-        .to_string(),
+        agent_kind: options.kind.clone(),
         agent_dir: agent_dir_from_context(ctx),
         tmux_session: options.tmux_session.clone(),
         attach_command: options
@@ -1538,11 +1451,7 @@ fn stop_failure_report(
         operation: "agent.stop".to_string(),
         status: "failed".to_string(),
         agent_name: options.name.clone(),
-        agent_kind: match options.kind {
-            AgentKind::Claude => "claude",
-            AgentKind::Codex => "codex",
-        }
-        .to_string(),
+        agent_kind: options.kind.clone(),
         agent_dir: agent_dir_from_context(ctx),
         tmux_session: options.tmux_session.clone(),
         attach_command: options
@@ -1766,7 +1675,7 @@ mod tests {
 
     #[test]
     fn writes_and_reads_active_agent_state() {
-        let ctx = test_context(test_root(), AgentKind::Claude);
+        let ctx = test_context(test_root(), "claude");
         ctx.prepare_paths().unwrap();
         let active = ActiveAgent {
             name: "agent-0".to_string(),
@@ -1785,7 +1694,7 @@ mod tests {
 
     #[test]
     fn clears_stale_active_agent_state() {
-        let ctx = test_context(test_root(), AgentKind::Claude);
+        let ctx = test_context(test_root(), "claude");
         ctx.prepare_paths().unwrap();
         write_active_agent(
             &ctx,
@@ -1814,16 +1723,12 @@ mod tests {
         ))
     }
 
-    fn test_context(root: PathBuf, kind: AgentKind) -> AgentContext {
-        let kind_name = match kind {
-            AgentKind::Claude => "claude",
-            AgentKind::Codex => "codex",
-        };
+    fn test_context(root: PathBuf, kind: &str) -> AgentContext {
         AgentContext {
             paths: AgentPaths {
                 workspace_dir: root.join("workspace"),
                 prompt_file: root.join("runtime/system_prompt.md"),
-                session_id_file: root.join(format!("{kind_name}_session_id.txt")),
+                session_id_file: root.join(format!("{kind}_session_id.txt")),
                 transcript_dir: root.join("session"),
                 runtime_dir: root.join("runtime"),
                 log_file: root.join("logs/agent.log"),

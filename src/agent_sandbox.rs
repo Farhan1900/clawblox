@@ -2,15 +2,8 @@ use std::path::{Path, PathBuf};
 
 use crate::agent::{AgentContext, CommandSpec};
 
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
-pub enum SandboxAgentKind {
-    Claude,
-    Codex,
-}
-
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SandboxLayout {
-    pub kind: SandboxAgentKind,
     pub host_home_dir: PathBuf,
     pub host_binary: PathBuf,
     pub guest_workspace: PathBuf,
@@ -30,14 +23,10 @@ pub struct SandboxLayout {
 }
 
 impl SandboxLayout {
-    pub fn for_agent(ctx: &AgentContext, kind: SandboxAgentKind, host_binary: PathBuf) -> Self {
+    pub fn for_agent(ctx: &AgentContext, host_binary: PathBuf, guest_binary_name: &str) -> Self {
         let host_home_dir = agent_dir_from_context(ctx).join("sandbox-home");
-        let guest_binary = match kind {
-            SandboxAgentKind::Claude => PathBuf::from("/sandbox-bin/claude"),
-            SandboxAgentKind::Codex => PathBuf::from("/sandbox-bin/codex"),
-        };
+        let guest_binary = PathBuf::from(format!("/sandbox-bin/{guest_binary_name}"));
         Self {
-            kind,
             host_home_dir,
             host_binary,
             guest_workspace: PathBuf::from("/workspace"),
@@ -55,6 +44,39 @@ impl SandboxLayout {
             host_deps_root: std::env::var_os("SANDBOX_DEPS_ROOT").map(PathBuf::from),
             host_hosts_file: None,
         }
+    }
+
+    /// Translate a host path to its guest (sandbox) equivalent.
+    ///
+    /// Walks the known host→guest bind-mount pairs and strips/replaces the
+    /// matching prefix. Falls back to the original path if no mapping matches,
+    /// so callers never need to special-case the non-sandbox scenario.
+    pub fn host_to_guest(&self, host_path: &Path) -> PathBuf {
+        let agent_dir = self.host_home_dir.parent().unwrap_or(&self.host_home_dir);
+        let host_log_dir = agent_dir.join("logs");
+        let host_runtime_dir = agent_dir.join("runtime");
+        let host_workspace_dir = agent_dir.join("workspace");
+
+        let pairs: &[(&Path, &Path)] = &[
+            (&self.host_home_dir,           &self.guest_home),
+            (host_workspace_dir.as_path(),  &self.guest_workspace),
+            (host_log_dir.as_path(),        &self.guest_logs),
+            (host_runtime_dir.as_path(),    &self.guest_runtime),
+        ];
+        // Prompt file is a special 1:1 mapping outside the standard dirs.
+        if host_path == agent_dir.join("runtime/system_prompt.md") {
+            return self.guest_prompt.clone();
+        }
+        for (host_root, guest_root) in pairs {
+            if let Ok(rel) = host_path.strip_prefix(host_root) {
+                return if rel.as_os_str().is_empty() {
+                    guest_root.to_path_buf()
+                } else {
+                    guest_root.join(rel)
+                };
+            }
+        }
+        host_path.to_path_buf()
     }
 
     pub fn with_claude_plugin(mut self) -> Self {
@@ -99,9 +121,9 @@ impl SandboxLayout {
     }
 }
 
-pub fn validate_runtime(layout: &SandboxLayout) -> Result<(), String> {
+pub fn validate_runtime(layout: &SandboxLayout, needs_socat: bool) -> Result<(), String> {
     require_program("bwrap", "bubblewrap (bwrap)")?;
-    if layout.kind == SandboxAgentKind::Claude {
+    if needs_socat {
         require_program("socat", "socat for Claude Code's native Linux sandbox")?;
     }
     if let Some(root) = &layout.host_deps_root {
@@ -115,11 +137,11 @@ pub fn validate_runtime(layout: &SandboxLayout) -> Result<(), String> {
     Ok(())
 }
 
-pub fn detect_sandbox_deps_root(kind: SandboxAgentKind) -> Result<Option<PathBuf>, String> {
+pub fn detect_sandbox_deps_root(needs_socat: bool) -> Result<Option<PathBuf>, String> {
     if let Some(root) = std::env::var_os("SANDBOX_DEPS_ROOT").map(PathBuf::from) {
         return Ok(Some(root));
     }
-    if kind != SandboxAgentKind::Claude {
+    if !needs_socat {
         return Ok(None);
     }
 
@@ -147,8 +169,9 @@ pub fn wrap_command(
     ctx: &AgentContext,
     layout: &SandboxLayout,
     command: CommandSpec,
+    needs_socat: bool,
 ) -> Result<CommandSpec, String> {
-    validate_runtime(layout)?;
+    validate_runtime(layout, needs_socat)?;
     Ok(wrap_command_unchecked(ctx, layout, command))
 }
 
@@ -186,7 +209,7 @@ fn wrap_command_unchecked(
         "/sandbox-bin".to_string(),
     ];
 
-    if layout.kind == SandboxAgentKind::Claude {
+    if layout.guest_plugin.is_some() {
         args.extend(["--dir".to_string(), "/plugin".to_string()]);
     }
     args.extend([
@@ -215,7 +238,7 @@ fn wrap_command_unchecked(
         layout.guest_runtime.display().to_string(),
     ]);
 
-    if layout.kind == SandboxAgentKind::Claude {
+    if layout.guest_plugin.is_some() {
         args.extend([
             "--ro-bind".to_string(),
             ctx.paths.prompt_file.display().to_string(),
@@ -284,7 +307,7 @@ fn wrap_command_unchecked(
             "1".to_string(),
         ]);
     }
-    if layout.kind == SandboxAgentKind::Claude {
+    if layout.guest_plugin.is_some() {
         for name in [
             "ANTHROPIC_API_KEY",
             "ANTHROPIC_AUTH_TOKEN",
@@ -418,8 +441,8 @@ mod tests {
         let ctx = test_context(root.clone());
         let layout = SandboxLayout::for_agent(
             &ctx,
-            SandboxAgentKind::Claude,
             PathBuf::from("/usr/local/bin/claude"),
+            "claude",
         )
         .with_claude_plugin()
         .with_hosts_file(ctx.paths.runtime_dir.join("sandbox_hosts"));
@@ -483,8 +506,8 @@ mod tests {
         let ctx = test_context(root.clone());
         let layout = SandboxLayout::for_agent(
             &ctx,
-            SandboxAgentKind::Codex,
             root.join("node_modules/.bin/codex"),
+            "codex",
         )
         .with_codex_binary_root(root.clone(), PathBuf::from("/node_modules/.bin/codex"))
         .with_node_root(node_root.clone());
@@ -524,8 +547,8 @@ mod tests {
         std::fs::create_dir_all(ctx.paths.workspace_dir.join(".venv/bin")).unwrap();
         let layout = SandboxLayout::for_agent(
             &ctx,
-            SandboxAgentKind::Codex,
             root.join("node_modules/.bin/codex"),
+            "codex",
         );
         let command = CommandSpec::new("/sandbox-bin/codex", "/workspace");
 
