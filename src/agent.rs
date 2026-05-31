@@ -1,7 +1,9 @@
 use std::{
     error::Error,
     fmt,
+    io::{BufRead, BufReader, Write},
     path::{Path, PathBuf},
+    process::{Command, Stdio},
 };
 
 use crate::agent_sandbox::SandboxLayout;
@@ -566,6 +568,11 @@ impl Agent for CodexAgent {
                     .map_err(|err| AgentError::InvalidConfig(err.to_string()))?
             ),
         )?;
+        // Codex treats hooks as code that can run outside its sandbox. The
+        // bash launcher pre-trusts this generated Stop hook so unattended
+        // generation runs do not stall on the interactive "Hooks need review"
+        // prompt; keep the Python/Rust agent path aligned with that behavior.
+        trust_codex_hooks(&self.binary, ctx)?;
         Ok(())
     }
 
@@ -628,16 +635,32 @@ impl CodexAgent {
         if let Some(codex_program_arg) = codex_program_arg {
             command = command.arg(codex_program_arg);
         }
-        command
+        command = command
             .arg("--no-alt-screen")
             .arg("-C")
             .arg(workspace.display().to_string())
             .arg("-m")
-            .arg(&ctx.settings.model)
-            .arg("-s")
-            .arg(sandbox_mode)
-            .arg("-a")
-            .arg(codex_approval_policy(&ctx.settings.permission_mode))
+            .arg(&ctx.settings.model);
+        if ctx.sandbox.is_some() {
+            // Clawblox already runs sandboxed Codex inside an outer bubblewrap
+            // that mounts only the agent workspace/home/runtime/logs plus the
+            // Codex executable. Codex 0.133.0's interactive TUI does not route
+            // local/private requests through its managed network_proxy reliably
+            // under `-s workspace-write`, so the world capability proxy is
+            // blocked before it can be reached. Use Codex's explicit
+            // externally-sandboxed mode here: the security boundary remains the
+            // Clawblox bubblewrap, while Codex shell commands can reach
+            // http://world:<capability-proxy-port> as the bash launcher did on
+            // 0.130.0.
+            command = command.arg("--dangerously-bypass-approvals-and-sandbox");
+        } else {
+            command = command
+                .arg("-s")
+                .arg(sandbox_mode)
+                .arg("-a")
+                .arg(codex_approval_policy(&ctx.settings.permission_mode));
+        }
+        command
             .envs(ctx.settings.env.clone())
             .env("HOME", home.display().to_string())
             .env(
@@ -1390,6 +1413,9 @@ fn write_codex_config(ctx: &AgentContext) -> AgentResult<()> {
              [sandbox_workspace_write]\n\
              writable_roots = [\"/workspace\"]\n\
              network_access = true\n\n\
+             [permissions.workspace.filesystem]\n\
+             \":minimal\" = \"read\"\n\
+             \"/workspace\" = \"write\"\n\n\
              [permissions.workspace.network]\n\
              enabled = true\n",
         );
@@ -1418,6 +1444,212 @@ fn write_codex_config(ctx: &AgentContext) -> AgentResult<()> {
             .map_err(|err| AgentError::InvalidConfig(err.to_string()))?
     ));
     write_file(&codex_home_dir(ctx).join("config.toml"), &config)
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct CodexHookTrust {
+    key: String,
+    current_hash: String,
+}
+
+fn trust_codex_hooks(codex_binary: &Path, ctx: &AgentContext) -> AgentResult<()> {
+    let Some(trust) = codex_stop_hook_trust(codex_binary, ctx)? else {
+        return Ok(());
+    };
+    if trust.current_hash.trim().is_empty() {
+        return Ok(());
+    }
+
+    let mut updates = vec![trust.clone()];
+    if ctx.sandbox.is_some() {
+        // The hook is discovered from the host path, but Codex later evaluates
+        // it from inside bubblewrap as /home/agent/.codex/hooks.json. Trust both
+        // keys, matching agent/run_codex_agent.sh.
+        let guest_key = "/home/agent/.codex/hooks.json:stop:0:0".to_string();
+        if trust.key != guest_key {
+            updates.push(CodexHookTrust {
+                key: guest_key,
+                current_hash: trust.current_hash,
+            });
+        }
+    }
+    append_codex_hook_trust(ctx, &updates)
+}
+
+fn codex_stop_hook_trust(
+    codex_binary: &Path,
+    ctx: &AgentContext,
+) -> AgentResult<Option<CodexHookTrust>> {
+    // Ask Codex itself for the hook key/hash instead of reimplementing its hash
+    // algorithm. If the installed CLI cannot answer, fall back to the normal
+    // interactive review flow rather than failing agent startup.
+    //
+    // Clear CODEX_HOME because this process may be launched by Codex itself,
+    // where CODEX_HOME points at the controller's home and overrides HOME. The
+    // generated agent config lives under the agent HOME instead.
+    let mut child = match Command::new(codex_binary)
+        .arg("app-server")
+        .arg("--listen")
+        .arg("stdio://")
+        .env("HOME", agent_home_dir(ctx))
+        .env_remove("CODEX_HOME")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+    {
+        Ok(child) => child,
+        Err(_) => return Ok(None),
+    };
+
+    let result = (|| -> AgentResult<Option<CodexHookTrust>> {
+        let mut stdin = child.stdin.take().ok_or_else(|| {
+            AgentError::InvalidConfig("Codex app-server stdin was unavailable".into())
+        })?;
+        let stdout = child.stdout.take().ok_or_else(|| {
+            AgentError::InvalidConfig("Codex app-server stdout was unavailable".into())
+        })?;
+        let mut stdout = BufReader::new(stdout);
+
+        write_json_rpc(
+            &mut stdin,
+            &serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "initialize",
+                "params": {
+                    "clientInfo": {
+                        "name": "clawblox",
+                        "title": "clawblox",
+                        "version": "0.1",
+                    }
+                },
+            }),
+        )?;
+        if read_json_rpc_response(&mut stdout, 1)?.is_none() {
+            return Ok(None);
+        }
+        write_json_rpc(
+            &mut stdin,
+            &serde_json::json!({
+                "jsonrpc": "2.0",
+                "method": "initialized",
+                "params": {},
+            }),
+        )?;
+        write_json_rpc(
+            &mut stdin,
+            &serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 2,
+                "method": "hooks/list",
+                "params": {
+                    "cwds": [ctx.paths.workspace_dir.display().to_string()],
+                },
+            }),
+        )?;
+        let Some(response) = read_json_rpc_response(&mut stdout, 2)? else {
+            return Ok(None);
+        };
+        Ok(parse_codex_stop_hook_trust(&response))
+    })();
+
+    let _ = child.kill();
+    let _ = child.wait();
+    match result {
+        Ok(value) => Ok(value),
+        Err(_) => Ok(None),
+    }
+}
+
+fn write_json_rpc(stdin: &mut impl Write, value: &serde_json::Value) -> AgentResult<()> {
+    serde_json::to_writer(&mut *stdin, value)
+        .map_err(|err| AgentError::InvalidConfig(err.to_string()))?;
+    stdin.write_all(b"\n")?;
+    stdin.flush()?;
+    Ok(())
+}
+
+fn read_json_rpc_response(
+    stdout: &mut impl BufRead,
+    response_id: i64,
+) -> AgentResult<Option<serde_json::Value>> {
+    let mut line = String::new();
+    for _ in 0..200 {
+        line.clear();
+        if stdout.read_line(&mut line)? == 0 {
+            return Ok(None);
+        }
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(line.trim()) else {
+            continue;
+        };
+        if value.get("id").and_then(|id| id.as_i64()) == Some(response_id) {
+            return Ok(Some(value));
+        }
+    }
+    Ok(None)
+}
+
+fn parse_codex_stop_hook_trust(response: &serde_json::Value) -> Option<CodexHookTrust> {
+    let hooks = response
+        .get("result")?
+        .get("data")?
+        .as_array()?
+        .first()?
+        .get("hooks")?
+        .as_array()?;
+    hooks.iter().find_map(|hook| {
+        (hook.get("eventName")?.as_str()? == "stop").then(|| CodexHookTrust {
+            key: hook.get("key").and_then(|value| value.as_str()).unwrap_or("").to_string(),
+            current_hash: hook
+                .get("currentHash")
+                .and_then(|value| value.as_str())
+                .unwrap_or("")
+                .to_string(),
+        })
+    })
+}
+
+fn append_codex_hook_trust(ctx: &AgentContext, updates: &[CodexHookTrust]) -> AgentResult<()> {
+    let config_path = codex_home_dir(ctx).join("config.toml");
+    let mut config = std::fs::read_to_string(&config_path).unwrap_or_default();
+    for update in updates {
+        if update.key.trim().is_empty() || update.current_hash.trim().is_empty() {
+            continue;
+        }
+        let quoted_key = serde_json::to_string(&update.key)
+            .map_err(|err| AgentError::InvalidConfig(err.to_string()))?;
+        let quoted_hash = serde_json::to_string(&update.current_hash)
+            .map_err(|err| AgentError::InvalidConfig(err.to_string()))?;
+        let marker = format!("[hooks.state.{quoted_key}]");
+        let block = format!("{marker}\ntrusted_hash = {quoted_hash}\n");
+        config = replace_or_append_toml_table(&config, &marker, &block);
+    }
+    write_file(&config_path, &config)
+}
+
+fn replace_or_append_toml_table(config: &str, marker: &str, block: &str) -> String {
+    let trimmed = config.trim_end();
+    let Some(start) = trimmed.find(marker) else {
+        if trimmed.is_empty() {
+            return block.to_string();
+        }
+        return format!("{trimmed}\n\n{block}");
+    };
+    let before = trimmed[..start].trim_end();
+    let after = &trimmed[start + marker.len()..];
+    let next_table = after
+        .find("\n[")
+        .map(|offset| start + marker.len() + offset + 1);
+    let suffix = next_table
+        .map(|index| trimmed[index..].trim_start())
+        .unwrap_or("");
+    match (before.is_empty(), suffix.is_empty()) {
+        (true, true) => block.to_string(),
+        (true, false) => format!("{block}\n{suffix}"),
+        (false, true) => format!("{before}\n\n{block}"),
+        (false, false) => format!("{before}\n\n{block}\n{suffix}"),
+    }
 }
 
 fn codex_approval_policy(input: &str) -> String {
@@ -2333,8 +2565,10 @@ mod tests {
             .any(|window| window == ["-C", "/workspace"]));
         assert!(start
             .args
-            .windows(2)
-            .any(|window| window == ["-s", "workspace-write"]));
+            .iter()
+            .any(|arg| arg == "--dangerously-bypass-approvals-and-sandbox"));
+        assert!(!start.args.iter().any(|arg| arg == "-s"));
+        assert!(!start.args.iter().any(|arg| arg == "-a"));
         assert!(start
             .env
             .contains(&("HOME".to_string(), "/home/agent".to_string())));
@@ -2343,11 +2577,39 @@ mod tests {
             "/runtime".to_string()
         )));
         let config = std::fs::read_to_string(codex_home_dir(&ctx).join("config.toml")).unwrap();
+        assert!(config.contains("[permissions.workspace.filesystem]"));
+        assert!(config.contains("\"/workspace\" = \"write\""));
         assert!(config.contains("proxy_url = \"http://127.0.0.1:43210\""));
         assert!(config.contains("[projects.\"/workspace\"]"));
         assert!(std::fs::read_to_string(codex_hooks_path(&ctx))
             .unwrap()
             .contains("/home/agent/.codex/stop_hook.py"));
+    }
+
+    #[test]
+    fn codex_hook_trust_table_is_appended_or_replaced() {
+        let marker = "[hooks.state.\"/home/agent/.codex/hooks.json:stop:0:0\"]";
+        let first = format!("{marker}\ntrusted_hash = \"old\"\n");
+        let second = format!("{marker}\ntrusted_hash = \"new\"\n");
+
+        let appended = replace_or_append_toml_table(
+            "[features]\nhooks = true\n",
+            marker,
+            &first,
+        );
+        assert!(appended.contains("[features]\nhooks = true"));
+        assert!(appended.contains("trusted_hash = \"old\""));
+
+        let replaced = replace_or_append_toml_table(
+            &format!(
+                "[features]\nhooks = true\n\n{first}\n[projects.\"/workspace\"]\ntrust_level = \"trusted\"\n"
+            ),
+            marker,
+            &second,
+        );
+        assert!(!replaced.contains("trusted_hash = \"old\""));
+        assert!(replaced.contains("trusted_hash = \"new\""));
+        assert!(replaced.contains("[projects.\"/workspace\"]"));
     }
 
     #[test]

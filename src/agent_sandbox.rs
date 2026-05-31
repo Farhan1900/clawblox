@@ -319,6 +319,13 @@ fn wrap_command_unchecked(
             args.extend(["--unsetenv".to_string(), name.to_string()]);
         }
     }
+    if layout.kind == SandboxAgentKind::Codex {
+        // Codex gives CODEX_HOME precedence over HOME. Controller sessions often
+        // set CODEX_HOME to their own temp/config location, which does not exist
+        // inside the agent bubblewrap. Drop it so sandboxed Codex consistently
+        // resolves /home/agent/.codex, the home we generated for this agent.
+        args.extend(["--unsetenv".to_string(), "CODEX_HOME".to_string()]);
+    }
 
     if let Some(root) = &layout.host_deps_root {
         args.extend([
@@ -538,6 +545,7 @@ mod tests {
                 "/sandbox-node/bin/node",
                 "/sandbox-codex/node_modules/.bin/codex"
             ]));
+        assert!(has_arg_pair(&wrapped.args, "--unsetenv", "CODEX_HOME"));
     }
 
     #[test]
