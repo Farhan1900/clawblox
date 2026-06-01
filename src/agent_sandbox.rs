@@ -20,6 +20,8 @@ pub struct SandboxLayout {
     pub guest_node_root: Option<PathBuf>,
     pub host_deps_root: Option<PathBuf>,
     pub host_hosts_file: Option<PathBuf>,
+    pub host_shm_dir: Option<PathBuf>,
+    pub unset_env: Vec<String>,
 }
 
 impl SandboxLayout {
@@ -43,6 +45,8 @@ impl SandboxLayout {
             guest_node_root: None,
             host_deps_root: std::env::var_os("SANDBOX_DEPS_ROOT").map(PathBuf::from),
             host_hosts_file: None,
+            host_shm_dir: None,
+            unset_env: Vec::new(),
         }
     }
 
@@ -91,6 +95,16 @@ impl SandboxLayout {
 
     pub fn with_host_deps_root(mut self, root: Option<PathBuf>) -> Self {
         self.host_deps_root = root;
+        self
+    }
+
+    pub fn with_shm_dir(mut self, path: PathBuf) -> Self {
+        self.host_shm_dir = Some(path);
+        self
+    }
+
+    pub fn with_unset_env(mut self, name: impl Into<String>) -> Self {
+        self.unset_env.push(name.into());
         self
     }
 
@@ -208,6 +222,13 @@ fn wrap_command_unchecked(
         "--dir".to_string(),
         "/sandbox-bin".to_string(),
     ];
+    if let Some(shm_dir) = &layout.host_shm_dir {
+        args.extend([
+            "--bind".to_string(),
+            shm_dir.display().to_string(),
+            "/dev/shm".to_string(),
+        ]);
+    }
 
     if layout.guest_plugin.is_some() {
         args.extend(["--dir".to_string(), "/plugin".to_string()]);
@@ -319,12 +340,8 @@ fn wrap_command_unchecked(
             args.extend(["--unsetenv".to_string(), name.to_string()]);
         }
     }
-    if layout.kind == SandboxAgentKind::Codex {
-        // Codex gives CODEX_HOME precedence over HOME. Controller sessions often
-        // set CODEX_HOME to their own temp/config location, which does not exist
-        // inside the agent bubblewrap. Drop it so sandboxed Codex consistently
-        // resolves /home/agent/.codex, the home we generated for this agent.
-        args.extend(["--unsetenv".to_string(), "CODEX_HOME".to_string()]);
+    for name in &layout.unset_env {
+        args.extend(["--unsetenv".to_string(), name.clone()]);
     }
 
     if let Some(root) = &layout.host_deps_root {
@@ -516,6 +533,7 @@ mod tests {
             root.join("node_modules/.bin/codex"),
             "codex",
         )
+        .with_unset_env("CODEX_HOME")
         .with_codex_binary_root(root.clone(), PathBuf::from("/node_modules/.bin/codex"))
         .with_node_root(node_root.clone());
         let command = CommandSpec::new(layout.codex_guest_node().unwrap(), "/workspace")

@@ -2846,6 +2846,7 @@ fn run_external_world_command(
         manifest_path: None,
         resume: resume.cloned(),
         clawblox_bin: Some(PathBuf::from(current_exe)),
+        shm_dir: None,
     };
 
     let status = run_external_world_blocking(&spec).unwrap_or_else(|err| {

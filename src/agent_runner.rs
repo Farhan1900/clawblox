@@ -1054,9 +1054,14 @@ fn build_sandbox_layout(
     binary: Option<PathBuf>,
 ) -> Result<SandboxLayout, String> {
     let host_binary = resolve_agent_binary(agent, binary)?;
-    let layout = SandboxLayout::for_agent(ctx, host_binary.clone(), agent.sandbox_guest_binary_name())
+    let mut layout = SandboxLayout::for_agent(ctx, host_binary.clone(), agent.sandbox_guest_binary_name())
         .with_host_deps_root(detect_sandbox_deps_root(agent.needs_socat_sandbox())?)
         .with_hosts_file(ctx.paths.runtime_dir.join("sandbox_hosts"));
+    if let Some((_, shm_dir)) = ctx.settings.env.iter().rfind(|(k, _)| k == "WORLD_SHM_DIR") {
+        // External run-command worlds may need a state-local /dev/shm that is
+        // shared with sandboxed agents without exposing the host's global shm.
+        layout = layout.with_shm_dir(PathBuf::from(shm_dir));
+    }
     agent.configure_sandbox_layout(layout, &host_binary).map_err(|e| e.to_string())
 }
 

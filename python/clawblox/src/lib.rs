@@ -40,6 +40,7 @@ struct PyAgent {
     bare: bool,
     extra_args: Vec<String>,
     sandbox: bool,
+    claude_native_sandbox: bool,
     run_tmux: Arc<Mutex<Option<AgentRunTmux>>>,
     world_env: Arc<Mutex<Vec<(String, String)>>>,
 }
@@ -92,6 +93,7 @@ struct PyWorld {
     next_agent_index: u32,
     world_proxies: Vec<WorldCapabilityProxy>,
     connected_sessions: Vec<String>,
+    shm_dir: Option<PathBuf>,
 }
 
 #[pyclass(name = "WorldStartResult")]
@@ -179,7 +181,7 @@ impl PyAgent {
 #[pymethods]
 impl PyAgent {
     #[new]
-    #[pyo3(signature = (*, agent, name, dir, model, binary = None, version = None, permission_mode = "bypassPermissions".to_string(), auto_continue_prompt = "Please don't stop. Just continue doing whatever you want to do.".to_string(), tmux = None, bare = false, extra_args = Vec::new(), sandbox = false))]
+    #[pyo3(signature = (*, agent, name, dir, model, binary = None, version = None, permission_mode = "bypassPermissions".to_string(), auto_continue_prompt = "Please don't stop. Just continue doing whatever you want to do.".to_string(), tmux = None, bare = false, extra_args = Vec::new(), sandbox = false, claude_native_sandbox = true))]
     #[allow(clippy::too_many_arguments)]
     fn new(
         agent: String,
@@ -194,6 +196,7 @@ impl PyAgent {
         bare: bool,
         extra_args: Vec<String>,
         sandbox: bool,
+        claude_native_sandbox: bool,
     ) -> Self {
         Self {
             agent,
@@ -208,6 +211,7 @@ impl PyAgent {
             bare,
             extra_args,
             sandbox,
+            claude_native_sandbox,
             run_tmux: Arc::new(Mutex::new(None)),
             world_env: Arc::new(Mutex::new(Vec::new())),
         }
@@ -454,6 +458,7 @@ impl PyWorld {
             next_agent_index: 0,
             world_proxies: Vec::new(),
             connected_sessions: Vec::new(),
+            shm_dir: None,
         })
     }
 
@@ -699,12 +704,21 @@ impl PyWorld {
             Some(command_file.unwrap_or_else(|| state_root.join("runtime/world.sh")));
         self.log_file = Some(log_file.unwrap_or_else(|| state_root.join("logs/world.log")));
         self.manifest_path = Some(manifest_path_for_state_root(&state_root));
+        if self.uses_run_command() {
+            let shm_dir = state_root.join("shm");
+            std::fs::create_dir_all(&shm_dir).map_err(io_error)?;
+            self.shm_dir = Some(shm_dir);
+        }
 
         wait_for_port_release(port, Duration::from_secs(self.port_wait))?;
 
         let command_file = self.running_command_file()?;
         let log_file = self.running_log_file()?;
-        let tmux_session = _tmux_session.filter(|value| !value.trim().is_empty());
+        let tmux_session = Some(
+            _tmux_session
+                .filter(|value| !value.trim().is_empty())
+                .unwrap_or_else(|| default_tmux_session(&self.dir)),
+        );
         let tmux_window = tmux_session.as_ref().map(|_| "world-0".to_string());
         let command = if self.uses_run_command() {
             let spec = self.external_world_command(port)?;
@@ -975,12 +989,23 @@ impl PyWorld {
         ];
         if agent.sandbox {
             let proxy_port = self.start_capability_proxy(agent, &internal_base_url)?;
-            let uses_socat = build_agent(&agent.agent, None, false)
-                .map(|a| a.needs_socat_sandbox())
-                .unwrap_or(false);
-            base_url = if uses_socat {
+            let agent_impl = build_agent(&agent.agent, None, false).map_err(PyAgentError::new_err)?;
+            let uses_socat = agent_impl.needs_socat_sandbox();
+            base_url = if agent_impl.name() == "claude" && !agent.claude_native_sandbox {
+                // Claude can opt out of its native sandbox when Clawblox's
+                // outer bubblewrap is the only sandbox boundary. In that mode
+                // it must address the per-agent capability proxy directly.
+                format!("http://world:{proxy_port}")
+            } else if uses_socat {
+                // Agents that keep a native sandbox network policy, currently
+                // Claude, use the synthetic world host plus the policy's
+                // httpProxyPort instead of putting the proxy port in the URL.
                 "http://world".to_string()
             } else {
+                // Codex/Kimi run inside Clawblox's outer bubblewrap. Their
+                // shell commands reach only the per-agent capability proxy via
+                // http://world:<proxy_port>; the proxy then enforces the world
+                // API surface and session token.
                 format!("http://world:{proxy_port}")
             };
             world_env[0] = ("WORLD_BASE_URL".to_string(), base_url.clone());
@@ -988,6 +1013,23 @@ impl PyWorld {
                 "CLAWBLOX_WORLD_HTTP_PROXY_PORT".to_string(),
                 proxy_port.to_string(),
             ));
+            if agent_impl.name() == "claude" && !agent.claude_native_sandbox {
+                world_env.push((
+                    "CLAWBLOX_CLAUDE_NATIVE_SANDBOX".to_string(),
+                    "0".to_string(),
+                ));
+            }
+        }
+        if let Some(shm_dir) = &self.shm_dir {
+            world_env.push(("WORLD_SHM_DIR".to_string(), shm_dir.display().to_string()));
+        }
+        if self.config
+            .get("sandbox")
+            .and_then(|s| s.get("allow_loopback"))
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false)
+        {
+            world_env.push(("WORLD_ALLOW_LOOPBACK".to_string(), "1".to_string()));
         }
         if let Some(manifest_path) = &self.manifest_path {
             world_env.push((
@@ -1117,6 +1159,7 @@ impl PyWorld {
             manifest_path: self.manifest_path.clone(),
             resume: None,
             clawblox_bin: None,
+            shm_dir: self.shm_dir.clone(),
         })
     }
 
@@ -2027,6 +2070,24 @@ fn terminate_process(pid: u32) {
 
 fn io_error(err: std::io::Error) -> PyErr {
     PyAgentError::new_err(err.to_string())
+}
+
+/// Generate a default tmux session name from the world directory name and a
+/// compact UTC timestamp, matching the convention used in run_agent_generations.py:
+///   {sanitized_dir_name}-{YYYYMMDDTHHmmssZ}
+/// e.g. "river-bridge-small-20260527T194512Z"
+fn default_tmux_session(world_dir: &Path) -> String {
+    let dir_name = world_dir
+        .file_name()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_else(|| "world".to_string());
+    // Same sanitization as run_agent_generations.py safe_name(): keep [A-Za-z0-9._-], replace rest with '_'
+    let safe: String = dir_name
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() || c == '.' || c == '_' || c == '-' { c } else { '_' })
+        .collect();
+    let ts = chrono::Utc::now().format("%Y%m%dT%H%M%SZ").to_string();
+    format!("{safe}-{ts}")
 }
 
 #[pymodule]

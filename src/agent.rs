@@ -500,7 +500,11 @@ impl Agent for CodexAgent {
         layout: SandboxLayout,
         host_binary: &Path,
     ) -> AgentResult<SandboxLayout> {
-        let mut layout = layout;
+        // Codex gives CODEX_HOME precedence over HOME. Controller sessions often
+        // set CODEX_HOME to their own temp/config location, which does not exist
+        // inside the agent bubblewrap. Drop it so sandboxed Codex consistently
+        // resolves /home/agent/.codex, the home we generated for this agent.
+        let mut layout = layout.with_unset_env("CODEX_HOME");
         if let Some((root, rel)) = codex_bind_root_for_bin(host_binary) {
             layout = layout.with_codex_binary_root(root, rel);
         }
@@ -678,7 +682,17 @@ impl CodexAgent {
 
     fn base_resume_command(&self, ctx: &AgentContext) -> CommandSpec {
         let mut command = self.base_command(ctx);
-        command.args.insert(0, "resume".to_string());
+        let insert_at = if ctx
+            .sandbox
+            .as_ref()
+            .and_then(|layout| layout.codex_guest_node())
+            .is_some()
+        {
+            1
+        } else {
+            0
+        };
+        command.args.insert(insert_at, "resume".to_string());
         command
     }
 }
@@ -1265,15 +1279,38 @@ fn write_claude_workspace_trust(_ctx: &AgentContext, layout: &SandboxLayout) -> 
 }
 
 fn write_claude_sandbox_settings(ctx: &AgentContext) -> AgentResult<()> {
+    let native_sandbox_enabled = env_value(ctx, "CLAWBLOX_CLAUDE_NATIVE_SANDBOX")
+        .map(|v| v != "0" && !v.eq_ignore_ascii_case("false"))
+        .unwrap_or(true);
+    if !native_sandbox_enabled {
+        let settings = serde_json::json!({
+            "sandbox": {
+                "enabled": false,
+            }
+        });
+        return write_json_file(
+            &ctx.paths.runtime_dir.join("claude_sandbox_settings.json"),
+            &settings,
+        );
+    }
+
     let world_base_url = env_value(ctx, "WORLD_BASE_URL").unwrap_or_default();
     let host = parse_http_host(&world_base_url).unwrap_or_default();
     let mut allowed_domains = Vec::new();
     if !host.is_empty() && !matches!(host.as_str(), "localhost" | "127.0.0.1" | "::1") {
         allowed_domains.push(host);
     }
+    let allow_loopback = env_value(ctx, "WORLD_ALLOW_LOOPBACK")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
+    let denied: serde_json::Value = if allow_loopback {
+        serde_json::json!([])
+    } else {
+        serde_json::json!(["localhost", "127.0.0.1"])
+    };
     let mut network = serde_json::json!({
         "allowedDomains": allowed_domains,
-        "deniedDomains": ["localhost", "127.0.0.1"],
+        "deniedDomains": denied,
     });
     if let Some(port) = world_proxy_port(ctx) {
         network["httpProxyPort"] = serde_json::json!(port);
@@ -2532,6 +2569,49 @@ mod tests {
     }
 
     #[test]
+    fn claude_agent_can_disable_native_sandbox_when_outer_sandboxed() {
+        let mut ctx = test_context();
+        ctx.settings.sandbox_enabled = true;
+        ctx.settings.env = vec![
+            ("WORLD_BASE_URL".to_string(), "http://world:43210".to_string()),
+            (
+                "CLAWBLOX_CLAUDE_NATIVE_SANDBOX".to_string(),
+                "0".to_string(),
+            ),
+        ];
+        ctx.prepare_paths().unwrap();
+        std::fs::write(&ctx.paths.prompt_file, "System prompt").unwrap();
+        ctx.sandbox = Some(
+            SandboxLayout::for_agent(
+                &ctx,
+                PathBuf::from("/bin/echo"),
+                "claude",
+            )
+            .with_claude_plugin()
+            .with_hosts_file(ctx.paths.runtime_dir.join("sandbox_hosts")),
+        );
+        let agent = ClaudeAgent {
+            binary: PathBuf::from("/bin/echo"),
+            bare: false,
+            disallowed_tools: Some("WebFetch,WebSearch".to_string()),
+        };
+
+        agent.configure_auto_continue(&ctx).unwrap();
+        let start = agent.start(&ctx).unwrap();
+
+        assert!(start
+            .args
+            .windows(2)
+            .any(|window| window == ["--settings", "/runtime/claude_sandbox_settings.json"]));
+        let settings: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(ctx.paths.runtime_dir.join("claude_sandbox_settings.json"))
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(settings["sandbox"]["enabled"], serde_json::json!(false));
+    }
+
+    #[test]
     fn codex_agent_uses_guest_paths_and_proxy_config_when_sandboxed() {
         let mut ctx = test_context();
         ctx.settings.sandbox_enabled = true;
@@ -2584,6 +2664,41 @@ mod tests {
         assert!(std::fs::read_to_string(codex_hooks_path(&ctx))
             .unwrap()
             .contains("/home/agent/.codex/stop_hook.py"));
+    }
+
+    #[test]
+    fn codex_agent_resumes_after_program_arg_when_sandbox_uses_node() {
+        let mut ctx = test_context();
+        ctx.settings.sandbox_enabled = true;
+        ctx.prepare_paths().unwrap();
+        std::fs::write(&ctx.paths.prompt_file, "System prompt").unwrap();
+        std::fs::write(&ctx.paths.session_id_file, "codex-session\n").unwrap();
+        ctx.sandbox = Some(
+            SandboxLayout::for_agent(
+                &ctx,
+                PathBuf::from("/host/node_modules/@openai/codex/bin/codex.js"),
+                "codex",
+            )
+            .with_codex_binary_root(
+                PathBuf::from("/host"),
+                PathBuf::from("/node_modules/@openai/codex/bin/codex.js"),
+            )
+            .with_node_root(PathBuf::from("/host/node")),
+        );
+        let agent = CodexAgent {
+            binary: PathBuf::from("/bin/echo"),
+        };
+
+        let next = agent.continue_session(&ctx, "Resume prompt").unwrap();
+
+        assert_eq!(next.program, PathBuf::from("/sandbox-node/bin/node"));
+        assert_eq!(
+            next.args.get(0),
+            Some(&"/sandbox-codex/node_modules/@openai/codex/bin/codex.js".to_string())
+        );
+        assert_eq!(next.args.get(1), Some(&"resume".to_string()));
+        assert!(next.args.contains(&"codex-session".to_string()));
+        assert_eq!(next.args.last(), Some(&"Resume prompt".to_string()));
     }
 
     #[test]

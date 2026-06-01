@@ -508,6 +508,23 @@ impl GameInstance {
             self.check_afk_players();
         }
 
+        // Drain Players:AddBot() requests queued from Lua last tick.
+        let pending_bots: Vec<String> = if let Some(runtime) = &self.lua_runtime {
+            runtime
+                .players()
+                .data
+                .lock()
+                .unwrap()
+                .pending_bots
+                .drain(..)
+                .collect()
+        } else {
+            vec![]
+        };
+        for name in pending_bots {
+            self.add_player(uuid::Uuid::new_v4(), &name);
+        }
+
         // Run start-of-frame Lua work before physics (resume yields + Stepped).
         if let Some(runtime) = &self.lua_runtime {
             if let Err(e) = runtime.begin_frame(dt) {

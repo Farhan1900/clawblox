@@ -16,6 +16,7 @@ pub struct ExternalWorldCommand {
     pub manifest_path: Option<PathBuf>,
     pub resume: Option<PathBuf>,
     pub clawblox_bin: Option<PathBuf>,
+    pub shm_dir: Option<PathBuf>,
 }
 
 impl ExternalWorldCommand {
@@ -71,8 +72,24 @@ pub fn spawn_external_world(
     log_file: Option<&Path>,
 ) -> Result<Child, String> {
     let executable = spec.executable()?;
-    let mut command = Command::new(executable);
-    command.args(spec.args()).current_dir(&spec.world_dir);
+    let mut command = if let Some(shm_dir) = &spec.shm_dir {
+        let inner: Vec<String> = std::iter::once(executable.to_string())
+            .chain(spec.args().iter().cloned())
+            .collect();
+        let sh_cmd = format!(
+            "mount --bind {} /dev/shm && exec {}",
+            shell_quote(&shm_dir.display().to_string()),
+            inner.iter().map(|a| shell_quote(a)).collect::<Vec<_>>().join(" "),
+        );
+        let mut cmd = Command::new("unshare");
+        cmd.args(["--mount", "--map-root-user", "--", "sh", "-c", &sh_cmd]);
+        cmd.current_dir(&spec.world_dir);
+        cmd
+    } else {
+        let mut cmd = Command::new(executable);
+        cmd.args(spec.args()).current_dir(&spec.world_dir);
+        cmd
+    };
     for (key, value) in spec.env() {
         command.env(key, value);
     }
@@ -115,31 +132,46 @@ pub fn write_external_world_command_file(
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    let mut parts = vec![
-        "cd".to_string(),
-        shell_quote(&spec.world_dir.display().to_string()),
-        "&&".to_string(),
-        "exec".to_string(),
-        "env".to_string(),
-    ];
-    for (key, value) in spec.env() {
-        parts.push(format!("{key}={}", shell_quote(&value)));
-    }
-    parts.push(shell_quote(spec.executable().map_err(io::Error::other)?));
-    for arg in spec.args() {
-        parts.push(shell_quote(arg));
-    }
-    if let Some(log_file) = log_file {
-        parts.push(">>".to_string());
-        parts.push(shell_quote(&log_file.display().to_string()));
-        parts.push("2>&1".to_string());
-    }
+    let env_parts: Vec<String> = spec
+        .env()
+        .iter()
+        .map(|(k, v)| format!("{k}={}", shell_quote(v)))
+        .collect();
+    let executable = shell_quote(spec.executable().map_err(io::Error::other)?);
+    let arg_parts: Vec<String> = spec.args().iter().map(|a| shell_quote(a)).collect();
+    let log_redirect = log_file
+        .map(|lf| format!(" >> {} 2>&1", shell_quote(&lf.display().to_string())))
+        .unwrap_or_default();
+
+    let body = if let Some(shm_dir) = &spec.shm_dir {
+        // Wrap with unshare so the server gets its own /dev/shm mount namespace.
+        let inner = format!(
+            "mount --bind {} /dev/shm && exec env {} {} {}",
+            shell_quote(&shm_dir.display().to_string()),
+            env_parts.join(" "),
+            executable,
+            arg_parts.join(" "),
+        );
+        format!(
+            "cd {} && exec unshare --mount --map-root-user -- sh -c {}{}",
+            shell_quote(&spec.world_dir.display().to_string()),
+            shell_quote(&inner),
+            log_redirect,
+        )
+    } else {
+        format!(
+            "cd {} && exec env {} {} {}{}",
+            shell_quote(&spec.world_dir.display().to_string()),
+            env_parts.join(" "),
+            executable,
+            arg_parts.join(" "),
+            log_redirect,
+        )
+    };
+
     std::fs::write(
         path,
-        format!(
-            "#!/usr/bin/env bash\nset -euo pipefail\n{}\n",
-            parts.join(" ")
-        ),
+        format!("#!/usr/bin/env bash\nset -euo pipefail\n{body}\n"),
     )?;
     make_executable(path)
 }

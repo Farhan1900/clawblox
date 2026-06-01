@@ -1,4 +1,5 @@
 use mlua::{UserData, UserDataFields, UserDataMethods, Value};
+use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 
 use crate::game::lua::events::create_signal;
@@ -12,6 +13,8 @@ pub struct PlayersServiceData {
     pub character_auto_loads: bool,
     pub player_added: RBXScriptSignal,
     pub player_removing: RBXScriptSignal,
+    /// Names queued by Players:AddBot() — drained by GameInstance::tick().
+    pub pending_bots: VecDeque<String>,
 }
 
 impl PlayersServiceData {
@@ -27,6 +30,7 @@ impl PlayersServiceData {
             character_auto_loads: true,
             player_added: create_signal("PlayerAdded"),
             player_removing: create_signal("PlayerRemoving"),
+            pending_bots: VecDeque::new(),
         }
     }
 }
@@ -183,5 +187,14 @@ impl UserData for PlayersService {
                 Ok(this.get_players().into_iter().find(|p| p.name() == name))
             },
         );
+
+        // Players:AddBot(name) — queues a server-side bot player for creation.
+        // The bot is created at the start of the next tick; Players.PlayerAdded
+        // fires with the real Player instance at that point.
+        // This is the Clawblox equivalent of Roblox Studio's "Play Solo" player.
+        methods.add_method("AddBot", |_, this, name: String| {
+            this.data.lock().unwrap().pending_bots.push_back(name);
+            Ok(())
+        });
     }
 }

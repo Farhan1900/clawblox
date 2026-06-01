@@ -429,6 +429,7 @@ dependencies = [
 name = "clawblox-python"
 version = "0.1.0"
 dependencies = [
+ "chrono",
  "clawblox",
  "pyo3",
  "serde_json",
