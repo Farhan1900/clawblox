@@ -1,10 +1,16 @@
 use super::*;
+use clawblox::agent::build_agent;
+use clawblox::replay_agent_log::{
+    detect_transcript_parser, load_agent_timeline_with_parser, TranscriptLineParser,
+};
+use clawblox::workspace_recording::{load_workspace_events, WorkspaceChange};
 
 #[derive(Clone)]
 struct AppState {
     project_root: PathBuf,
     base_path: String,
     sessions: Arc<DashMap<String, ReplayState>>,
+    external_sessions: Arc<DashMap<String, ExternalReplaySession>>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -19,6 +25,88 @@ struct AppTreeNode {
 #[derive(Debug, Clone)]
 struct ReplayListEntry {
     rel_path: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct ExternalReplayManifest {
+    #[serde(default)]
+    version: Option<u32>,
+    #[serde(default)]
+    format: Option<String>,
+    recording: String,
+    #[serde(default)]
+    events: Option<String>,
+    command: Vec<String>,
+    #[serde(default)]
+    cwd: Option<String>,
+    #[serde(default)]
+    agents: Vec<ExternalReplayAgentManifest>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ExternalReplayAgentManifest {
+    #[serde(default)]
+    transcript: Option<String>,
+}
+
+#[derive(Clone)]
+struct ExternalReplaySession {
+    _process: Arc<ExternalReplayProcess>,
+    url: String,
+    recording_path: PathBuf,
+    manifest_path: PathBuf,
+    format: Option<String>,
+    agent_timeline: Option<Arc<ReplayAgentTimeline>>,
+    workspace_timeline: Option<Arc<ReplayWorkspaceTimeline>>,
+}
+
+#[derive(Clone, Serialize)]
+struct ReplayWorkspaceEvent {
+    pub event_type: String,
+    pub wall_time: f64,
+    pub time: String,
+    pub agent_id: String,
+    pub agent_name: String,
+    pub initial: bool,
+    pub tick: f64,
+    pub approx: bool,
+    pub changes: Vec<WorkspaceChange>,
+}
+
+#[derive(Clone)]
+struct ReplayWorkspaceTimeline {
+    events: Vec<ReplayWorkspaceEvent>,
+}
+
+#[derive(Deserialize)]
+struct ReplayWorkspaceQuery {
+    tick: Option<u64>,
+}
+
+#[derive(Serialize)]
+struct ReplayWorkspaceEventsResponse {
+    enabled: bool,
+    current_tick: u64,
+    start_tick: u64,
+    end_tick: u64,
+    events: Vec<ReplayWorkspaceEvent>,
+}
+
+struct ExternalReplayProcess {
+    child: Mutex<std::process::Child>,
+}
+
+impl Drop for ExternalReplayProcess {
+    fn drop(&mut self) {
+        let Ok(mut child) = self.child.lock() else {
+            return;
+        };
+        let Ok(None) = child.try_wait() else {
+            return;
+        };
+        let _ = child.kill();
+        let _ = child.wait();
+    }
 }
 
 #[derive(Serialize)]
@@ -40,7 +128,22 @@ struct AppOpenReplayResponse {
     recording_path: String,
     world_dir: String,
     #[serde(skip_serializing_if = "Option::is_none")]
+    replay_format: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     agent_log: Option<String>,
+}
+
+#[derive(Serialize)]
+struct ExternalReplayViewResponse {
+    enabled: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    url: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct ExternalReplayProxyPath {
+    id: String,
+    path: String,
 }
 
 async fn build_replay_state(
@@ -159,6 +262,7 @@ pub fn run_app(path: PathBuf, port: u16, base_path: &str) {
         project_root: project_root.clone(),
         base_path: base_path.clone(),
         sessions: Arc::new(DashMap::new()),
+        external_sessions: Arc::new(DashMap::new()),
     };
 
     let rt = tokio::runtime::Runtime::new().unwrap();
@@ -184,18 +288,34 @@ pub fn run_app(path: PathBuf, port: u16, base_path: &str) {
                     get(app_replay_renderer_manifest),
                 )
                 .route("/sessions/{id}/replay/info", get(app_replay_info))
+                .route(
+                    "/sessions/{id}/replay/external-view",
+                    get(app_replay_external_view),
+                )
+                .route(
+                    "/sessions/{id}/replay/external",
+                    get(app_external_replay_proxy_root),
+                )
+                .route(
+                    "/sessions/{id}/replay/external/{*path}",
+                    get(app_external_replay_proxy_path),
+                )
                 .route("/sessions/{id}/replay/state", get(app_replay_state_at))
                 .route(
                     "/sessions/{id}/replay/agent",
                     get(app_replay_agent_messages),
                 )
                 .route(
-                    "/sessions/{id}/replay/metadata",
-                    get(app_replay_metadata),
+                    "/sessions/{id}/replay/workspace",
+                    get(app_replay_workspace_events),
                 )
+                .route("/sessions/{id}/replay/metadata", get(app_replay_metadata))
                 .route("/sessions/{id}/replay/seek", post(app_replay_seek))
                 .route("/sessions/{id}/replay/speed", post(app_replay_speed))
-                .route("/sessions/{id}/replay/skip-idle", post(app_replay_skip_idle))
+                .route(
+                    "/sessions/{id}/replay/skip-idle",
+                    post(app_replay_skip_idle),
+                )
                 .route("/sessions/{id}/replay/pause", post(app_replay_pause))
                 .route("/sessions/{id}/replay/play", post(app_replay_play))
                 .route(
@@ -267,7 +387,7 @@ fn scan_recordings_recursive(
             scan_recordings_recursive(root, &path, out)?;
             continue;
         }
-        if path.extension().and_then(|ext| ext.to_str()) != Some("clawrec") {
+        if !is_replay_entry_path(&path) {
             continue;
         }
         let rel = path
@@ -285,6 +405,27 @@ fn list_project_recordings(root: &Path) -> Result<Vec<ReplayListEntry>, String> 
     scan_recordings_recursive(root, root, &mut entries)?;
     entries.sort_by(|a, b| a.rel_path.cmp(&b.rel_path));
     Ok(entries)
+}
+
+fn is_replay_entry_path(path: &Path) -> bool {
+    if path.extension().and_then(|ext| ext.to_str()) == Some("clawrec") {
+        return true;
+    }
+    if path.extension().and_then(|ext| ext.to_str()) == Some("h5") {
+        return find_clawblox_manifest_near(path)
+            .and_then(|manifest_path| manifest::load(&manifest_path).ok())
+            .and_then(|manifest| manifest.world)
+            .is_some_and(|world| !world.replay_command.is_empty());
+    }
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name.ends_with(".replay.toml"))
+}
+
+fn is_external_replay_manifest_path(path: &Path) -> bool {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name.ends_with(".replay.toml"))
 }
 
 fn insert_tree_path(nodes: &mut Vec<AppTreeNode>, segments: &[&str], full_path: &str) {
@@ -358,6 +499,27 @@ fn find_world_instance_dir_near_recording(file: &Path) -> Option<PathBuf> {
         current = dir.parent();
     }
     None
+}
+
+fn find_clawblox_manifest_near(file: &Path) -> Option<PathBuf> {
+    let mut current = file.parent();
+    while let Some(dir) = current {
+        let manifest_path = dir.join(".clawblox").join("manifest.json");
+        if manifest_path.is_file() {
+            return Some(manifest_path);
+        }
+        current = dir.parent();
+    }
+    None
+}
+
+fn resolve_clawblox_manifest_path(manifest_path: &Path, value: &str) -> PathBuf {
+    let path = PathBuf::from(value);
+    if path.is_absolute() {
+        path
+    } else {
+        manifest::manifest_state_root(manifest_path).join(path)
+    }
 }
 
 fn collect_session_transcripts_recursive(dir: &Path, out: &mut Vec<PathBuf>) {
@@ -475,7 +637,8 @@ fn collect_transcript_candidates_for_agent(agent_dir: &Path, out: &mut Vec<PathB
             if !name.starts_with("session_start") || !name.ends_with(".json") {
                 continue;
             }
-            if let Some(transcript_path) = parse_transcript_path_from_session_json(&path, agent_dir) {
+            if let Some(transcript_path) = parse_transcript_path_from_session_json(&path, agent_dir)
+            {
                 out.push(transcript_path);
             }
         }
@@ -490,6 +653,19 @@ fn collect_transcript_candidates_for_agent(agent_dir: &Path, out: &mut Vec<PathB
 }
 
 fn find_agent_log_near_recording(file: &Path) -> Option<PathBuf> {
+    if let Some(manifest_path) = find_clawblox_manifest_near(file) {
+        if let Ok(manifest) = manifest::load(&manifest_path) {
+            for agent in &manifest.agents {
+                for transcript in &agent.transcripts {
+                    let path = resolve_clawblox_manifest_path(&manifest_path, transcript);
+                    if path.is_file() {
+                        return Some(path);
+                    }
+                }
+            }
+        }
+    }
+
     let world_instance_dir = find_world_instance_dir_near_recording(file)?;
     let agents_dir = world_instance_dir.join("agents");
     if !agents_dir.is_dir() {
@@ -521,7 +697,9 @@ fn find_agent_log_near_recording(file: &Path) -> Option<PathBuf> {
     }
 
     let recording_key = timestamp_key_from_recording(file);
-    let recording_modified = std::fs::metadata(file).and_then(|meta| meta.modified()).ok();
+    let recording_modified = std::fs::metadata(file)
+        .and_then(|meta| meta.modified())
+        .ok();
     let mut ranked = deduped
         .into_iter()
         .map(|path| {
@@ -577,6 +755,541 @@ fn app_session_base_path(state: &AppState, id: &str) -> String {
     join_base_path(&state.base_path, &format!("/sessions/{}", id))
 }
 
+fn resolve_manifest_path(manifest_dir: &Path, value: &str) -> PathBuf {
+    let path = PathBuf::from(value);
+    if path.is_absolute() {
+        path
+    } else {
+        manifest_dir.join(path)
+    }
+}
+
+fn substitute_external_replay_arg(
+    value: &str,
+    recording_path: &Path,
+    manifest_path: &Path,
+    manifest_dir: &Path,
+    port: u16,
+) -> String {
+    value
+        .replace("{recording}", &recording_path.to_string_lossy())
+        .replace("{manifest}", &manifest_path.to_string_lossy())
+        .replace("{manifest_dir}", &manifest_dir.to_string_lossy())
+        .replace("{port}", &port.to_string())
+}
+
+fn choose_external_replay_port() -> Result<u16, String> {
+    let listener = std::net::TcpListener::bind(("127.0.0.1", 0))
+        .map_err(|e| format!("failed to allocate replay port: {}", e))?;
+    let port = listener
+        .local_addr()
+        .map_err(|e| format!("failed to read replay port: {}", e))?
+        .port();
+    drop(listener);
+    Ok(port)
+}
+
+async fn wait_for_external_replay(
+    url: &str,
+    process: &ExternalReplayProcess,
+) -> Result<(), String> {
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let client = reqwest::Client::new();
+    loop {
+        if let Ok(mut child) = process.child.lock() {
+            match child.try_wait() {
+                Ok(Some(status)) => {
+                    return Err(format!(
+                        "external replay command exited early with {}",
+                        status
+                    ));
+                }
+                Ok(None) => {}
+                Err(err) => {
+                    return Err(format!(
+                        "failed to inspect external replay command: {}",
+                        err
+                    ));
+                }
+            }
+        }
+
+        if let Ok(resp) = client.get(url).send().await {
+            if resp.status().is_success() || resp.status().is_redirection() {
+                return Ok(());
+            }
+        }
+
+        if Instant::now() >= deadline {
+            return Err(format!(
+                "external replay server did not become ready at {}",
+                url
+            ));
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+}
+
+async fn external_replay_info(url: &str) -> Result<serde_json::Value, String> {
+    let info_url = join_external_replay_url(url, "/replay/info");
+    let resp = reqwest::Client::new()
+        .get(&info_url)
+        .send()
+        .await
+        .map_err(|e| format!("external replay info request failed '{}': {}", info_url, e))?;
+    if !resp.status().is_success() {
+        return Err(format!(
+            "external replay info request '{}' returned {}",
+            info_url,
+            resp.status()
+        ));
+    }
+    resp.json::<serde_json::Value>().await.map_err(|e| {
+        format!(
+            "external replay info response was not JSON '{}': {}",
+            info_url, e
+        )
+    })
+}
+
+fn load_agent_timeline_from_manifest_paths(
+    transcript_paths: &[(PathBuf, Box<dyn TranscriptLineParser>)],
+    info: &serde_json::Value,
+    anchors: &[ReplayTickAnchor],
+) -> Option<Arc<ReplayAgentTimeline>> {
+    let tick_rate = info
+        .get("tick_rate")
+        .and_then(|value| value.as_u64())
+        .and_then(|value| u32::try_from(value).ok())
+        .unwrap_or(60);
+    let first_tick = info
+        .get("first_tick")
+        .and_then(|value| value.as_u64())
+        .unwrap_or(0);
+    let mut messages = Vec::new();
+    let mut anchor_count = 0usize;
+
+    for (path, parser) in transcript_paths {
+        match load_agent_timeline_with_parser(path, tick_rate, first_tick, anchors, parser.as_ref()) {
+            Ok(timeline) => {
+                anchor_count += timeline.anchor_count;
+                messages.extend(timeline.messages);
+            }
+            Err(err) => {
+                eprintln!(
+                    "Warning: failed to load manifest transcript '{}': {}",
+                    path.display(),
+                    err
+                );
+            }
+        }
+    }
+
+    if messages.is_empty() {
+        return None;
+    }
+    messages.sort_by(|a, b| {
+        a.tick
+            .partial_cmp(&b.tick)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| a.timestamp_ms.cmp(&b.timestamp_ms))
+    });
+    Some(Arc::new(ReplayAgentTimeline {
+        messages,
+        anchor_count,
+    }))
+}
+
+fn load_workspace_timeline_from_manifest_paths(
+    event_paths: &[PathBuf],
+    info: &serde_json::Value,
+    anchors: &[ReplayTickAnchor],
+) -> Option<Arc<ReplayWorkspaceTimeline>> {
+    let tick_rate = info
+        .get("tick_rate")
+        .and_then(|value| value.as_u64())
+        .unwrap_or(60) as f64;
+    let first_tick = info
+        .get("first_tick")
+        .and_then(|value| value.as_u64())
+        .unwrap_or(0) as f64;
+    let ticks_per_ms = tick_rate / 1000.0;
+    let mut events = Vec::new();
+
+    for path in event_paths {
+        match load_workspace_events(path) {
+            Ok(workspace_events) => {
+                for event in workspace_events {
+                    let timestamp_ms = (event.wall_time * 1000.0).round() as i64;
+                    let (tick, approx) = infer_external_replay_tick(
+                        timestamp_ms,
+                        anchors,
+                        ticks_per_ms,
+                        first_tick,
+                    );
+                    events.push(ReplayWorkspaceEvent {
+                        event_type: event.event_type,
+                        wall_time: event.wall_time,
+                        time: event.time,
+                        agent_id: event.agent_id,
+                        agent_name: event.agent_name,
+                        initial: event.initial,
+                        tick,
+                        approx,
+                        changes: event.changes,
+                    });
+                }
+            }
+            Err(err) => {
+                eprintln!(
+                    "Warning: failed to load workspace recording '{}': {}",
+                    path.display(),
+                    err
+                );
+            }
+        }
+    }
+
+    if events.is_empty() {
+        return None;
+    }
+    events.sort_by(|a, b| {
+        a.tick
+            .partial_cmp(&b.tick)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| a.time.cmp(&b.time))
+    });
+    Some(Arc::new(ReplayWorkspaceTimeline { events }))
+}
+
+fn infer_external_replay_tick(
+    timestamp_ms: i64,
+    anchors: &[ReplayTickAnchor],
+    fallback_ticks_per_ms: f64,
+    first_tick: f64,
+) -> (f64, bool) {
+    if anchors.is_empty() {
+        return (first_tick.max(0.0), true);
+    }
+    match anchors.binary_search_by_key(&timestamp_ms, |anchor| anchor.timestamp_ms) {
+        Ok(index) => (anchors[index].tick as f64, false),
+        Err(0) => {
+            let slope = if anchors.len() >= 2 {
+                external_replay_slope(&anchors[0], &anchors[1], fallback_ticks_per_ms)
+            } else {
+                fallback_ticks_per_ms
+            };
+            let dt = (timestamp_ms - anchors[0].timestamp_ms) as f64;
+            ((anchors[0].tick as f64 + dt * slope).max(0.0), true)
+        }
+        Err(index) if index >= anchors.len() => {
+            let last = anchors.len() - 1;
+            let slope = if anchors.len() >= 2 {
+                external_replay_slope(&anchors[last - 1], &anchors[last], fallback_ticks_per_ms)
+            } else {
+                fallback_ticks_per_ms
+            };
+            let dt = (timestamp_ms - anchors[last].timestamp_ms) as f64;
+            ((anchors[last].tick as f64 + dt * slope).max(0.0), true)
+        }
+        Err(index) => {
+            let a = &anchors[index - 1];
+            let b = &anchors[index];
+            let dt = (b.timestamp_ms - a.timestamp_ms) as f64;
+            if dt.abs() < f64::EPSILON {
+                return (a.tick as f64, true);
+            }
+            let t = (timestamp_ms - a.timestamp_ms) as f64 / dt;
+            let tick = a.tick as f64 + (b.tick as f64 - a.tick as f64) * t;
+            (tick.max(0.0), true)
+        }
+    }
+}
+
+fn external_replay_slope(
+    a: &ReplayTickAnchor,
+    b: &ReplayTickAnchor,
+    fallback_ticks_per_ms: f64,
+) -> f64 {
+    let dt = (b.timestamp_ms - a.timestamp_ms) as f64;
+    if dt.abs() < f64::EPSILON {
+        fallback_ticks_per_ms
+    } else {
+        (b.tick as f64 - a.tick as f64) / dt
+    }
+}
+
+fn load_replay_tick_anchors(paths: &[PathBuf]) -> Vec<ReplayTickAnchor> {
+    let mut anchors = Vec::new();
+    for path in paths {
+        load_replay_tick_anchors_from_jsonl(path, &mut anchors);
+    }
+    anchors.sort_by_key(|anchor| (anchor.timestamp_ms, anchor.tick));
+    anchors.dedup_by_key(|anchor| (anchor.timestamp_ms, anchor.tick));
+    anchors
+}
+
+fn load_replay_tick_anchors_from_jsonl(path: &Path, out: &mut Vec<ReplayTickAnchor>) {
+    let Ok(raw) = std::fs::read_to_string(path) else {
+        return;
+    };
+    for line in raw.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(line) else {
+            continue;
+        };
+        let Some(tick) = value.get("tick").and_then(|value| value.as_u64()) else {
+            continue;
+        };
+        let Some(timestamp_ms) = value
+            .get("wall_time")
+            .and_then(|value| value.as_f64())
+            .map(|seconds| (seconds * 1000.0).round() as i64)
+        else {
+            continue;
+        };
+        out.push(ReplayTickAnchor { timestamp_ms, tick });
+    }
+}
+
+async fn open_external_replay_command(
+    manifest_path: PathBuf,
+    manifest_dir: PathBuf,
+    recording_path: PathBuf,
+    command_template: Vec<String>,
+    cwd: PathBuf,
+    format: Option<String>,
+    transcript_paths: Vec<(PathBuf, Box<dyn TranscriptLineParser>)>,
+    event_paths: Vec<PathBuf>,
+    workspace_event_paths: Vec<PathBuf>,
+) -> Result<ExternalReplaySession, String> {
+    if command_template.is_empty() {
+        return Err(format!(
+            "manifest '{}' does not declare a replay command",
+            manifest_path.display()
+        ));
+    }
+    if !recording_path.is_file() {
+        return Err(format!("recording not found: {}", recording_path.display()));
+    }
+    if !cwd.is_dir() {
+        return Err(format!("replay cwd not found: {}", cwd.display()));
+    }
+
+    let port = choose_external_replay_port()?;
+    let command = command_template
+        .iter()
+        .map(|arg| {
+            substitute_external_replay_arg(arg, &recording_path, &manifest_path, &manifest_dir, port)
+        })
+        .collect::<Vec<_>>();
+    let executable = command[0].clone();
+    let args = command.get(1..).unwrap_or(&[]);
+    let child = Command::new(&executable)
+        .args(args)
+        .current_dir(&cwd)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::inherit())
+        .stderr(std::process::Stdio::inherit())
+        .spawn()
+        .map_err(|e| {
+            format!(
+                "failed to start external replay command '{}': {}",
+                executable, e
+            )
+        })?;
+    let process = Arc::new(ExternalReplayProcess {
+        child: Mutex::new(child),
+    });
+    let url = format!("http://127.0.0.1:{}/", port);
+    wait_for_external_replay(&url, &process).await?;
+    let info = external_replay_info(&url).await?;
+    let anchors = load_replay_tick_anchors(&event_paths);
+    let agent_timeline =
+        load_agent_timeline_from_manifest_paths(&transcript_paths, &info, &anchors);
+    let workspace_timeline =
+        load_workspace_timeline_from_manifest_paths(&workspace_event_paths, &info, &anchors);
+
+    Ok(ExternalReplaySession {
+        _process: process,
+        url,
+        recording_path,
+        manifest_path,
+        format,
+        agent_timeline,
+        workspace_timeline,
+    })
+}
+
+async fn open_external_replay_manifest(
+    manifest_path: PathBuf,
+) -> Result<ExternalReplaySession, String> {
+    let raw = std::fs::read_to_string(&manifest_path).map_err(|e| {
+        format!(
+            "failed to read replay manifest '{}': {}",
+            manifest_path.display(),
+            e
+        )
+    })?;
+    let manifest: ExternalReplayManifest = toml::from_str(&raw).map_err(|e| {
+        format!(
+            "failed to parse replay manifest '{}': {}",
+            manifest_path.display(),
+            e
+        )
+    })?;
+    let version = manifest.version.unwrap_or(1);
+    if version != 1 {
+        return Err(format!(
+            "unsupported replay manifest version {} in '{}'",
+            version,
+            manifest_path.display()
+        ));
+    }
+    if manifest.command.is_empty() {
+        return Err(format!(
+            "replay manifest '{}' must include a non-empty command",
+            manifest_path.display()
+        ));
+    }
+
+    let manifest_dir = manifest_path
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| PathBuf::from("."));
+    let recording_path = resolve_manifest_path(&manifest_dir, &manifest.recording);
+    if !recording_path.is_file() {
+        return Err(format!(
+            "manifest recording not found: {}",
+            recording_path.display()
+        ));
+    }
+    let cwd = manifest
+        .cwd
+        .as_deref()
+        .map(|value| resolve_manifest_path(&manifest_dir, value))
+        .unwrap_or_else(|| manifest_dir.clone());
+    if !cwd.is_dir() {
+        return Err(format!("manifest cwd not found: {}", cwd.display()));
+    }
+
+    let transcript_paths: Vec<(PathBuf, Box<dyn TranscriptLineParser>)> = manifest
+        .agents
+        .iter()
+        .filter_map(|agent| agent.transcript.as_deref())
+        .map(|path| {
+            let resolved = resolve_manifest_path(&manifest_dir, path);
+            let parser = detect_transcript_parser(&resolved);
+            (resolved, parser)
+        })
+        .filter(|(path, _)| path.is_file())
+        .collect();
+    let event_paths = manifest
+        .events
+        .as_deref()
+        .map(|path| resolve_manifest_path(&manifest_dir, path))
+        .filter(|path| path.is_file())
+        .into_iter()
+        .collect::<Vec<_>>();
+
+    open_external_replay_command(
+        manifest_path,
+        manifest_dir,
+        recording_path,
+        manifest.command,
+        cwd,
+        manifest.format,
+        transcript_paths,
+        event_paths,
+        Vec::new(),
+    )
+    .await
+}
+
+async fn open_external_replay_from_clawblox_manifest(
+    recording_path: PathBuf,
+) -> Result<ExternalReplaySession, String> {
+    let manifest_path = find_clawblox_manifest_near(&recording_path).ok_or_else(|| {
+        format!(
+            "no .clawblox/manifest.json found near recording '{}'",
+            recording_path.display()
+        )
+    })?;
+    let manifest = manifest::load(&manifest_path)?;
+    let world = manifest.world.ok_or_else(|| {
+        format!(
+            "manifest '{}' does not contain world metadata",
+            manifest_path.display()
+        )
+    })?;
+    if world.replay_command.is_empty() {
+        return Err(format!(
+            "manifest '{}' does not contain a replay command",
+            manifest_path.display()
+        ));
+    }
+
+    let state_root = manifest::manifest_state_root(&manifest_path);
+    let cwd = if world.source_dir.is_empty() {
+        state_root.clone()
+    } else {
+        resolve_clawblox_manifest_path(&manifest_path, &world.source_dir)
+    };
+    let transcript_paths: Vec<(PathBuf, Box<dyn TranscriptLineParser>)> = manifest
+        .agents
+        .iter()
+        .flat_map(|agent| {
+            let backend = agent.backend.clone();
+            let mp = manifest_path.clone();
+            agent.transcripts.iter().map(move |path| {
+                let resolved = resolve_clawblox_manifest_path(&mp, path);
+                let parser: Box<dyn TranscriptLineParser> = build_agent(&backend, None, false)
+                    .map(|a| a.transcript_parser())
+                    .unwrap_or_else(|_| detect_transcript_parser(&resolved));
+                (resolved, parser)
+            })
+        })
+        .filter(|(path, _)| path.is_file())
+        .collect();
+    let event_paths = manifest
+        .recordings
+        .iter()
+        .filter(|recording| {
+            resolve_clawblox_manifest_path(&manifest_path, &recording.path) == recording_path
+        })
+        .filter_map(|recording| recording.events.as_deref())
+        .map(|path| resolve_clawblox_manifest_path(&manifest_path, path))
+        .filter(|path| path.is_file())
+        .collect::<Vec<_>>();
+    let workspace_event_paths = manifest
+        .agents
+        .iter()
+        .filter_map(|agent| agent.workspace_recording.as_ref())
+        .map(|recording| resolve_clawblox_manifest_path(&manifest_path, &recording.events))
+        .filter(|path| path.is_file())
+        .collect::<Vec<_>>();
+    let format = recording_path
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .map(ToString::to_string);
+
+    open_external_replay_command(
+        manifest_path,
+        state_root.clone(),
+        recording_path,
+        world.replay_command,
+        cwd,
+        format,
+        transcript_paths,
+        event_paths,
+        workspace_event_paths,
+    )
+    .await
+}
+
 fn get_app_replay_state(
     state: &AppState,
     id: &str,
@@ -585,6 +1298,320 @@ fn get_app_replay_state(
         axum::http::StatusCode::NOT_FOUND,
         format!("unknown replay session '{}'", id),
     ))
+}
+
+fn get_app_external_session(
+    state: &AppState,
+    id: &str,
+) -> Result<ExternalReplaySession, (axum::http::StatusCode, String)> {
+    state
+        .external_sessions
+        .get(id)
+        .map(|entry| entry.clone())
+        .ok_or((
+            axum::http::StatusCode::NOT_FOUND,
+            format!("unknown external replay session '{}'", id),
+        ))
+}
+
+fn get_app_session_exists(
+    state: &AppState,
+    id: &str,
+) -> Result<(), (axum::http::StatusCode, String)> {
+    if state.sessions.contains_key(id) || state.external_sessions.contains_key(id) {
+        Ok(())
+    } else {
+        Err((
+            axum::http::StatusCode::NOT_FOUND,
+            format!("unknown replay session '{}'", id),
+        ))
+    }
+}
+
+fn join_external_replay_url(base: &str, path: &str) -> String {
+    let base = base.trim_end_matches('/');
+    let path = if path.starts_with('/') {
+        path.to_string()
+    } else {
+        format!("/{}", path)
+    };
+    format!("{}{}", base, path)
+}
+
+fn app_external_replay_base_path(state: &AppState, id: &str) -> String {
+    join_base_path(
+        &app_session_base_path(state, id),
+        "/replay/external",
+    )
+}
+
+fn app_external_replay_path(state: &AppState, id: &str, path: &str) -> String {
+    join_base_path(&app_external_replay_base_path(state, id), path)
+}
+
+fn external_replay_target_path(path: &str, original_uri: &axum::http::Uri) -> String {
+    let mut target = if path.is_empty() {
+        "/".to_string()
+    } else if path.starts_with('/') {
+        path.to_string()
+    } else {
+        format!("/{}", path)
+    };
+    if let Some(query) = original_uri.query() {
+        target.push('?');
+        target.push_str(query);
+    }
+    target
+}
+
+fn external_replay_ws_url(base: &str, path: &str) -> Result<String, String> {
+    let url = join_external_replay_url(base, path);
+    if let Some(rest) = url.strip_prefix("http://") {
+        Ok(format!("ws://{}", rest))
+    } else if let Some(rest) = url.strip_prefix("https://") {
+        Ok(format!("wss://{}", rest))
+    } else {
+        Err(format!("unsupported external replay URL '{}'", url))
+    }
+}
+
+fn selected_ws_protocols(headers: &axum::http::HeaderMap) -> Vec<String> {
+    headers
+        .get(axum::http::header::SEC_WEBSOCKET_PROTOCOL)
+        .and_then(|value| value.to_str().ok())
+        .map(|value| {
+            value
+                .split(',')
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(ToString::to_string)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn is_ws_upgrade(headers: &axum::http::HeaderMap) -> bool {
+    headers
+        .get(axum::http::header::UPGRADE)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| value.eq_ignore_ascii_case("websocket"))
+}
+
+fn map_ws_message_to_tungstenite(message: Message) -> Option<tungstenite::Message> {
+    match message {
+        Message::Text(value) => Some(tungstenite::Message::Text(value.to_string().into())),
+        Message::Binary(value) => Some(tungstenite::Message::Binary(value.to_vec().into())),
+        Message::Ping(value) => Some(tungstenite::Message::Ping(value.to_vec().into())),
+        Message::Pong(value) => Some(tungstenite::Message::Pong(value.to_vec().into())),
+        Message::Close(frame) => Some(tungstenite::Message::Close(frame.map(|frame| {
+            tungstenite::protocol::CloseFrame {
+                code: tungstenite::protocol::frame::coding::CloseCode::from(u16::from(frame.code)),
+                reason: frame.reason.to_string().into(),
+            }
+        }))),
+    }
+}
+
+fn map_tungstenite_message_to_ws(message: tungstenite::Message) -> Option<Message> {
+    match message {
+        tungstenite::Message::Text(value) => Some(Message::Text(value.to_string().into())),
+        tungstenite::Message::Binary(value) => Some(Message::Binary(value.to_vec().into())),
+        tungstenite::Message::Ping(value) => Some(Message::Ping(value.to_vec().into())),
+        tungstenite::Message::Pong(value) => Some(Message::Pong(value.to_vec().into())),
+        tungstenite::Message::Close(frame) => Some(Message::Close(frame.map(|frame| {
+            axum::extract::ws::CloseFrame {
+                code: u16::from(frame.code),
+                reason: frame.reason.to_string().into(),
+            }
+        }))),
+        tungstenite::Message::Frame(_) => None,
+    }
+}
+
+async fn proxy_external_replay_json(
+    session: &ExternalReplaySession,
+    path: &str,
+) -> Result<serde_json::Value, (axum::http::StatusCode, String)> {
+    let url = join_external_replay_url(&session.url, path);
+    let resp = reqwest::Client::new().get(&url).send().await.map_err(|e| {
+        (
+            axum::http::StatusCode::BAD_GATEWAY,
+            format!("external replay request failed '{}': {}", url, e),
+        )
+    })?;
+    let status = resp.status();
+    if !status.is_success() {
+        return Err((
+            axum::http::StatusCode::BAD_GATEWAY,
+            format!("external replay request '{}' returned {}", url, status),
+        ));
+    }
+    resp.json::<serde_json::Value>().await.map_err(|e| {
+        (
+            axum::http::StatusCode::BAD_GATEWAY,
+            format!("external replay response was not JSON '{}': {}", url, e),
+        )
+    })
+}
+
+async fn proxy_external_replay_http(
+    session: &ExternalReplaySession,
+    path: &str,
+) -> Result<axum::response::Response, (axum::http::StatusCode, String)> {
+    let url = join_external_replay_url(&session.url, path);
+    let resp = reqwest::Client::new().get(&url).send().await.map_err(|e| {
+        (
+            axum::http::StatusCode::BAD_GATEWAY,
+            format!("external replay request failed '{}': {}", url, e),
+        )
+    })?;
+    let status = resp.status();
+    let headers = resp.headers().clone();
+    let bytes = resp.bytes().await.map_err(|e| {
+        (
+            axum::http::StatusCode::BAD_GATEWAY,
+            format!("external replay response read failed '{}': {}", url, e),
+        )
+    })?;
+
+    let mut builder = axum::response::Response::builder().status(status);
+    for name in [
+        axum::http::header::CONTENT_TYPE,
+        axum::http::header::CACHE_CONTROL,
+        axum::http::header::ETAG,
+        axum::http::header::LAST_MODIFIED,
+    ] {
+        if let Some(value) = headers.get(&name) {
+            builder = builder.header(name, value);
+        }
+    }
+    builder
+        .body(axum::body::Body::from(bytes))
+        .map_err(|e| {
+            (
+                axum::http::StatusCode::BAD_GATEWAY,
+                format!("failed to build external replay response: {}", e),
+            )
+        })
+}
+
+async fn proxy_external_replay_ws(
+    socket: WebSocket,
+    target_url: String,
+    protocols: Vec<String>,
+) {
+    let mut request = match tungstenite::client::IntoClientRequest::into_client_request(&target_url)
+    {
+        Ok(request) => request,
+        Err(_) => return,
+    };
+    if !protocols.is_empty() {
+        if let Ok(value) = axum::http::HeaderValue::from_str(&protocols.join(", ")) {
+            request.headers_mut().insert(
+                axum::http::header::SEC_WEBSOCKET_PROTOCOL,
+                value,
+            );
+        }
+    }
+
+    let Ok((upstream, _)) = tokio_tungstenite::connect_async(request).await else {
+        return;
+    };
+
+    let (mut browser_tx, mut browser_rx) = socket.split();
+    let (mut upstream_tx, mut upstream_rx) = upstream.split();
+
+    let browser_to_upstream = async {
+        while let Some(result) = browser_rx.next().await {
+            let Ok(message) = result else {
+                break;
+            };
+            let Some(message) = map_ws_message_to_tungstenite(message) else {
+                continue;
+            };
+            if upstream_tx.send(message).await.is_err() {
+                break;
+            }
+        }
+    };
+
+    let upstream_to_browser = async {
+        while let Some(result) = upstream_rx.next().await {
+            let Ok(message) = result else {
+                break;
+            };
+            let Some(message) = map_tungstenite_message_to_ws(message) else {
+                continue;
+            };
+            if browser_tx.send(message).await.is_err() {
+                break;
+            }
+        }
+    };
+
+    tokio::select! {
+        _ = browser_to_upstream => {},
+        _ = upstream_to_browser => {},
+    }
+}
+
+async fn app_external_replay_proxy(
+    state: AppState,
+    id: String,
+    path: String,
+    original_uri: axum::http::Uri,
+    headers: axum::http::HeaderMap,
+    ws: Result<WebSocketUpgrade, WebSocketUpgradeRejection>,
+) -> Result<axum::response::Response, (axum::http::StatusCode, String)> {
+    let session = get_app_external_session(&state, &id)?;
+    let target_path = external_replay_target_path(&path, &original_uri);
+    if is_ws_upgrade(&headers) {
+        let ws = ws.map_err(|_| (
+            axum::http::StatusCode::BAD_REQUEST,
+            "invalid websocket upgrade request".to_string(),
+        ))?;
+        let protocols = selected_ws_protocols(&headers);
+        let target_url = external_replay_ws_url(&session.url, &target_path)
+            .map_err(|e| (axum::http::StatusCode::BAD_GATEWAY, e))?;
+        let response = if protocols.is_empty() {
+            ws.on_upgrade(move |socket| proxy_external_replay_ws(socket, target_url, protocols))
+        } else {
+            ws.protocols(protocols.clone()).on_upgrade(move |socket| {
+                proxy_external_replay_ws(socket, target_url, protocols)
+            })
+        };
+        return Ok(response.into_response());
+    }
+    proxy_external_replay_http(&session, &target_path).await
+}
+
+async fn post_external_replay(
+    session: &ExternalReplaySession,
+    path: &str,
+) -> Result<axum::http::StatusCode, (axum::http::StatusCode, String)> {
+    let url = join_external_replay_url(&session.url, path);
+    let resp = reqwest::Client::new()
+        .post(&url)
+        .send()
+        .await
+        .map_err(|e| {
+            (
+                axum::http::StatusCode::BAD_GATEWAY,
+                format!("external replay request failed '{}': {}", url, e),
+            )
+        })?;
+    if resp.status().is_success() {
+        Ok(axum::http::StatusCode::OK)
+    } else {
+        Err((
+            axum::http::StatusCode::BAD_GATEWAY,
+            format!(
+                "external replay request '{}' returned {}",
+                url,
+                resp.status()
+            ),
+        ))
+    }
 }
 
 async fn app_ui_index(State(state): State<AppState>) -> impl IntoResponse {
@@ -620,13 +1647,62 @@ async fn app_open_replay(
     if !recording_path.is_file() {
         return Err((
             axum::http::StatusCode::NOT_FOUND,
-            format!("recording not found: {}", recording_path.display()),
+            format!("replay entry not found: {}", recording_path.display()),
         ));
     }
+
+    if is_external_replay_manifest_path(&recording_path) {
+        let session_id = Uuid::new_v4().to_string();
+        let session = open_external_replay_manifest(recording_path.clone())
+            .await
+            .map_err(|e| (axum::http::StatusCode::BAD_REQUEST, e))?;
+        let resolved_recording_path = session.recording_path.display().to_string();
+        let world_dir = session
+            .manifest_path
+            .parent()
+            .map(|path| path.display().to_string())
+            .unwrap_or_default();
+        let replay_format = session.format.clone();
+        state.external_sessions.insert(session_id.clone(), session);
+        let session_url = app_session_base_path(&state, &session_id);
+
+        return Ok(Json(AppOpenReplayResponse {
+            session_id,
+            url: session_url,
+            recording_path: resolved_recording_path,
+            world_dir,
+            replay_format,
+            agent_log: None,
+        }));
+    }
+
+    if recording_path.extension().and_then(|ext| ext.to_str()) == Some("h5") {
+        let session_id = Uuid::new_v4().to_string();
+        let session = open_external_replay_from_clawblox_manifest(recording_path.clone())
+            .await
+            .map_err(|e| (axum::http::StatusCode::BAD_REQUEST, e))?;
+        let resolved_recording_path = session.recording_path.display().to_string();
+        let world_dir = manifest::manifest_state_root(&session.manifest_path)
+            .display()
+            .to_string();
+        let replay_format = session.format.clone();
+        state.external_sessions.insert(session_id.clone(), session);
+        let session_url = app_session_base_path(&state, &session_id);
+
+        return Ok(Json(AppOpenReplayResponse {
+            session_id,
+            url: session_url,
+            recording_path: resolved_recording_path,
+            world_dir,
+            replay_format,
+            agent_log: None,
+        }));
+    }
+
     if recording_path.extension().and_then(|ext| ext.to_str()) != Some("clawrec") {
         return Err((
             axum::http::StatusCode::BAD_REQUEST,
-            "selected file is not a .clawrec recording".to_string(),
+            "selected file is not a .clawrec recording, .h5 manifest recording, or .replay.toml manifest".to_string(),
         ));
     }
 
@@ -640,8 +1716,8 @@ async fn app_open_replay(
         None,
         agent_log.clone(),
     )
-        .await
-        .map_err(|e| (axum::http::StatusCode::BAD_REQUEST, e))?;
+    .await
+    .map_err(|e| (axum::http::StatusCode::BAD_REQUEST, e))?;
     let world_dir = replay_state.world_dir.display().to_string();
     state.sessions.insert(session_id.clone(), replay_state);
 
@@ -650,6 +1726,7 @@ async fn app_open_replay(
         url: session_base,
         recording_path: recording_path.display().to_string(),
         world_dir,
+        replay_format: Some("clawrec".to_string()),
         agent_log: agent_log.map(|path| path.display().to_string()),
     }))
 }
@@ -658,7 +1735,7 @@ async fn app_session_ui_index(
     AxumPath(id): AxumPath<String>,
     State(state): State<AppState>,
 ) -> Result<impl IntoResponse, (axum::http::StatusCode, String)> {
-    get_app_replay_state(&state, &id)?;
+    get_app_session_exists(&state, &id)?;
     Ok(embedded_ui_index_response(&app_session_base_path(
         &state, &id,
     )))
@@ -684,10 +1761,66 @@ async fn app_replay_renderer_manifest(
 async fn app_replay_info(
     AxumPath(id): AxumPath<String>,
     State(state): State<AppState>,
-) -> Result<Json<replay::ReplayInfo>, (axum::http::StatusCode, String)> {
+) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, String)> {
+    if let Ok(session) = get_app_external_session(&state, &id) {
+        return proxy_external_replay_json(&session, "/replay/info")
+            .await
+            .map(Json);
+    }
     let replay_state = get_app_replay_state(&state, &id)?;
     let pb = replay_state.playback.lock().await;
-    Ok(Json(pb.info()))
+    serde_json::to_value(pb.info()).map(Json).map_err(|e| {
+        (
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            format!("failed to serialize replay info: {}", e),
+        )
+    })
+}
+
+async fn app_replay_external_view(
+    AxumPath(id): AxumPath<String>,
+    State(state): State<AppState>,
+) -> Result<Json<ExternalReplayViewResponse>, (axum::http::StatusCode, String)> {
+    if let Ok(session) = get_app_external_session(&state, &id) {
+        let _ = session;
+        return Ok(Json(ExternalReplayViewResponse {
+            enabled: true,
+            url: Some(app_external_replay_path(&state, &id, "/replay/view")),
+        }));
+    }
+    get_app_replay_state(&state, &id)?;
+    Ok(Json(ExternalReplayViewResponse {
+        enabled: false,
+        url: None,
+    }))
+}
+
+async fn app_external_replay_proxy_root(
+    AxumPath(id): AxumPath<String>,
+    State(state): State<AppState>,
+    OriginalUri(original_uri): OriginalUri,
+    headers: axum::http::HeaderMap,
+    ws: Result<WebSocketUpgrade, WebSocketUpgradeRejection>,
+) -> Result<axum::response::Response, (axum::http::StatusCode, String)> {
+    app_external_replay_proxy(state, id, String::new(), original_uri, headers, ws).await
+}
+
+async fn app_external_replay_proxy_path(
+    AxumPath(params): AxumPath<ExternalReplayProxyPath>,
+    State(state): State<AppState>,
+    OriginalUri(original_uri): OriginalUri,
+    headers: axum::http::HeaderMap,
+    ws: Result<WebSocketUpgrade, WebSocketUpgradeRejection>,
+) -> Result<axum::response::Response, (axum::http::StatusCode, String)> {
+    app_external_replay_proxy(
+        state,
+        params.id,
+        params.path,
+        original_uri,
+        headers,
+        ws,
+    )
+    .await
 }
 
 async fn app_replay_state_at(
@@ -720,6 +1853,31 @@ async fn app_replay_agent_messages(
     State(state): State<AppState>,
     Query(query): Query<ReplayAgentQuery>,
 ) -> Result<Json<ReplayAgentMessagesResponse>, (axum::http::StatusCode, String)> {
+    if let Ok(session) = get_app_external_session(&state, &id) {
+        let info = proxy_external_replay_json(&session, "/replay/info")
+            .await
+            .ok();
+        let current_tick = query
+            .tick
+            .or_else(|| info.as_ref()?.get("current_tick")?.as_u64())
+            .unwrap_or(0);
+        let Some(timeline) = session.agent_timeline.as_ref() else {
+            return Ok(Json(ReplayAgentMessagesResponse {
+                enabled: false,
+                current_tick,
+                start_tick: 0,
+                end_tick: current_tick,
+                messages: Vec::new(),
+            }));
+        };
+        return Ok(Json(ReplayAgentMessagesResponse {
+            enabled: true,
+            current_tick,
+            start_tick: 0,
+            end_tick: current_tick,
+            messages: timeline.messages.clone(),
+        }));
+    }
     let replay_state = get_app_replay_state(&state, &id)?;
     let current_tick = if let Some(tick) = query.tick {
         tick
@@ -747,10 +1905,62 @@ async fn app_replay_agent_messages(
     }))
 }
 
+async fn app_replay_workspace_events(
+    AxumPath(id): AxumPath<String>,
+    State(state): State<AppState>,
+    Query(query): Query<ReplayWorkspaceQuery>,
+) -> Result<Json<ReplayWorkspaceEventsResponse>, (axum::http::StatusCode, String)> {
+    if let Ok(session) = get_app_external_session(&state, &id) {
+        let info = proxy_external_replay_json(&session, "/replay/info")
+            .await
+            .ok();
+        let current_tick = query
+            .tick
+            .or_else(|| info.as_ref()?.get("current_tick")?.as_u64())
+            .unwrap_or(0);
+        let Some(timeline) = session.workspace_timeline.as_ref() else {
+            return Ok(Json(ReplayWorkspaceEventsResponse {
+                enabled: false,
+                current_tick,
+                start_tick: 0,
+                end_tick: current_tick,
+                events: Vec::new(),
+            }));
+        };
+        return Ok(Json(ReplayWorkspaceEventsResponse {
+            enabled: true,
+            current_tick,
+            start_tick: 0,
+            end_tick: current_tick,
+            events: timeline.events.clone(),
+        }));
+    }
+    let replay_state = get_app_replay_state(&state, &id)?;
+    let current_tick = if let Some(tick) = query.tick {
+        tick
+    } else {
+        let pb = replay_state.playback.lock().await;
+        pb.current_tick()
+    };
+    Ok(Json(ReplayWorkspaceEventsResponse {
+        enabled: false,
+        current_tick,
+        start_tick: 0,
+        end_tick: current_tick,
+        events: Vec::new(),
+    }))
+}
+
 async fn app_replay_metadata(
     AxumPath(id): AxumPath<String>,
     State(state): State<AppState>,
 ) -> Result<Json<ReplayMetadataResponse>, (axum::http::StatusCode, String)> {
+    if get_app_external_session(&state, &id).is_ok() {
+        return Ok(Json(ReplayMetadataResponse {
+            enabled: false,
+            metadata: None,
+        }));
+    }
     let replay_state = get_app_replay_state(&state, &id)?;
     Ok(Json(ReplayMetadataResponse {
         enabled: replay_state.replay_metadata.is_some(),
@@ -766,6 +1976,9 @@ async fn app_replay_seek(
     State(state): State<AppState>,
     Query(q): Query<SeekQuery>,
 ) -> Result<axum::http::StatusCode, (axum::http::StatusCode, String)> {
+    if let Ok(session) = get_app_external_session(&state, &id) {
+        return post_external_replay(&session, &format!("/replay/seek?tick={}", q.tick)).await;
+    }
     let replay_state = get_app_replay_state(&state, &id)?;
     let mut pb = replay_state.playback.lock().await;
     pb.seek(q.tick);
@@ -777,6 +1990,9 @@ async fn app_replay_speed(
     State(state): State<AppState>,
     Query(q): Query<SpeedQuery>,
 ) -> Result<axum::http::StatusCode, (axum::http::StatusCode, String)> {
+    if let Ok(session) = get_app_external_session(&state, &id) {
+        return post_external_replay(&session, &format!("/replay/speed?value={}", q.value)).await;
+    }
     let replay_state = get_app_replay_state(&state, &id)?;
     let mut pb = replay_state.playback.lock().await;
     pb.set_speed(q.value);
@@ -788,6 +2004,13 @@ async fn app_replay_skip_idle(
     State(state): State<AppState>,
     Query(q): Query<SkipIdleQuery>,
 ) -> Result<axum::http::StatusCode, (axum::http::StatusCode, String)> {
+    if let Ok(session) = get_app_external_session(&state, &id) {
+        return post_external_replay(
+            &session,
+            &format!("/replay/skip-idle?enabled={}", q.enabled),
+        )
+        .await;
+    }
     let replay_state = get_app_replay_state(&state, &id)?;
     let mut pb = replay_state.playback.lock().await;
     pb.set_skip_idle(q.enabled);
@@ -798,6 +2021,9 @@ async fn app_replay_pause(
     AxumPath(id): AxumPath<String>,
     State(state): State<AppState>,
 ) -> Result<axum::http::StatusCode, (axum::http::StatusCode, String)> {
+    if let Ok(session) = get_app_external_session(&state, &id) {
+        return post_external_replay(&session, "/replay/pause").await;
+    }
     let replay_state = get_app_replay_state(&state, &id)?;
     let mut pb = replay_state.playback.lock().await;
     pb.set_paused(true);
@@ -808,6 +2034,9 @@ async fn app_replay_play(
     AxumPath(id): AxumPath<String>,
     State(state): State<AppState>,
 ) -> Result<axum::http::StatusCode, (axum::http::StatusCode, String)> {
+    if let Ok(session) = get_app_external_session(&state, &id) {
+        return post_external_replay(&session, "/replay/play").await;
+    }
     let replay_state = get_app_replay_state(&state, &id)?;
     let mut pb = replay_state.playback.lock().await;
     pb.play();
@@ -819,6 +2048,16 @@ async fn app_replay_play_range(
     State(state): State<AppState>,
     Query(q): Query<PlayRangeQuery>,
 ) -> Result<axum::http::StatusCode, (axum::http::StatusCode, String)> {
+    if let Ok(session) = get_app_external_session(&state, &id) {
+        return post_external_replay(
+            &session,
+            &format!(
+                "/replay/play-range?start_tick={}&end_tick={}",
+                q.start_tick, q.end_tick
+            ),
+        )
+        .await;
+    }
     let replay_state = get_app_replay_state(&state, &id)?;
     let mut pb = replay_state.playback.lock().await;
     pb.play_range(q.start_tick, q.end_tick);

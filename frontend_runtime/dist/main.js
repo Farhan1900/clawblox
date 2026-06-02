@@ -75,8 +75,11 @@ const replaySpeedEl = document.getElementById('replay-speed')
 const replaySkipIdleEl = document.getElementById('replay-skip-idle')
 const agentLogPanelEl = document.getElementById('agent-log-panel')
 const agentLogFeedEl = document.getElementById('agent-log-feed')
+const workspaceFeedEl = document.getElementById('workspace-feed')
 const agentLogStatusEl = document.getElementById('agent-log-status')
 const agentLogToggleEl = document.getElementById('agent-log-toggle')
+const agentLogTabMessagesEl = document.getElementById('agent-log-tab-messages')
+const agentLogTabWorkspaceEl = document.getElementById('agent-log-tab-workspace')
 
 const chatState = {
   open: false,
@@ -99,11 +102,17 @@ const replayState = {
   agentEnabled: false,
   agentLoaded: false,
   agentMessages: [],
+  workspaceEnabled: false,
+  workspaceLoaded: false,
+  workspaceEvents: [],
+  sidePanelTab: 'messages',
   agentPanelOpen: readStoredBool('clawblox_agent_log_open', true),
   agentExpandedBlocks: new Set(),
   metadataEnabled: false,
   metadataLoaded: false,
   metadata: null,
+  externalViewEnabled: false,
+  externalViewUrl: null,
   behaviorPanelOpen: readStoredBool('clawblox_behavior_panel_open', false),
   selectedBehaviorId: null,
   selectedOccurrenceId: null,
@@ -190,6 +199,22 @@ function setAgentLogStatus(text) {
   if (agentLogStatusEl) agentLogStatusEl.textContent = text
 }
 
+function setSidePanelTab(tab) {
+  replayState.sidePanelTab = tab === 'workspace' ? 'workspace' : 'messages'
+  const workspaceActive = replayState.sidePanelTab === 'workspace'
+  if (agentLogFeedEl) agentLogFeedEl.hidden = workspaceActive
+  if (workspaceFeedEl) workspaceFeedEl.hidden = !workspaceActive
+  if (agentLogTabMessagesEl) {
+    agentLogTabMessagesEl.classList.toggle('is-active', !workspaceActive)
+    agentLogTabMessagesEl.setAttribute('aria-selected', workspaceActive ? 'false' : 'true')
+  }
+  if (agentLogTabWorkspaceEl) {
+    agentLogTabWorkspaceEl.classList.toggle('is-active', workspaceActive)
+    agentLogTabWorkspaceEl.setAttribute('aria-selected', workspaceActive ? 'true' : 'false')
+  }
+  renderSidePanel(replayState.info?.current_tick || 0)
+}
+
 function setAgentLogPanelOpen(open, persist = true) {
   replayState.agentPanelOpen = !!open
   if (agentLogPanelEl) {
@@ -204,7 +229,7 @@ function setAgentLogPanelOpen(open, persist = true) {
 }
 
 function syncAgentLogVisibility() {
-  const shouldShow = replayState.enabled && replayState.agentEnabled
+  const shouldShow = replayState.enabled && (replayState.agentEnabled || replayState.workspaceEnabled)
   if (agentLogPanelEl) {
     agentLogPanelEl.hidden = !shouldShow
     agentLogPanelEl.classList.toggle('is-open', shouldShow && replayState.agentPanelOpen)
@@ -254,6 +279,9 @@ function setReplayMode(enabled) {
   if (!replayState.enabled) {
     replayState.agentLoaded = false
     replayState.agentMessages = []
+    replayState.workspaceLoaded = false
+    replayState.workspaceEnabled = false
+    replayState.workspaceEvents = []
     replayState.metadataLoaded = false
     replayState.metadataEnabled = false
     replayState.metadata = null
@@ -306,6 +334,7 @@ function renderReplayInfo(info) {
   }
   if (replaySkipIdleEl) replaySkipIdleEl.checked = !!info.skip_idle
   if (replayState.behaviorPanelOpen) renderBehaviorPanel()
+  renderSidePanel(info.current_tick || info.first_tick || 0)
 }
 
 function renderAgentLogMessages(currentTick, payload = null) {
@@ -317,7 +346,7 @@ function renderAgentLogMessages(currentTick, payload = null) {
     replayState.agentMessages = Array.isArray(payload?.messages) ? payload.messages : []
     replayState.agentRenderedSig = null
   }
-  const enabled = replayState.agentEnabled
+  const enabled = replayState.agentEnabled || replayState.workspaceEnabled
   syncAgentLogVisibility()
 
   if (!enabled) {
@@ -330,14 +359,17 @@ function renderAgentLogMessages(currentTick, payload = null) {
   const allMessages = Array.isArray(replayState.agentMessages) ? replayState.agentMessages : []
   const endTick = Number((currentTick ?? replayState.info?.current_tick) || 0)
   const messages = allMessages.filter((msg) => Number(msg?.tick) <= endTick + 1e-6)
-  setAgentLogStatus(`${messages.length}/${allMessages.length}`)
+  const workspaceState = buildWorkspaceState(endTick)
+  setAgentLogStatus(replayState.sidePanelTab === 'workspace'
+    ? `${workspaceState.length} files`
+    : `${messages.length}/${allMessages.length}`)
 
   if (!allMessages.length) {
     agentLogFeedEl.textContent = ''
     replayState.agentRenderedSig = 'empty'
     const empty = document.createElement('div')
     empty.className = 'agent-log-empty'
-    empty.textContent = 'No agent messages in this log.'
+    empty.textContent = 'No agent messages in this replay.'
     agentLogFeedEl.appendChild(empty)
     return
   }
@@ -351,7 +383,8 @@ function renderAgentLogMessages(currentTick, payload = null) {
     return
   }
 
-  const sig = `${messages.length}|${messages[messages.length - 1]?.id || ''}|${messages[messages.length - 1]?.timestamp_ms || ''}`
+  const lastMessage = messages[messages.length - 1] || {}
+  const sig = `${messages.length}|${lastMessage.id || ''}|${lastMessage.timestamp_ms || ''}`
   const sigChanged = replayState.agentRenderedSig !== sig
 
   if (sigChanged) {
@@ -372,6 +405,22 @@ function renderAgentLogMessages(currentTick, payload = null) {
     }
   } else {
     updateCurrentTickHighlight(endTick)
+  }
+}
+
+function applyWorkspaceEvents(payload) {
+  replayState.workspaceEnabled = !!payload?.enabled
+  replayState.workspaceLoaded = true
+  replayState.workspaceEvents = Array.isArray(payload?.events) ? payload.events : []
+  replayState.workspaceRenderedSig = null
+  syncAgentLogVisibility()
+}
+
+function renderSidePanel(currentTick) {
+  if (replayState.sidePanelTab === 'workspace') {
+    renderWorkspaceAtTick(currentTick)
+  } else {
+    renderAgentLogMessages(currentTick)
   }
 }
 
@@ -416,6 +465,97 @@ function buildAgentLogMessage(msg, endTick) {
 
   row.appendChild(body)
   return row
+}
+
+function buildWorkspaceState(currentTick) {
+  const files = new Map()
+  const events = Array.isArray(replayState.workspaceEvents) ? replayState.workspaceEvents : []
+  for (const event of events) {
+    if (Number(event?.tick) > currentTick + 1e-6) continue
+    const changes = Array.isArray(event?.changes) ? event.changes : []
+    for (const change of changes) {
+      const path = String(change?.path || '')
+      if (!path) continue
+      const op = String(change?.op || '')
+      if (op === 'delete') {
+        files.delete(path)
+      } else {
+        files.set(path, {
+          path,
+          op,
+          size: change?.size,
+          sha256: change?.sha256,
+          omitted: change?.omitted,
+          tick: Number(event?.tick) || 0,
+          agent: String(event?.agent_name || event?.agent_id || ''),
+        })
+      }
+    }
+  }
+  return [...files.values()].sort((a, b) => a.path.localeCompare(b.path))
+}
+
+function renderWorkspaceAtTick(currentTick) {
+  if (!workspaceFeedEl) return
+  const endTick = Number((currentTick ?? replayState.info?.current_tick) || 0)
+  const files = buildWorkspaceState(endTick)
+  const sig = `${files.length}|${files.map((file) => `${file.path}:${file.sha256 || file.omitted || ''}`).join('|')}`
+  setAgentLogStatus(`${files.length} files`)
+
+  if (!replayState.workspaceEnabled) {
+    workspaceFeedEl.textContent = ''
+    replayState.workspaceRenderedSig = null
+    const empty = document.createElement('div')
+    empty.className = 'agent-log-empty'
+    empty.textContent = 'No workspace recording in this replay.'
+    workspaceFeedEl.appendChild(empty)
+    return
+  }
+  if (replayState.workspaceRenderedSig === sig) return
+
+  workspaceFeedEl.textContent = ''
+  replayState.workspaceRenderedSig = sig
+  if (!files.length) {
+    const empty = document.createElement('div')
+    empty.className = 'agent-log-empty'
+    empty.textContent = 'Workspace is empty at this replay point.'
+    workspaceFeedEl.appendChild(empty)
+    return
+  }
+  for (const file of files) {
+    const row = document.createElement('div')
+    row.className = 'workspace-row'
+
+    const op = document.createElement('span')
+    op.className = 'workspace-row__op'
+    op.textContent = file.omitted ? '!' : '+'
+
+    const path = document.createElement('span')
+    path.className = 'workspace-row__path'
+    path.title = file.path
+    path.textContent = file.path
+
+    const meta = document.createElement('span')
+    meta.className = 'workspace-row__meta'
+    if (file.omitted) {
+      meta.textContent = 'omitted'
+    } else if (Number.isFinite(Number(file.size))) {
+      meta.textContent = formatBytes(Number(file.size))
+    } else {
+      meta.textContent = ''
+    }
+
+    row.append(op, path, meta)
+    workspaceFeedEl.appendChild(row)
+  }
+}
+
+function formatBytes(value) {
+  const bytes = Number(value)
+  if (!Number.isFinite(bytes) || bytes < 0) return ''
+  if (bytes < 1024) return `${bytes} B`
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`
 }
 
 function buildAgentLogBlock(block, key) {
@@ -907,10 +1047,38 @@ async function fetchReplayAgentMessages() {
   return resp.json()
 }
 
+async function fetchReplayWorkspaceEvents() {
+  const resp = await fetch(withBasePath('/replay/workspace'), { cache: 'no-store' })
+  if (!resp.ok) throw new Error(`replay workspace HTTP ${resp.status}`)
+  return resp.json()
+}
+
 async function fetchReplayMetadata() {
   const resp = await fetch(withBasePath('/replay/metadata'), { cache: 'no-store' })
   if (!resp.ok) throw new Error(`replay metadata HTTP ${resp.status}`)
   return resp.json()
+}
+
+async function fetchExternalReplayView() {
+  const resp = await fetch(withBasePath('/replay/external-view'), { cache: 'no-store' })
+  if (!resp.ok) throw new Error(`external replay view HTTP ${resp.status}`)
+  return resp.json()
+}
+
+function mountExternalReplayView(url) {
+  replayState.externalViewEnabled = true
+  replayState.externalViewUrl = url
+  canvas.hidden = true
+  let frame = document.getElementById('external-replay-view')
+  if (!frame) {
+    frame = document.createElement('iframe')
+    frame.id = 'external-replay-view'
+    frame.className = 'external-replay-view'
+    frame.title = 'Replay viewport'
+    frame.allow = 'fullscreen; clipboard-read; clipboard-write'
+    canvas.insertAdjacentElement('afterend', frame)
+  }
+  frame.src = url
 }
 
 function applyReplayMetadata(payload) {
@@ -987,6 +1155,13 @@ async function refreshReplayInfo() {
       if (logs) renderAgentLogMessages(info?.current_tick || 0, logs)
     } else {
       renderAgentLogMessages(info?.current_tick || 0)
+    }
+    if (!replayState.workspaceLoaded) {
+      const workspace = await fetchReplayWorkspaceEvents()
+      if (workspace) {
+        applyWorkspaceEvents(workspace)
+        renderSidePanel(info?.current_tick || 0)
+      }
     }
   } catch (err) {
     console.error(err)
@@ -1850,7 +2025,27 @@ async function bootstrap() {
       return null
     })
     if (logs) renderAgentLogMessages(replayInfo?.current_tick || 0, logs)
+    const workspace = await fetchReplayWorkspaceEvents().catch((err) => {
+      console.error(err)
+      return null
+    })
+    if (workspace) {
+      applyWorkspaceEvents(workspace)
+      renderSidePanel(replayInfo?.current_tick || 0)
+    }
     startReplayPolling()
+    const externalView = await fetchExternalReplayView().catch((err) => {
+      console.error(err)
+      return null
+    })
+    if (externalView?.enabled && externalView?.url) {
+      mountExternalReplayView(externalView.url)
+      setStatus('Connected | Replay | External viewport', 'ok')
+      window.addEventListener('beforeunload', () => {
+        if (replayState.pollTimer) clearInterval(replayState.pollTimer)
+      })
+      return
+    }
   }
 
   let manifest
@@ -1977,8 +2172,8 @@ async function bootstrap() {
       wsStats.frames += 1
       if (typeof state?.tick === 'number') wsStats.lastTick = state.tick
       renderPlayerList(state?.players)
-      if (replayState.enabled && replayState.agentLoaded && typeof state?.tick === 'number') {
-        renderAgentLogMessages(state.tick)
+      if (replayState.enabled && (replayState.agentLoaded || replayState.workspaceLoaded) && typeof state?.tick === 'number') {
+        renderSidePanel(state.tick)
       }
       const rendererState = prioritizeSelectedPlayer(state)
       if (renderer.onState) renderer.onState(rendererState)
@@ -2103,6 +2298,14 @@ if (agentLogToggleEl) {
     setAgentLogPanelOpen(!replayState.agentPanelOpen, true)
     syncAgentLogVisibility()
   })
+}
+
+if (agentLogTabMessagesEl) {
+  agentLogTabMessagesEl.addEventListener('click', () => setSidePanelTab('messages'))
+}
+
+if (agentLogTabWorkspaceEl) {
+  agentLogTabWorkspaceEl.addEventListener('click', () => setSidePanelTab('workspace'))
 }
 
 bootstrap()

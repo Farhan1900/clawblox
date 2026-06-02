@@ -864,14 +864,15 @@ impl WorkspaceService {
                         let part_rot = part.cframe.rotation;
                         let part_half = [part.size.x / 2.0, part.size.y / 2.0, part.size.z / 2.0];
 
-                        obb_intersects_obb(
+                        let result = obb_intersects_obb(
                             query_center,
                             query_rot,
                             query_half,
                             part_center,
                             part_rot,
                             part_half,
-                        )
+                        );
+                        result
                     }
                 } else {
                     false

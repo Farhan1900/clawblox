@@ -18,6 +18,11 @@ agent/logs/
 agent/workspace/
 **/.clawblox/
 mc-server/
+examples/minecraft/client-mod-fabric/.gradle/
+examples/minecraft/client-mod-fabric/.tooling/
+examples/minecraft/client-mod-fabric/build/
+examples/minecraft/launcher/.cache/
+examples/minecraft/launcher/.runtime/
 
 results/
 recordings/
@@ -29,6 +34,7 @@ worlds/minecraft/monitor-old/
 worlds/mesa-opaque-actions-world/live_observation_pretty.json
 
 *.egg-info/
+python/clawblox/clawblox/*.so
 **/.build.lock
 
 # Piper TTS binary (download separately, not versioned)
