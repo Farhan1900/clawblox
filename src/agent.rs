@@ -398,6 +398,7 @@ impl Agent for ClaudeAgent {
                 "PATH".to_string(),
                 "CLAWBLOX_CLAUDE_AUTO_LOOP".to_string(),
                 "CLAUDE_AUTO_LOOP_MESSAGE".to_string(),
+                "CLAUDE_CODE_STOP_HOOK_BLOCK_CAP".to_string(),
                 "CLAWBLOX_CLAUDE_RUNTIME_DIR".to_string(),
                 "WORLD_INTERNAL_BASE_URL".to_string(),
             ],
@@ -444,6 +445,11 @@ impl ClaudeAgent {
                 runtime_dir.display().to_string(),
             )
             .env("CLAWBLOX_CLAUDE_AUTO_LOOP", "1")
+            // Claude Code caps repeated blocking Stop hooks to avoid accidental
+            // infinite loops. Clawblox deliberately uses a blocking Stop hook as
+            // its unattended auto-continue mechanism, so raise the cap high
+            // enough for long generation runs.
+            .env("CLAUDE_CODE_STOP_HOOK_BLOCK_CAP", "1000000")
             .env(
                 "CLAUDE_AUTO_LOOP_MESSAGE",
                 &ctx.settings.auto_continue_prompt,

@@ -7,12 +7,55 @@ use std::collections::{HashMap, HashSet};
 
 use super::constants::humanoid as humanoid_consts;
 use super::constants::physics as consts;
-use super::lua::types::{PartType, PhysicalProperties};
+use super::lua::types::{CFrame, PartType, PhysicalProperties, Vector3};
+
+/// Large enough for normal worlds, small enough to keep Rapier broad-phase keys
+/// away from overflow and floating-point precision collapse.
+pub const PHYSICS_WORLD_ENVELOPE: f32 = 50_000.0;
+pub const PHYSICS_VELOCITY_ENVELOPE: f32 = 10_000.0;
+
+fn finite_vec3(values: [f32; 3]) -> bool {
+    values.iter().all(|v| v.is_finite())
+}
+
+fn within_abs_envelope(values: [f32; 3], envelope: f32) -> bool {
+    values.iter().all(|v| v.abs() <= envelope)
+}
+
+pub fn transform_within_physics_envelope(position: [f32; 3]) -> bool {
+    finite_vec3(position) && within_abs_envelope(position, PHYSICS_WORLD_ENVELOPE)
+}
+
+pub fn velocity_within_physics_envelope(velocity: [f32; 3]) -> bool {
+    finite_vec3(velocity) && within_abs_envelope(velocity, PHYSICS_VELOCITY_ENVELOPE)
+}
+
+fn rotation_matrix_is_finite(rotation: &[[f32; 3]; 3]) -> bool {
+    rotation.iter().flatten().all(|v| v.is_finite())
+}
+
+fn part_within_physics_envelope(part: &PhysicsAssemblyPart) -> bool {
+    transform_within_physics_envelope(part.position)
+        && finite_vec3(part.size)
+        && part.size.iter().all(|v| *v >= 0.0)
+        && rotation_matrix_is_finite(&part.rotation)
+        && velocity_within_physics_envelope(part.velocity)
+        && velocity_within_physics_envelope(part.angular_velocity)
+}
 
 /// Converts a 3x3 rotation matrix to a UnitQuaternion (Shepperd's method).
 pub fn rotation_matrix_to_quaternion(m: &[[f32; 3]; 3]) -> UnitQuaternion<f32> {
+    // Roblox CFrames are rigid transforms: their 3x3 component is orientation,
+    // not scale or shear. Normalize here before handing the matrix to Rapier so
+    // a bad script/runtime edge cannot turn a part into a scaled physics frame.
+    let basis = CFrame {
+        position: Vector3::zero(),
+        rotation: *m,
+    }
+    .orthonormalized();
+    let r = basis.rotation;
     let rot = nalgebra::Matrix3::new(
-        m[0][0], m[0][1], m[0][2], m[1][0], m[1][1], m[1][2], m[2][0], m[2][1], m[2][2],
+        r[0][0], r[0][1], r[0][2], r[1][0], r[1][1], r[1][2], r[2][0], r[2][1], r[2][2],
     );
     let rotation = nalgebra::Rotation3::from_matrix_unchecked(rot);
     UnitQuaternion::from_rotation_matrix(&rotation)
@@ -72,6 +115,32 @@ impl PartInteractionState {
     }
 }
 
+#[derive(Debug, Clone)]
+pub struct PhysicsAssemblyPart {
+    pub lua_id: u64,
+    pub position: [f32; 3],
+    pub rotation: [[f32; 3]; 3],
+    pub size: [f32; 3],
+    pub anchored: bool,
+    pub can_collide: bool,
+    pub can_touch: bool,
+    pub can_query: bool,
+    pub shape: PartType,
+    pub physical_properties: Option<PhysicalProperties>,
+    pub velocity: [f32; 3],
+    pub angular_velocity: [f32; 3],
+    pub position_dirty: bool,
+    pub cframe_dirty: bool,
+    pub velocity_dirty: bool,
+    pub angular_velocity_dirty: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct PhysicsAssemblySpec {
+    pub root_id: u64,
+    pub parts: Vec<PhysicsAssemblyPart>,
+}
+
 /// Wrapper around Rapier3D physics world for game physics simulation.
 /// Syncs with Lua Workspace parts to simulate physics for non-anchored parts.
 pub struct PhysicsWorld {
@@ -102,6 +171,16 @@ pub struct PhysicsWorld {
     pub character_controllers: HashMap<u64, CharacterControllerState>,
     /// Maps Rapier collider handle to Lua instance ID (for touch detection)
     pub collider_to_lua: HashMap<ColliderHandle, u64>,
+    /// Maps Lua part IDs to their collider handles. Multiple Lua parts can
+    /// share one rigid body when rigid welds form a Roblox-style assembly.
+    pub lua_to_collider: HashMap<u64, ColliderHandle>,
+    /// Body-local transform for each Lua part collider within its physical assembly.
+    pub lua_to_local_frame: HashMap<u64, Isometry<Real>>,
+    /// Maps a Rapier body to all Lua parts represented by its colliders.
+    pub body_to_luas: HashMap<RigidBodyHandle, Vec<u64>>,
+    /// Stable structural signatures for physical assemblies. Matching signatures
+    /// allow us to preserve Rapier bodies so sleeping and warmstarting work.
+    assembly_signatures: HashMap<u64, String>,
     /// Script-driven kinematic linear velocity sampled from per-tick target translation.
     pub kinematic_linear_velocities: HashMap<RigidBodyHandle, [f32; 3]>,
     /// Bodies queued for removal after the current physics step finishes.
@@ -196,7 +275,153 @@ fn build_collider_with_physical_properties(
     collider
 }
 
+fn part_isometry(position: [f32; 3], rotation: &[[f32; 3]; 3]) -> Isometry<Real> {
+    Isometry::from_parts(
+        Translation3::new(position[0], position[1], position[2]),
+        rotation_matrix_to_quaternion(rotation),
+    )
+}
+
+fn q5(value: f32) -> i64 {
+    let quantized = (value * 100_000.0).round() as i64;
+    if quantized == 0 { 0 } else { quantized }
+}
+
+fn fmt_vec3(out: &mut String, values: [f32; 3]) {
+    out.push_str(&format!("{},{},{}", q5(values[0]), q5(values[1]), q5(values[2])));
+}
+
+fn fmt_iso(out: &mut String, iso: &Isometry<Real>) {
+    let t = iso.translation.vector;
+    let q = iso.rotation;
+    out.push_str(&format!(
+        "{},{},{}|{},{},{},{}",
+        q5(t.x), q5(t.y), q5(t.z), q5(q.i), q5(q.j), q5(q.k), q5(q.w)
+    ));
+}
+
+fn assembly_signature(
+    root_iso: &Isometry<Real>,
+    anchored: bool,
+    parts: &[PhysicsAssemblyPart],
+    existing_local_frames: &HashMap<u64, Isometry<Real>>,
+) -> String {
+    let mut out = format!("anchored={};", anchored);
+    let inv_root = root_iso.inverse();
+    let assembly_cframe_write = parts.iter().any(|part| part.cframe_dirty);
+    let mut sorted = parts.to_vec();
+    sorted.sort_by_key(|p| p.lua_id);
+    for part in &sorted {
+        // Roblox weld parity: setting Position on a welded part recalculates
+        // that part's assembly-local offset, but setting CFrame moves the whole
+        // assembly through the existing offsets. If any assembly member had a
+        // CFrame write this frame, preserve every stored local frame; otherwise
+        // moving the root part would make every other part look like it changed
+        // weld offset relative to the new root transform.
+        let local = if assembly_cframe_write {
+            existing_local_frames
+                .get(&part.lua_id)
+                .copied()
+                .unwrap_or_else(|| inv_root * part_isometry(part.position, &part.rotation))
+        } else {
+            inv_root * part_isometry(part.position, &part.rotation)
+        };
+        out.push_str(&format!("id={};shape={:?};", part.lua_id, part.shape));
+        out.push_str("size=");
+        fmt_vec3(&mut out, part.size);
+        out.push_str(";collide=");
+        out.push_str(if part.can_collide { "1" } else { "0" });
+        out.push_str(";touch=");
+        out.push_str(if part.can_touch { "1" } else { "0" });
+        out.push_str(";query=");
+        out.push_str(if part.can_query { "1" } else { "0" });
+        out.push_str(";local=");
+        fmt_iso(&mut out, &local);
+        out.push(';');
+        if let Some(props) = part.physical_properties {
+            out.push_str(&format!(
+                "props={},{},{},{},{};",
+                q5(props.density),
+                q5(props.friction),
+                q5(props.elasticity),
+                q5(props.friction_weight),
+                q5(props.elasticity_weight)
+            ));
+        }
+    }
+    out
+}
+
 impl PhysicsWorld {
+    fn body_is_within_physics_envelope(&self, handle: RigidBodyHandle) -> bool {
+        let Some(body) = self.rigid_body_set.get(handle) else {
+            return true;
+        };
+        let pos = body.translation();
+        let linvel = body.linvel();
+        let angvel = body.angvel();
+        let position = [pos.x, pos.y, pos.z];
+        let linear_velocity = [linvel.x, linvel.y, linvel.z];
+        let angular_velocity = [angvel.x, angvel.y, angvel.z];
+
+        transform_within_physics_envelope(position)
+            && velocity_within_physics_envelope(linear_velocity)
+            && velocity_within_physics_envelope(angular_velocity)
+    }
+
+    fn remove_body_mappings(&mut self, body_handle: RigidBodyHandle) {
+        let root_id = self.body_to_lua.remove(&body_handle);
+        if let Some(root_id) = root_id {
+            self.assembly_signatures.remove(&root_id);
+        }
+
+        let lua_ids = self
+            .body_to_luas
+            .remove(&body_handle)
+            .or_else(|| root_id.map(|id| vec![id]))
+            .unwrap_or_default();
+        for lua_id in lua_ids {
+            self.lua_to_body.remove(&lua_id);
+            self.lua_to_collider.remove(&lua_id);
+            self.lua_to_local_frame.remove(&lua_id);
+            self.lua_to_shape.remove(&lua_id);
+            self.lua_to_physical_properties.remove(&lua_id);
+            self.lua_to_interactions.remove(&lua_id);
+        }
+
+        self.kinematic_linear_velocities.remove(&body_handle);
+        if let Some(body) = self.rigid_body_set.get(body_handle) {
+            for &collider_handle in body.colliders() {
+                self.collider_to_lua.remove(&collider_handle);
+            }
+        }
+    }
+
+    /// Removes bodies whose transforms or velocities have left the finite range
+    /// Rapier can robustly simulate. Roblox similarly prevents fallen/far-origin
+    /// parts from living forever; this keeps one bad dynamic body from halting
+    /// the whole server.
+    pub fn purge_invalid_bodies(&mut self) -> usize {
+        let handles: Vec<_> = self
+            .rigid_body_set
+            .iter()
+            .filter_map(|(handle, _)| {
+                if self.body_is_within_physics_envelope(handle) {
+                    None
+                } else {
+                    Some(handle)
+                }
+            })
+            .collect();
+
+        let removed = handles.len();
+        for handle in handles {
+            self.remove_body_mappings(handle);
+            self.queue_body_removal(handle);
+        }
+        removed
+    }
+
     fn queryable_collider_predicate(&self) -> impl Fn(ColliderHandle, &Collider) -> bool + '_ {
         move |handle, _collider| {
             self.collider_to_lua
@@ -229,6 +454,10 @@ impl PhysicsWorld {
             lua_to_interactions: HashMap::new(),
             character_controllers: HashMap::new(),
             collider_to_lua: HashMap::new(),
+            lua_to_collider: HashMap::new(),
+            lua_to_local_frame: HashMap::new(),
+            body_to_luas: HashMap::new(),
+            assembly_signatures: HashMap::new(),
             kinematic_linear_velocities: HashMap::new(),
             pending_body_removals: Vec::new(),
         }
@@ -241,6 +470,7 @@ impl PhysicsWorld {
 
     /// Steps the physics simulation forward by dt seconds
     pub fn step(&mut self, dt: f32) {
+        self.purge_invalid_bodies();
         self.integration_parameters.dt = dt;
         self.physics_pipeline.step(
             &self.gravity,
@@ -257,6 +487,7 @@ impl PhysicsWorld {
             &(),
             &(),
         );
+        self.purge_invalid_bodies();
     }
 
     /// Removes all impulse joints. Constraints are rebuilt from Lua every tick.
@@ -284,6 +515,223 @@ impl PhysicsWorld {
             .local_frame1(local_frame1)
             .local_frame2(local_frame2);
         self.impulse_joint_set.insert(body1, body2, joint, true)
+    }
+
+    /// Syncs Roblox-style rigid assemblies into Rapier.
+    ///
+    /// Rigid weld graphs are represented as one Rapier body with one collider per
+    /// Lua part. This matches Roblox's "assembly is one rigid body" physics
+    /// model and avoids per-frame internal fixed-joint solves, wakeups, and sleep
+    /// timer resets. The body is preserved while the assembly signature is stable.
+    pub fn sync_assemblies(&mut self, specs: Vec<PhysicsAssemblySpec>, dt: f32) {
+        let mut active_lua_ids = HashSet::new();
+        let mut active_roots = HashSet::new();
+
+        for spec in specs {
+            if spec.parts.is_empty() {
+                continue;
+            }
+
+            active_roots.insert(spec.root_id);
+            for part in &spec.parts {
+                active_lua_ids.insert(part.lua_id);
+            }
+
+            if !spec.parts.iter().all(part_within_physics_envelope) {
+                self.remove_assembly_by_root(spec.root_id);
+                continue;
+            }
+
+            let root_part = spec
+                .parts
+                .iter()
+                .find(|part| part.lua_id == spec.root_id)
+                .unwrap_or(&spec.parts[0]);
+            let root_iso = part_isometry(root_part.position, &root_part.rotation);
+            let anchored = spec.parts.iter().any(|part| part.anchored);
+            let signature =
+                assembly_signature(&root_iso, anchored, &spec.parts, &self.lua_to_local_frame);
+            let existing_signature = self.assembly_signatures.get(&spec.root_id);
+
+            if existing_signature != Some(&signature) {
+                self.rebuild_assembly(&spec, root_iso, anchored, signature);
+                continue;
+            }
+
+            self.update_existing_assembly(&spec, dt);
+        }
+
+        let orphaned_roots: Vec<u64> = self
+            .assembly_signatures
+            .keys()
+            .copied()
+            .filter(|root_id| !active_roots.contains(root_id))
+            .collect();
+        for root_id in orphaned_roots {
+            self.remove_assembly_by_root(root_id);
+        }
+
+        let orphaned_parts: Vec<u64> = self
+            .lua_to_body
+            .keys()
+            .copied()
+            .filter(|lua_id| {
+                !active_lua_ids.contains(lua_id) && !self.character_controllers.contains_key(lua_id)
+            })
+            .collect();
+        for lua_id in orphaned_parts {
+            self.remove_part(lua_id);
+        }
+    }
+
+    fn rebuild_assembly(
+        &mut self,
+        spec: &PhysicsAssemblySpec,
+        root_iso: Isometry<Real>,
+        anchored: bool,
+        signature: String,
+    ) {
+        let mut old_roots: Vec<u64> = spec
+            .parts
+            .iter()
+            .filter_map(|part| {
+                let body = self.lua_to_body.get(&part.lua_id)?;
+                self.body_to_lua.get(body).copied()
+            })
+            .collect();
+        old_roots.sort_unstable();
+        old_roots.dedup();
+
+        // A weld can merge multiple previous assemblies, and the Roblox assembly
+        // root can change when a lower-id part joins. Remove every old body
+        // before inserting the replacement body; otherwise later orphan-root
+        // cleanup can follow an old root id to the new body and delete it.
+        for old_root in old_roots {
+            self.remove_assembly_by_root(old_root);
+        }
+
+        let body = if anchored {
+            RigidBodyBuilder::kinematic_position_based()
+        } else {
+            RigidBodyBuilder::dynamic()
+        }
+        .position(root_iso)
+        .build();
+        let body_handle = self.rigid_body_set.insert(body);
+
+        let inv_root = root_iso.inverse();
+        let mut lua_ids = Vec::with_capacity(spec.parts.len());
+        let mut initial_velocity = None;
+        let mut initial_angular_velocity = None;
+
+        for part in &spec.parts {
+            let interaction_state = PartInteractionState {
+                can_collide: part.can_collide,
+                can_touch: part.can_touch,
+                can_query: part.can_query,
+            };
+            let local_frame = inv_root * part_isometry(part.position, &part.rotation);
+            let mut collider = build_collider_with_physical_properties(
+                part.size,
+                part.shape,
+                interaction_state,
+                part.physical_properties,
+            );
+            collider.set_position(local_frame);
+            let collider_handle = self.collider_set.insert_with_parent(
+                collider,
+                body_handle,
+                &mut self.rigid_body_set,
+            );
+
+            self.lua_to_body.insert(part.lua_id, body_handle);
+            self.lua_to_collider.insert(part.lua_id, collider_handle);
+            self.lua_to_local_frame.insert(part.lua_id, local_frame);
+            self.lua_to_shape.insert(part.lua_id, part.shape);
+            self.lua_to_physical_properties
+                .insert(part.lua_id, part.physical_properties);
+            self.lua_to_interactions.insert(part.lua_id, interaction_state);
+            self.collider_to_lua.insert(collider_handle, part.lua_id);
+            lua_ids.push(part.lua_id);
+
+            if initial_velocity.is_none() && (part.velocity_dirty || part.lua_id == spec.root_id) {
+                initial_velocity = Some(part.velocity);
+            }
+            if initial_angular_velocity.is_none()
+                && (part.angular_velocity_dirty || part.lua_id == spec.root_id)
+            {
+                initial_angular_velocity = Some(part.angular_velocity);
+            }
+        }
+
+        self.body_to_lua.insert(body_handle, spec.root_id);
+        self.body_to_luas.insert(body_handle, lua_ids);
+        self.assembly_signatures.insert(spec.root_id, signature);
+
+        if !anchored {
+            if let Some(velocity) = initial_velocity {
+                self.set_velocity(body_handle, velocity);
+            }
+            if let Some(angular_velocity) = initial_angular_velocity {
+                self.set_angular_velocity(body_handle, angular_velocity);
+            }
+        } else {
+            self.kinematic_linear_velocities
+                .insert(body_handle, [0.0, 0.0, 0.0]);
+        }
+    }
+
+    fn update_existing_assembly(&mut self, spec: &PhysicsAssemblySpec, dt: f32) {
+        let Some(&body_handle) = self.lua_to_body.get(&spec.root_id) else {
+            return;
+        };
+
+        for part in &spec.parts {
+            if part.position_dirty {
+                if let Some(local_frame) = self.lua_to_local_frame.get(&part.lua_id).copied() {
+                    let target_body_iso =
+                        part_isometry(part.position, &part.rotation) * local_frame.inverse();
+                    if let Some(body) = self.rigid_body_set.get(body_handle) {
+                        if body.is_kinematic() {
+                            let cur = body.translation();
+                            let target = target_body_iso.translation.vector;
+                            let inv_dt = if dt > consts::EPSILON { 1.0 / dt } else { 0.0 };
+                            self.kinematic_linear_velocities.insert(
+                                body_handle,
+                                [
+                                    (target.x - cur.x) * inv_dt,
+                                    (target.y - cur.y) * inv_dt,
+                                    (target.z - cur.z) * inv_dt,
+                                ],
+                            );
+                        }
+                    }
+                    if let Some(body) = self.rigid_body_set.get_mut(body_handle) {
+                        if body.is_kinematic() {
+                            body.set_next_kinematic_position(target_body_iso);
+                        } else if body.is_dynamic() {
+                            body.set_position(target_body_iso, true);
+                        }
+                    }
+                }
+            }
+            if part.velocity_dirty {
+                self.set_velocity(body_handle, part.velocity);
+            }
+            if part.angular_velocity_dirty {
+                self.set_angular_velocity(body_handle, part.angular_velocity);
+            }
+        }
+    }
+
+    fn remove_assembly_by_root(&mut self, root_id: u64) {
+        let Some(body_handle) = self.lua_to_body.get(&root_id).copied() else {
+            self.assembly_signatures.remove(&root_id);
+            return;
+        };
+
+        self.remove_body_mappings(body_handle);
+        self.queue_body_removal(body_handle);
     }
 
     /// Adds a part to the physics world
@@ -337,6 +785,9 @@ impl PhysicsWorld {
         // Store mappings
         self.lua_to_body.insert(lua_id, handle);
         self.body_to_lua.insert(handle, lua_id);
+        self.body_to_luas.insert(handle, vec![lua_id]);
+        self.lua_to_collider.insert(lua_id, collider_handle);
+        self.lua_to_local_frame.insert(lua_id, Isometry::identity());
         self.lua_to_shape.insert(lua_id, shape);
         self.lua_to_physical_properties
             .insert(lua_id, physical_properties);
@@ -350,13 +801,29 @@ impl PhysicsWorld {
     pub fn remove_part(&mut self, lua_id: u64) -> bool {
         // If this lua_id is a character HRP, clean up the character controller
         // to avoid stale handles that would panic in rapier during step/move.
-        self.character_controllers.remove(&lua_id);
+        if let Some(state) = self.character_controllers.remove(&lua_id) {
+            self.lua_to_body.remove(&lua_id);
+            self.body_to_lua.remove(&state.body_handle);
+            self.body_to_luas.remove(&state.body_handle);
+            self.lua_to_collider.remove(&lua_id);
+            self.lua_to_local_frame.remove(&lua_id);
+            self.collider_to_lua.remove(&state.collider_handle);
+            self.kinematic_linear_velocities.remove(&state.body_handle);
+            self.queue_body_removal(state.body_handle);
+            return true;
+        }
 
-        if let Some(handle) = self.lua_to_body.remove(&lua_id) {
-            self.body_to_lua.remove(&handle);
+        if let Some(&handle) = self.lua_to_body.get(&lua_id) {
+            if let Some(root_id) = self.body_to_lua.get(&handle).copied() {
+                self.remove_assembly_by_root(root_id);
+                return true;
+            }
+            self.lua_to_body.remove(&lua_id);
             self.lua_to_shape.remove(&lua_id);
             self.lua_to_physical_properties.remove(&lua_id);
             self.lua_to_interactions.remove(&lua_id);
+            self.lua_to_collider.remove(&lua_id);
+            self.lua_to_local_frame.remove(&lua_id);
             self.kinematic_linear_velocities.remove(&handle);
             // Remove collider->lua mappings before disabling and queuing the body.
             if let Some(body) = self.rigid_body_set.get(handle) {
@@ -411,6 +878,11 @@ impl PhysicsWorld {
         position: [f32; 3],
         dt: f32,
     ) {
+        if !transform_within_physics_envelope(position) {
+            self.remove_body_mappings(handle);
+            self.queue_body_removal(handle);
+            return;
+        }
         if let Some(body) = self.rigid_body_set.get_mut(handle) {
             if body.is_kinematic() {
                 let cur = body.translation();
@@ -435,6 +907,11 @@ impl PhysicsWorld {
 
     /// Updates the rotation of an anchored (kinematic) part from a 3x3 rotation matrix
     pub fn set_kinematic_rotation(&mut self, handle: RigidBodyHandle, rotation: &[[f32; 3]; 3]) {
+        if !rotation_matrix_is_finite(rotation) {
+            self.remove_body_mappings(handle);
+            self.queue_body_removal(handle);
+            return;
+        }
         if let Some(body) = self.rigid_body_set.get_mut(handle) {
             if body.is_kinematic() {
                 let quat = rotation_matrix_to_quaternion(rotation);
@@ -445,6 +922,11 @@ impl PhysicsWorld {
 
     /// Teleports a dynamic body to a world position.
     pub fn set_dynamic_position(&mut self, handle: RigidBodyHandle, position: [f32; 3]) {
+        if !transform_within_physics_envelope(position) {
+            self.remove_body_mappings(handle);
+            self.queue_body_removal(handle);
+            return;
+        }
         if let Some(body) = self.rigid_body_set.get_mut(handle) {
             if body.is_dynamic() {
                 body.set_translation(vector![position[0], position[1], position[2]], true);
@@ -454,6 +936,11 @@ impl PhysicsWorld {
 
     /// Sets a dynamic body's world orientation from a 3x3 rotation matrix.
     pub fn set_dynamic_rotation(&mut self, handle: RigidBodyHandle, rotation: &[[f32; 3]; 3]) {
+        if !rotation_matrix_is_finite(rotation) {
+            self.remove_body_mappings(handle);
+            self.queue_body_removal(handle);
+            return;
+        }
         if let Some(body) = self.rigid_body_set.get_mut(handle) {
             if body.is_dynamic() {
                 let quat = rotation_matrix_to_quaternion(rotation);
@@ -464,6 +951,11 @@ impl PhysicsWorld {
 
     /// Sets the velocity of a dynamic part
     pub fn set_velocity(&mut self, handle: RigidBodyHandle, velocity: [f32; 3]) {
+        if !velocity_within_physics_envelope(velocity) {
+            self.remove_body_mappings(handle);
+            self.queue_body_removal(handle);
+            return;
+        }
         if let Some(body) = self.rigid_body_set.get_mut(handle) {
             if body.is_dynamic() {
                 body.set_linvel(vector![velocity[0], velocity[1], velocity[2]], true);
@@ -473,6 +965,11 @@ impl PhysicsWorld {
 
     /// Sets the angular velocity of a dynamic part
     pub fn set_angular_velocity(&mut self, handle: RigidBodyHandle, angular_velocity: [f32; 3]) {
+        if !velocity_within_physics_envelope(angular_velocity) {
+            self.remove_body_mappings(handle);
+            self.queue_body_removal(handle);
+            return;
+        }
         if let Some(body) = self.rigid_body_set.get_mut(handle) {
             if body.is_dynamic() {
                 body.set_angvel(
@@ -510,6 +1007,42 @@ impl PhysicsWorld {
             .map(|body| quaternion_to_rotation_matrix(body.rotation()))
     }
 
+    fn get_part_world_isometry(&self, lua_id: u64) -> Option<Isometry<Real>> {
+        let body_handle = *self.lua_to_body.get(&lua_id)?;
+        let body = self.rigid_body_set.get(body_handle)?;
+        let local = self
+            .lua_to_local_frame
+            .get(&lua_id)
+            .copied()
+            .unwrap_or_else(Isometry::identity);
+        Some(*body.position() * local)
+    }
+
+    pub fn get_part_position(&self, lua_id: u64) -> Option<[f32; 3]> {
+        self.get_part_world_isometry(lua_id).map(|iso| {
+            let pos = iso.translation.vector;
+            [pos.x, pos.y, pos.z]
+        })
+    }
+
+    pub fn get_part_rotation_matrix(&self, lua_id: u64) -> Option<[[f32; 3]; 3]> {
+        self.get_part_world_isometry(lua_id)
+            .map(|iso| quaternion_to_rotation_matrix(&iso.rotation))
+    }
+
+    pub fn get_part_velocity(&self, lua_id: u64) -> Option<[f32; 3]> {
+        let body_handle = *self.lua_to_body.get(&lua_id)?;
+        let body = self.rigid_body_set.get(body_handle)?;
+        let part_iso = self.get_part_world_isometry(lua_id)?;
+        let point = point![
+            part_iso.translation.vector.x,
+            part_iso.translation.vector.y,
+            part_iso.translation.vector.z
+        ];
+        let vel = body.velocity_at_point(&point);
+        Some([vel.x, vel.y, vel.z])
+    }
+
     /// Gets the velocity of a rigid body
     pub fn get_velocity(&self, handle: RigidBodyHandle) -> Option<[f32; 3]> {
         self.rigid_body_set.get(handle).map(|body| {
@@ -539,6 +1072,20 @@ impl PhysicsWorld {
     /// Gets the handle for a Lua instance
     pub fn get_handle(&self, lua_id: u64) -> Option<RigidBodyHandle> {
         self.lua_to_body.get(&lua_id).copied()
+    }
+
+    pub fn dynamic_body_count(&self) -> usize {
+        self.rigid_body_set
+            .iter()
+            .filter(|(_, body)| body.is_dynamic())
+            .count()
+    }
+
+    pub fn awake_dynamic_body_count(&self) -> usize {
+        self.rigid_body_set
+            .iter()
+            .filter(|(_, body)| body.is_dynamic() && !body.is_sleeping())
+            .count()
     }
 
     pub fn is_dynamic_body(&self, handle: RigidBodyHandle) -> bool {
@@ -585,33 +1132,33 @@ impl PhysicsWorld {
                     can_touch: true,
                     can_query: true,
                 });
-        if let Some(&handle) = self.lua_to_body.get(&lua_id) {
-            if let Some(body) = self.rigid_body_set.get(handle) {
-                let colliders: Vec<_> = body.colliders().iter().cloned().collect();
-
-                for collider_handle in colliders {
-                    self.collider_to_lua.remove(&collider_handle);
-                    self.collider_set.remove(
-                        collider_handle,
-                        &mut self.island_manager,
-                        &mut self.rigid_body_set,
-                        true,
-                    );
-                }
-
-                let collider = build_collider_with_physical_properties(
-                    size,
-                    shape,
-                    interaction_state,
-                    physical_properties,
-                );
-                let new_ch = self.collider_set.insert_with_parent(
-                    collider,
-                    handle,
-                    &mut self.rigid_body_set,
-                );
-                self.collider_to_lua.insert(new_ch, lua_id);
-            }
+        if let (Some(&handle), Some(&old_collider)) =
+            (self.lua_to_body.get(&lua_id), self.lua_to_collider.get(&lua_id))
+        {
+            let local_frame = self
+                .lua_to_local_frame
+                .get(&lua_id)
+                .copied()
+                .unwrap_or_else(Isometry::identity);
+            self.collider_to_lua.remove(&old_collider);
+            self.collider_set.remove(
+                old_collider,
+                &mut self.island_manager,
+                &mut self.rigid_body_set,
+                true,
+            );
+            let mut collider = build_collider_with_physical_properties(
+                size,
+                shape,
+                interaction_state,
+                physical_properties,
+            );
+            collider.set_position(local_frame);
+            let new_ch =
+                self.collider_set
+                    .insert_with_parent(collider, handle, &mut self.rigid_body_set);
+            self.collider_to_lua.insert(new_ch, lua_id);
+            self.lua_to_collider.insert(lua_id, new_ch);
         }
     }
 
@@ -660,15 +1207,10 @@ impl PhysicsWorld {
 
     fn set_interaction_state(&mut self, lua_id: u64, state: PartInteractionState) {
         self.lua_to_interactions.insert(lua_id, state);
-        if let Some(&handle) = self.lua_to_body.get(&lua_id) {
-            if let Some(body) = self.rigid_body_set.get(handle) {
-                let colliders: Vec<_> = body.colliders().iter().cloned().collect();
-                for collider_handle in colliders {
-                    if let Some(collider) = self.collider_set.get_mut(collider_handle) {
-                        collider.set_sensor(!state.can_collide);
-                        collider.set_enabled(state.collider_enabled());
-                    }
-                }
+        if let Some(&collider_handle) = self.lua_to_collider.get(&lua_id) {
+            if let Some(collider) = self.collider_set.get_mut(collider_handle) {
+                collider.set_sensor(!state.can_collide);
+                collider.set_enabled(state.collider_enabled());
             }
         }
     }
@@ -690,33 +1232,33 @@ impl PhysicsWorld {
                     can_touch: true,
                     can_query: true,
                 });
-        if let Some(&handle) = self.lua_to_body.get(&lua_id) {
-            if let Some(body) = self.rigid_body_set.get(handle) {
-                let colliders: Vec<_> = body.colliders().iter().cloned().collect();
-
-                for collider_handle in colliders {
-                    self.collider_to_lua.remove(&collider_handle);
-                    self.collider_set.remove(
-                        collider_handle,
-                        &mut self.island_manager,
-                        &mut self.rigid_body_set,
-                        true,
-                    );
-                }
-
-                let collider = build_collider_with_physical_properties(
-                    size,
-                    shape,
-                    interaction_state,
-                    physical_properties,
-                );
-                let new_ch = self.collider_set.insert_with_parent(
-                    collider,
-                    handle,
-                    &mut self.rigid_body_set,
-                );
-                self.collider_to_lua.insert(new_ch, lua_id);
-            }
+        if let (Some(&handle), Some(&old_collider)) =
+            (self.lua_to_body.get(&lua_id), self.lua_to_collider.get(&lua_id))
+        {
+            let local_frame = self
+                .lua_to_local_frame
+                .get(&lua_id)
+                .copied()
+                .unwrap_or_else(Isometry::identity);
+            self.collider_to_lua.remove(&old_collider);
+            self.collider_set.remove(
+                old_collider,
+                &mut self.island_manager,
+                &mut self.rigid_body_set,
+                true,
+            );
+            let mut collider = build_collider_with_physical_properties(
+                size,
+                shape,
+                interaction_state,
+                physical_properties,
+            );
+            collider.set_position(local_frame);
+            let new_ch =
+                self.collider_set
+                    .insert_with_parent(collider, handle, &mut self.rigid_body_set);
+            self.collider_to_lua.insert(new_ch, lua_id);
+            self.lua_to_collider.insert(lua_id, new_ch);
         }
     }
 
@@ -728,18 +1270,13 @@ impl PhysicsWorld {
     ) {
         self.lua_to_physical_properties
             .insert(lua_id, physical_properties);
-        if let Some(&handle) = self.lua_to_body.get(&lua_id) {
-            if let Some(body) = self.rigid_body_set.get(handle) {
+        if let Some(&collider_handle) = self.lua_to_collider.get(&lua_id) {
+            if let Some(collider) = self.collider_set.get_mut(collider_handle) {
                 let props =
                     physical_properties.unwrap_or(PhysicalProperties::new(0.7, 0.3, 0.5, 1.0, 1.0));
-                let colliders: Vec<_> = body.colliders().iter().cloned().collect();
-                for collider_handle in colliders {
-                    if let Some(collider) = self.collider_set.get_mut(collider_handle) {
-                        collider.set_friction(props.friction.max(0.0));
-                        collider.set_restitution(props.elasticity.max(0.0));
-                        collider.set_density(props.density.max(0.0));
-                    }
-                }
+                collider.set_friction(props.friction.max(0.0));
+                collider.set_restitution(props.elasticity.max(0.0));
+                collider.set_density(props.density.max(0.0));
             }
         }
     }
@@ -747,8 +1284,8 @@ impl PhysicsWorld {
     #[cfg(test)]
     fn collider_enabled_for_lua(&self, lua_id: u64) -> Option<bool> {
         let handle = *self.lua_to_body.get(&lua_id)?;
-        let body = self.rigid_body_set.get(handle)?;
-        let collider_handle = *body.colliders().first()?;
+        let _body = self.rigid_body_set.get(handle)?;
+        let collider_handle = *self.lua_to_collider.get(&lua_id)?;
         Some(self.collider_set.get(collider_handle)?.is_enabled())
     }
 
@@ -809,6 +1346,10 @@ impl PhysicsWorld {
         self.character_controllers.insert(lua_id, state);
         self.lua_to_body.insert(lua_id, body_handle);
         self.body_to_lua.insert(body_handle, lua_id);
+        self.body_to_luas.insert(body_handle, vec![lua_id]);
+        self.lua_to_collider.insert(lua_id, collider_handle);
+        self.lua_to_local_frame
+            .insert(lua_id, Isometry::identity());
         self.collider_to_lua.insert(collider_handle, lua_id);
 
         body_handle
@@ -949,6 +1490,9 @@ impl PhysicsWorld {
         if let Some(state) = self.character_controllers.remove(&lua_id) {
             self.lua_to_body.remove(&lua_id);
             self.body_to_lua.remove(&state.body_handle);
+            self.body_to_luas.remove(&state.body_handle);
+            self.lua_to_collider.remove(&lua_id);
+            self.lua_to_local_frame.remove(&lua_id);
             self.collider_to_lua.remove(&state.collider_handle);
             self.kinematic_linear_velocities.remove(&state.body_handle);
             self.queue_body_removal(state.body_handle);
@@ -1021,47 +1565,44 @@ impl PhysicsWorld {
     pub fn detect_overlaps(&self) -> HashSet<(u64, u64)> {
         let mut overlaps = HashSet::new();
 
-        for (&lua_id, &body_handle) in &self.lua_to_body {
-            let Some(body) = self.rigid_body_set.get(body_handle) else {
+        for (&ch, &lua_id) in &self.collider_to_lua {
+            let Some(collider) = self.collider_set.get(ch) else {
                 continue;
             };
+            let parent_body = collider.parent();
+            let shape = collider.shape();
+            let pos = collider.position();
 
-            // Get the collider shape and position for this body
-            let collider_handles: Vec<_> = body.colliders().iter().cloned().collect();
-            for ch in collider_handles {
-                let Some(collider) = self.collider_set.get(ch) else {
-                    continue;
-                };
+            let filter = QueryFilter::default().exclude_collider(ch);
 
-                let shape = collider.shape();
-                let pos = collider.position();
-
-                // Query all intersecting colliders, excluding self
-                let filter = QueryFilter::default().exclude_rigid_body(body_handle);
-
-                self.query_pipeline.intersections_with_shape(
-                    &self.rigid_body_set,
-                    &self.collider_set,
-                    pos,
-                    shape,
-                    filter,
-                    |other_collider_handle| {
-                        if let Some(&other_lua_id) =
-                            self.collider_to_lua.get(&other_collider_handle)
-                        {
-                            if other_lua_id != lua_id {
-                                let pair = if lua_id < other_lua_id {
-                                    (lua_id, other_lua_id)
-                                } else {
-                                    (other_lua_id, lua_id)
-                                };
-                                overlaps.insert(pair);
-                            }
+            self.query_pipeline.intersections_with_shape(
+                &self.rigid_body_set,
+                &self.collider_set,
+                pos,
+                shape,
+                filter,
+                |other_collider_handle| {
+                    let Some(&other_lua_id) = self.collider_to_lua.get(&other_collider_handle)
+                    else {
+                        return true;
+                    };
+                    if other_lua_id == lua_id {
+                        return true;
+                    }
+                    if let Some(other_collider) = self.collider_set.get(other_collider_handle) {
+                        if other_collider.parent() == parent_body {
+                            return true;
                         }
-                        true // continue searching
-                    },
-                );
-            }
+                    }
+                    let pair = if lua_id < other_lua_id {
+                        (lua_id, other_lua_id)
+                    } else {
+                        (other_lua_id, lua_id)
+                    };
+                    overlaps.insert(pair);
+                    true
+                },
+            );
         }
 
         overlaps
@@ -2100,6 +2641,72 @@ mod tests {
         world.flush_pending_removals();
 
         assert!(!world.has_part(lua_id));
+        assert!(world.get_handle(lua_id).is_none());
+    }
+
+    #[test]
+    fn test_scaled_rotation_matrix_is_normalized_before_physics() {
+        let scaled_identity = [
+            [0.111_069_754, 0.0, 0.0],
+            [0.0, 0.111_069_77, 0.0],
+            [0.0, 0.0, 0.111_069_78],
+        ];
+
+        let quat = rotation_matrix_to_quaternion(&scaled_identity);
+        let rot = quaternion_to_rotation_matrix(&quat);
+
+        assert!((rot[0][0] - 1.0).abs() < 1e-5);
+        assert!((rot[1][1] - 1.0).abs() < 1e-5);
+        assert!((rot[2][2] - 1.0).abs() < 1e-5);
+        assert!(rot[0][1].abs() < 1e-5);
+        assert!(rot[0][2].abs() < 1e-5);
+        assert!(rot[1][0].abs() < 1e-5);
+        assert!(rot[1][2].abs() < 1e-5);
+        assert!(rot[2][0].abs() < 1e-5);
+        assert!(rot[2][1].abs() < 1e-5);
+    }
+
+    #[test]
+    fn test_purge_invalid_body_removes_far_dynamic_part_before_step() {
+        let mut world = PhysicsWorld::new();
+        let lua_id = 42;
+        world.add_part(
+            lua_id,
+            [PHYSICS_WORLD_ENVELOPE * 2.0, 0.0, 0.0],
+            &[[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
+            [1.0, 1.0, 1.0],
+            false,
+            true,
+            true,
+            true,
+            PartType::Block,
+            None,
+        );
+
+        assert_eq!(world.purge_invalid_bodies(), 1);
+        world.flush_pending_removals();
+        assert!(world.get_handle(lua_id).is_none());
+    }
+
+    #[test]
+    fn test_invalid_velocity_write_removes_dynamic_part() {
+        let mut world = PhysicsWorld::new();
+        let lua_id = 43;
+        let handle = world.add_part(
+            lua_id,
+            [0.0, 1.0, 0.0],
+            &[[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
+            [1.0, 1.0, 1.0],
+            false,
+            true,
+            true,
+            true,
+            PartType::Block,
+            None,
+        );
+
+        world.set_velocity(handle, [f32::NAN, 0.0, 0.0]);
+        world.flush_pending_removals();
         assert!(world.get_handle(lua_id).is_none());
     }
 

@@ -148,6 +148,10 @@ pub struct PartData {
     pub custom_physical_properties_dirty: bool,
     pub shape: PartType,
     pub position_dirty: bool,
+    /// Distinguishes Roblox's welded-part transform semantics:
+    /// Position changes recompute the weld offset, while CFrame changes move the
+    /// whole rigid assembly through the existing offset.
+    pub cframe_dirty: bool,
     pub size_dirty: bool,
     pub anchored_dirty: bool,
     pub can_collide_dirty: bool,
@@ -183,6 +187,7 @@ impl Default for PartData {
             custom_physical_properties_dirty: false,
             shape: PartType::Block,
             position_dirty: false,
+            cframe_dirty: false,
             size_dirty: false,
             anchored_dirty: false,
             can_collide_dirty: false,
@@ -1308,12 +1313,14 @@ impl Instance {
     }
 
     fn pivot_to_cframe(&self, target: CFrame) {
+        let target = target.orthonormalized();
         if self.data.lock().unwrap().part_data.is_some() {
             let mut data = self.data.lock().unwrap();
             if let Some(part) = &mut data.part_data {
                 part.cframe = target;
                 part.position = target.position;
                 part.position_dirty = true;
+                part.cframe_dirty = true;
             }
             return;
         }
@@ -1330,6 +1337,7 @@ impl Instance {
                 part_data.cframe = part_data.cframe.multiply(&offset);
                 part_data.position = part_data.cframe.position;
                 part_data.position_dirty = true;
+                part_data.cframe_dirty = true;
             }
         }
 
@@ -1947,6 +1955,7 @@ impl UserData for Instance {
                             part.position = *pos;
                             part.cframe.position = *pos;
                             part.position_dirty = true;
+                            part.cframe_dirty = false;
                         } else if let Some(attachment) = &mut data.attachment_data {
                             attachment.cframe.position = *pos;
                         }
@@ -1973,11 +1982,13 @@ impl UserData for Instance {
             }
         });
         fields.add_field_method_set("CFrame", |_, this, cf: CFrame| {
+            let cf = cf.orthonormalized();
             let mut data = this.data.lock().unwrap();
             if let Some(part) = &mut data.part_data {
                 part.cframe = cf;
                 part.position = cf.position;
                 part.position_dirty = true;
+                part.cframe_dirty = true;
             } else if let Some(attachment) = &mut data.attachment_data {
                 attachment.cframe = cf;
             }
@@ -2658,7 +2669,7 @@ impl UserData for Instance {
                     match &value {
                         Value::UserData(ud) => {
                             if let Ok(cf) = ud.borrow::<CFrame>() {
-                                v.value = *cf;
+                                v.value = cf.orthonormalized();
                             } else {
                                 return Err(mlua::Error::runtime(
                                     "CFrameValue.Value expects CFrame",
@@ -3113,7 +3124,7 @@ impl UserData for Instance {
         fields.add_field_method_set("C0", |_, this, cframe: CFrame| {
             let mut data = this.data.lock().unwrap();
             if let Some(weld) = &mut data.weld_data {
-                weld.c0 = cframe;
+                weld.c0 = cframe.orthonormalized();
             }
             Ok(())
         });
@@ -3125,7 +3136,7 @@ impl UserData for Instance {
         fields.add_field_method_set("C1", |_, this, cframe: CFrame| {
             let mut data = this.data.lock().unwrap();
             if let Some(weld) = &mut data.weld_data {
-                weld.c1 = cframe;
+                weld.c1 = cframe.orthonormalized();
             }
             Ok(())
         });

@@ -454,6 +454,7 @@ fn shape_from_part(size: Vector3, shape: PartType) -> Option<SharedShape> {
 }
 
 fn cframe_to_isometry(cframe: CFrame) -> Isometry3<f32> {
+    let cframe = cframe.orthonormalized();
     let m = Matrix3::new(
         cframe.rotation[0][0],
         cframe.rotation[0][1],

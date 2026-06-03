@@ -6,11 +6,12 @@ use uuid::Uuid;
 use super::async_bridge::AsyncBridge;
 use super::lua::instance::{
     attributes_to_json, AttributeValue, ClassName, Instance, TextXAlignment, TextYAlignment,
+    WeakInstanceRef,
 };
 use super::lua::services::AgentInput;
 use super::lua::types::CFrame;
 use super::lua::LuaRuntime;
-use super::physics::PhysicsWorld;
+use super::physics::{PhysicsAssemblyPart, PhysicsAssemblySpec, PhysicsWorld};
 use super::touch_events::compute_touch_transitions;
 
 mod character_controller;
@@ -38,11 +39,13 @@ fn round_f32(v: f32) -> f32 {
 }
 
 fn set_part_cframe_from_constraint(part: &Instance, cframe: CFrame) {
+    let cframe = cframe.orthonormalized();
     let mut data = part.data.lock().unwrap();
     if let Some(part_data) = &mut data.part_data {
         part_data.cframe = cframe;
         part_data.position = cframe.position;
         part_data.position_dirty = true;
+        part_data.cframe_dirty = true;
     }
 }
 
@@ -859,39 +862,101 @@ impl GameInstance {
         }
     }
 
-    /// Syncs Lua parts to the physics world
-    /// - Creates physics bodies for new parts (skips character-controlled parts)
-    /// - Updates positions for anchored parts that moved in Lua
-    /// - Removes physics bodies for parts that were destroyed in Lua
+    /// Syncs Lua parts to the physics world as Roblox-style rigid assemblies.
+    ///
+    /// Active rigid welds define connected components of parts. Each component is
+    /// represented as one Rapier body with one collider per Lua part, which keeps
+    /// per-part query/touch identity while matching Roblox's "assembly is one
+    /// rigid body" physics model.
     fn sync_lua_to_physics(&mut self, dt: f32) {
         let Some(runtime) = &self.lua_runtime else {
             return;
         };
 
         let descendants = runtime.workspace().get_descendants();
+        let mut part_instances: HashMap<u64, Instance> = HashMap::new();
+        let mut adjacency: HashMap<u64, Vec<u64>> = HashMap::new();
 
-        // Collect all active Lua part IDs
-        let mut active_lua_ids: std::collections::HashSet<u64> = std::collections::HashSet::new();
-
-        for part in descendants {
-            let mut data = part.data.lock().unwrap();
-
+        for part in &descendants {
+            let data = part.data.lock().unwrap();
             let lua_id = data.id.0;
-            if let Some(part_data) = data.part_data.as_mut() {
-                active_lua_ids.insert(lua_id);
+            if data.part_data.is_some() {
+                part_instances.insert(lua_id, part.clone());
+                adjacency.entry(lua_id).or_default();
+            }
+        }
 
-                // Character-controlled parts: allow Lua-driven teleports (spawn) to sync into physics
-                if self.physics.has_character(lua_id) {
+        for instance in &descendants {
+            let data = instance.data.lock().unwrap();
+            let part_id = |part_ref: &Option<WeakInstanceRef>| {
+                part_ref
+                    .as_ref()
+                    .and_then(|w| w.upgrade())
+                    .map(|p| p.lock().unwrap().id.0)
+            };
+            let mut maybe_edge = |part0: Option<u64>, part1: Option<u64>| {
+                let (Some(a), Some(b)) = (part0, part1) else {
+                    return;
+                };
+                if a == b || !part_instances.contains_key(&a) || !part_instances.contains_key(&b) {
+                    return;
+                }
+                adjacency.entry(a).or_default().push(b);
+                adjacency.entry(b).or_default().push(a);
+            };
+
+            if let Some(weld) = &data.weld_data {
+                if weld.enabled {
+                    maybe_edge(part_id(&weld.part0), part_id(&weld.part1));
+                }
+            }
+
+            if let Some(weld) = &data.weld_constraint_data {
+                if weld.enabled {
+                    maybe_edge(part_id(&weld.part0), part_id(&weld.part1));
+                }
+            }
+        }
+
+        let mut visited = HashSet::new();
+        let mut assembly_specs = Vec::new();
+        let mut ids: Vec<u64> = part_instances.keys().copied().collect();
+        ids.sort_unstable();
+
+        for start_id in ids {
+            if !visited.insert(start_id) {
+                continue;
+            }
+
+            let mut component = Vec::new();
+            let mut stack = vec![start_id];
+            while let Some(id) = stack.pop() {
+                component.push(id);
+                if let Some(neighbors) = adjacency.get(&id) {
+                    for &neighbor in neighbors {
+                        if visited.insert(neighbor) {
+                            stack.push(neighbor);
+                        }
+                    }
+                }
+            }
+            component.sort_unstable();
+
+            let mut specs = Vec::with_capacity(component.len());
+            for lua_id in &component {
+                let Some(part) = part_instances.get(lua_id) else {
+                    continue;
+                };
+                let mut data = part.data.lock().unwrap();
+                let Some(part_data) = data.part_data.as_mut() else {
+                    continue;
+                };
+
+                // Character-controlled parts keep their dedicated controller body.
+                if self.physics.has_character(*lua_id) {
                     if part_data.position_dirty {
-                        eprintln!(
-                            "[Sync] Teleport character lua_id={} -> ({:.2},{:.2},{:.2})",
-                            lua_id,
-                            part_data.position.x,
-                            part_data.position.y,
-                            part_data.position.z
-                        );
                         self.physics.set_character_position(
-                            lua_id,
+                            *lua_id,
                             [
                                 part_data.position.x,
                                 part_data.position.y,
@@ -899,169 +964,79 @@ impl GameInstance {
                             ],
                         );
                         part_data.position_dirty = false;
+                        part_data.cframe_dirty = false;
                     }
                     continue;
                 }
 
-                if !self.physics.has_part(lua_id) {
-                    // New part - add to physics (even CanCollide=false as sensor)
-                    self.physics.add_part(
-                        lua_id,
-                        [
-                            part_data.position.x,
-                            part_data.position.y,
-                            part_data.position.z,
-                        ],
-                        &part_data.cframe.rotation,
-                        [part_data.size.x, part_data.size.y, part_data.size.z],
-                        part_data.anchored,
-                        part_data.can_collide,
-                        part_data.can_touch,
-                        part_data.can_query,
-                        part_data.shape,
-                        Some(part_data.effective_physical_properties()),
-                    );
-
-                    // Apply initial velocity for dynamic parts
-                    if !part_data.anchored {
-                        if let Some(handle) = self.physics.get_handle(lua_id) {
-                            self.physics.set_velocity(
-                                handle,
-                                [
-                                    part_data.velocity.x,
-                                    part_data.velocity.y,
-                                    part_data.velocity.z,
-                                ],
-                            );
-                            self.physics.set_angular_velocity(
-                                handle,
-                                [
-                                    part_data.angular_velocity.x,
-                                    part_data.angular_velocity.y,
-                                    part_data.angular_velocity.z,
-                                ],
-                            );
-                        }
-                    }
-
-                    // Clear all dirty flags since we just created the body
-                    part_data.size_dirty = false;
-                    part_data.anchored_dirty = false;
-                    part_data.can_collide_dirty = false;
-                    part_data.interaction_dirty = false;
-                    part_data.velocity_dirty = false;
-                    part_data.angular_velocity_dirty = false;
-                    part_data.shape_dirty = false;
-                    part_data.custom_physical_properties_dirty = false;
-                } else {
-                    // Existing part - process dirty flags
-                    if part_data.anchored_dirty {
-                        self.physics.set_anchored(lua_id, part_data.anchored);
-                        part_data.anchored_dirty = false;
-                    }
-                    if part_data.size_dirty {
-                        self.physics.set_size(
-                            lua_id,
-                            [part_data.size.x, part_data.size.y, part_data.size.z],
-                        );
-                        part_data.size_dirty = false;
-                    }
-                    if part_data.can_collide_dirty {
-                        self.physics.set_can_collide(lua_id, part_data.can_collide);
-                        part_data.can_collide_dirty = false;
-                    }
-                    if part_data.interaction_dirty {
-                        self.physics.set_can_touch(lua_id, part_data.can_touch);
-                        self.physics.set_can_query(lua_id, part_data.can_query);
-                        part_data.interaction_dirty = false;
-                    }
-                    if part_data.velocity_dirty {
-                        if let Some(handle) = self.physics.get_handle(lua_id) {
-                            self.physics.set_velocity(
-                                handle,
-                                [
-                                    part_data.velocity.x,
-                                    part_data.velocity.y,
-                                    part_data.velocity.z,
-                                ],
-                            );
-                        }
-                        part_data.velocity_dirty = false;
-                    }
-                    if part_data.angular_velocity_dirty {
-                        if let Some(handle) = self.physics.get_handle(lua_id) {
-                            self.physics.set_angular_velocity(
-                                handle,
-                                [
-                                    part_data.angular_velocity.x,
-                                    part_data.angular_velocity.y,
-                                    part_data.angular_velocity.z,
-                                ],
-                            );
-                        }
-                        part_data.angular_velocity_dirty = false;
-                    }
-                    if part_data.shape_dirty {
-                        self.physics.set_shape(
-                            lua_id,
-                            part_data.shape,
-                            [part_data.size.x, part_data.size.y, part_data.size.z],
-                        );
-                        part_data.shape_dirty = false;
-                    }
-                    if part_data.custom_physical_properties_dirty {
-                        self.physics.set_physical_properties(
-                            lua_id,
-                            Some(part_data.effective_physical_properties()),
-                        );
-                        part_data.custom_physical_properties_dirty = false;
-                    }
-
-                    // Position/CFrame writes from Lua should move both anchored and dynamic parts.
-                    // This preserves Roblox-like semantics for server-authoritative movement scripts.
-                    if part_data.position_dirty {
-                        if let Some(handle) = self.physics.get_handle(lua_id) {
-                            if part_data.anchored {
-                                self.physics.set_kinematic_position_with_dt(
-                                    handle,
-                                    [
-                                        part_data.position.x,
-                                        part_data.position.y,
-                                        part_data.position.z,
-                                    ],
-                                    dt,
-                                );
-                                self.physics
-                                    .set_kinematic_rotation(handle, &part_data.cframe.rotation);
-                            } else {
-                                self.physics.set_dynamic_position(
-                                    handle,
-                                    [
-                                        part_data.position.x,
-                                        part_data.position.y,
-                                        part_data.position.z,
-                                    ],
-                                );
-                                self.physics
-                                    .set_dynamic_rotation(handle, &part_data.cframe.rotation);
-                            }
-                        }
-                        part_data.position_dirty = false;
-                    }
-                }
+                specs.push(PhysicsAssemblyPart {
+                    lua_id: *lua_id,
+                    position: [
+                        part_data.position.x,
+                        part_data.position.y,
+                        part_data.position.z,
+                    ],
+                    rotation: part_data.cframe.rotation,
+                    size: [part_data.size.x, part_data.size.y, part_data.size.z],
+                    anchored: part_data.anchored,
+                    can_collide: part_data.can_collide,
+                    can_touch: part_data.can_touch,
+                    can_query: part_data.can_query,
+                    shape: part_data.shape,
+                    physical_properties: Some(part_data.effective_physical_properties()),
+                    velocity: [
+                        part_data.velocity.x,
+                        part_data.velocity.y,
+                        part_data.velocity.z,
+                    ],
+                    angular_velocity: [
+                        part_data.angular_velocity.x,
+                        part_data.angular_velocity.y,
+                        part_data.angular_velocity.z,
+                    ],
+                    position_dirty: part_data.position_dirty,
+                    cframe_dirty: part_data.cframe_dirty,
+                    velocity_dirty: part_data.velocity_dirty,
+                    angular_velocity_dirty: part_data.angular_velocity_dirty,
+                });
             }
+
+            if specs.is_empty() {
+                continue;
+            }
+
+            let root_id = specs
+                .iter()
+                .filter(|part| part.anchored)
+                .map(|part| part.lua_id)
+                .min()
+                .unwrap_or_else(|| specs.iter().map(|part| part.lua_id).min().unwrap());
+            assembly_specs.push(PhysicsAssemblySpec {
+                root_id,
+                parts: specs,
+            });
         }
 
-        // Remove physics parts that no longer exist in Lua (destroyed parts)
-        let orphaned_ids: Vec<u64> = self
-            .physics
-            .get_all_part_ids()
-            .into_iter()
-            .filter(|id| !active_lua_ids.contains(id))
-            .collect();
+        self.physics.sync_assemblies(assembly_specs, dt);
 
-        for lua_id in orphaned_ids {
-            self.physics.remove_part(lua_id);
+        for part in part_instances.values() {
+            let mut data = part.data.lock().unwrap();
+            let lua_id = data.id.0;
+            if let Some(part_data) = data.part_data.as_mut() {
+                if self.physics.has_character(lua_id) {
+                    continue;
+                }
+                part_data.size_dirty = false;
+                part_data.anchored_dirty = false;
+                part_data.can_collide_dirty = false;
+                part_data.interaction_dirty = false;
+                part_data.velocity_dirty = false;
+                part_data.angular_velocity_dirty = false;
+                part_data.shape_dirty = false;
+                part_data.custom_physical_properties_dirty = false;
+                part_data.position_dirty = false;
+                part_data.cframe_dirty = false;
+            }
         }
     }
 
@@ -1108,28 +1083,24 @@ impl GameInstance {
                     if part_data.position_dirty {
                         continue;
                     }
+                    if let Some(pos) = self.physics.get_part_position(lua_id) {
+                        part_data.position.x = pos[0];
+                        part_data.position.y = pos[1];
+                        part_data.position.z = pos[2];
+                        part_data.cframe.position = part_data.position;
+                    }
+
+                    if let Some(rot) = self.physics.get_part_rotation_matrix(lua_id) {
+                        part_data.cframe.rotation = rot;
+                    }
+
+                    if let Some(vel) = self.physics.get_part_velocity(lua_id) {
+                        part_data.velocity.x = vel[0];
+                        part_data.velocity.y = vel[1];
+                        part_data.velocity.z = vel[2];
+                    }
+
                     if let Some(handle) = self.physics.get_handle(lua_id) {
-                        // Update position from physics
-                        if let Some(pos) = self.physics.get_position(handle) {
-                            part_data.position.x = pos[0];
-                            part_data.position.y = pos[1];
-                            part_data.position.z = pos[2];
-                            part_data.cframe.position = part_data.position;
-                        }
-
-                        // Update rotation from physics
-                        if let Some(rot) = self.physics.get_rotation_matrix(handle) {
-                            part_data.cframe.rotation = rot;
-                        }
-
-                        // Update velocity from physics
-                        if let Some(vel) = self.physics.get_velocity(handle) {
-                            part_data.velocity.x = vel[0];
-                            part_data.velocity.y = vel[1];
-                            part_data.velocity.z = vel[2];
-                        }
-
-                        // Update angular velocity from physics
                         if let Some(ang_vel) = self.physics.get_angular_velocity(handle) {
                             part_data.angular_velocity.x = ang_vel[0];
                             part_data.angular_velocity.y = ang_vel[1];
@@ -1358,6 +1329,9 @@ impl GameInstance {
                     let Some(handle1) = self.physics.get_handle(part1_id) else {
                         continue;
                     };
+                    if handle0 == handle1 {
+                        continue;
+                    }
                     if !self.physics.is_dynamic_body(handle0)
                         && !self.physics.is_dynamic_body(handle1)
                     {
@@ -1391,6 +1365,9 @@ impl GameInstance {
                     let Some(handle1) = self.physics.get_handle(part1_id) else {
                         continue;
                     };
+                    if handle0 == handle1 {
+                        continue;
+                    }
                     if !self.physics.is_dynamic_body(handle0)
                         && !self.physics.is_dynamic_body(handle1)
                     {
@@ -4399,6 +4376,60 @@ mod tests {
     }
 
     #[test]
+    fn test_touched_reports_specific_part_in_welded_assembly() {
+        let mut instance = GameInstance::new(Uuid::new_v4(), None);
+
+        instance.load_script(
+            r#"
+            Workspace.Gravity = 0
+
+            local left = Instance.new("Part")
+            left.Name = "Left"
+            left.Size = Vector3.new(1, 1, 1)
+            left.Position = Vector3.new(0, 3, 0)
+            left.Anchored = false
+            left.CanCollide = false
+            left.Parent = Workspace
+
+            local right = Instance.new("Part")
+            right.Name = "Right"
+            right.Size = Vector3.new(1, 1, 1)
+            right.Position = Vector3.new(2, 3, 0)
+            right.Anchored = false
+            right.CanCollide = false
+            right.Parent = Workspace
+
+            local weld = Instance.new("WeldConstraint")
+            weld.Part0 = left
+            weld.Part1 = right
+            weld.Parent = Workspace
+
+            local trigger = Instance.new("Part")
+            trigger.Name = "Trigger"
+            trigger.Size = Vector3.new(1.1, 1.1, 1.1)
+            trigger.Position = Vector3.new(2, 3, 0)
+            trigger.Anchored = true
+            trigger.CanCollide = false
+            trigger.Parent = Workspace
+
+            trigger.Touched:Connect(function(otherPart)
+                trigger:SetAttribute("LastTouched", otherPart.Name)
+            end)
+        "#,
+        );
+
+        for _ in 0..10 {
+            instance.tick();
+        }
+
+        let last_touched = get_trigger_str_attr(&instance, "Trigger", "LastTouched");
+        assert_eq!(
+            last_touched, "Right",
+            "compound assembly colliders must preserve the specific Lua part identity"
+        );
+    }
+
+    #[test]
     fn test_game_instance_serverscriptservice_require_smoke() {
         let mut instance = GameInstance::new(Uuid::new_v4(), None);
 
@@ -4480,8 +4511,7 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_weld_constraint_moves_as_bidirectional_assembly() {
+    fn welded_pair_positions_after_write(write_script: &str) -> (f32, f32) {
         let mut instance = GameInstance::new(Uuid::new_v4(), None);
 
         instance.load_script(
@@ -4515,11 +4545,7 @@ mod tests {
         let runtime = instance.lua_runtime.as_ref().unwrap();
         runtime
             .lua()
-            .load(
-                r#"
-                _G.right.Position = Vector3.new(8, 5, 0)
-            "#,
-            )
+            .load(write_script)
             .exec()
             .expect("failed to teleport welded part");
 
@@ -4546,15 +4572,223 @@ mod tests {
 
         let left_x = left_x.expect("Left part missing");
         let right_x = right_x.expect("Right part missing");
+        (left_x, right_x)
+    }
+
+    #[test]
+    fn test_weld_constraint_position_write_recomputes_offset() {
+        let (left_x, right_x) =
+            welded_pair_positions_after_write("_G.right.Position = Vector3.new(8, 5, 0)");
+
+        // Roblox weld parity: assigning Position to one welded part changes
+        // that part's offset within the assembly. It does not drag the other
+        // welded parts; scripts that want to move the whole assembly use CFrame.
+        assert!(
+            left_x.abs() < 0.25,
+            "Position write should not drag Part0; got left_x={left_x}, right_x={right_x}"
+        );
+        assert!(
+            (right_x - 8.0).abs() < 0.25,
+            "Position write should move only Part1; got left_x={left_x}, right_x={right_x}"
+        );
+    }
+
+    #[test]
+    fn test_weld_constraint_cframe_write_moves_assembly() {
+        let (left_x, right_x) =
+            welded_pair_positions_after_write("_G.right.CFrame = CFrame.new(8, 5, 0)");
         let spacing = right_x - left_x;
 
         assert!(
-            left_x > 0.5,
-            "moving Part1 should drag Part0; got left_x={left_x}, right_x={right_x}"
+            (left_x - 6.0).abs() < 0.25,
+            "CFrame write should move the whole assembly; got left_x={left_x}, right_x={right_x}"
         );
         assert!(
             (spacing - 2.0).abs() < 0.25,
-            "welded spacing should stay near 2 studs; got left_x={left_x}, right_x={right_x}, spacing={spacing}"
+            "CFrame write should preserve welded spacing; got left_x={left_x}, right_x={right_x}, spacing={spacing}"
+        );
+    }
+
+    #[test]
+    fn test_weld_constraint_root_cframe_write_preserves_all_offsets() {
+        let mut instance = GameInstance::new(Uuid::new_v4(), None);
+
+        instance.load_script(
+            r#"
+            Workspace.Gravity = 0
+
+            local a = Instance.new("Part")
+            a.Name = "Root"
+            a.Position = Vector3.new(0, 5, 0)
+            a.CanCollide = false
+            a.Parent = Workspace
+
+            local b = Instance.new("Part")
+            b.Name = "Middle"
+            b.Position = Vector3.new(2, 5, 0)
+            b.CanCollide = false
+            b.Parent = Workspace
+
+            local c = Instance.new("Part")
+            c.Name = "End"
+            c.Position = Vector3.new(4, 5, 0)
+            c.CanCollide = false
+            c.Parent = Workspace
+
+            local ab = Instance.new("WeldConstraint")
+            ab.Part0 = a
+            ab.Part1 = b
+            ab.Parent = Workspace
+
+            local bc = Instance.new("WeldConstraint")
+            bc.Part0 = b
+            bc.Part1 = c
+            bc.Parent = Workspace
+
+            _G.a = a
+            _G.b = b
+            _G.c = c
+        "#,
+        );
+
+        for _ in 0..10 {
+            instance.tick();
+        }
+
+        let runtime = instance.lua_runtime.as_ref().unwrap();
+        runtime
+            .lua()
+            .load("_G.a.CFrame = CFrame.new(10, 8, 0)")
+            .exec()
+            .unwrap();
+
+        for _ in 0..10 {
+            instance.tick();
+        }
+
+        let runtime = instance.lua_runtime.as_ref().unwrap();
+        let (a_x, b_x, c_x, a_y, b_y, c_y): (f32, f32, f32, f32, f32, f32) = runtime
+            .lua()
+            .load("return _G.a.Position.X, _G.b.Position.X, _G.c.Position.X, _G.a.Position.Y, _G.b.Position.Y, _G.c.Position.Y")
+            .eval()
+            .unwrap();
+
+        assert!(
+            (a_x - 10.0).abs() < 0.01 && (b_x - 12.0).abs() < 0.01 && (c_x - 14.0).abs() < 0.01,
+            "root CFrame write should move the whole assembly while preserving X offsets: a={a_x}, b={b_x}, c={c_x}"
+        );
+        assert!(
+            (a_y - 8.0).abs() < 0.01 && (b_y - 8.0).abs() < 0.01 && (c_y - 8.0).abs() < 0.01,
+            "root CFrame write should preserve Y offsets: a={a_y}, b={b_y}, c={c_y}"
+        );
+    }
+
+    #[test]
+    fn test_weld_merge_with_lower_root_keeps_single_compound_body() {
+        let mut instance = GameInstance::new(Uuid::new_v4(), None);
+
+        instance.load_script(
+            r#"
+            Workspace.Gravity = 0
+
+            local low = Instance.new("Part")
+            low.Name = "LowRoot"
+            low.Position = Vector3.new(0, 5, 0)
+            low.CanCollide = false
+            low.Parent = Workspace
+
+            local mid = Instance.new("Part")
+            mid.Name = "MidRoot"
+            mid.Position = Vector3.new(2, 5, 0)
+            mid.CanCollide = false
+            mid.Parent = Workspace
+
+            local high = Instance.new("Part")
+            high.Name = "HighPart"
+            high.Position = Vector3.new(4, 5, 0)
+            high.CanCollide = false
+            high.Parent = Workspace
+
+            local first = Instance.new("WeldConstraint")
+            first.Part0 = mid
+            first.Part1 = high
+            first.Parent = Workspace
+
+            _G.low = low
+            _G.mid = mid
+            _G.high = high
+        "#,
+        );
+
+        for _ in 0..5 {
+            instance.tick();
+        }
+
+        let runtime = instance.lua_runtime.as_ref().unwrap();
+        runtime
+            .lua()
+            .load(
+                r#"
+                local merge = Instance.new("WeldConstraint")
+                merge.Part0 = _G.low
+                merge.Part1 = _G.mid
+                merge.Parent = Workspace
+            "#,
+            )
+            .exec()
+            .expect("failed to merge welded assemblies");
+
+        for _ in 0..10 {
+            instance.tick();
+        }
+
+        let low_id = {
+            let runtime = instance.lua_runtime.as_ref().unwrap();
+            let debug_id: String = runtime
+                .lua()
+                .load("return _G.low:GetDebugId()")
+                .eval()
+                .unwrap();
+            u64::from_str_radix(debug_id.trim_start_matches("RBX"), 16).unwrap()
+        };
+        let mid_id = {
+            let runtime = instance.lua_runtime.as_ref().unwrap();
+            let debug_id: String = runtime
+                .lua()
+                .load("return _G.mid:GetDebugId()")
+                .eval()
+                .unwrap();
+            u64::from_str_radix(debug_id.trim_start_matches("RBX"), 16).unwrap()
+        };
+        let high_id = {
+            let runtime = instance.lua_runtime.as_ref().unwrap();
+            let debug_id: String = runtime
+                .lua()
+                .load("return _G.high:GetDebugId()")
+                .eval()
+                .unwrap();
+            u64::from_str_radix(debug_id.trim_start_matches("RBX"), 16).unwrap()
+        };
+
+        let low_handle = instance.physics.get_handle(low_id).unwrap();
+        let mid_handle = instance.physics.get_handle(mid_id).unwrap();
+        let high_handle = instance.physics.get_handle(high_id).unwrap();
+        assert_eq!(low_handle, mid_handle, "merged Low/Mid should share one body");
+        assert_eq!(low_handle, high_handle, "merged Low/High should share one body");
+
+        for _ in 0..120 {
+            instance.tick();
+        }
+
+        let runtime = instance.lua_runtime.as_ref().unwrap();
+        let (low_x, mid_x, high_x): (f32, f32, f32) = runtime
+            .lua()
+            .load("return _G.low.Position.X, _G.mid.Position.X, _G.high.Position.X")
+            .eval()
+            .unwrap();
+        assert!(
+            (mid_x - low_x - 2.0).abs() < 0.01 && (high_x - mid_x - 2.0).abs() < 0.01,
+            "merged assembly spacing changed: low={low_x}, mid={mid_x}, high={high_x}"
         );
     }
 

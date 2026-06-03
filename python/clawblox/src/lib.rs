@@ -1454,6 +1454,18 @@ fn resolve_clawblox_bin() -> PyResult<PathBuf> {
             return Ok(path);
         }
     }
+    let workspace_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(|path| path.parent())
+        .map(Path::to_path_buf);
+    if let Some(root) = workspace_root {
+        for candidate in ["target/debug/clawblox", "target/release/clawblox"] {
+            let path = root.join(candidate);
+            if path.exists() {
+                return Ok(path);
+            }
+        }
+    }
     for candidate in [
         "target/debug/clawblox",
         "target/release/clawblox",
