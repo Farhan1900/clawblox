@@ -178,6 +178,9 @@ pub struct SandboxConfig {
     /// Add /sandbox-deps/lib to LD_LIBRARY_PATH when deps_root is set.
     #[serde(default = "default_add_deps_lib_to_library_path")]
     pub add_deps_lib_to_library_path: bool,
+    /// Bind GPU device nodes into the agent sandbox when present.
+    #[serde(default)]
+    pub enable_gpu: bool,
 }
 
 fn default_add_deps_lib_to_library_path() -> bool {

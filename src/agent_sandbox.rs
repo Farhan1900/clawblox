@@ -24,6 +24,7 @@ pub struct SandboxLayout {
     pub host_hosts_file: Option<PathBuf>,
     pub host_shm_dir: Option<PathBuf>,
     pub enable_weaker_nested_sandbox: bool,
+    pub enable_gpu: bool,
     pub unset_env: Vec<String>,
 }
 
@@ -51,6 +52,7 @@ impl SandboxLayout {
             host_hosts_file: None,
             host_shm_dir: None,
             enable_weaker_nested_sandbox: false,
+            enable_gpu: false,
             unset_env: Vec::new(),
         }
     }
@@ -110,6 +112,11 @@ impl SandboxLayout {
 
     pub fn with_enable_weaker_nested_sandbox(mut self, enabled: bool) -> Self {
         self.enable_weaker_nested_sandbox = enabled;
+        self
+    }
+
+    pub fn with_enable_gpu(mut self, enabled: bool) -> Self {
+        self.enable_gpu = enabled;
         self
     }
 
@@ -261,6 +268,15 @@ fn wrap_command_unchecked(
             shm_dir.display().to_string(),
             "/dev/shm".to_string(),
         ]);
+    }
+    if layout.enable_gpu {
+        for device in gpu_device_paths() {
+            args.extend([
+                "--dev-bind".to_string(),
+                device.display().to_string(),
+                device.display().to_string(),
+            ]);
+        }
     }
 
     if layout.guest_plugin.is_some() {
@@ -434,6 +450,37 @@ fn wrap_command_unchecked(
         env: command.env,
         cwd: ctx.paths.workspace_dir.clone(),
     }
+}
+
+fn gpu_device_paths() -> Vec<PathBuf> {
+    let mut devices = Vec::new();
+    for path in [
+        "/dev/dxg",
+        "/dev/nvidiactl",
+        "/dev/nvidia-uvm",
+        "/dev/nvidia-uvm-tools",
+        "/dev/nvidia-modeset",
+    ] {
+        let path = PathBuf::from(path);
+        if path.exists() {
+            devices.push(path);
+        }
+    }
+    if let Ok(entries) = std::fs::read_dir("/dev") {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let Some(name) = path.file_name().and_then(|value| value.to_str()) else {
+                continue;
+            };
+            if name.strip_prefix("nvidia").is_some_and(|suffix| {
+                !suffix.is_empty() && suffix.chars().all(|ch| ch.is_ascii_digit())
+            }) && !devices.iter().any(|existing| existing == &path)
+            {
+                devices.push(path);
+            }
+        }
+    }
+    devices
 }
 
 fn sandbox_path(ctx: &AgentContext, layout: &SandboxLayout) -> String {

@@ -1104,6 +1104,7 @@ fn build_sandbox_layout(
             )?)
             .with_add_deps_lib_to_library_path(sandbox_config.add_deps_lib_to_library_path)
             .with_enable_weaker_nested_sandbox(sandbox_config.enable_weaker_nested_sandbox)
+            .with_enable_gpu(sandbox_config.enable_gpu)
             .with_hosts_file(ctx.paths.runtime_dir.join("sandbox_hosts"));
     if let Some((_, shm_dir)) = ctx.settings.env.iter().rfind(|(k, _)| k == "WORLD_SHM_DIR") {
         // External run-command worlds may need a state-local /dev/shm that is
