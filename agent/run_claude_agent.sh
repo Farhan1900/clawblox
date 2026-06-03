@@ -64,6 +64,7 @@ SANDBOX="${SANDBOX-0}"
 SKIP_SOUL="${SKIP_SOUL-0}"
 CLAUDE_NATIVE_SANDBOX="${CLAUDE_NATIVE_SANDBOX-$SANDBOX}"
 SANDBOX_DEPS_ROOT="${SANDBOX_DEPS_ROOT-}"
+SANDBOX_ADD_DEPS_LIB_TO_LIBRARY_PATH="${SANDBOX_ADD_DEPS_LIB_TO_LIBRARY_PATH-auto}"
 CLAWBLOX_WORLD_HTTP_PROXY_PORT="${CLAWBLOX_WORLD_HTTP_PROXY_PORT-}"
 CHECKPOINT_WARNING_SECONDS="${CHECKPOINT_WARNING_SECONDS:-300}"
 CHECKPOINT_WARNING_PROMPT="${CHECKPOINT_WARNING_PROMPT:-You will be reset in 5 minutes. Update your workspace memory files now.}"
@@ -658,7 +659,7 @@ if [[ "$SANDBOX" == "1" ]]; then
   sandbox_ld_library_path=""
   if [[ -n "$SANDBOX_DEPS_ROOT" ]]; then
     sandbox_path="/home/agent/.local/bin:/sandbox-bin:/sandbox-deps/bin:/usr/bin:/bin"
-    if [[ -d "$SANDBOX_DEPS_ROOT/lib" ]]; then
+    if [[ -d "$SANDBOX_DEPS_ROOT/lib" && ! "${SANDBOX_ADD_DEPS_LIB_TO_LIBRARY_PATH,,}" =~ ^(0|false|no)$ ]]; then
       sandbox_ld_library_path="/sandbox-deps/lib"
     fi
   fi
@@ -699,6 +700,7 @@ if [[ "$SANDBOX" == "1" ]]; then
   )
   [[ -n "$SANDBOX_DEPS_ROOT" ]] && bwrap_prefix+=(--ro-bind "$SANDBOX_DEPS_ROOT" /sandbox-deps)
   [[ -n "$sandbox_ld_library_path" ]] && bwrap_prefix+=(--setenv LD_LIBRARY_PATH "$sandbox_ld_library_path")
+  [[ -n "$SANDBOX_DEPS_ROOT" && -z "$sandbox_ld_library_path" ]] && bwrap_prefix+=(--unsetenv LD_LIBRARY_PATH)
   [[ -d /lib64 ]] && bwrap_prefix+=(--ro-bind /lib64 /lib64)
   [[ -n "$SANDBOX_HOSTS_FILE" && -f "$SANDBOX_HOSTS_FILE" ]] && bwrap_prefix+=(--ro-bind "$SANDBOX_HOSTS_FILE" /etc/hosts)
   # Mount only resolv.conf for DNS — do NOT mount all of /mnt/wsl, which

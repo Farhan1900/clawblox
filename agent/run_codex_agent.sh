@@ -31,6 +31,7 @@ CHECKPOINT_WARNING_PROMPT="${CHECKPOINT_WARNING_PROMPT:-You will be reset in 5 m
 DURATION_SECONDS="${DURATION_SECONDS-}"
 CLAWBLOX_WORLD_HTTP_PROXY_PORT="${CLAWBLOX_WORLD_HTTP_PROXY_PORT-}"
 SANDBOX_DEPS_ROOT="${SANDBOX_DEPS_ROOT-}"
+SANDBOX_ADD_DEPS_LIB_TO_LIBRARY_PATH="${SANDBOX_ADD_DEPS_LIB_TO_LIBRARY_PATH-auto}"
 
 CODEX_MODEL="${CODEX_MODEL-${CLAUDE_MODEL-gpt-5.5}}"
 CODEX_APPROVAL_POLICY="${CODEX_APPROVAL_POLICY-${CLAUDE_PERMISSION_MODE-bypassPermissions}}"
@@ -512,7 +513,7 @@ build_bwrap_prefix() {
   local sandbox_ld_library_path=""
   if [[ -n "$SANDBOX_DEPS_ROOT" ]]; then
     sandbox_path="/home/agent/.local/bin:/sandbox-bin:/sandbox-deps/bin:/usr/bin:/bin"
-    if [[ -d "$SANDBOX_DEPS_ROOT/lib" ]]; then
+    if [[ -d "$SANDBOX_DEPS_ROOT/lib" && ! "${SANDBOX_ADD_DEPS_LIB_TO_LIBRARY_PATH,,}" =~ ^(0|false|no)$ ]]; then
       sandbox_ld_library_path="/sandbox-deps/lib"
     fi
   fi
@@ -557,6 +558,7 @@ build_bwrap_prefix() {
   fi
   [[ -n "$SANDBOX_DEPS_ROOT" ]] && BWRAP_PREFIX+=(--ro-bind "$SANDBOX_DEPS_ROOT" /sandbox-deps)
   [[ -n "$sandbox_ld_library_path" ]] && BWRAP_PREFIX+=(--setenv LD_LIBRARY_PATH "$sandbox_ld_library_path")
+  [[ -n "$SANDBOX_DEPS_ROOT" && -z "$sandbox_ld_library_path" ]] && BWRAP_PREFIX+=(--unsetenv LD_LIBRARY_PATH)
   [[ -d /lib64 ]] && BWRAP_PREFIX+=(--ro-bind /lib64 /lib64)
   [[ -n "${SANDBOX_HOSTS_FILE:-}" && -f "$SANDBOX_HOSTS_FILE" ]] && BWRAP_PREFIX+=(--ro-bind "$SANDBOX_HOSTS_FILE" /etc/hosts)
   [[ -f /mnt/wsl/resolv.conf ]] && BWRAP_PREFIX+=(--ro-bind /mnt/wsl/resolv.conf /mnt/wsl/resolv.conf)

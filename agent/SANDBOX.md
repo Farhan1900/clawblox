@@ -54,7 +54,10 @@ bash agent/launch_multi_claude.sh --world-dir worlds/mesa-world --sandbox
 
 For new worlds, prefer `world.toml` over environment variables for sandbox
 policy. `SANDBOX_DEPS_ROOT` remains supported as a fallback when
-`sandbox.deps_root` is not set.
+`sandbox.deps_root` is not set. `SANDBOX_ADD_DEPS_LIB_TO_LIBRARY_PATH=0` is the
+matching fallback for launch paths that are configured by environment instead
+of `world.toml`; it keeps `/sandbox-deps/bin` on `PATH` while leaving
+`LD_LIBRARY_PATH` unset.
 
 ## Claude Code version pin
 
