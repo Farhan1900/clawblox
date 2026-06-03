@@ -54,11 +54,9 @@ use clawblox::{
         script_bundle::load_world_and_entry_script,
         GameManager, GameManagerHandle,
     },
-    manifest,
-    recording, replay,
+    manifest, recording, replay,
     replay_agent_log::{
-        load_agent_timeline, ReplayAgentMessage,
-        ReplayAgentTimeline, ReplayTickAnchor,
+        load_agent_timeline, ReplayAgentMessage, ReplayAgentTimeline, ReplayTickAnchor,
     },
     replay_metadata::{self, ReplayMetadata},
     snapshot::GameInstanceSnapshot,
@@ -304,6 +302,7 @@ fn main() {
                 agent_dir,
                 system_prompt,
                 sandbox,
+                sandbox_config: clawblox::config::SandboxConfig::default(),
             }),
         ),
         Commands::Replay {

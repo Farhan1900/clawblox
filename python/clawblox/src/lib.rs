@@ -10,8 +10,10 @@ use std::{
 
 use clawblox::agent::build_agent;
 use clawblox::agent_runner::{
-    send_agent, start_agent, stop_agent, AgentSendOptions, AgentStartOptions, AgentStopOptions,
+    default_system_prompt as rust_default_system_prompt, send_agent, start_agent, stop_agent,
+    AgentSendOptions, AgentStartOptions, AgentStopOptions,
 };
+use clawblox::config::{SandboxConfig, WorldConfig};
 use clawblox::manifest::{
     manifest_path_for_state_root, record_agent_connected, record_world_started,
     refresh_agent_from_dir, AgentConnected, WorldStarted,
@@ -41,6 +43,7 @@ struct PyAgent {
     extra_args: Vec<String>,
     sandbox: bool,
     claude_native_sandbox: bool,
+    sandbox_config: Arc<Mutex<SandboxConfig>>,
     run_tmux: Arc<Mutex<Option<AgentRunTmux>>>,
     world_env: Arc<Mutex<Vec<(String, String)>>>,
 }
@@ -77,6 +80,7 @@ struct PyAgentStopResult {
 struct PyWorld {
     dir: PathBuf,
     config: serde_json::Value,
+    world_config: WorldConfig,
     port: Option<u16>,
     base_path: String,
     record: bool,
@@ -138,6 +142,23 @@ impl PyAgent {
         Ok(())
     }
 
+    fn set_sandbox_config(&self, config: SandboxConfig) -> PyResult<()> {
+        let mut sandbox_config = self.sandbox_config.lock().map_err(|_| {
+            PyAgentError::new_err("agent sandbox config lock was poisoned".to_string())
+        })?;
+        *sandbox_config = config;
+        Ok(())
+    }
+
+    fn sandbox_config(&self) -> PyResult<SandboxConfig> {
+        self.sandbox_config
+            .lock()
+            .map(|guard| guard.clone())
+            .map_err(|_| {
+                PyAgentError::new_err("agent sandbox config lock was poisoned".to_string())
+            })
+    }
+
     fn prepare_workspace_runtime(&self) -> PyResult<()> {
         let pyproject = self.workspace_dir().join("pyproject.toml");
         if !pyproject.is_file() {
@@ -150,7 +171,11 @@ impl PyAgent {
             )));
         }
         if self.sandbox && command_exists("bwrap") {
-            run_workspace_uv_sync_in_sandbox(&self.workspace_dir(), &self.runtime_dir())
+            run_workspace_uv_sync_in_sandbox(
+                &self.workspace_dir(),
+                &self.runtime_dir(),
+                &self.sandbox_config()?,
+            )
         } else {
             run_workspace_uv_sync_on_host(&self.workspace_dir(), &self.runtime_dir())
         }
@@ -212,6 +237,7 @@ impl PyAgent {
             extra_args,
             sandbox,
             claude_native_sandbox,
+            sandbox_config: Arc::new(Mutex::new(SandboxConfig::default())),
             run_tmux: Arc::new(Mutex::new(None)),
             world_env: Arc::new(Mutex::new(Vec::new())),
         }
@@ -271,6 +297,7 @@ impl PyAgent {
         self.prepare_workspace_runtime()?;
         let env = self.merged_env(dict_to_env(env)?)?;
         let manifest_path = manifest_path_from_env(&env);
+        let sandbox_config = self.sandbox_config()?;
         let run_tmux = self.hidden_run_tmux()?;
         let tmux_session = run_tmux
             .as_ref()
@@ -293,6 +320,7 @@ impl PyAgent {
             env,
             extra_args: self.extra_args.clone(),
             sandbox: self.sandbox,
+            sandbox_config,
             bare: self.bare,
         })
         .map_err(PyAgentError::new_err)?;
@@ -327,6 +355,7 @@ impl PyAgent {
     ) -> PyResult<PyAgentStartResult> {
         let env = self.merged_env(dict_to_env(env)?)?;
         let manifest_path = manifest_path_from_env(&env);
+        let sandbox_config = self.sandbox_config()?;
         let run_tmux = self.hidden_run_tmux()?;
         let tmux_session = run_tmux
             .as_ref()
@@ -348,6 +377,7 @@ impl PyAgent {
             env,
             extra_args: self.extra_args.clone(),
             sandbox: self.sandbox,
+            sandbox_config,
             bare: self.bare,
         })
         .map_err(PyAgentError::new_err)?;
@@ -382,6 +412,7 @@ impl PyAgent {
     ) -> PyResult<PyAgentStopResult> {
         let env = self.merged_env(dict_to_env(env)?)?;
         let manifest_path = manifest_path_from_env(&env);
+        let sandbox_config = self.sandbox_config()?;
         let run_tmux = self.hidden_run_tmux()?;
         let tmux_session = run_tmux
             .as_ref()
@@ -401,6 +432,7 @@ impl PyAgent {
             env,
             extra_args: self.extra_args.clone(),
             sandbox: self.sandbox,
+            sandbox_config,
             bare: self.bare,
             grace_seconds,
         })
@@ -438,10 +470,12 @@ impl PyWorld {
                 dir.display()
             )));
         }
+        let world_config = read_world_config(&world_toml)?;
         let config = read_world_config_value(&world_toml)?;
         Ok(Self {
             dir,
             config,
+            world_config,
             port: None,
             base_path: "/".to_string(),
             record: false,
@@ -988,8 +1022,10 @@ impl PyWorld {
             ("WORLD_AGENT_NAME".to_string(), agent.name().to_string()),
         ];
         if agent.sandbox {
+            agent.set_sandbox_config(self.world_config.sandbox.clone())?;
             let proxy_port = self.start_capability_proxy(agent, &internal_base_url)?;
-            let agent_impl = build_agent(&agent.agent, None, false).map_err(PyAgentError::new_err)?;
+            let agent_impl =
+                build_agent(&agent.agent, None, false).map_err(PyAgentError::new_err)?;
             let uses_socat = agent_impl.needs_socat_sandbox();
             base_url = if agent_impl.name() == "claude" && !agent.claude_native_sandbox {
                 // Claude can opt out of its native sandbox when Clawblox's
@@ -1023,7 +1059,8 @@ impl PyWorld {
         if let Some(shm_dir) = &self.shm_dir {
             world_env.push(("WORLD_SHM_DIR".to_string(), shm_dir.display().to_string()));
         }
-        if self.config
+        if self
+            .config
             .get("sandbox")
             .and_then(|s| s.get("allow_loopback"))
             .and_then(|v| v.as_bool())
@@ -1039,7 +1076,11 @@ impl PyWorld {
             record_agent_connected(
                 manifest_path,
                 AgentConnected {
-                    id: if agent_id.is_empty() { agent.name() } else { agent_id },
+                    id: if agent_id.is_empty() {
+                        agent.name()
+                    } else {
+                        agent_id
+                    },
                     name: agent.name(),
                     backend: &agent.agent,
                     model: &agent.model,
@@ -1433,9 +1474,12 @@ fn resolve_clawblox_bin() -> PyResult<PathBuf> {
     ))
 }
 
+fn read_world_config(path: &Path) -> PyResult<WorldConfig> {
+    WorldConfig::from_file(path).map_err(|err| PyAgentError::new_err(err.to_string()))
+}
+
 fn read_world_config_value(path: &PathBuf) -> PyResult<serde_json::Value> {
-    clawblox::config::WorldConfig::from_file(path)
-        .map_err(|err| PyAgentError::new_err(err.to_string()))?;
+    read_world_config(path)?;
     let content = std::fs::read_to_string(path).map_err(io_error)?;
     let value: toml::Value = toml::from_str(&content).map_err(|err| {
         PyAgentError::new_err(format!("failed to parse {}: {err}", path.display()))
@@ -1505,7 +1549,11 @@ fn run_workspace_uv_sync_on_host(workspace_dir: &Path, runtime_dir: &Path) -> Py
     run_checked(command, "failed to prepare workspace Python environment")
 }
 
-fn run_workspace_uv_sync_in_sandbox(workspace_dir: &Path, runtime_dir: &Path) -> PyResult<()> {
+fn run_workspace_uv_sync_in_sandbox(
+    workspace_dir: &Path,
+    runtime_dir: &Path,
+    sandbox_config: &SandboxConfig,
+) -> PyResult<()> {
     std::fs::create_dir_all(workspace_dir).map_err(io_error)?;
     std::fs::create_dir_all(runtime_dir).map_err(io_error)?;
     let uv = resolve_program("uv").ok_or_else(|| {
@@ -1513,7 +1561,19 @@ fn run_workspace_uv_sync_in_sandbox(workspace_dir: &Path, runtime_dir: &Path) ->
             "workspace has pyproject.toml, but uv was not found in PATH".to_string(),
         )
     })?;
-    let mut args = vec![
+    let mut args = Vec::new();
+    if sandbox_config.enable_weaker_nested_sandbox {
+        // Match the main agent sandbox: nested Docker mode should not make the
+        // guest process root, because Claude bypass mode refuses root.
+        args.extend([
+            "--unshare-user".to_string(),
+            "--uid".to_string(),
+            "1000".to_string(),
+            "--gid".to_string(),
+            "1000".to_string(),
+        ]);
+    }
+    args.extend([
         "--ro-bind".to_string(),
         "/usr".to_string(),
         "/usr".to_string(),
@@ -1553,11 +1613,38 @@ fn run_workspace_uv_sync_in_sandbox(workspace_dir: &Path, runtime_dir: &Path) ->
         "/workspace".to_string(),
         "--setenv".to_string(),
         "PATH".to_string(),
-        "/sandbox-bin:/usr/local/bin:/usr/bin:/bin".to_string(),
+        if sandbox_config.deps_root.is_some() {
+            "/sandbox-bin:/sandbox-deps/bin:/usr/local/bin:/usr/bin:/bin".to_string()
+        } else {
+            "/sandbox-bin:/usr/local/bin:/usr/bin:/bin".to_string()
+        },
         "--setenv".to_string(),
         "UV_PYTHON_INSTALL_DIR".to_string(),
         "/runtime/python".to_string(),
-    ];
+    ]);
+    if let Some(root) = sandbox_config.deps_root.as_ref() {
+        args.extend([
+            "--ro-bind".to_string(),
+            root.display().to_string(),
+            "/sandbox-deps".to_string(),
+        ]);
+        if root.is_absolute() && root != Path::new("/sandbox-deps") {
+            args.extend([
+                "--ro-bind".to_string(),
+                root.display().to_string(),
+                root.display().to_string(),
+            ]);
+        }
+        if sandbox_config.add_deps_lib_to_library_path && root.join("lib").is_dir() {
+            args.extend([
+                "--setenv".to_string(),
+                "LD_LIBRARY_PATH".to_string(),
+                "/sandbox-deps/lib".to_string(),
+            ]);
+        } else {
+            args.extend(["--unsetenv".to_string(), "LD_LIBRARY_PATH".to_string()]);
+        }
+    }
     if Path::new("/lib64").is_dir() {
         args.extend([
             "--ro-bind".to_string(),
@@ -2084,7 +2171,13 @@ fn default_tmux_session(world_dir: &Path) -> String {
     // Same sanitization as run_agent_generations.py safe_name(): keep [A-Za-z0-9._-], replace rest with '_'
     let safe: String = dir_name
         .chars()
-        .map(|c| if c.is_ascii_alphanumeric() || c == '.' || c == '_' || c == '-' { c } else { '_' })
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '.' || c == '_' || c == '-' {
+                c
+            } else {
+                '_'
+            }
+        })
         .collect();
     let ts = chrono::Utc::now().format("%Y%m%dT%H%M%SZ").to_string();
     format!("{safe}-{ts}")
@@ -2097,5 +2190,11 @@ fn _clawblox(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyWorldStartResult>()?;
     m.add_class::<PyAgentStartResult>()?;
     m.add_class::<PyAgentStopResult>()?;
+    m.add_function(wrap_pyfunction!(default_system_prompt, m)?)?;
     Ok(())
+}
+
+#[pyfunction]
+fn default_system_prompt() -> &'static str {
+    rust_default_system_prompt()
 }

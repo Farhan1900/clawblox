@@ -1,7 +1,7 @@
 //! World configuration parsing from world.toml files
 
 use serde::Deserialize;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// Scripts configuration section
 #[derive(Debug, Clone, Deserialize)]
@@ -163,6 +163,27 @@ impl Default for SpeechConfig {
     }
 }
 
+/// Agent sandbox configuration.
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct SandboxConfig {
+    /// Enable the Docker-compatible nested sandbox mode.
+    ///
+    /// This is weaker than the standard bubblewrap sandbox and should only be
+    /// enabled when the outer container is part of the isolation boundary.
+    #[serde(default)]
+    pub enable_weaker_nested_sandbox: bool,
+    /// Optional host dependency prefix to mount read-only at /sandbox-deps.
+    #[serde(default)]
+    pub deps_root: Option<PathBuf>,
+    /// Add /sandbox-deps/lib to LD_LIBRARY_PATH when deps_root is set.
+    #[serde(default = "default_add_deps_lib_to_library_path")]
+    pub add_deps_lib_to_library_path: bool,
+}
+
+fn default_add_deps_lib_to_library_path() -> bool {
+    true
+}
+
 /// World configuration from world.toml
 #[derive(Debug, Clone, Deserialize)]
 pub struct WorldConfig {
@@ -192,6 +213,9 @@ pub struct WorldConfig {
     /// Speech configuration
     #[serde(default)]
     pub speech: SpeechConfig,
+    /// Agent sandbox configuration
+    #[serde(default)]
+    pub sandbox: SandboxConfig,
     /// AFK timeout in seconds (0 = disabled). Players idle longer than this are kicked.
     #[serde(default = "default_afk_timeout")]
     pub afk_timeout: u64,
@@ -278,6 +302,14 @@ impl WorldConfig {
                 ));
             }
         }
+        if let Some(root) = self.sandbox.deps_root.as_ref() {
+            if root.as_os_str().is_empty() {
+                return Err(WorldConfigError::ValidationError(
+                    path.to_path_buf(),
+                    "sandbox.deps_root must be a non-empty path".to_string(),
+                ));
+            }
+        }
         Ok(())
     }
 }
@@ -325,6 +357,8 @@ mod tests {
         assert_eq!(config.observation.radius, 100.0);
         assert_eq!(config.speech.mode, SpeechMode::Global);
         assert_eq!(config.speech.hearing_radius, 30.0);
+        assert!(!config.sandbox.enable_weaker_nested_sandbox);
+        assert_eq!(config.sandbox.deps_root, None);
     }
 
     #[test]
@@ -356,6 +390,11 @@ mod tests {
             mode = "proximity"
             hearing_radius = 24
 
+            [sandbox]
+            enable_weaker_nested_sandbox = true
+            deps_root = "/opt/conda"
+            add_deps_lib_to_library_path = false
+
             [run]
             command = ["custom-runner", "--flag"]
         "#;
@@ -373,6 +412,12 @@ mod tests {
         assert_eq!(config.observation.radius, 64.0);
         assert_eq!(config.speech.mode, SpeechMode::Proximity);
         assert_eq!(config.speech.hearing_radius, 24.0);
+        assert!(config.sandbox.enable_weaker_nested_sandbox);
+        assert_eq!(
+            config.sandbox.deps_root.as_deref(),
+            Some(Path::new("/opt/conda"))
+        );
+        assert!(!config.sandbox.add_deps_lib_to_library_path);
         assert_eq!(
             config.run.command.as_ref().map(|c| c.as_slice()),
             Some(vec!["custom-runner".to_string(), "--flag".to_string()].as_slice())

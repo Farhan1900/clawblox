@@ -11,11 +11,10 @@ use std::{
 use chrono::{SecondsFormat, Utc};
 use serde::{Deserialize, Serialize};
 
-use crate::agent::{
-    build_agent, Agent, AgentContext, AgentPaths, AgentSettings, CommandSpec,
-};
+use crate::agent::{build_agent, Agent, AgentContext, AgentPaths, AgentSettings, CommandSpec};
 use crate::agent_recovery::{start_agent_recovery_watchdog, AgentRecoveryConfig};
 use crate::agent_sandbox::{detect_sandbox_deps_root, wrap_command, SandboxLayout};
+use crate::config::{SandboxConfig, WorldConfig};
 use crate::manifest::record_agent_workspace_recording;
 use crate::workspace_recording::{
     start_workspace_recorder, WorkspaceRecorderConfig, WorkspaceRecorderHandle,
@@ -23,6 +22,40 @@ use crate::workspace_recording::{
 
 static WORKSPACE_RECORDERS: OnceLock<Mutex<HashMap<PathBuf, WorkspaceRecorderHandle>>> =
     OnceLock::new();
+
+pub const DEFAULT_SYSTEM_PROMPT: &str = r#"You are a being living in your world.
+Your name is ${WORLD_AGENT_NAME}.
+Your workspace is ${WORKSPACE_DIR}. Only work inside this directory.
+Make sure to keep your workspace clean and well organized.
+The files in your workspace are yours to evolve.
+These files are your memory that persists across sessions. Anything not in your workspace will be forgotten.
+The source for your world is available under ${WORKSPACE_DIR}/world.
+
+Among your workspace, you have two memory files:
+- EPISODIC_MEMORY.md describes how to record what happened. Actual entries are appended to EPISODIC_MEMORY.jsonl - never rewrite or delete old ones.
+- SEMANTIC_MEMORY.md is for techniques and knowledge you have learned.
+
+Embody SOUL.md's persona and tone.
+
+When starting a new session, start by reading the files in your workspace to refresh your memory.
+
+Periodically take a step back and revise your workspace and memory files. You don't want to forget what you have experienced and learned.
+
+When using the bash tool with timeout, always keep the timeout duration under 30s.
+
+Prefer observing and acting directly over using scripts.
+
+Note: There is an automated stop hook. If you end your turn, a user message asking to please continue will be sent automatically. Just continue doing whatever you want to do. Avoid wasting time in an endless response loop with the stop hook.
+
+World base URL: ${WORLD_BASE_URL}
+${SESSION_LINE}
+
+Fetch capabilities with: ${SKILL_CURL} ${SKILL_URL}
+"#;
+
+pub fn default_system_prompt() -> &'static str {
+    DEFAULT_SYSTEM_PROMPT
+}
 
 #[derive(Clone, Debug)]
 pub struct AgentRunnerOptions {
@@ -34,6 +67,7 @@ pub struct AgentRunnerOptions {
     pub agent_dir: Option<PathBuf>,
     pub system_prompt: Option<PathBuf>,
     pub sandbox: bool,
+    pub sandbox_config: SandboxConfig,
 }
 
 #[derive(Clone, Debug)]
@@ -52,6 +86,7 @@ pub struct AgentStartOptions {
     pub env: Vec<(String, String)>,
     pub extra_args: Vec<String>,
     pub sandbox: bool,
+    pub sandbox_config: SandboxConfig,
     pub bare: bool,
     pub version: Option<String>,
 }
@@ -71,6 +106,7 @@ pub struct AgentSendOptions {
     pub env: Vec<(String, String)>,
     pub extra_args: Vec<String>,
     pub sandbox: bool,
+    pub sandbox_config: SandboxConfig,
     pub bare: bool,
     pub version: Option<String>,
 }
@@ -89,6 +125,7 @@ pub struct AgentStopOptions {
     pub env: Vec<(String, String)>,
     pub extra_args: Vec<String>,
     pub sandbox: bool,
+    pub sandbox_config: SandboxConfig,
     pub bare: bool,
     pub grace_seconds: u64,
 }
@@ -167,6 +204,9 @@ pub fn start_agent_tmux_for_local_world(
         .clone()
         .unwrap_or_else(|| world_dir.join(".clawblox").join("agents").join(&safe_name));
     let agent = build_agent(&options.kind, None, false)?;
+    let sandbox_config = WorldConfig::from_game_dir(world_dir)
+        .map(|config| config.sandbox)
+        .unwrap_or_else(|_| options.sandbox_config.clone());
     start_agent(AgentStartOptions {
         kind: options.kind,
         name: options.name,
@@ -181,9 +221,7 @@ pub fn start_agent_tmux_for_local_world(
         system_prompt: match options.system_prompt.as_ref() {
             Some(path) => std::fs::read_to_string(path)
                 .map_err(|err| format!("failed to read system prompt {}: {err}", path.display()))?,
-            None => {
-                bundled_prompt.unwrap_or_else(|| "Use the local Clawblox world API.".to_string())
-            }
+            None => bundled_prompt.unwrap_or_else(|| DEFAULT_SYSTEM_PROMPT.to_string()),
         },
         auto_continue_prompt: "Please don't stop. Just continue doing whatever you want to do."
             .to_string(),
@@ -202,6 +240,7 @@ pub fn start_agent_tmux_for_local_world(
         ],
         extra_args: Vec::new(),
         sandbox: options.sandbox,
+        sandbox_config,
         bare: false,
     })
 }
@@ -259,6 +298,7 @@ pub fn start_agent(options: AgentStartOptions) -> Result<StartedAgent, String> {
             &ctx,
             agent.as_ref(),
             options.binary.clone(),
+            &options.sandbox_config,
         )?);
     }
 
@@ -561,6 +601,7 @@ pub fn send_agent(options: AgentSendOptions) -> Result<StartedAgent, String> {
             &ctx,
             agent.as_ref(),
             options.binary.clone(),
+            &options.sandbox_config,
         )?);
     }
 
@@ -1052,17 +1093,26 @@ fn build_sandbox_layout(
     ctx: &AgentContext,
     agent: &dyn Agent,
     binary: Option<PathBuf>,
+    sandbox_config: &SandboxConfig,
 ) -> Result<SandboxLayout, String> {
     let host_binary = resolve_agent_binary(agent, binary)?;
-    let mut layout = SandboxLayout::for_agent(ctx, host_binary.clone(), agent.sandbox_guest_binary_name())
-        .with_host_deps_root(detect_sandbox_deps_root(agent.needs_socat_sandbox())?)
-        .with_hosts_file(ctx.paths.runtime_dir.join("sandbox_hosts"));
+    let mut layout =
+        SandboxLayout::for_agent(ctx, host_binary.clone(), agent.sandbox_guest_binary_name())
+            .with_host_deps_root(detect_sandbox_deps_root(
+                sandbox_config,
+                agent.needs_socat_sandbox(),
+            )?)
+            .with_add_deps_lib_to_library_path(sandbox_config.add_deps_lib_to_library_path)
+            .with_enable_weaker_nested_sandbox(sandbox_config.enable_weaker_nested_sandbox)
+            .with_hosts_file(ctx.paths.runtime_dir.join("sandbox_hosts"));
     if let Some((_, shm_dir)) = ctx.settings.env.iter().rfind(|(k, _)| k == "WORLD_SHM_DIR") {
         // External run-command worlds may need a state-local /dev/shm that is
         // shared with sandboxed agents without exposing the host's global shm.
         layout = layout.with_shm_dir(PathBuf::from(shm_dir));
     }
-    agent.configure_sandbox_layout(layout, &host_binary).map_err(|e| e.to_string())
+    agent
+        .configure_sandbox_layout(layout, &host_binary)
+        .map_err(|e| e.to_string())
 }
 
 fn resolve_agent_binary(agent: &dyn Agent, binary: Option<PathBuf>) -> Result<PathBuf, String> {
@@ -1326,11 +1376,7 @@ fn start_kimi_autoloop_watcher(cfg: KimiAutoloopConfig) {
                 // The hook only fires at turn-end, after which the TUI is idle,
                 // so it is safe to type the next prompt now. Only the watcher
                 // starts new turns, so fires increment one at a time.
-                tmux_send_literal(
-                    &cfg.tmux_session,
-                    cfg.tmux_window.as_deref(),
-                    &cfg.message,
-                );
+                tmux_send_literal(&cfg.tmux_session, cfg.tmux_window.as_deref(), &cfg.message);
                 last = fires;
             }
         }

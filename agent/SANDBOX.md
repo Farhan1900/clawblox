@@ -1,8 +1,44 @@
 # Sandbox setup
 
 The `--sandbox` flag wraps each Claude agent in a bubblewrap (`bwrap`) jail so
-only the agent workspace is writable. On machines where you don't have root,
-install `bwrap` (and optionally `socat`) via conda-forge:
+only the agent workspace is writable. Per-world sandbox settings live in
+`world.toml`:
+
+```toml
+[sandbox]
+deps_root = "/opt/conda"
+enable_weaker_nested_sandbox = true
+add_deps_lib_to_library_path = true
+```
+
+`deps_root` is optional. When set, Clawblox mounts that host prefix read-only at
+`/sandbox-deps` inside the agent sandbox and adds `/sandbox-deps/bin` to `PATH`.
+Use it for world runtimes installed outside system paths, such as a Docker image
+with Python, MuJoCo, ROS, or DDS dependencies under `/opt/conda`.
+Absolute dependency prefixes are also mounted read-only at their original path
+so console scripts with absolute shebangs, such as Conda-generated entrypoints,
+continue to work.
+By default Clawblox also adds `/sandbox-deps/lib` to `LD_LIBRARY_PATH` for
+compatibility with dependency prefixes that need it. Set
+`add_deps_lib_to_library_path = false` when the prefix is self-contained enough
+without a global library path, or when its libraries conflict with system
+commands.
+
+`enable_weaker_nested_sandbox` is off by default. Enable it only when running
+Clawblox inside an unprivileged Docker or WSL2 container where standard
+`bubblewrap` cannot create its namespace. This mode is weaker than the standard
+sandbox and relies on the outer container as part of the isolation boundary.
+The agent process still runs as a non-root user inside the nested sandbox.
+
+The non-root mapping is intentional. Claude Code's autonomous permission mode
+uses `--dangerously-skip-permissions`, and Claude refuses to run that mode as
+root. Docker containers commonly run as root, so the nested sandbox maps the
+agent to uid/gid `1000` inside the bubblewrap namespace. That keeps the desired
+UX, where agents can run commands without approval prompts, while Clawblox's
+outer sandbox remains the boundary.
+
+On machines where you don't have root, install `bwrap` (and optionally `socat`)
+via conda-forge:
 
 ```bash
 conda create -y -n sandbox-deps -c conda-forge bubblewrap socat
@@ -15,6 +51,10 @@ Then launch with the env active so `bwrap` is on PATH:
 conda activate sandbox-deps
 bash agent/launch_multi_claude.sh --world-dir worlds/mesa-world --sandbox
 ```
+
+For new worlds, prefer `world.toml` over environment variables for sandbox
+policy. `SANDBOX_DEPS_ROOT` remains supported as a fallback when
+`sandbox.deps_root` is not set.
 
 ## Claude Code version pin
 

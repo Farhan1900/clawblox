@@ -1,6 +1,7 @@
 use std::path::{Path, PathBuf};
 
 use crate::agent::{AgentContext, CommandSpec};
+use crate::config::SandboxConfig;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SandboxLayout {
@@ -19,8 +20,10 @@ pub struct SandboxLayout {
     pub host_node_root: Option<PathBuf>,
     pub guest_node_root: Option<PathBuf>,
     pub host_deps_root: Option<PathBuf>,
+    pub add_deps_lib_to_library_path: bool,
     pub host_hosts_file: Option<PathBuf>,
     pub host_shm_dir: Option<PathBuf>,
+    pub enable_weaker_nested_sandbox: bool,
     pub unset_env: Vec<String>,
 }
 
@@ -43,9 +46,11 @@ impl SandboxLayout {
             guest_binary_rel: None,
             host_node_root: None,
             guest_node_root: None,
-            host_deps_root: std::env::var_os("SANDBOX_DEPS_ROOT").map(PathBuf::from),
+            host_deps_root: None,
+            add_deps_lib_to_library_path: true,
             host_hosts_file: None,
             host_shm_dir: None,
+            enable_weaker_nested_sandbox: false,
             unset_env: Vec::new(),
         }
     }
@@ -62,10 +67,10 @@ impl SandboxLayout {
         let host_workspace_dir = agent_dir.join("workspace");
 
         let pairs: &[(&Path, &Path)] = &[
-            (&self.host_home_dir,           &self.guest_home),
-            (host_workspace_dir.as_path(),  &self.guest_workspace),
-            (host_log_dir.as_path(),        &self.guest_logs),
-            (host_runtime_dir.as_path(),    &self.guest_runtime),
+            (&self.host_home_dir, &self.guest_home),
+            (host_workspace_dir.as_path(), &self.guest_workspace),
+            (host_log_dir.as_path(), &self.guest_logs),
+            (host_runtime_dir.as_path(), &self.guest_runtime),
         ];
         // Prompt file is a special 1:1 mapping outside the standard dirs.
         if host_path == agent_dir.join("runtime/system_prompt.md") {
@@ -95,6 +100,16 @@ impl SandboxLayout {
 
     pub fn with_host_deps_root(mut self, root: Option<PathBuf>) -> Self {
         self.host_deps_root = root;
+        self
+    }
+
+    pub fn with_add_deps_lib_to_library_path(mut self, enabled: bool) -> Self {
+        self.add_deps_lib_to_library_path = enabled;
+        self
+    }
+
+    pub fn with_enable_weaker_nested_sandbox(mut self, enabled: bool) -> Self {
+        self.enable_weaker_nested_sandbox = enabled;
         self
     }
 
@@ -143,7 +158,7 @@ pub fn validate_runtime(layout: &SandboxLayout, needs_socat: bool) -> Result<(),
     if let Some(root) = &layout.host_deps_root {
         if !root.join("bin").is_dir() {
             return Err(format!(
-                "SANDBOX_DEPS_ROOT must contain a bin directory: {}",
+                "sandbox.deps_root must contain a bin directory: {}",
                 root.display()
             ));
         }
@@ -151,7 +166,13 @@ pub fn validate_runtime(layout: &SandboxLayout, needs_socat: bool) -> Result<(),
     Ok(())
 }
 
-pub fn detect_sandbox_deps_root(needs_socat: bool) -> Result<Option<PathBuf>, String> {
+pub fn detect_sandbox_deps_root(
+    config: &SandboxConfig,
+    needs_socat: bool,
+) -> Result<Option<PathBuf>, String> {
+    if config.deps_root.is_some() {
+        return Ok(config.deps_root.clone());
+    }
     if let Some(root) = std::env::var_os("SANDBOX_DEPS_ROOT").map(PathBuf::from) {
         return Ok(Some(root));
     }
@@ -172,7 +193,7 @@ pub fn detect_sandbox_deps_root(needs_socat: bool) -> Result<Option<PathBuf>, St
         (false, true) => Ok(Some(socat_root)),
         (true, true) if bwrap_root == socat_root => Ok(Some(bwrap_root)),
         (true, true) => Err(format!(
-            "bwrap and socat are in different non-system prefixes; set SANDBOX_DEPS_ROOT explicitly.\n  bwrap root: {}\n  socat root: {}",
+            "bwrap and socat are in different non-system prefixes; set sandbox.deps_root in world.toml explicitly.\n  bwrap root: {}\n  socat root: {}",
             bwrap_root.display(),
             socat_root.display()
         )),
@@ -194,7 +215,19 @@ fn wrap_command_unchecked(
     layout: &SandboxLayout,
     command: CommandSpec,
 ) -> CommandSpec {
-    let mut args = vec![
+    let mut args = Vec::new();
+    if layout.enable_weaker_nested_sandbox {
+        // Docker-compatible nested bwrap needs a user namespace. Keep the
+        // guest uid non-root so Claude Code can run bypass-permissions mode.
+        args.extend([
+            "--unshare-user".to_string(),
+            "--uid".to_string(),
+            "1000".to_string(),
+            "--gid".to_string(),
+            "1000".to_string(),
+        ]);
+    }
+    args.extend([
         "--ro-bind".to_string(),
         "/usr".to_string(),
         "/usr".to_string(),
@@ -221,7 +254,7 @@ fn wrap_command_unchecked(
         "/tmp".to_string(),
         "--dir".to_string(),
         "/sandbox-bin".to_string(),
-    ];
+    ]);
     if let Some(shm_dir) = &layout.host_shm_dir {
         args.extend([
             "--bind".to_string(),
@@ -350,12 +383,21 @@ fn wrap_command_unchecked(
             root.display().to_string(),
             "/sandbox-deps".to_string(),
         ]);
-        if root.join("lib").is_dir() {
+        if root.is_absolute() && root != Path::new("/sandbox-deps") {
+            args.extend([
+                "--ro-bind".to_string(),
+                root.display().to_string(),
+                root.display().to_string(),
+            ]);
+        }
+        if layout.add_deps_lib_to_library_path && root.join("lib").is_dir() {
             args.extend([
                 "--setenv".to_string(),
                 "LD_LIBRARY_PATH".to_string(),
                 "/sandbox-deps/lib".to_string(),
             ]);
+        } else {
+            args.extend(["--unsetenv".to_string(), "LD_LIBRARY_PATH".to_string()]);
         }
     }
     if Path::new("/lib64").is_dir() {
@@ -463,13 +505,10 @@ mod tests {
     fn wraps_claude_command_with_expected_mounts_and_guest_paths() {
         let root = test_root();
         let ctx = test_context(root.clone());
-        let layout = SandboxLayout::for_agent(
-            &ctx,
-            PathBuf::from("/usr/local/bin/claude"),
-            "claude",
-        )
-        .with_claude_plugin()
-        .with_hosts_file(ctx.paths.runtime_dir.join("sandbox_hosts"));
+        let layout =
+            SandboxLayout::for_agent(&ctx, PathBuf::from("/usr/local/bin/claude"), "claude")
+                .with_claude_plugin()
+                .with_hosts_file(ctx.paths.runtime_dir.join("sandbox_hosts"));
         let command = CommandSpec::new("/sandbox-bin/claude", "/workspace")
             .arg("--plugin-dir")
             .arg("/plugin")
@@ -528,14 +567,10 @@ mod tests {
         let root = test_root();
         let node_root = root.join("node");
         let ctx = test_context(root.clone());
-        let layout = SandboxLayout::for_agent(
-            &ctx,
-            root.join("node_modules/.bin/codex"),
-            "codex",
-        )
-        .with_unset_env("CODEX_HOME")
-        .with_codex_binary_root(root.clone(), PathBuf::from("/node_modules/.bin/codex"))
-        .with_node_root(node_root.clone());
+        let layout = SandboxLayout::for_agent(&ctx, root.join("node_modules/.bin/codex"), "codex")
+            .with_unset_env("CODEX_HOME")
+            .with_codex_binary_root(root.clone(), PathBuf::from("/node_modules/.bin/codex"))
+            .with_node_root(node_root.clone());
         let command = CommandSpec::new(layout.codex_guest_node().unwrap(), "/workspace")
             .arg(layout.codex_guest_program().display().to_string())
             .arg("--no-alt-screen");
@@ -571,11 +606,7 @@ mod tests {
         let root = test_root();
         let ctx = test_context(root.clone());
         std::fs::create_dir_all(ctx.paths.workspace_dir.join(".venv/bin")).unwrap();
-        let layout = SandboxLayout::for_agent(
-            &ctx,
-            root.join("node_modules/.bin/codex"),
-            "codex",
-        );
+        let layout = SandboxLayout::for_agent(&ctx, root.join("node_modules/.bin/codex"), "codex");
         let command = CommandSpec::new("/sandbox-bin/codex", "/workspace");
 
         let wrapped = wrap_command_unchecked(&ctx, &layout, command);
@@ -595,6 +626,79 @@ mod tests {
             .args
             .windows(3)
             .any(|window| window == ["--setenv", "PYTHONNOUSERSITE", "1"]));
+    }
+
+    #[test]
+    fn weaker_nested_sandbox_adds_user_namespace_flags() {
+        let root = test_root();
+        let ctx = test_context(root.clone());
+        let layout = SandboxLayout::for_agent(&ctx, root.join("bin/claude"), "claude")
+            .with_enable_weaker_nested_sandbox(true);
+        let command = CommandSpec::new("/sandbox-bin/claude", "/workspace");
+
+        let wrapped = wrap_command_unchecked(&ctx, &layout, command);
+
+        assert!(wrapped
+            .args
+            .windows(5)
+            .any(|window| { window == ["--unshare-user", "--uid", "1000", "--gid", "1000"] }));
+    }
+
+    #[test]
+    fn deps_root_is_mounted_and_added_to_path() {
+        let root = test_root();
+        let deps_root = root.join("deps");
+        std::fs::create_dir_all(deps_root.join("bin")).unwrap();
+        std::fs::create_dir_all(deps_root.join("lib")).unwrap();
+        let ctx = test_context(root.clone());
+        let layout = SandboxLayout::for_agent(&ctx, root.join("bin/codex"), "codex")
+            .with_host_deps_root(Some(deps_root.clone()));
+        let command = CommandSpec::new("/sandbox-bin/codex", "/workspace");
+
+        let wrapped = wrap_command_unchecked(&ctx, &layout, command);
+
+        assert!(has_arg_triple(
+            &wrapped.args,
+            "--ro-bind",
+            &deps_root.display().to_string(),
+            "/sandbox-deps"
+        ));
+        assert!(has_arg_triple(
+            &wrapped.args,
+            "--ro-bind",
+            &deps_root.display().to_string(),
+            &deps_root.display().to_string()
+        ));
+        assert!(wrapped.args.windows(3).any(|window| window
+            == [
+                "--setenv",
+                "PATH",
+                "/home/agent/.local/bin:/sandbox-bin:/sandbox-deps/bin:/usr/bin:/bin"
+            ]));
+        assert!(has_arg_triple(
+            &wrapped.args,
+            "--setenv",
+            "LD_LIBRARY_PATH",
+            "/sandbox-deps/lib"
+        ));
+    }
+
+    #[test]
+    fn deps_root_can_skip_ld_library_path() {
+        let root = test_root();
+        let deps_root = root.join("deps");
+        std::fs::create_dir_all(deps_root.join("bin")).unwrap();
+        std::fs::create_dir_all(deps_root.join("lib")).unwrap();
+        let ctx = test_context(root.clone());
+        let layout = SandboxLayout::for_agent(&ctx, PathBuf::from("/bin/echo"), "codex")
+            .with_host_deps_root(Some(deps_root))
+            .with_add_deps_lib_to_library_path(false);
+        let command = CommandSpec::new("/sandbox-bin/codex", "/workspace");
+
+        let wrapped = wrap_command_unchecked(&ctx, &layout, command);
+
+        assert!(!has_arg_pair(&wrapped.args, "--setenv", "LD_LIBRARY_PATH"));
+        assert!(has_arg_pair(&wrapped.args, "--unsetenv", "LD_LIBRARY_PATH"));
     }
 
     fn has_arg_triple(args: &[String], flag: &str, host: &str, guest: &str) -> bool {

@@ -135,7 +135,8 @@ impl AgentContext {
 
     /// Return the guest HOME directory when sandboxed, or the agent home dir otherwise.
     pub fn guest_home(&self) -> PathBuf {
-        self.sandbox.as_ref()
+        self.sandbox
+            .as_ref()
             .map(|layout| layout.guest_home.clone())
             .unwrap_or_else(|| self.paths.agent_home_dir.clone())
     }
@@ -438,7 +439,10 @@ impl ClaudeAgent {
                 "CLAWBLOX_CLAUDE_METADATA_FILE",
                 metadata_file.display().to_string(),
             )
-            .env("CLAWBLOX_CLAUDE_RUNTIME_DIR", runtime_dir.display().to_string())
+            .env(
+                "CLAWBLOX_CLAUDE_RUNTIME_DIR",
+                runtime_dir.display().to_string(),
+            )
             .env("CLAWBLOX_CLAUDE_AUTO_LOOP", "1")
             .env(
                 "CLAUDE_AUTO_LOOP_MESSAGE",
@@ -742,7 +746,11 @@ impl Agent for KimiAgent {
         Some(if system_prompt.trim().is_empty() {
             ctx.settings.initial_prompt.clone()
         } else {
-            format!("{}\n\n{}", system_prompt.trim(), ctx.settings.initial_prompt)
+            format!(
+                "{}\n\n{}",
+                system_prompt.trim(),
+                ctx.settings.initial_prompt
+            )
         })
     }
 
@@ -818,7 +826,9 @@ impl Agent for KimiAgent {
 
 impl KimiAgent {
     fn base_command(&self, ctx: &AgentContext) -> CommandSpec {
-        let program = ctx.sandbox.as_ref()
+        let program = ctx
+            .sandbox
+            .as_ref()
             .map(|layout| layout.guest_binary.clone())
             .unwrap_or_else(|| self.binary.clone());
         let cwd = ctx.guest_path(&ctx.paths.workspace_dir);
@@ -1113,7 +1123,10 @@ fn collect_kimi_transcript(ctx: &AgentContext) -> AgentResult<()> {
     let wire = session_dir_host.join("agents/main/wire.jsonl");
     if wire.is_file() {
         std::fs::create_dir_all(&ctx.paths.transcript_dir)?;
-        std::fs::copy(wire, ctx.paths.transcript_dir.join(format!("{session_id}.jsonl")))?;
+        std::fs::copy(
+            wire,
+            ctx.paths.transcript_dir.join(format!("{session_id}.jsonl")),
+        )?;
     }
     Ok(())
 }
@@ -1234,8 +1247,38 @@ fn prepare_claude_sandbox_home(ctx: &AgentContext, layout: &SandboxLayout) -> Ag
             &layout.host_home_dir.join(".claude.json"),
         )?;
     }
+    write_claude_sandbox_autonomous_settings(&claude_dir.join("settings.json"))?;
     write_claude_workspace_trust(ctx, layout)?;
     Ok(())
+}
+
+fn write_claude_sandbox_autonomous_settings(path: &Path) -> AgentResult<()> {
+    let mut data = if path.is_file() {
+        serde_json::from_str::<serde_json::Value>(&std::fs::read_to_string(path)?)
+            .unwrap_or_else(|_| serde_json::json!({}))
+    } else {
+        serde_json::json!({})
+    };
+    if !data.is_object() {
+        data = serde_json::json!({});
+    }
+    let obj = data.as_object_mut().expect("object");
+    obj.entry("skipDangerousModePermissionPrompt".to_string())
+        .or_insert(serde_json::json!(true));
+    obj.entry("skipAutoPermissionPrompt".to_string())
+        .or_insert(serde_json::json!(true));
+    let permissions = obj
+        .entry("permissions".to_string())
+        .or_insert_with(|| serde_json::json!({}));
+    if !permissions.is_object() {
+        *permissions = serde_json::json!({});
+    }
+    permissions
+        .as_object_mut()
+        .expect("object")
+        .entry("defaultMode".to_string())
+        .or_insert(serde_json::json!("auto"));
+    write_json_file(path, &data)
 }
 
 fn write_claude_workspace_trust(_ctx: &AgentContext, layout: &SandboxLayout) -> AgentResult<()> {
@@ -1637,7 +1680,11 @@ fn parse_codex_stop_hook_trust(response: &serde_json::Value) -> Option<CodexHook
         .as_array()?;
     hooks.iter().find_map(|hook| {
         (hook.get("eventName")?.as_str()? == "stop").then(|| CodexHookTrust {
-            key: hook.get("key").and_then(|value| value.as_str()).unwrap_or("").to_string(),
+            key: hook
+                .get("key")
+                .and_then(|value| value.as_str())
+                .unwrap_or("")
+                .to_string(),
             current_hash: hook
                 .get("currentHash")
                 .and_then(|value| value.as_str())
@@ -2289,7 +2336,11 @@ fn require_nonempty_path(name: &str, value: &Path) -> AgentResult<()> {
 }
 
 /// Construct an agent by name. This is the single place to register a new agent.
-pub fn build_agent(kind: &str, binary: Option<PathBuf>, bare: bool) -> Result<Box<dyn Agent>, String> {
+pub fn build_agent(
+    kind: &str,
+    binary: Option<PathBuf>,
+    bare: bool,
+) -> Result<Box<dyn Agent>, String> {
     match kind {
         "claude" => Ok(Box::new(ClaudeAgent {
             binary: binary.unwrap_or_else(|| ClaudeAgent::default().binary),
@@ -2525,13 +2576,9 @@ mod tests {
         ctx.prepare_paths().unwrap();
         std::fs::write(&ctx.paths.prompt_file, "System prompt").unwrap();
         ctx.sandbox = Some(
-            SandboxLayout::for_agent(
-                &ctx,
-                PathBuf::from("/bin/echo"),
-                "claude",
-            )
-            .with_claude_plugin()
-            .with_hosts_file(ctx.paths.runtime_dir.join("sandbox_hosts")),
+            SandboxLayout::for_agent(&ctx, PathBuf::from("/bin/echo"), "claude")
+                .with_claude_plugin()
+                .with_hosts_file(ctx.paths.runtime_dir.join("sandbox_hosts")),
         );
         let agent = ClaudeAgent {
             binary: PathBuf::from("/bin/echo"),
@@ -2569,11 +2616,74 @@ mod tests {
     }
 
     #[test]
+    fn claude_sandbox_home_gets_autonomous_settings_when_fresh() {
+        let ctx = test_context();
+        ctx.prepare_paths().unwrap();
+        let layout = SandboxLayout::for_agent(&ctx, PathBuf::from("/bin/echo"), "claude")
+            .with_claude_plugin();
+
+        prepare_claude_sandbox_home(&ctx, &layout).unwrap();
+
+        let settings: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(layout.host_home_dir.join(".claude/settings.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            settings["skipDangerousModePermissionPrompt"],
+            serde_json::json!(true)
+        );
+        assert_eq!(
+            settings["skipAutoPermissionPrompt"],
+            serde_json::json!(true)
+        );
+        assert_eq!(
+            settings["permissions"]["defaultMode"],
+            serde_json::json!("auto")
+        );
+    }
+
+    #[test]
+    fn claude_sandbox_home_preserves_existing_settings() {
+        let ctx = test_context();
+        ctx.prepare_paths().unwrap();
+        let layout = SandboxLayout::for_agent(&ctx, PathBuf::from("/bin/echo"), "claude")
+            .with_claude_plugin();
+        let settings_path = layout.host_home_dir.join(".claude/settings.json");
+        std::fs::create_dir_all(settings_path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &settings_path,
+            r#"{"theme":"dark","permissions":{"defaultMode":"acceptEdits"}}"#,
+        )
+        .unwrap();
+
+        write_claude_sandbox_autonomous_settings(&settings_path).unwrap();
+
+        let settings: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&settings_path).unwrap()).unwrap();
+        assert_eq!(settings["theme"], serde_json::json!("dark"));
+        assert_eq!(
+            settings["permissions"]["defaultMode"],
+            serde_json::json!("acceptEdits")
+        );
+        assert_eq!(
+            settings["skipDangerousModePermissionPrompt"],
+            serde_json::json!(true)
+        );
+        assert_eq!(
+            settings["skipAutoPermissionPrompt"],
+            serde_json::json!(true)
+        );
+    }
+
+    #[test]
     fn claude_agent_can_disable_native_sandbox_when_outer_sandboxed() {
         let mut ctx = test_context();
         ctx.settings.sandbox_enabled = true;
         ctx.settings.env = vec![
-            ("WORLD_BASE_URL".to_string(), "http://world:43210".to_string()),
+            (
+                "WORLD_BASE_URL".to_string(),
+                "http://world:43210".to_string(),
+            ),
             (
                 "CLAWBLOX_CLAUDE_NATIVE_SANDBOX".to_string(),
                 "0".to_string(),
@@ -2582,13 +2692,9 @@ mod tests {
         ctx.prepare_paths().unwrap();
         std::fs::write(&ctx.paths.prompt_file, "System prompt").unwrap();
         ctx.sandbox = Some(
-            SandboxLayout::for_agent(
-                &ctx,
-                PathBuf::from("/bin/echo"),
-                "claude",
-            )
-            .with_claude_plugin()
-            .with_hosts_file(ctx.paths.runtime_dir.join("sandbox_hosts")),
+            SandboxLayout::for_agent(&ctx, PathBuf::from("/bin/echo"), "claude")
+                .with_claude_plugin()
+                .with_hosts_file(ctx.paths.runtime_dir.join("sandbox_hosts")),
         );
         let agent = ClaudeAgent {
             binary: PathBuf::from("/bin/echo"),
@@ -2707,11 +2813,7 @@ mod tests {
         let first = format!("{marker}\ntrusted_hash = \"old\"\n");
         let second = format!("{marker}\ntrusted_hash = \"new\"\n");
 
-        let appended = replace_or_append_toml_table(
-            "[features]\nhooks = true\n",
-            marker,
-            &first,
-        );
+        let appended = replace_or_append_toml_table("[features]\nhooks = true\n", marker, &first);
         assert!(appended.contains("[features]\nhooks = true"));
         assert!(appended.contains("trusted_hash = \"old\""));
 
@@ -2854,7 +2956,11 @@ mod tests {
         let first = run();
         // Non-blocking: exit 0, and the message must NOT be written to stderr
         // (stderr + exit 2 is the blocking path that cannot loop on Kimi).
-        assert_eq!(first.status.code(), Some(0), "hook must exit 0 (non-blocking)");
+        assert_eq!(
+            first.status.code(),
+            Some(0),
+            "hook must exit 0 (non-blocking)"
+        );
         assert!(
             String::from_utf8_lossy(&first.stderr).trim().is_empty(),
             "hook must not emit a block reason on stderr"
