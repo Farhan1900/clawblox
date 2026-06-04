@@ -252,6 +252,16 @@ fn build_collider(
     ColliderBuilder::new(shared_shape)
         .enabled(interaction_state.collider_enabled())
         .sensor(!can_collide)
+        .active_events(if interaction_state.can_touch {
+            ActiveEvents::COLLISION_EVENTS
+        } else {
+            ActiveEvents::empty()
+        })
+        .active_collision_types(if interaction_state.can_touch {
+            ActiveCollisionTypes::all()
+        } else {
+            ActiveCollisionTypes::default()
+        })
         .collision_groups(InteractionGroups::new(GROUP_STATIC, Group::ALL))
         .build()
 }
@@ -1211,6 +1221,16 @@ impl PhysicsWorld {
             if let Some(collider) = self.collider_set.get_mut(collider_handle) {
                 collider.set_sensor(!state.can_collide);
                 collider.set_enabled(state.collider_enabled());
+                collider.set_active_events(if state.can_touch {
+                    ActiveEvents::COLLISION_EVENTS
+                } else {
+                    ActiveEvents::empty()
+                });
+                collider.set_active_collision_types(if state.can_touch {
+                    ActiveCollisionTypes::all()
+                } else {
+                    ActiveCollisionTypes::default()
+                });
             }
         }
     }
@@ -1307,6 +1327,8 @@ impl PhysicsWorld {
         // Create capsule collider (half-height is the cylinder part, total height = 2*half_height + 2*radius)
         let half_height = (height - 2.0 * radius).max(0.0) / 2.0;
         let collider = ColliderBuilder::capsule_y(half_height, radius)
+            .active_events(ActiveEvents::COLLISION_EVENTS)
+            .active_collision_types(ActiveCollisionTypes::all())
             .collision_groups(InteractionGroups::new(
                 GROUP_CHARACTER,
                 GROUP_STATIC | GROUP_CHARACTER,
@@ -1606,6 +1628,55 @@ impl PhysicsWorld {
         }
 
         overlaps
+    }
+
+    /// Returns active contact/intersection pairs already computed by Rapier's
+    /// narrow phase during the physics step. This is the Roblox-like hot path
+    /// for Touched/TouchEnded: consume contact state produced by simulation
+    /// instead of polling every collider against the whole world each frame.
+    pub fn detect_narrow_phase_touches(&self) -> HashSet<(u64, u64)> {
+        let mut touches = HashSet::new();
+
+        let mut insert_pair = |collider_a, collider_b| {
+            let Some(&lua_a) = self.collider_to_lua.get(&collider_a) else {
+                return;
+            };
+            let Some(&lua_b) = self.collider_to_lua.get(&collider_b) else {
+                return;
+            };
+            if lua_a == lua_b {
+                return;
+            }
+
+            if let (Some(a), Some(b)) = (
+                self.collider_set.get(collider_a),
+                self.collider_set.get(collider_b),
+            ) {
+                if a.parent().is_some() && a.parent() == b.parent() {
+                    return;
+                }
+            }
+
+            if lua_a < lua_b {
+                touches.insert((lua_a, lua_b));
+            } else {
+                touches.insert((lua_b, lua_a));
+            }
+        };
+
+        for pair in self.narrow_phase.contact_pairs() {
+            if pair.has_any_active_contact {
+                insert_pair(pair.collider1, pair.collider2);
+            }
+        }
+
+        for (collider_a, collider_b, intersecting) in self.narrow_phase.intersection_pairs() {
+            if intersecting {
+                insert_pair(collider_a, collider_b);
+            }
+        }
+
+        touches
     }
 
     /// Casts a ray downward from a position to detect ground

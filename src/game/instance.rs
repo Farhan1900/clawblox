@@ -1117,21 +1117,15 @@ impl GameInstance {
     ///
     /// Matches Roblox semantics:
     /// - Both parts must have CanTouch=true for events to fire on either
+    /// - Touch state is tracked only when a part has a Touched/TouchEnded
+    ///   listener, mirroring Roblox's TouchTransmitter/TouchInterest behavior
     /// - Two anchored (non-character) parts never fire Touched on each other
     /// - Touched fires once on first overlap, TouchEnded fires once when overlap ends
     fn fire_touch_events(&mut self) {
-        // Refresh query pipeline after physics step
-        self.physics
-            .query_pipeline
-            .update(&self.physics.collider_set);
-
-        // Detect current overlaps
-        let current = self.physics.detect_overlaps();
-        let transitions = compute_touch_transitions(&current, &self.prev_touches);
-
         // Do all Lua work in a block to scope the runtime borrow,
         // collecting errors to handle afterward (split-borrow pattern).
         let mut errors: Vec<(&str, mlua::Error)> = Vec::new();
+        let mut current = HashSet::new();
 
         if let Some(runtime) = &self.lua_runtime {
             let lua = runtime.lua();
@@ -1147,6 +1141,52 @@ impl GameInstance {
                 }
             }
 
+            #[derive(Clone)]
+            struct TouchPartInfo {
+                anchored_non_character: bool,
+                can_touch: bool,
+                collision_group: String,
+                touched: super::lua::events::RBXScriptSignal,
+                touch_ended: super::lua::events::RBXScriptSignal,
+            }
+
+            let part_info = |lua_id: u64| -> Option<TouchPartInfo> {
+                let instance = id_to_instance.get(&lua_id)?.clone();
+                let data = instance.data.lock().unwrap();
+                let part = data.part_data.as_ref()?;
+                Some(TouchPartInfo {
+                    anchored_non_character: part.anchored && !self.physics.has_character(lua_id),
+                    can_touch: part.can_touch,
+                    collision_group: part.collision_group.clone(),
+                    touched: part.touched.clone(),
+                    touch_ended: part.touch_ended.clone(),
+                })
+            };
+
+            let pair_can_touch = |a: &TouchPartInfo, b: &TouchPartInfo| -> bool {
+                if !a.can_touch || !b.can_touch {
+                    return false;
+                }
+                if a.anchored_non_character && b.anchored_non_character {
+                    return false;
+                }
+                if !runtime
+                    .game()
+                    .physics_service()
+                    .groups_collidable(&a.collision_group, &b.collision_group)
+                {
+                    return false;
+                }
+
+                // Roblox creates internal TouchInterest/TouchTransmitter state
+                // only for parts with touch listeners. Avoid tracking inert
+                // construction-block pairs that cannot fire script callbacks.
+                a.touched.connection_count() > 0
+                    || b.touched.connection_count() > 0
+                    || a.touch_ended.connection_count() > 0
+                    || b.touch_ended.connection_count() > 0
+            };
+
             // Helper: check if a lua_id is an anchored non-character part
             let is_anchored_non_character = |lua_id: u64| -> bool {
                 if self.physics.has_character(lua_id) {
@@ -1160,6 +1200,16 @@ impl GameInstance {
                     })
                     .unwrap_or(false)
             };
+
+            for (a, b) in self.physics.detect_narrow_phase_touches() {
+                let (Some(info_a), Some(info_b)) = (part_info(a), part_info(b)) else {
+                    continue;
+                };
+                if pair_can_touch(&info_a, &info_b) {
+                    current.insert((a, b));
+                }
+            }
+            let transitions = compute_touch_transitions(&current, &self.prev_touches);
 
             // Helper: fire a signal on one part with the other as argument
             let mut fire_signal = |signal: &super::lua::events::RBXScriptSignal,
@@ -4107,14 +4157,18 @@ mod tests {
         let touch_count = get_trigger_attr(&instance, "Trigger", "TouchCount");
         assert_eq!(touch_count, 0.0, "No touches before moving to trigger");
 
-        // Teleport player into the trigger zone
+        // Move player into the trigger zone through the character controller.
+        // Roblox Touched is contact-driven; direct CFrame/Position teleports
+        // should not require a full-world overlap poll to synthesize touches.
         instance
             .physics
-            .set_character_position(hrp_id, [10.0, 3.0, 0.0]);
+            .set_character_target(hrp_id, Some([10.0, 3.0, 0.0]));
 
-        // Tick to detect the overlap
-        for _ in 0..3 {
+        for _ in 0..180 {
             instance.tick();
+            if get_trigger_attr(&instance, "Trigger", "TouchCount") >= 1.0 {
+                break;
+            }
         }
 
         let touch_count = get_trigger_attr(&instance, "Trigger", "TouchCount");
@@ -4130,13 +4184,16 @@ mod tests {
             "Touched arg should be the character's HRP"
         );
 
-        // Now teleport player away from trigger
+        // Now move player away from trigger.
         instance
             .physics
-            .set_character_position(hrp_id, [50.0, 3.0, 0.0]);
+            .set_character_target(hrp_id, Some([50.0, 3.0, 0.0]));
 
-        for _ in 0..3 {
+        for _ in 0..240 {
             instance.tick();
+            if get_trigger_attr(&instance, "Trigger", "EndedCount") >= 1.0 {
+                break;
+            }
         }
 
         let ended_count = get_trigger_attr(&instance, "Trigger", "EndedCount");
@@ -4318,6 +4375,34 @@ mod tests {
             touch_count, 0.0,
             "Anchored+Anchored should never fire Touched. Got count={}",
             touch_count
+        );
+    }
+
+    #[test]
+    fn test_touch_tracking_requires_touch_interest() {
+        let mut instance = GameInstance::new(Uuid::new_v4(), None);
+
+        instance.load_script(
+            r#"
+            for i = 1, 25 do
+                local part = Instance.new("Part")
+                part.Name = "InertTouchPart_" .. i
+                part.Size = Vector3.new(4, 4, 4)
+                part.Position = Vector3.new(0, 6 + i * 0.01, 0)
+                part.Anchored = false
+                part.CanTouch = true
+                part.Parent = Workspace
+            end
+        "#,
+        );
+
+        for _ in 0..20 {
+            instance.tick();
+        }
+
+        assert!(
+            instance.prev_touches.is_empty(),
+            "Parts with no Touched/TouchEnded listeners should not create touch state"
         );
     }
 
