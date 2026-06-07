@@ -942,6 +942,56 @@ impl GameInstance {
             }
             component.sort_unstable();
 
+            if component.len() > 1 {
+                let cframe_write = component.iter().filter_map(|lua_id| {
+                    let part = part_instances.get(lua_id)?;
+                    let data = part.data.lock().unwrap();
+                    let part_data = data.part_data.as_ref()?;
+                    if !part_data.cframe_dirty {
+                        return None;
+                    }
+                    Some((
+                        *lua_id,
+                        [
+                            part_data.position.x,
+                            part_data.position.y,
+                            part_data.position.z,
+                        ],
+                        part_data.cframe.rotation,
+                    ))
+                })
+                // Match existing sync semantics for multiple writes in one
+                // component: later sorted members win.
+                .last();
+
+                if let Some((written_id, position, rotation)) = cframe_write {
+                    if let Some(projected) =
+                        self.physics
+                            .project_assembly_cframe_write(written_id, position, &rotation)
+                    {
+                        for lua_id in &component {
+                            let Some((position, rotation)) = projected.get(lua_id) else {
+                                continue;
+                            };
+                            let Some(part) = part_instances.get(lua_id) else {
+                                continue;
+                            };
+                            let mut data = part.data.lock().unwrap();
+                            let Some(part_data) = data.part_data.as_mut() else {
+                                continue;
+                            };
+                            part_data.position.x = position[0];
+                            part_data.position.y = position[1];
+                            part_data.position.z = position[2];
+                            part_data.cframe.position = part_data.position;
+                            part_data.cframe.rotation = *rotation;
+                            part_data.position_dirty = true;
+                            part_data.cframe_dirty = true;
+                        }
+                    }
+                }
+            }
+
             let mut specs = Vec::with_capacity(component.len());
             for lua_id in &component {
                 let Some(part) = part_instances.get(lua_id) else {

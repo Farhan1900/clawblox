@@ -1136,8 +1136,17 @@ fn canonicalize_if_possible(path: &Path) -> Result<PathBuf, String> {
     if !path.exists() {
         return Err(format!("agent binary was not found at {}", path.display()));
     }
-    std::fs::canonicalize(path)
-        .map_err(|err| format!("failed to canonicalize {}: {err}", path.display()))
+    let resolved = std::fs::canonicalize(path)
+        .map_err(|err| format!("failed to canonicalize {}: {err}", path.display()))?;
+    let metadata = std::fs::metadata(&resolved)
+        .map_err(|err| format!("failed to inspect agent binary {}: {err}", resolved.display()))?;
+    if !metadata.is_file() {
+        return Err(format!("agent binary is not a file: {}", resolved.display()));
+    }
+    if metadata.len() == 0 {
+        return Err(format!("agent binary is empty: {}", resolved.display()));
+    }
+    Ok(resolved)
 }
 
 fn local_world_url(port: u16, base_path: &str) -> String {
@@ -1787,6 +1796,21 @@ mod tests {
         let contents = std::fs::read_to_string(&command_file).unwrap();
         assert!(contents.starts_with("#!/usr/bin/env bash\nset -euo pipefail\n"));
         assert!(contents.contains("exec '/bin/echo' 'hi'"));
+    }
+
+    #[test]
+    fn rejects_empty_agent_binary() {
+        let root = test_root();
+        std::fs::create_dir_all(&root).unwrap();
+        let binary = root.join("empty-agent");
+        std::fs::write(&binary, "").unwrap();
+
+        let err = canonicalize_if_possible(&binary).unwrap_err();
+
+        assert!(
+            err.contains("agent binary is empty"),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]

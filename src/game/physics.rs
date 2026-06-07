@@ -1028,6 +1028,49 @@ impl PhysicsWorld {
         Some(*body.position() * local)
     }
 
+    /// Projects a Roblox-style CFrame write to one member of a welded assembly
+    /// across every Lua part represented by the same physical body.
+    ///
+    /// Setting BasePart.CFrame on a welded member moves the assembly so that the
+    /// written member reaches the requested frame while all weld offsets are
+    /// preserved. This helper returns the resulting world frames for every Lua
+    /// part in the current physical assembly.
+    pub fn project_assembly_cframe_write(
+        &self,
+        lua_id: u64,
+        position: [f32; 3],
+        rotation: &[[f32; 3]; 3],
+    ) -> Option<HashMap<u64, ([f32; 3], [[f32; 3]; 3])>> {
+        let body_handle = *self.lua_to_body.get(&lua_id)?;
+        let local = self
+            .lua_to_local_frame
+            .get(&lua_id)
+            .copied()
+            .unwrap_or_else(Isometry::identity);
+        let target_member_iso = part_isometry(position, rotation);
+        let target_body_iso = target_member_iso * local.inverse();
+        let lua_ids = self.body_to_luas.get(&body_handle)?;
+
+        let mut out = HashMap::with_capacity(lua_ids.len());
+        for part_id in lua_ids {
+            let part_local = self
+                .lua_to_local_frame
+                .get(part_id)
+                .copied()
+                .unwrap_or_else(Isometry::identity);
+            let part_iso = target_body_iso * part_local;
+            let pos = part_iso.translation.vector;
+            out.insert(
+                *part_id,
+                (
+                    [pos.x, pos.y, pos.z],
+                    quaternion_to_rotation_matrix(&part_iso.rotation),
+                ),
+            );
+        }
+        Some(out)
+    }
+
     pub fn get_part_position(&self, lua_id: u64) -> Option<[f32; 3]> {
         self.get_part_world_isometry(lua_id).map(|iso| {
             let pos = iso.translation.vector;
