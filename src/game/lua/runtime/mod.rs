@@ -20,8 +20,8 @@ use super::types::{register_all_types, Vector3};
 use crate::game::async_bridge::AsyncBridge;
 
 mod coroutines;
-mod engine;
 mod frame_events;
+mod script_runtime;
 
 /// A request to kick a player from the game
 #[derive(Debug, Clone)]

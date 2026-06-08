@@ -1,4 +1,4 @@
-use super::super::*;
+use super::*;
 use crate::game::lua::instance::{ClassName, Instance};
 
 impl LuaRuntime {
