@@ -55,9 +55,8 @@ pub mod humanoid {
     /// Default walk speed (studs/second)
     pub const DEFAULT_WALK_SPEED: f32 = 16.0;
 
-    /// Default jump power tuned for `physics::DEFAULT_GRAVITY` (30 studs/s²).
-    /// This yields roughly `DEFAULT_JUMP_HEIGHT` of vertical travel.
-    pub const DEFAULT_JUMP_POWER: f32 = 20.8;
+    /// Default jump power (Roblox-compatible).
+    pub const DEFAULT_JUMP_POWER: f32 = 50.0;
 
     /// Default jump height
     pub const DEFAULT_JUMP_HEIGHT: f32 = 7.2;

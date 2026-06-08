@@ -23,12 +23,10 @@ pub fn build_motion_plan(
     contact_velocity: Option<[f32; 3]>,
 ) -> MotionPlan {
     let mut new_vertical_velocity = vertical_velocity + gravity * dt;
-    if grounded {
-        if let Some(jump) = jump_power {
-            let max_launch_speed =
-                (2.0 * gravity.abs() * humanoid_consts::DEFAULT_JUMP_HEIGHT).sqrt();
-            new_vertical_velocity = jump.max(0.0).min(max_launch_speed);
-        }
+    if let Some(jump) = jump_power {
+        let max_launch_speed =
+            (2.0 * gravity.abs() * humanoid_consts::DEFAULT_JUMP_HEIGHT).sqrt();
+        new_vertical_velocity = jump.max(0.0).min(max_launch_speed);
     }
 
     let mut dx = 0.0f32;
