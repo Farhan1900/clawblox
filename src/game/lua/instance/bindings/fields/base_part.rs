@@ -340,10 +340,12 @@ pub(super) fn add_fields<F: UserDataFields<Instance>>(fields: &mut F) {
         Ok(data.part_data.as_ref().map(|p| p.velocity))
     });
     fields.add_field_method_set("AssemblyLinearVelocity", |_, this, velocity: Vector3| {
-        let mut data = this.data.lock().unwrap();
-        if let Some(part) = &mut data.part_data {
-            part.velocity = velocity;
-            part.velocity_dirty = true;
+        for assembly_part in this.assembly_parts_from_graph() {
+            let mut data = assembly_part.data.lock().unwrap();
+            if let Some(part) = &mut data.part_data {
+                part.velocity = velocity;
+                part.velocity_dirty = true;
+            }
         }
         Ok(())
     });
@@ -354,10 +356,12 @@ pub(super) fn add_fields<F: UserDataFields<Instance>>(fields: &mut F) {
     fields.add_field_method_set(
         "AssemblyAngularVelocity",
         |_, this, angular_velocity: Vector3| {
-            let mut data = this.data.lock().unwrap();
-            if let Some(part) = &mut data.part_data {
-                part.angular_velocity = angular_velocity;
-                part.angular_velocity_dirty = true;
+            for assembly_part in this.assembly_parts_from_graph() {
+                let mut data = assembly_part.data.lock().unwrap();
+                if let Some(part) = &mut data.part_data {
+                    part.angular_velocity = angular_velocity;
+                    part.angular_velocity_dirty = true;
+                }
             }
             Ok(())
         },

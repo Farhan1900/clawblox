@@ -108,6 +108,15 @@ impl Instance {
         result
     }
 
+    pub(super) fn assembly_parts_from_graph(&self) -> Vec<Instance> {
+        if self.data.lock().unwrap().part_data.is_none() {
+            return Vec::new();
+        }
+        let mut parts = vec![self.clone()];
+        parts.extend(self.connected_parts_from_graph(true));
+        parts
+    }
+
     fn model_descendant_parts(&self) -> Vec<Instance> {
         self.get_descendants()
             .into_iter()
@@ -291,7 +300,11 @@ impl Instance {
         Ok(())
     }
 
-    pub(super) fn fire_property_changed_if_listening(&self, lua: &Lua, property_name: &str) -> Result<()> {
+    pub(super) fn fire_property_changed_if_listening(
+        &self,
+        lua: &Lua,
+        property_name: &str,
+    ) -> Result<()> {
         let signal = self
             .data
             .lock()

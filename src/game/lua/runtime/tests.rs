@@ -2192,6 +2192,78 @@ fn test_basepart_assembly_velocity_properties_are_writable() {
 }
 
 #[test]
+fn test_basepart_assembly_velocity_write_updates_welded_assembly() {
+    let mut instance = crate::game::instance::GameInstance::new(Uuid::new_v4(), None);
+    instance.load_script(
+        r#"
+        Workspace.Gravity = 0
+
+        local root = Instance.new("Part")
+        root.Name = "AssemblyVelocityRoot"
+        root.Size = Vector3.new(2, 2, 2)
+        root.Position = Vector3.new(0, 10, 0)
+        root.CanCollide = false
+        root.Parent = Workspace
+
+        local child = Instance.new("Part")
+        child.Name = "AssemblyVelocityChild"
+        child.Size = Vector3.new(2, 2, 2)
+        child.Position = Vector3.new(3, 10, 0)
+        child.CanCollide = false
+        child.Parent = Workspace
+
+        local weld = Instance.new("WeldConstraint")
+        weld.Part0 = root
+        weld.Part1 = child
+        weld.Parent = Workspace
+
+        child.AssemblyLinearVelocity = Vector3.new(12, 0, 0)
+        child.AssemblyAngularVelocity = Vector3.new(0, 0, 0)
+
+        _G.root = root
+        _G.child = child
+        _G.immediateRootVelocity = root.AssemblyLinearVelocity.X
+    "#,
+    );
+
+    for _ in 0..5 {
+        instance.tick();
+    }
+
+    let runtime = instance.lua_runtime.as_ref().unwrap();
+    let (immediate_root_velocity, root_velocity, child_velocity, angular): (f64, f64, f64, f64) =
+        runtime
+            .lua()
+            .load(
+                r#"
+                return _G.immediateRootVelocity,
+                    _G.root.AssemblyLinearVelocity.X,
+                    _G.child.AssemblyLinearVelocity.X,
+                    _G.root.AssemblyAngularVelocity.Magnitude
+            "#,
+            )
+            .eval()
+            .unwrap();
+
+    assert!(
+        (immediate_root_velocity - 12.0).abs() < 0.001,
+        "assembly velocity setter should update connected members immediately"
+    );
+    assert!(
+        (root_velocity - 12.0).abs() < 0.05,
+        "expected root assembly velocity ~= 12, got {root_velocity}"
+    );
+    assert!(
+        (child_velocity - 12.0).abs() < 0.05,
+        "expected child assembly velocity ~= 12, got {child_velocity}"
+    );
+    assert!(
+        angular < 0.05,
+        "pure assembly velocity write should not spin assembly: {angular}"
+    );
+}
+
+#[test]
 fn test_basepart_assembly_angular_velocity_remains_accessible_after_ticks() {
     let mut runtime = test_runtime();
     runtime
