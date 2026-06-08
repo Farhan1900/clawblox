@@ -7,7 +7,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 
 use super::events::{create_signal, track_yielded_threads, RBXScriptSignal};
-use super::runtime::Game;
+use super::runtime::{Game, PhysicsCommand};
 use super::services::{PlayersService, WorkspaceService};
 use super::types::{
     CFrame, Color3, HumanoidStateType, Material, PartType, PhysicalProperties, UDim, UDim2, Vector3,
@@ -4149,6 +4149,55 @@ impl UserData for Instance {
                 }
             };
             Ok(volume * density)
+        });
+
+        methods.add_method("ApplyImpulse", |lua, this, impulse: Vector3| {
+            if this.data.lock().unwrap().part_data.is_none() {
+                return Err(mlua::Error::runtime(
+                    "ApplyImpulse is only supported on BasePart",
+                ));
+            }
+            let game_ud: mlua::AnyUserData = lua.globals().get("__clawblox_game")?;
+            let game_ref = game_ud.borrow::<Game>()?;
+            game_ref.queue_physics_command(PhysicsCommand::ApplyImpulse {
+                part_id: this.id().0,
+                impulse,
+            });
+            Ok(())
+        });
+
+        methods.add_method(
+            "ApplyImpulseAtPosition",
+            |lua, this, (impulse, position): (Vector3, Vector3)| {
+                if this.data.lock().unwrap().part_data.is_none() {
+                    return Err(mlua::Error::runtime(
+                        "ApplyImpulseAtPosition is only supported on BasePart",
+                    ));
+                }
+                let game_ud: mlua::AnyUserData = lua.globals().get("__clawblox_game")?;
+                let game_ref = game_ud.borrow::<Game>()?;
+                game_ref.queue_physics_command(PhysicsCommand::ApplyImpulseAtPosition {
+                    part_id: this.id().0,
+                    impulse,
+                    position,
+                });
+                Ok(())
+            },
+        );
+
+        methods.add_method("ApplyAngularImpulse", |lua, this, impulse: Vector3| {
+            if this.data.lock().unwrap().part_data.is_none() {
+                return Err(mlua::Error::runtime(
+                    "ApplyAngularImpulse is only supported on BasePart",
+                ));
+            }
+            let game_ud: mlua::AnyUserData = lua.globals().get("__clawblox_game")?;
+            let game_ref = game_ud.borrow::<Game>()?;
+            game_ref.queue_physics_command(PhysicsCommand::ApplyAngularImpulse {
+                part_id: this.id().0,
+                impulse,
+            });
+            Ok(())
         });
 
         methods.add_method("SetNetworkOwner", |_, this, _owner: Value| {

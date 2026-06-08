@@ -102,7 +102,7 @@ pub struct GroundKinematicSupport {
     pub distance: f32,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PartInteractionState {
     pub can_collide: bool,
     pub can_touch: bool,
@@ -339,12 +339,6 @@ fn assembly_signature(
         out.push_str(&format!("id={};shape={:?};", part.lua_id, part.shape));
         out.push_str("size=");
         fmt_vec3(&mut out, part.size);
-        out.push_str(";collide=");
-        out.push_str(if part.can_collide { "1" } else { "0" });
-        out.push_str(";touch=");
-        out.push_str(if part.can_touch { "1" } else { "0" });
-        out.push_str(";query=");
-        out.push_str(if part.can_query { "1" } else { "0" });
         out.push_str(";local=");
         fmt_iso(&mut out, &local);
         out.push(';');
@@ -697,6 +691,15 @@ impl PhysicsWorld {
         };
 
         for part in &spec.parts {
+            let interaction_state = PartInteractionState {
+                can_collide: part.can_collide,
+                can_touch: part.can_touch,
+                can_query: part.can_query,
+            };
+            if self.lua_to_interactions.get(&part.lua_id).copied() != Some(interaction_state) {
+                self.set_interaction_state(part.lua_id, interaction_state);
+            }
+
             if part.position_dirty {
                 if let Some(local_frame) = self.lua_to_local_frame.get(&part.lua_id).copied() {
                     let target_body_iso =
@@ -990,6 +993,59 @@ impl PhysicsWorld {
                     ],
                     true,
                 );
+            }
+        }
+    }
+
+    pub fn apply_impulse_to_part(&mut self, lua_id: u64, impulse: [f32; 3]) {
+        if !velocity_within_physics_envelope(impulse) {
+            return;
+        }
+        let Some(&handle) = self.lua_to_body.get(&lua_id) else {
+            return;
+        };
+        if let Some(body) = self.rigid_body_set.get_mut(handle) {
+            if body.is_dynamic() {
+                body.apply_impulse(vector![impulse[0], impulse[1], impulse[2]], true);
+            }
+        }
+    }
+
+    pub fn apply_impulse_at_position_to_part(
+        &mut self,
+        lua_id: u64,
+        impulse: [f32; 3],
+        position: [f32; 3],
+    ) {
+        if !velocity_within_physics_envelope(impulse)
+            || !transform_within_physics_envelope(position)
+        {
+            return;
+        }
+        let Some(&handle) = self.lua_to_body.get(&lua_id) else {
+            return;
+        };
+        if let Some(body) = self.rigid_body_set.get_mut(handle) {
+            if body.is_dynamic() {
+                body.apply_impulse_at_point(
+                    vector![impulse[0], impulse[1], impulse[2]],
+                    point![position[0], position[1], position[2]],
+                    true,
+                );
+            }
+        }
+    }
+
+    pub fn apply_angular_impulse_to_part(&mut self, lua_id: u64, impulse: [f32; 3]) {
+        if !velocity_within_physics_envelope(impulse) {
+            return;
+        }
+        let Some(&handle) = self.lua_to_body.get(&lua_id) else {
+            return;
+        };
+        if let Some(body) = self.rigid_body_set.get_mut(handle) {
+            if body.is_dynamic() {
+                body.apply_torque_impulse(vector![impulse[0], impulse[1], impulse[2]], true);
             }
         }
     }

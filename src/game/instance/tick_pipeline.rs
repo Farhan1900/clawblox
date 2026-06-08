@@ -29,6 +29,10 @@ pub(super) fn run_tick_phases(instance: &mut GameInstance, dt: f32) {
     // Rebuild physics constraints from Lua weld objects before the solver step.
     instance.sync_constraints_to_physics();
 
+    // Apply one-frame BasePart physics commands queued by Lua methods such as
+    // ApplyImpulse after assemblies exist and before the solver advances.
+    instance.process_physics_commands();
+
     // Sync script control targets to physics character controllers.
     instance.sync_controller_targets();
 

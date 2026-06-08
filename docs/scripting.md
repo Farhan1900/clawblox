@@ -258,6 +258,17 @@ Base class for all physical parts. Inherits from Instance.
 | `Touched` | (otherPart: BasePart) | Part touched another part |
 | `TouchEnded` | (otherPart: BasePart) | Parts stopped touching |
 
+#### Methods
+| Method | Returns | Description |
+|--------|---------|-------------|
+| `GetMass()` | number | Returns the part's mass using its size and physical properties |
+| `SetNetworkOwner(owner)` | void | Accepted for Roblox compatibility; physics ownership is engine controlled |
+| `ApplyImpulse(impulse)` | void | Applies a world-space impulse to the part's assembly at its center of mass |
+| `ApplyImpulseAtPosition(impulse, position)` | void | Applies a world-space impulse at a world-space position, which can add angular velocity |
+| `ApplyAngularImpulse(impulse)` | void | Applies a world-space angular impulse to the part's assembly |
+
+For welded assemblies, these methods operate on the shared physics assembly. Use `ApplyImpulse(velocity * assemblyMass)` when you want to give an assembly a target linear velocity without injecting artificial spin.
+
 #### Physics Properties (Roblox parity)
 
 In Roblox-style APIs, `Friction`, `Density`, and `Elasticity` are not direct `BasePart` fields.

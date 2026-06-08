@@ -16,7 +16,7 @@ use super::services::{
     DataStoreService, DebrisService, HttpService, PhysicsService, PlayersService,
     RemoteEventService, RunService, WorkspaceService,
 };
-use super::types::register_all_types;
+use super::types::{register_all_types, Vector3};
 use crate::game::async_bridge::AsyncBridge;
 
 mod coroutines;
@@ -28,6 +28,23 @@ mod frame_events;
 pub struct KickRequest {
     pub user_id: u64,
     pub message: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum PhysicsCommand {
+    ApplyImpulse {
+        part_id: u64,
+        impulse: Vector3,
+    },
+    ApplyImpulseAtPosition {
+        part_id: u64,
+        impulse: Vector3,
+        position: Vector3,
+    },
+    ApplyAngularImpulse {
+        part_id: u64,
+        impulse: Vector3,
+    },
 }
 
 #[derive(Default)]
@@ -79,6 +96,8 @@ pub struct GameDataModel {
     pub replicated_storage: Instance,
     /// Queue of pending kick requests from Lua scripts
     pub kick_requests: Vec<KickRequest>,
+    /// One-frame physics commands issued by BasePart methods during Lua execution.
+    pub physics_commands: Vec<PhysicsCommand>,
 }
 
 const DEFAULT_PLAYER_MODEL_URL: &str = "asset://player.glb";
@@ -106,6 +125,7 @@ impl GameDataModel {
             server_storage: Instance::from_data(InstanceData::new_server_storage()),
             replicated_storage: Instance::from_data(InstanceData::new_replicated_storage()),
             kick_requests: Vec::new(),
+            physics_commands: Vec::new(),
         }
     }
 }
@@ -194,6 +214,18 @@ impl Game {
     /// Drain all pending kick requests (called from GameInstance tick)
     pub fn drain_kick_requests(&self) -> Vec<KickRequest> {
         std::mem::take(&mut self.data_model.lock().unwrap().kick_requests)
+    }
+
+    pub fn queue_physics_command(&self, command: PhysicsCommand) {
+        self.data_model
+            .lock()
+            .unwrap()
+            .physics_commands
+            .push(command);
+    }
+
+    pub fn drain_physics_commands(&self) -> Vec<PhysicsCommand> {
+        std::mem::take(&mut self.data_model.lock().unwrap().physics_commands)
     }
 }
 
