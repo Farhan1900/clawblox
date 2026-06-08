@@ -6,6 +6,7 @@ pub mod lua;
 mod manager;
 pub mod physics;
 pub mod script_bundle;
+pub mod world_root;
 
 use dashmap::DashMap;
 use parking_lot::RwLock;
