@@ -2254,6 +2254,8 @@ fn test_physics_service_collision_groups_filter_solver_contacts() {
             ghost.Anchored = false
             ghost.CollisionGroup = "Ghost"
             ghost.Parent = Workspace
+
+            PhysicsService:RenameCollisionGroup("Ghost", "Phantom")
         "#,
     );
 
@@ -2308,11 +2310,17 @@ fn test_physics_service_collision_groups_filter_character_controller_contacts() 
     let hrp_id = *instance.player_hrp_ids.get(&agent_id).unwrap();
 
     let runtime = instance.lua_runtime.as_ref().unwrap();
+    let ghost_group_id = runtime
+        .game()
+        .physics_service()
+        .resolve_collision_group_id("Ghost")
+        .expect("Ghost collision group should be registered");
     for inst in runtime.workspace().get_descendants() {
         let mut data = inst.data.lock().unwrap();
         if data.id.0 == hrp_id {
             let part = data.part_data.as_mut().expect("HRP should be a part");
             part.collision_group = "Ghost".to_string();
+            part.collision_group_id = ghost_group_id;
             part.interaction_dirty = true;
         }
     }

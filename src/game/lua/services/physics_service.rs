@@ -31,7 +31,20 @@ impl Default for CollisionGroupMask {
 struct PhysicsServiceData {
     registered_groups: HashSet<String>,
     group_indices: HashMap<String, u8>,
-    explicit_pair_collidable: HashMap<(String, String), bool>,
+    explicit_pair_collidable: HashMap<(u8, u8), bool>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CollisionGroupRegistryEntry {
+    pub name: String,
+    pub id: u8,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CollisionGroupPairEntry {
+    pub group1_id: u8,
+    pub group2_id: u8,
+    pub collidable: bool,
 }
 
 #[derive(Clone, Default)]
@@ -51,11 +64,11 @@ impl PhysicsService {
         }
     }
 
-    fn canonical_pair(group1: &str, group2: &str) -> (String, String) {
+    fn canonical_pair(group1: u8, group2: u8) -> (u8, u8) {
         if group1 <= group2 {
-            (group1.to_string(), group2.to_string())
+            (group1, group2)
         } else {
-            (group2.to_string(), group1.to_string())
+            (group2, group1)
         }
     }
 
@@ -101,6 +114,11 @@ impl PhysicsService {
         self.data.lock().unwrap().registered_groups.contains(group)
     }
 
+    pub fn resolve_collision_group_id(&self, group: &str) -> mlua::Result<u8> {
+        let data = self.data.lock().unwrap();
+        Self::group_id(&data, group)
+    }
+
     fn group_id(data: &PhysicsServiceData, group: &str) -> mlua::Result<u8> {
         data.group_indices.get(group).copied().ok_or_else(|| {
             mlua::Error::runtime(format!("collision group '{group}' is not registered"))
@@ -120,8 +138,8 @@ impl PhysicsService {
             .iter()
             .map(|(name, &index)| {
                 let mut filter = 0u32;
-                for (other_name, &other_index) in &data.group_indices {
-                    let key = Self::canonical_pair(name, other_name);
+                for &other_index in data.group_indices.values() {
+                    let key = Self::canonical_pair(index, other_index);
                     if data
                         .explicit_pair_collidable
                         .get(&key)
@@ -144,12 +162,13 @@ impl PhysicsService {
                 "cannot unregister collision group 'Default'",
             ));
         }
-        if !data.registered_groups.remove(group) {
+        let Some(removed_id) = data.group_indices.get(group).copied() else {
             return Ok(());
-        }
+        };
+        data.registered_groups.remove(group);
         data.group_indices.remove(group);
         data.explicit_pair_collidable
-            .retain(|(a, b), _| a != group && b != group);
+            .retain(|(a, b), _| *a != removed_id && *b != removed_id);
         Ok(())
     }
 
@@ -178,19 +197,20 @@ impl PhysicsService {
         data.registered_groups.insert(to.to_string());
         data.group_indices.insert(to.to_string(), index);
 
-        let mut renamed_pairs = HashMap::with_capacity(data.explicit_pair_collidable.len());
-        for ((a, b), collidable) in data.explicit_pair_collidable.drain() {
-            let next_a = if a == from { to.to_string() } else { a };
-            let next_b = if b == from { to.to_string() } else { b };
-            let key = PhysicsService::canonical_pair(&next_a, &next_b);
-            renamed_pairs.insert(key, collidable);
-        }
-        data.explicit_pair_collidable = renamed_pairs;
         Ok(())
     }
 
     pub fn groups_collidable(&self, group1: &str, group2: &str) -> bool {
         let data = self.data.lock().unwrap();
+        let (Ok(group1), Ok(group2)) =
+            (Self::group_id(&data, group1), Self::group_id(&data, group2))
+        else {
+            return true;
+        };
+        Self::groups_collidable_ids_locked(&data, group1, group2)
+    }
+
+    fn groups_collidable_ids_locked(data: &PhysicsServiceData, group1: u8, group2: u8) -> bool {
         let key = Self::canonical_pair(group1, group2);
         data.explicit_pair_collidable
             .get(&key)
@@ -198,25 +218,114 @@ impl PhysicsService {
             .unwrap_or(true)
     }
 
+    pub fn groups_collidable_ids(&self, group1: u8, group2: u8) -> bool {
+        let data = self.data.lock().unwrap();
+        Self::groups_collidable_ids_locked(&data, group1, group2)
+    }
+
     pub fn collision_group_mask(&self, group: &str) -> CollisionGroupMask {
         let data = self.data.lock().unwrap();
         let Some(&index) = data.group_indices.get(group) else {
             return CollisionGroupMask::default();
         };
+        Self::collision_group_mask_locked(&data, index)
+    }
+
+    fn collision_group_mask_locked(data: &PhysicsServiceData, index: u8) -> CollisionGroupMask {
         let membership = 1u32 << index;
         let mut filter = 0u32;
-        for (other_name, &other_index) in &data.group_indices {
-            let key = Self::canonical_pair(group, other_name);
-            if data
-                .explicit_pair_collidable
-                .get(&key)
-                .copied()
-                .unwrap_or(true)
-            {
+        if !data.group_indices.values().any(|&id| id == index) {
+            return CollisionGroupMask::default();
+        }
+        for &other_index in data.group_indices.values() {
+            if Self::groups_collidable_ids_locked(data, index, other_index) {
                 filter |= 1u32 << other_index;
             }
         }
         CollisionGroupMask { membership, filter }
+    }
+
+    pub fn collision_group_mask_by_id(&self, group_id: u8) -> CollisionGroupMask {
+        let data = self.data.lock().unwrap();
+        Self::collision_group_mask_locked(&data, group_id)
+    }
+
+    pub fn snapshot_registry(&self) -> Vec<CollisionGroupRegistryEntry> {
+        let data = self.data.lock().unwrap();
+        let mut groups = data
+            .group_indices
+            .iter()
+            .map(|(name, &id)| CollisionGroupRegistryEntry {
+                name: name.clone(),
+                id,
+            })
+            .collect::<Vec<_>>();
+        groups.sort_by_key(|group| group.id);
+        groups
+    }
+
+    pub fn snapshot_pair_collidability(&self) -> Vec<CollisionGroupPairEntry> {
+        let data = self.data.lock().unwrap();
+        let mut pairs = data
+            .explicit_pair_collidable
+            .iter()
+            .map(
+                |(&(group1_id, group2_id), &collidable)| CollisionGroupPairEntry {
+                    group1_id,
+                    group2_id,
+                    collidable,
+                },
+            )
+            .collect::<Vec<_>>();
+        pairs.sort_by_key(|pair| (pair.group1_id, pair.group2_id));
+        pairs
+    }
+
+    pub fn restore_registry(
+        &self,
+        groups: &[CollisionGroupRegistryEntry],
+        pair_collidability: &[CollisionGroupPairEntry],
+    ) -> mlua::Result<()> {
+        let mut group_indices = HashMap::new();
+        let mut registered_groups = HashSet::new();
+        for group in groups {
+            if group.name.is_empty() || group.id as usize >= MAX_COLLISION_GROUPS {
+                return Err(mlua::Error::runtime("invalid collision group snapshot"));
+            }
+            if registered_groups.contains(&group.name)
+                || group_indices.values().any(|&id| id == group.id)
+            {
+                return Err(mlua::Error::runtime(
+                    "duplicate collision group in snapshot",
+                ));
+            }
+            registered_groups.insert(group.name.clone());
+            group_indices.insert(group.name.clone(), group.id);
+        }
+        if group_indices.get(DEFAULT_COLLISION_GROUP).copied() != Some(0) {
+            return Err(mlua::Error::runtime(
+                "collision group snapshot is missing Default group id 0",
+            ));
+        }
+
+        let mut explicit_pair_collidable = HashMap::new();
+        for pair in pair_collidability {
+            if !group_indices.values().any(|&id| id == pair.group1_id)
+                || !group_indices.values().any(|&id| id == pair.group2_id)
+            {
+                return Err(mlua::Error::runtime(
+                    "collision group pair references an unregistered group id",
+                ));
+            }
+            let key = Self::canonical_pair(pair.group1_id, pair.group2_id);
+            explicit_pair_collidable.insert(key, pair.collidable);
+        }
+
+        let mut data = self.data.lock().unwrap();
+        data.registered_groups = registered_groups;
+        data.group_indices = group_indices;
+        data.explicit_pair_collidable = explicit_pair_collidable;
+        Ok(())
     }
 }
 
@@ -290,7 +399,9 @@ impl UserData for PhysicsService {
                 let mut data = this.data.lock().unwrap();
                 PhysicsService::require_registered_group(&data, &group1)?;
                 PhysicsService::require_registered_group(&data, &group2)?;
-                let key = PhysicsService::canonical_pair(&group1, &group2);
+                let group1 = PhysicsService::group_id(&data, &group1)?;
+                let group2 = PhysicsService::group_id(&data, &group2)?;
+                let key = PhysicsService::canonical_pair(group1, group2);
                 data.explicit_pair_collidable.insert(key, collidable);
                 Ok(())
             },
@@ -313,13 +424,15 @@ impl UserData for PhysicsService {
         methods.add_method(
             "SetPartCollisionGroup",
             |_, this, (part, group): (Instance, String)| {
-                {
+                let group_id = {
                     let data = this.data.lock().unwrap();
                     PhysicsService::require_registered_group(&data, &group)?;
-                }
+                    PhysicsService::group_id(&data, &group)?
+                };
                 let mut data = part.data.lock().unwrap();
                 if let Some(part_data) = &mut data.part_data {
                     part_data.collision_group = group;
+                    part_data.collision_group_id = group_id;
                     part_data.interaction_dirty = true;
                 }
                 Ok(())

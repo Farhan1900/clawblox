@@ -11,6 +11,9 @@ use crate::game::lua::instance::{
     ScriptData, TextXAlignment, TextYAlignment, UICornerData, WeldConstraintData, WeldData,
 };
 use crate::game::lua::services::agent_input::AgentInput;
+use crate::game::lua::services::physics_service::{
+    CollisionGroupPairEntry, CollisionGroupRegistryEntry, PhysicsService,
+};
 use crate::game::lua::services::remote_event::ReplicatedEvent;
 use crate::game::lua::types::{
     CFrame, Color3, HumanoidStateType, Material, PartType, PhysicalProperties, UDim, UDim2, Vector3,
@@ -25,6 +28,10 @@ pub struct GameInstanceSnapshot {
     pub instance_id: Uuid,
     pub tick: u64,
     pub workspace_gravity: f32,
+    #[serde(default)]
+    pub physics_collision_groups: Vec<PhysicsCollisionGroupSnapshot>,
+    #[serde(default)]
+    pub physics_collision_group_pairs: Vec<PhysicsCollisionGroupPairSnapshot>,
     pub workspace_children: Vec<InstanceSnapshot>,
     #[serde(default)]
     pub server_script_service_children: Vec<InstanceSnapshot>,
@@ -35,6 +42,19 @@ pub struct GameInstanceSnapshot {
     pub pending_inputs: Vec<PendingInputSnapshot>,
     #[serde(default)]
     pub remote_events: Vec<ReplicatedEventSnapshot>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PhysicsCollisionGroupSnapshot {
+    pub name: String,
+    pub id: u8,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PhysicsCollisionGroupPairSnapshot {
+    pub group1_id: u8,
+    pub group2_id: u8,
+    pub collidable: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -179,6 +199,8 @@ pub struct PartSnapshot {
     pub can_collide: bool,
     pub can_query: bool,
     pub collision_group: String,
+    #[serde(default)]
+    pub collision_group_id: u8,
     pub can_touch: bool,
     pub transparency: f32,
     pub color: [f32; 3],
@@ -421,6 +443,24 @@ pub fn capture_game_instance(instance: &GameInstance) -> Result<GameInstanceSnap
 
     let workspace = runtime.workspace();
     let workspace_gravity = workspace.data.lock().unwrap().gravity;
+    let physics_service = runtime.game().physics_service();
+    let physics_collision_groups = physics_service
+        .snapshot_registry()
+        .into_iter()
+        .map(|group| PhysicsCollisionGroupSnapshot {
+            name: group.name,
+            id: group.id,
+        })
+        .collect();
+    let physics_collision_group_pairs = physics_service
+        .snapshot_pair_collidability()
+        .into_iter()
+        .map(|pair| PhysicsCollisionGroupPairSnapshot {
+            group1_id: pair.group1_id,
+            group2_id: pair.group2_id,
+            collidable: pair.collidable,
+        })
+        .collect();
     let workspace_children = workspace
         .get_children()
         .into_iter()
@@ -492,6 +532,8 @@ pub fn capture_game_instance(instance: &GameInstance) -> Result<GameInstanceSnap
         instance_id: instance.instance_id,
         tick: instance.tick,
         workspace_gravity,
+        physics_collision_groups,
+        physics_collision_group_pairs,
         workspace_children,
         server_script_service_children,
         server_storage_children,
@@ -521,6 +563,7 @@ pub fn restore_game_instance(
         players_service,
         agent_input_service,
         remote_event_service,
+        physics_service,
     ) = {
         let runtime = instance.lua_runtime.as_ref().ok_or_else(|| {
             "cannot restore instance without an initialized Lua runtime".to_string()
@@ -533,6 +576,7 @@ pub fn restore_game_instance(
             runtime.players(),
             runtime.agent_input_service(),
             runtime.game().remote_event_service(),
+            runtime.game().physics_service(),
         )
     };
 
@@ -543,6 +587,11 @@ pub fn restore_game_instance(
     {
         workspace.data.lock().unwrap().gravity = snapshot.workspace_gravity;
     }
+    restore_physics_service(
+        &physics_service,
+        &snapshot.physics_collision_groups,
+        &snapshot.physics_collision_group_pairs,
+    )?;
 
     let mut instance_map = HashMap::new();
     let mut fixups = Vec::new();
@@ -734,20 +783,22 @@ fn capture_player_snapshot(
             if let Some(part) = &data.part_data {
                 if data.name == "HumanoidRootPart" {
                     humanoid_root_part_id = Some(data.id.0);
-                    character_controller = instance.physics.get_character_state(data.id.0).map(|state| {
-                        PlayerCharacterControllerSnapshot {
-                            vertical_velocity: state.vertical_velocity,
-                            target_position: state.target_position,
-                            walk_speed: state.walk_speed,
-                            jump_power: state.jump_power,
-                            jump_requested: state.jump_requested,
-                            jump_buffer_remaining: state.jump_buffer_remaining,
-                            jump_cooldown_remaining: state.jump_cooldown_remaining,
-                            move_to_elapsed: state.move_to_elapsed,
-                            grounded: state.grounded,
-                            horizontal_velocity: state.horizontal_velocity,
-                        }
-                    });
+                    character_controller =
+                        instance
+                            .physics
+                            .get_character_state(data.id.0)
+                            .map(|state| PlayerCharacterControllerSnapshot {
+                                vertical_velocity: state.vertical_velocity,
+                                target_position: state.target_position,
+                                walk_speed: state.walk_speed,
+                                jump_power: state.jump_power,
+                                jump_requested: state.jump_requested,
+                                jump_buffer_remaining: state.jump_buffer_remaining,
+                                jump_cooldown_remaining: state.jump_cooldown_remaining,
+                                move_to_elapsed: state.move_to_elapsed,
+                                grounded: state.grounded,
+                                horizontal_velocity: state.horizontal_velocity,
+                            });
                     humanoid_root_part = Some(PlayerPartSnapshot {
                         attributes: data
                             .attributes
@@ -801,11 +852,7 @@ fn capture_player_snapshot(
     })
 }
 
-fn infer_restored_character_grounded(
-    instance: &GameInstance,
-    hrp_id: u64,
-    height: f32,
-) -> bool {
+fn infer_restored_character_grounded(instance: &GameInstance, hrp_id: u64, height: f32) -> bool {
     let Some(state) = instance.physics.get_character_state(hrp_id) else {
         return false;
     };
@@ -815,9 +862,10 @@ fn infer_restored_character_grounded(
 
     let half_height = height * 0.5;
     let max_distance = half_height + crate::game::constants::physics::SNAP_TO_GROUND + 0.1;
-    let Some((toi, _)) = instance
-        .physics
-        .raycast_down(position, max_distance, Some(state.body_handle))
+    let Some((toi, _)) =
+        instance
+            .physics
+            .raycast_down(position, max_distance, Some(state.body_handle))
     else {
         return false;
     };
@@ -951,8 +999,7 @@ fn restore_players(
                 instance
                     .physics
                     .set_character_position(hrp_id, hrp_snapshot.position);
-                let inferred_grounded =
-                    infer_restored_character_grounded(instance, hrp_id, height);
+                let inferred_grounded = infer_restored_character_grounded(instance, hrp_id, height);
                 if let Some(state) = instance.physics.get_character_state_mut(hrp_id) {
                     if let Some(controller_snapshot) = player.character_controller.as_ref() {
                         state.vertical_velocity = controller_snapshot.vertical_velocity;
@@ -1001,6 +1048,38 @@ fn restore_players(
     };
 
     Ok(())
+}
+
+fn restore_physics_service(
+    physics_service: &PhysicsService,
+    groups: &[PhysicsCollisionGroupSnapshot],
+    pairs: &[PhysicsCollisionGroupPairSnapshot],
+) -> Result<(), String> {
+    let groups = if groups.is_empty() {
+        vec![CollisionGroupRegistryEntry {
+            name: "Default".to_string(),
+            id: 0,
+        }]
+    } else {
+        groups
+            .iter()
+            .map(|group| CollisionGroupRegistryEntry {
+                name: group.name.clone(),
+                id: group.id,
+            })
+            .collect()
+    };
+    let pairs = pairs
+        .iter()
+        .map(|pair| CollisionGroupPairEntry {
+            group1_id: pair.group1_id,
+            group2_id: pair.group2_id,
+            collidable: pair.collidable,
+        })
+        .collect::<Vec<_>>();
+    physics_service
+        .restore_registry(&groups, &pairs)
+        .map_err(|err| err.to_string())
 }
 
 fn restore_root_children(
@@ -1433,6 +1512,7 @@ fn apply_part_snapshot(part: &mut PartData, snapshot: &PartSnapshot) -> Result<(
     part.can_collide = snapshot.can_collide;
     part.can_query = snapshot.can_query;
     part.collision_group = snapshot.collision_group.clone();
+    part.collision_group_id = snapshot.collision_group_id;
     part.can_touch = snapshot.can_touch;
     part.transparency = snapshot.transparency;
     part.color = restore_color3(snapshot.color);
@@ -1529,6 +1609,7 @@ fn snapshot_part_data(part: &PartData) -> PartSnapshot {
         can_collide: part.can_collide,
         can_query: part.can_query,
         collision_group: part.collision_group.clone(),
+        collision_group_id: part.collision_group_id,
         can_touch: part.can_touch,
         transparency: part.transparency,
         color: snapshot_color3(part.color),
@@ -1978,6 +2059,28 @@ mod tests {
             );
         }
         workspace.add_child(part.clone());
+        {
+            let runtime = instance.lua_runtime.as_ref().unwrap();
+            runtime
+                .lua()
+                .globals()
+                .set("__tracked_part", part.clone())
+                .unwrap();
+            runtime
+                .lua()
+                .load(
+                    r#"
+                    local PhysicsService = game:GetService("PhysicsService")
+                    PhysicsService:RegisterCollisionGroup("Players")
+                    PhysicsService:RegisterCollisionGroup("Ground")
+                    PhysicsService:CollisionGroupSetCollidable("Players", "Ground", false)
+                    PhysicsService:SetPartCollisionGroup(__tracked_part, "Players")
+                    PhysicsService:RenameCollisionGroup("Players", "Characters")
+                    "#,
+                )
+                .exec()
+                .unwrap();
+        }
 
         let target = Instance::from_data(InstanceData::new_part("ConstraintTarget"));
         {
@@ -2092,9 +2195,31 @@ mod tests {
             Some(AttributeValue::String(value)) if value == "alpha"
         ));
         let restored_part_data = restored_part.data.lock().unwrap();
-        let restored_part_pos = restored_part_data.part_data.as_ref().unwrap().position;
+        let restored_part_state = restored_part_data.part_data.as_ref().unwrap();
+        let restored_part_pos = restored_part_state.position;
+        let restored_part_collision_group_id = restored_part_state.collision_group_id;
         assert_eq!(snapshot_vector3(restored_part_pos), [12.0, 3.0, -4.0]);
+        assert_eq!(restored_part_state.collision_group, "Players");
+        assert_eq!(
+            Some(restored_part_collision_group_id),
+            restored_runtime
+                .game()
+                .physics_service()
+                .resolve_collision_group_id("Characters")
+                .ok()
+        );
         drop(restored_part_data);
+        let restored_physics_service = restored_runtime.game().physics_service();
+        assert!(restored_physics_service
+            .resolve_collision_group_id("Players")
+            .is_err());
+        assert_eq!(
+            restored_physics_service
+                .resolve_collision_group_id("Characters")
+                .unwrap(),
+            restored_part_collision_group_id
+        );
+        assert!(!restored_physics_service.groups_collidable("Characters", "Ground"));
 
         let restored_attachment = restored_runtime
             .workspace()

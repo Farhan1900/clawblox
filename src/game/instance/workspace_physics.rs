@@ -345,7 +345,7 @@ impl GameInstance {
                 if self.physics.has_character(*lua_id) {
                     self.physics.set_character_collision_group(
                         *lua_id,
-                        physics_service.collision_group_mask(&part_data.collision_group),
+                        physics_service.collision_group_mask_by_id(part_data.collision_group_id),
                     );
                     if part_data.position_dirty {
                         self.physics.set_character_position(
@@ -376,7 +376,7 @@ impl GameInstance {
                     can_touch: part_data.can_touch,
                     can_query: part_data.can_query,
                     collision_group: physics_service
-                        .collision_group_mask(&part_data.collision_group),
+                        .collision_group_mask_by_id(part_data.collision_group_id),
                     shape: part_data.shape,
                     physical_properties: Some(part_data.effective_physical_properties()),
                     velocity: [
@@ -540,7 +540,7 @@ impl GameInstance {
             struct TouchPartInfo {
                 anchored_non_character: bool,
                 can_touch: bool,
-                collision_group: String,
+                collision_group_id: u8,
                 touched: RBXScriptSignal,
                 touch_ended: RBXScriptSignal,
             }
@@ -552,7 +552,7 @@ impl GameInstance {
                 Some(TouchPartInfo {
                     anchored_non_character: part.anchored && !self.physics.has_character(lua_id),
                     can_touch: part.can_touch,
-                    collision_group: part.collision_group.clone(),
+                    collision_group_id: part.collision_group_id,
                     touched: part.touched.clone(),
                     touch_ended: part.touch_ended.clone(),
                 })
@@ -568,7 +568,7 @@ impl GameInstance {
                 if !runtime
                     .game()
                     .physics_service()
-                    .groups_collidable(&a.collision_group, &b.collision_group)
+                    .groups_collidable_ids(a.collision_group_id, b.collision_group_id)
                 {
                     return false;
                 }
@@ -645,14 +645,14 @@ impl GameInstance {
                 let (a_can_touch, a_group, a_signal) = {
                     let data = inst_a.data.lock().unwrap();
                     match data.part_data.as_ref() {
-                        Some(p) => (p.can_touch, p.collision_group.clone(), p.touched.clone()),
+                        Some(p) => (p.can_touch, p.collision_group_id, p.touched.clone()),
                         None => continue,
                     }
                 };
                 let (b_can_touch, b_group, b_signal) = {
                     let data = inst_b.data.lock().unwrap();
                     match data.part_data.as_ref() {
-                        Some(p) => (p.can_touch, p.collision_group.clone(), p.touched.clone()),
+                        Some(p) => (p.can_touch, p.collision_group_id, p.touched.clone()),
                         None => continue,
                     }
                 };
@@ -663,7 +663,7 @@ impl GameInstance {
                 if !runtime
                     .game()
                     .physics_service()
-                    .groups_collidable(&a_group, &b_group)
+                    .groups_collidable_ids(a_group, b_group)
                 {
                     continue;
                 }
@@ -686,22 +686,14 @@ impl GameInstance {
                 let (a_can_touch, a_group, a_signal) = {
                     let data = inst_a.data.lock().unwrap();
                     match data.part_data.as_ref() {
-                        Some(p) => (
-                            p.can_touch,
-                            p.collision_group.clone(),
-                            p.touch_ended.clone(),
-                        ),
+                        Some(p) => (p.can_touch, p.collision_group_id, p.touch_ended.clone()),
                         None => continue,
                     }
                 };
                 let (b_can_touch, b_group, b_signal) = {
                     let data = inst_b.data.lock().unwrap();
                     match data.part_data.as_ref() {
-                        Some(p) => (
-                            p.can_touch,
-                            p.collision_group.clone(),
-                            p.touch_ended.clone(),
-                        ),
+                        Some(p) => (p.can_touch, p.collision_group_id, p.touch_ended.clone()),
                         None => continue,
                     }
                 };
@@ -712,7 +704,7 @@ impl GameInstance {
                 if !runtime
                     .game()
                     .physics_service()
-                    .groups_collidable(&a_group, &b_group)
+                    .groups_collidable_ids(a_group, b_group)
                 {
                     continue;
                 }

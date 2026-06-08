@@ -704,6 +704,11 @@ fn test_workspace_raycast_collision_group_filters_parts() {
     runtime
         .load_script(
             r#"
+            local PhysicsService = game:GetService("PhysicsService")
+            PhysicsService:RegisterCollisionGroup("Blue")
+            PhysicsService:RegisterCollisionGroup("Red")
+            PhysicsService:CollisionGroupSetCollidable("Blue", "Red", false)
+
             local front = Instance.new("Part")
             front.Name = "FrontBlue"
             front.Size = Vector3.new(4, 4, 4)
@@ -989,7 +994,12 @@ fn test_get_part_bounds_in_box_overlap_collision_group_filters_parts() {
     let mut runtime = test_runtime();
     runtime
             .load_script(
-                r#"
+            r#"
+            local PhysicsService = game:GetService("PhysicsService")
+            PhysicsService:RegisterCollisionGroup("Blue")
+            PhysicsService:RegisterCollisionGroup("Red")
+            PhysicsService:CollisionGroupSetCollidable("Blue", "Red", false)
+
             local blue = Instance.new("Part")
             blue.Name = "BluePart"
             blue.Anchored = true
@@ -1081,6 +1091,11 @@ fn test_get_parts_in_part_respects_overlap_params() {
     runtime
         .load_script(
             r#"
+            local PhysicsService = game:GetService("PhysicsService")
+            PhysicsService:RegisterCollisionGroup("Blue")
+            PhysicsService:RegisterCollisionGroup("Red")
+            PhysicsService:CollisionGroupSetCollidable("Blue", "Red", false)
+
             local query = Instance.new("Part")
             query.Name = "Query"
             query.Anchored = true
@@ -2595,6 +2610,9 @@ fn test_physics_service_collision_group_lifecycle_parity() {
             local playersId = PhysicsService:GetCollisionGroupId("Players")
             local createdId = PhysicsService:CreateCollisionGroup("Triggers")
 
+            local p = Instance.new("Part")
+            p.CollisionGroup = "Players"
+
             PhysicsService:CollisionGroupSetCollidable("Players", "Ground", false)
             PhysicsService:RenameCollisionGroup("Players", "Characters")
 
@@ -2629,6 +2647,7 @@ fn test_physics_service_collision_group_lifecycle_parity() {
                 and PhysicsService:GetCollisionGroupName(playersId) == "Characters"
                 and PhysicsService:IsCollisionGroupRegistered("Players") == false
                 and PhysicsService:IsCollisionGroupRegistered("Characters") == true
+                and p.CollisionGroup == "Players"
                 and PhysicsService:IsCollisionGroupRegistered("Triggers") == false
                 and PhysicsService:CollisionGroupsAreCollidable("Characters", "Ground") == false
                 and PhysicsService:CollisionGroupsAreCollidable("Triggers", "Ground") == true

@@ -1,4 +1,4 @@
-use mlua::{FromLua, Lua, Result, UserData, UserDataFields, UserDataMethods, Value};
+use mlua::{AnyUserData, FromLua, Lua, Result, UserData, UserDataFields, UserDataMethods, Value};
 use nalgebra::{Isometry3, Matrix3, Rotation3, Translation3, UnitQuaternion};
 use rapier3d::parry::query::intersection_test;
 use rapier3d::prelude::{point, SharedShape};
@@ -6,6 +6,8 @@ use std::sync::{Arc, Mutex};
 
 use crate::game::constants::physics as consts;
 use crate::game::lua::instance::{ClassName, Instance};
+use crate::game::lua::runtime::Game;
+use crate::game::lua::services::PhysicsService;
 use crate::game::lua::types::{CFrame, PartType, Ray, RaycastFilterType, Vector3};
 
 #[inline]
@@ -25,6 +27,20 @@ fn normalize(v: [f32; 3]) -> [f32; 3] {
         [0.0, 0.0, 0.0]
     } else {
         [v[0] / l, v[1] / l, v[2] / l]
+    }
+}
+
+fn physics_service_from_lua(lua: &Lua) -> Result<PhysicsService> {
+    let game_ud: AnyUserData = lua.globals().get("__clawblox_game")?;
+    let game = game_ud.borrow::<Game>()?;
+    Ok(game.physics_service())
+}
+
+fn resolve_query_collision_group(physics_service: &PhysicsService, group: &str) -> Result<u8> {
+    if group.is_empty() {
+        Ok(0)
+    } else {
+        physics_service.resolve_collision_group_id(group)
     }
 }
 
@@ -373,7 +389,10 @@ fn ring_segments(size: Vector3) -> Vec<([f32; 3], f32, [f32; 3])> {
 fn build_ring_shared_shape(size: Vector3) -> SharedShape {
     let cuboid_half = {
         let segments = ring_segments(size);
-        let half = segments.first().map(|(_, _, half)| *half).unwrap_or([0.05, 0.05, 0.05]);
+        let half = segments
+            .first()
+            .map(|(_, _, half)| *half)
+            .unwrap_or([0.05, 0.05, 0.05]);
         SharedShape::cuboid(half[0], half[1], half[2])
     };
 
@@ -711,8 +730,11 @@ impl WorkspaceService {
         origin: Vector3,
         direction: Vector3,
         params: Option<RaycastParams>,
-    ) -> Option<RaycastResult> {
+        physics_service: &PhysicsService,
+    ) -> Result<Option<RaycastResult>> {
         let params = params.unwrap_or_default();
+        let query_group_id =
+            resolve_query_collision_group(physics_service, &params.collision_group)?;
         let ray_length = direction.magnitude();
         let ray_dir = direction.unit();
 
@@ -726,7 +748,7 @@ impl WorkspaceService {
                     (
                         part.can_query,
                         part.can_collide,
-                        part.collision_group.clone(),
+                        part.collision_group_id,
                         part.size,
                         part.cframe.position,
                         part.cframe.rotation,
@@ -735,7 +757,7 @@ impl WorkspaceService {
                 })
             }; // Lock released here
 
-            let Some((can_query, can_collide, collision_group, size, position, rotation, shape)) =
+            let Some((can_query, can_collide, collision_group_id, size, position, rotation, shape)) =
                 part_info
             else {
                 continue;
@@ -748,10 +770,7 @@ impl WorkspaceService {
             if params.respect_can_collide && !can_collide {
                 continue;
             }
-            if !params.collision_group.is_empty()
-                && params.collision_group != "Default"
-                && collision_group != params.collision_group
-            {
+            if !physics_service.groups_collidable_ids(query_group_id, collision_group_id) {
                 continue;
             }
 
@@ -808,7 +827,7 @@ impl WorkspaceService {
             }
         }
 
-        closest.map(|(dist, instance, normal)| {
+        Ok(closest.map(|(dist, instance, normal)| {
             let position = Vector3::new(
                 origin.x + ray_dir.x * dist,
                 origin.y + ray_dir.y * dist,
@@ -820,7 +839,7 @@ impl WorkspaceService {
                 normal,
                 distance: dist,
             }
-        })
+        }))
     }
 
     pub fn get_part_bounds_in_box(
@@ -828,8 +847,11 @@ impl WorkspaceService {
         cframe: CFrame,
         size: Vector3,
         params: Option<OverlapParams>,
-    ) -> Vec<Instance> {
+        physics_service: &PhysicsService,
+    ) -> Result<Vec<Instance>> {
         let params = params.unwrap_or_default();
+        let query_group_id =
+            resolve_query_collision_group(physics_service, &params.collision_group)?;
         let query_center = [cframe.position.x, cframe.position.y, cframe.position.z];
         let query_rot = cframe.rotation;
         let query_half = [size.x / 2.0, size.y / 2.0, size.z / 2.0];
@@ -855,9 +877,8 @@ impl WorkspaceService {
                         false
                     } else if params.respect_can_collide && !part.can_collide {
                         false
-                    } else if !params.collision_group.is_empty()
-                        && params.collision_group != "Default"
-                        && part.collision_group != params.collision_group
+                    } else if !physics_service
+                        .groups_collidable_ids(query_group_id, part.collision_group_id)
                     {
                         false
                     } else {
@@ -887,7 +908,7 @@ impl WorkspaceService {
                 }
             }
         }
-        out
+        Ok(out)
     }
 
     pub fn get_part_bounds_in_radius(
@@ -895,8 +916,11 @@ impl WorkspaceService {
         position: Vector3,
         radius: f32,
         params: Option<OverlapParams>,
-    ) -> Vec<Instance> {
+        physics_service: &PhysicsService,
+    ) -> Result<Vec<Instance>> {
         let params = params.unwrap_or_default();
+        let query_group_id =
+            resolve_query_collision_group(physics_service, &params.collision_group)?;
         let sphere_center = [position.x, position.y, position.z];
         let mut out = Vec::new();
         for inst in self.get_descendants() {
@@ -919,9 +943,8 @@ impl WorkspaceService {
                         false
                     } else if params.respect_can_collide && !part.can_collide {
                         false
-                    } else if !params.collision_group.is_empty()
-                        && params.collision_group != "Default"
-                        && part.collision_group != params.collision_group
+                    } else if !physics_service
+                        .groups_collidable_ids(query_group_id, part.collision_group_id)
                     {
                         false
                     } else {
@@ -948,25 +971,28 @@ impl WorkspaceService {
                 }
             }
         }
-        out
+        Ok(out)
     }
 
     pub fn get_parts_in_part(
         &self,
         query_part: Instance,
         params: Option<OverlapParams>,
-    ) -> Vec<Instance> {
+        physics_service: &PhysicsService,
+    ) -> Result<Vec<Instance>> {
         let params = params.unwrap_or_default();
+        let query_group_id =
+            resolve_query_collision_group(physics_service, &params.collision_group)?;
         let query_data = {
             let data = query_part.data.lock().unwrap();
             let Some(part) = &data.part_data else {
-                return Vec::new();
+                return Ok(Vec::new());
             };
             (data.id.0, part.size, part.cframe, part.shape)
         };
         let (query_id, query_size, query_cframe, query_shape_type) = query_data;
         let Some(query_shape) = shape_from_part(query_size, query_shape_type) else {
-            return Vec::new();
+            return Ok(Vec::new());
         };
         let query_iso = cframe_to_isometry(query_cframe);
 
@@ -993,7 +1019,7 @@ impl WorkspaceService {
                         (
                             p.can_query,
                             p.can_collide,
-                            p.collision_group.clone(),
+                            p.collision_group_id,
                             p.size,
                             p.cframe,
                             p.shape,
@@ -1002,7 +1028,7 @@ impl WorkspaceService {
                 }
             };
 
-            let Some((can_query, can_collide, collision_group, size, cframe, shape_type)) =
+            let Some((can_query, can_collide, collision_group_id, size, cframe, shape_type)) =
                 part_data
             else {
                 continue;
@@ -1014,10 +1040,7 @@ impl WorkspaceService {
             if params.respect_can_collide && !can_collide {
                 continue;
             }
-            if !params.collision_group.is_empty()
-                && params.collision_group != "Default"
-                && collision_group != params.collision_group
-            {
+            if !physics_service.groups_collidable_ids(query_group_id, collision_group_id) {
                 continue;
             }
 
@@ -1035,7 +1058,7 @@ impl WorkspaceService {
                 }
             }
         }
-        out
+        Ok(out)
     }
 }
 
@@ -1058,14 +1081,16 @@ impl UserData for WorkspaceService {
     fn add_methods<M: UserDataMethods<Self>>(methods: &mut M) {
         methods.add_method(
             "Raycast",
-            |_, this, (origin, direction, params): (Vector3, Vector3, Option<RaycastParams>)| {
-                Ok(this.raycast(origin, direction, params))
+            |lua, this, (origin, direction, params): (Vector3, Vector3, Option<RaycastParams>)| {
+                let physics_service = physics_service_from_lua(lua)?;
+                this.raycast(origin, direction, params, &physics_service)
             },
         );
 
         methods.add_method(
             "FindPartOnRayWithIgnoreList",
             |lua, this, (ray, ignore): (Ray, Value)| {
+                let physics_service = physics_service_from_lua(lua)?;
                 let mut params = RaycastParams::default();
                 if let Value::Table(tbl) = ignore {
                     let mut filter_instances = Vec::new();
@@ -1079,7 +1104,7 @@ impl UserData for WorkspaceService {
                     params.filter_instances = filter_instances;
                 }
 
-                match this.raycast(ray.origin, ray.direction, Some(params)) {
+                match this.raycast(ray.origin, ray.direction, Some(params), &physics_service)? {
                     Some(hit) => Ok((
                         Some(hit.instance),
                         Some(Value::UserData(lua.create_userdata(hit.position)?)),
@@ -1090,7 +1115,8 @@ impl UserData for WorkspaceService {
         );
 
         methods.add_method("FindPartOnRay", |lua, this, ray: Ray| {
-            match this.raycast(ray.origin, ray.direction, None) {
+            let physics_service = physics_service_from_lua(lua)?;
+            match this.raycast(ray.origin, ray.direction, None, &physics_service)? {
                 Some(hit) => Ok((
                     Some(hit.instance),
                     Some(Value::UserData(lua.create_userdata(hit.position)?)),
@@ -1101,22 +1127,25 @@ impl UserData for WorkspaceService {
 
         methods.add_method(
             "GetPartBoundsInBox",
-            |_, this, (cframe, size, params): (CFrame, Vector3, Option<OverlapParams>)| {
-                Ok(this.get_part_bounds_in_box(cframe, size, params))
+            |lua, this, (cframe, size, params): (CFrame, Vector3, Option<OverlapParams>)| {
+                let physics_service = physics_service_from_lua(lua)?;
+                this.get_part_bounds_in_box(cframe, size, params, &physics_service)
             },
         );
 
         methods.add_method(
             "GetPartBoundsInRadius",
-            |_, this, (position, radius, params): (Vector3, f32, Option<OverlapParams>)| {
-                Ok(this.get_part_bounds_in_radius(position, radius, params))
+            |lua, this, (position, radius, params): (Vector3, f32, Option<OverlapParams>)| {
+                let physics_service = physics_service_from_lua(lua)?;
+                this.get_part_bounds_in_radius(position, radius, params, &physics_service)
             },
         );
 
         methods.add_method(
             "GetPartsInPart",
-            |_, this, (part, params): (Instance, Option<OverlapParams>)| {
-                Ok(this.get_parts_in_part(part, params))
+            |lua, this, (part, params): (Instance, Option<OverlapParams>)| {
+                let physics_service = physics_service_from_lua(lua)?;
+                this.get_parts_in_part(part, params, &physics_service)
             },
         );
 

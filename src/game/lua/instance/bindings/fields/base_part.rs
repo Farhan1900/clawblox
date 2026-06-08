@@ -1,5 +1,6 @@
-use mlua::UserDataFields;
+use mlua::{AnyUserData, UserDataFields};
 
+use crate::game::lua::runtime::Game;
 use crate::game::lua::types::{Color3, Material, PartType, PhysicalProperties, Vector3};
 
 use super::super::super::*;
@@ -61,10 +62,17 @@ pub(super) fn add_fields<F: UserDataFields<Instance>>(fields: &mut F) {
         let data = this.data.lock().unwrap();
         Ok(data.part_data.as_ref().map(|p| p.collision_group.clone()))
     });
-    fields.add_field_method_set("CollisionGroup", |_, this, collision_group: String| {
+    fields.add_field_method_set("CollisionGroup", |lua, this, collision_group: String| {
+        let group_id = {
+            let game_ud: AnyUserData = lua.globals().get("__clawblox_game")?;
+            let game = game_ud.borrow::<Game>()?;
+            game.physics_service()
+                .resolve_collision_group_id(&collision_group)?
+        };
         let mut data = this.data.lock().unwrap();
         if let Some(part) = &mut data.part_data {
             part.collision_group = collision_group;
+            part.collision_group_id = group_id;
             part.interaction_dirty = true;
         }
         Ok(())

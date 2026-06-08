@@ -1,9 +1,9 @@
 use super::datamodel::WeakInstanceRef;
 use crate::game::constants::humanoid as humanoid_consts;
-use crate::game::lua::events::{create_signal, RBXScriptSignal};
 pub use crate::game::lua::animation::{
     default_animation_length_seconds, AnimationScheduler, AnimationTrack, AnimationTrackSnapshot,
 };
+use crate::game::lua::events::{create_signal, RBXScriptSignal};
 use crate::game::lua::types::{
     CFrame, Color3, HumanoidStateType, Material, PartType, PhysicalProperties, UDim, UDim2, Vector3,
 };
@@ -17,6 +17,7 @@ pub struct PartData {
     pub can_collide: bool,
     pub can_query: bool,
     pub collision_group: String,
+    pub collision_group_id: u8,
     pub can_touch: bool,
     pub transparency: f32,
     pub color: Color3,
@@ -56,6 +57,7 @@ impl Default for PartData {
             can_collide: true,
             can_query: true,
             collision_group: "Default".to_string(),
+            collision_group_id: 0,
             can_touch: true,
             transparency: 0.0,
             color: Color3::new(0.6, 0.6, 0.6),
