@@ -4,7 +4,7 @@ use uuid::Uuid;
 use rayon::prelude::*;
 
 use crate::game::instance::GameStatus;
-use crate::game::panic_reporting;
+use crate::game::manager_runtime;
 use crate::game::{GameInstanceHandle, GameManagerHandle};
 
 fn process_instance(
@@ -48,7 +48,7 @@ fn process_instance(
         let (game_id, tick) = {
             let mut instance = instance_handle.write();
             if instance.halted_error.is_none() {
-                let msg = panic_reporting::panic_payload_message(&*payload);
+                let msg = manager_runtime::panic_payload_message(&*payload);
                 instance.halted_error = Some(format!("panic in instance tick: {}", msg));
             }
             instance.status = GameStatus::Finished;
@@ -61,7 +61,7 @@ fn process_instance(
             .retain(|(cached_instance_id, _), _| *cached_instance_id != instance_id);
 
         let context = format!("game={} instance={} tick={}", game_id, instance_id, tick);
-        panic_reporting::log_panic("instance_tick", &context, &*payload);
+        manager_runtime::log_panic("instance_tick", &context, &*payload);
     }
 }
 

@@ -8,8 +8,8 @@ mod manager_lifecycle;
 mod manager_listing;
 mod manager_observations;
 mod manager_players;
+mod manager_runtime;
 mod manager_tick;
-pub mod panic_reporting;
 pub mod physics;
 pub mod script_bundle;
 
@@ -17,8 +17,7 @@ use dashmap::DashMap;
 use parking_lot::RwLock;
 use sqlx::PgPool;
 use std::sync::Arc;
-use std::thread;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 use uuid::Uuid;
 
 use async_bridge::AsyncBridge;
@@ -32,9 +31,6 @@ pub type GameInstanceHandle = Arc<RwLock<GameInstance>>;
 
 /// Default timeout before an empty instance is destroyed (60 seconds)
 const EMPTY_INSTANCE_TIMEOUT: Duration = Duration::from_secs(60);
-
-/// Cleanup interval in ticks (60 ticks = 1 second at 60 Hz)
-const CLEANUP_INTERVAL_TICKS: u64 = 60;
 
 pub struct GameManagerState {
     /// Running instances, keyed by instance_id
@@ -107,35 +103,6 @@ impl GameManager {
         Self::new_with_bridge(tick_rate, None, error_mode, true)
     }
 
-    pub fn run(self) {
-        let tick_duration = Duration::from_millis(1000 / self.tick_rate);
-        let mut tick_counter: u64 = 0;
-
-        loop {
-            let start = Instant::now();
-
-            let tick_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                manager_tick::tick_instances(&self.state);
-            }));
-            if let Err(payload) = tick_result {
-                panic_reporting::log_panic("manager_loop", "tick_instances", &*payload);
-            }
-
-            // Periodic cleanup
-            tick_counter += 1;
-            if tick_counter % CLEANUP_INTERVAL_TICKS == 0 && !self.state.disable_gc {
-                let destroyed = cleanup_empty_instances(&self.state);
-                if destroyed > 0 {
-                    eprintln!("[Cleanup] Destroyed {} empty instances", destroyed);
-                }
-            }
-
-            let elapsed = start.elapsed();
-            if elapsed < tick_duration {
-                thread::sleep(tick_duration - elapsed);
-            }
-        }
-    }
 }
 
 // =============================================================================
