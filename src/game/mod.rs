@@ -12,7 +12,6 @@ mod manager_tick;
 pub mod panic_reporting;
 pub mod physics;
 pub mod script_bundle;
-pub mod touch_events;
 
 use dashmap::DashMap;
 use parking_lot::RwLock;

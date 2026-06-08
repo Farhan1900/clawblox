@@ -6,9 +6,35 @@ use crate::game::lua::types::CFrame;
 use crate::game::physics::{
     rotation_matrix_to_quaternion, PhysicsAssemblyPart, PhysicsAssemblySpec,
 };
-use crate::game::touch_events::compute_touch_transitions;
 
 use super::GameInstance;
+
+/// Pair-wise touch lifecycle for one tick.
+#[derive(Debug, Default, Clone)]
+struct TouchTransitions {
+    began: Vec<(u64, u64)>,
+    ended: Vec<(u64, u64)>,
+}
+
+/// Compute touch begin/end transitions from current and previous overlap sets.
+fn compute_touch_transitions(
+    current: &HashSet<(u64, u64)>,
+    previous: &HashSet<(u64, u64)>,
+) -> TouchTransitions {
+    let began = current
+        .iter()
+        .filter(|pair| !previous.contains(pair))
+        .copied()
+        .collect();
+
+    let ended = previous
+        .iter()
+        .filter(|pair| !current.contains(pair))
+        .copied()
+        .collect();
+
+    TouchTransitions { began, ended }
+}
 
 fn set_part_cframe_from_constraint(part: &Instance, cframe: CFrame) {
     let cframe = cframe.orthonormalized();
@@ -18,6 +44,23 @@ fn set_part_cframe_from_constraint(part: &Instance, cframe: CFrame) {
         part_data.position = cframe.position;
         part_data.position_dirty = true;
         part_data.cframe_dirty = true;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashSet;
+
+    use super::*;
+
+    #[test]
+    fn test_compute_touch_transitions() {
+        let previous = HashSet::from([(1, 2), (3, 4)]);
+        let current = HashSet::from([(3, 4), (5, 6)]);
+
+        let transitions = compute_touch_transitions(&current, &previous);
+        assert_eq!(transitions.began, vec![(5, 6)]);
+        assert_eq!(transitions.ended, vec![(1, 2)]);
     }
 }
 
