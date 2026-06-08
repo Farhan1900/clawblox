@@ -597,6 +597,425 @@ pub(super) fn build_spectator_observation(instance: &GameInstance) -> SpectatorO
     }
 }
 
+impl GameInstance {
+    /// Gets the observation for a specific player.
+    pub fn get_player_observation(&self, agent_id: Uuid) -> Option<PlayerObservation> {
+        build_player_observation(self, agent_id)
+    }
+
+    /// Get static map geometry (entities with "Static" tag).
+    pub fn get_map_info(&self) -> MapInfo {
+        build_map_info(self)
+    }
+
+    /// Gets the spectator observation (full world state from Lua Workspace).
+    pub fn get_spectator_observation(&self) -> SpectatorObservation {
+        build_spectator_observation(self)
+    }
+
+    /// Get the game status from Lua if available.
+    fn get_game_status_from_lua(&self) -> String {
+        if self.halted_error.is_some() {
+            return "failed".to_string();
+        }
+        match self.status {
+            GameStatus::Waiting => "waiting".to_string(),
+            GameStatus::Playing => "active".to_string(),
+            GameStatus::Finished => "finished".to_string(),
+        }
+    }
+
+    /// Get dynamic world info (entities WITHOUT "Static" tag + folders with attributes).
+    fn get_dynamic_world_info(&self, observer_pos: [f32; 3]) -> WorldInfo {
+        let mut entities = Vec::new();
+
+        if let Some(runtime) = &self.lua_runtime {
+            for part in runtime.workspace().get_descendants() {
+                let data = part.data.lock().unwrap();
+                let is_static = data.tags.contains("Static");
+
+                if let Some(part_data) = &data.part_data {
+                    if !is_static {
+                        let raw_position = [
+                            part_data.position.x,
+                            part_data.position.y,
+                            part_data.position.z,
+                        ];
+                        let raw_size = [part_data.size.x, part_data.size.y, part_data.size.z];
+                        if !part_intersects_observation_radius(
+                            observer_pos,
+                            raw_position,
+                            raw_size,
+                            part_data.cframe.rotation,
+                            self.observation_radius,
+                        ) {
+                            continue;
+                        }
+                        let (aabb, obb) =
+                            compute_part_bounds(raw_position, raw_size, part_data.cframe.rotation);
+                        let attrs = attributes_to_json(&data.attributes);
+                        entities.push(WorldEntity {
+                            id: data.id.0,
+                            name: data.name.clone(),
+                            entity_type: Some("part".to_string()),
+                            position: round_position(raw_position),
+                            size: round_position(raw_size),
+                            rotation: Some(part_data.cframe.rotation),
+                            aabb: Some(aabb),
+                            obb: Some(obb),
+                            color: Some([part_data.color.r, part_data.color.g, part_data.color.b]),
+                            material: Some(part_data.material.name().to_string()),
+                            shape: Some(part_data.shape.name().to_string()),
+                            transparency: if part_data.transparency != 0.0 {
+                                Some(part_data.transparency)
+                            } else {
+                                None
+                            },
+                            anchored: part_data.anchored,
+                            attributes: if attrs.is_empty() { None } else { Some(attrs) },
+                        });
+                    }
+                } else if data.class_name == ClassName::Folder && !is_static {
+                    let attrs = attributes_to_json(&data.attributes);
+                    if !attrs.is_empty() {
+                        entities.push(WorldEntity {
+                            id: data.id.0,
+                            name: data.name.clone(),
+                            entity_type: Some("folder".to_string()),
+                            position: [0.0, 0.0, 0.0],
+                            size: [0.0, 0.0, 0.0],
+                            rotation: None,
+                            aabb: None,
+                            obb: None,
+                            color: None,
+                            material: None,
+                            shape: None,
+                            transparency: None,
+                            anchored: true,
+                            attributes: Some(attrs),
+                        });
+                    }
+                }
+            }
+        }
+
+        WorldInfo { entities }
+    }
+
+    /// Get world info (all visible parts and folders from Workspace).
+    #[allow(dead_code)]
+    fn get_world_info(&self) -> WorldInfo {
+        let mut entities = Vec::new();
+
+        if let Some(runtime) = &self.lua_runtime {
+            for part in runtime.workspace().get_descendants() {
+                let data = part.data.lock().unwrap();
+
+                if let Some(part_data) = &data.part_data {
+                    let attrs = attributes_to_json(&data.attributes);
+                    entities.push(WorldEntity {
+                        id: data.id.0,
+                        name: data.name.clone(),
+                        entity_type: Some("part".to_string()),
+                        position: [
+                            part_data.position.x,
+                            part_data.position.y,
+                            part_data.position.z,
+                        ],
+                        size: [part_data.size.x, part_data.size.y, part_data.size.z],
+                        rotation: Some(part_data.cframe.rotation),
+                        aabb: None,
+                        obb: None,
+                        color: Some([part_data.color.r, part_data.color.g, part_data.color.b]),
+                        material: Some(part_data.material.name().to_string()),
+                        shape: Some(part_data.shape.name().to_string()),
+                        transparency: if part_data.transparency != 0.0 {
+                            Some(part_data.transparency)
+                        } else {
+                            None
+                        },
+                        anchored: part_data.anchored,
+                        attributes: if attrs.is_empty() { None } else { Some(attrs) },
+                    });
+                } else if data.class_name == ClassName::Folder {
+                    let attrs = attributes_to_json(&data.attributes);
+                    if !attrs.is_empty() {
+                        entities.push(WorldEntity {
+                            id: data.id.0,
+                            name: data.name.clone(),
+                            entity_type: Some("folder".to_string()),
+                            position: [0.0, 0.0, 0.0],
+                            size: [0.0, 0.0, 0.0],
+                            rotation: None,
+                            aabb: None,
+                            obb: None,
+                            color: None,
+                            material: None,
+                            shape: None,
+                            transparency: None,
+                            anchored: true,
+                            attributes: Some(attrs),
+                        });
+                    }
+                }
+            }
+        }
+
+        WorldInfo { entities }
+    }
+
+    fn get_player_view_origin(&self, agent_id: Uuid) -> Option<[f32; 3]> {
+        let pos = self.get_player_position(agent_id)?;
+        Some([pos[0], pos[1] + 2.0, pos[2]])
+    }
+
+    fn get_player_view_forward(&self, agent_id: Uuid) -> Option<[f32; 3]> {
+        let hrp_id = *self.player_hrp_ids.get(&agent_id)?;
+        let state = self.physics.get_character_state(hrp_id)?;
+        let rot = self.physics.get_rotation_matrix(state.body_handle)?;
+        // Roblox/CFrame look vector convention: local -Z points forward.
+        let mut fx = -rot[0][2];
+        let mut fz = -rot[2][2];
+        let mag = (fx * fx + fz * fz).sqrt();
+        if mag <= 1e-4 {
+            return Some([0.0, 0.0, -1.0]);
+        }
+        fx /= mag;
+        fz /= mag;
+        Some([fx, 0.0, fz])
+    }
+
+    fn player_view_fov_deg(&self) -> f32 {
+        // Matches spectator camera intent (75deg vertical perspective on widescreen ~= ~105deg horizontal).
+        105.0
+    }
+
+    /// Get info about other players with distance, line-of-sight and view-cone filtering.
+    fn get_other_players(&self, exclude_agent_id: Uuid) -> Vec<OtherPlayerInfo> {
+        let mut others = Vec::new();
+        let observer_pos = self
+            .get_player_position(exclude_agent_id)
+            .unwrap_or([0.0, 0.0, 0.0]);
+        let observer_eye = self.get_player_view_origin(exclude_agent_id).unwrap_or([
+            observer_pos[0],
+            observer_pos[1] + 2.0,
+            observer_pos[2],
+        ]);
+        let observer_body = self
+            .player_hrp_ids
+            .get(&exclude_agent_id)
+            .and_then(|&hrp_id| self.physics.get_character_state(hrp_id))
+            .map(|state| state.body_handle);
+
+        for (&agent_id, &user_id) in &self.players {
+            if agent_id == exclude_agent_id {
+                continue;
+            }
+
+            let position = self
+                .get_player_position(agent_id)
+                .unwrap_or([0.0, 0.0, 0.0]);
+
+            let dx = position[0] - observer_pos[0];
+            let dy = position[1] - observer_pos[1];
+            let dz = position[2] - observer_pos[2];
+            let distance = (dx * dx + dy * dy + dz * dz).sqrt();
+
+            if distance > self.observation_radius {
+                continue;
+            }
+
+            let target_eye = [position[0], position[1] + 2.0, position[2]];
+            let target_body = self
+                .player_hrp_ids
+                .get(&agent_id)
+                .and_then(|&hrp_id| self.physics.get_character_state(hrp_id))
+                .map(|state| state.body_handle);
+            if !self
+                .physics
+                .has_line_of_sight(observer_eye, target_eye, observer_body, target_body)
+            {
+                continue;
+            }
+
+            let health = self.get_player_health(agent_id).unwrap_or(100);
+
+            let attributes = if let Some(runtime) = &self.lua_runtime {
+                if let Some(player) = runtime.players().get_player_by_user_id(user_id) {
+                    let data = player.data.lock().unwrap();
+                    attributes_to_json(&data.attributes)
+                } else {
+                    std::collections::HashMap::new()
+                }
+            } else {
+                std::collections::HashMap::new()
+            };
+
+            others.push(OtherPlayerInfo {
+                id: agent_id,
+                name: self.player_names.get(&agent_id).cloned(),
+                position: round_position(position),
+                distance: round_f32(distance),
+                health,
+                attributes,
+            });
+        }
+
+        others
+    }
+
+    /// Serializes a GUI instance tree to GuiElement for frontend rendering.
+    fn serialize_gui_tree(instance: &Instance) -> Option<GuiElement> {
+        let data = instance.data.lock().unwrap();
+
+        let element_type = match data.class_name {
+            ClassName::ScreenGui => "ScreenGui",
+            ClassName::Frame => "Frame",
+            ClassName::TextLabel => "TextLabel",
+            ClassName::TextButton => "TextButton",
+            ClassName::ImageLabel => "ImageLabel",
+            ClassName::ImageButton => "ImageButton",
+            _ => return None,
+        };
+
+        let gui_data = data.gui_data.as_ref();
+
+        let mut element = GuiElement {
+            id: data.id.0,
+            element_type: element_type.to_string(),
+            name: data.name.clone(),
+            position: gui_data.map(|g| UDim2Json {
+                x_scale: g.position.x.scale,
+                x_offset: g.position.x.offset,
+                y_scale: g.position.y.scale,
+                y_offset: g.position.y.offset,
+            }),
+            size: gui_data.map(|g| UDim2Json {
+                x_scale: g.size.x.scale,
+                x_offset: g.size.x.offset,
+                y_scale: g.size.y.scale,
+                y_offset: g.size.y.offset,
+            }),
+            anchor_point: gui_data.map(|g| [g.anchor_point.0, g.anchor_point.1]),
+            rotation: gui_data.map(|g| g.rotation),
+            z_index: gui_data.map(|g| g.z_index),
+            visible: gui_data.map(|g| g.visible),
+            background_color: gui_data.map(|g| {
+                [
+                    g.background_color.r,
+                    g.background_color.g,
+                    g.background_color.b,
+                ]
+            }),
+            background_transparency: gui_data.map(|g| g.background_transparency),
+            border_color: gui_data.map(|g| [g.border_color.r, g.border_color.g, g.border_color.b]),
+            border_size_pixel: gui_data.map(|g| g.border_size_pixel),
+            text: gui_data.and_then(|g| g.text.clone()),
+            text_color: gui_data.and_then(|g| g.text_color.map(|c| [c.r, c.g, c.b])),
+            text_size: gui_data.and_then(|g| g.text_size),
+            text_transparency: gui_data.and_then(|g| g.text_transparency),
+            text_x_alignment: gui_data.map(|g| match g.text_x_alignment {
+                TextXAlignment::Left => "Left".to_string(),
+                TextXAlignment::Center => "Center".to_string(),
+                TextXAlignment::Right => "Right".to_string(),
+            }),
+            text_y_alignment: gui_data.map(|g| match g.text_y_alignment {
+                TextYAlignment::Top => "Top".to_string(),
+                TextYAlignment::Center => "Center".to_string(),
+                TextYAlignment::Bottom => "Bottom".to_string(),
+            }),
+            image: gui_data.and_then(|g| g.image.clone()),
+            image_color: gui_data.and_then(|g| g.image_color.map(|c| [c.r, c.g, c.b])),
+            image_transparency: gui_data.and_then(|g| g.image_transparency),
+            display_order: gui_data.map(|g| g.display_order),
+            enabled: gui_data.map(|g| g.enabled),
+            children: Vec::new(),
+        };
+
+        let children_refs: Vec<_> = data.children.iter().cloned().collect();
+        drop(data);
+
+        for child_ref in children_refs {
+            let child = Instance::from_ref(child_ref);
+            if let Some(child_element) = Self::serialize_gui_tree(&child) {
+                element.children.push(child_element);
+            }
+        }
+
+        Some(element)
+    }
+
+    /// Collects BillboardGui data from a part's children.
+    fn collect_billboard_gui(
+        children: &[crate::game::lua::instance::InstanceRef],
+    ) -> Option<BillboardGuiJson> {
+        for child_ref in children {
+            let child_data = child_ref.lock().unwrap();
+
+            if child_data.class_name == ClassName::BillboardGui {
+                if let Some(billboard_data) = &child_data.billboard_gui_data {
+                    let mut labels = Vec::new();
+
+                    for label_ref in &child_data.children {
+                        let label_data = label_ref.lock().unwrap();
+
+                        if label_data.class_name == ClassName::TextLabel {
+                            if let Some(gui_data) = &label_data.gui_data {
+                                labels.push(BillboardLabelJson {
+                                    text: gui_data.text.clone().unwrap_or_default(),
+                                    color: [
+                                        gui_data.text_color.map(|c| c.r).unwrap_or(1.0),
+                                        gui_data.text_color.map(|c| c.g).unwrap_or(1.0),
+                                        gui_data.text_color.map(|c| c.b).unwrap_or(1.0),
+                                    ],
+                                    size: gui_data.text_size.unwrap_or(14.0) as f32,
+                                });
+                            }
+                        }
+                    }
+
+                    return Some(BillboardGuiJson {
+                        studs_offset: [
+                            billboard_data.studs_offset.x,
+                            billboard_data.studs_offset.y,
+                            billboard_data.studs_offset.z,
+                        ],
+                        always_on_top: billboard_data.always_on_top,
+                        labels,
+                    });
+                }
+            }
+        }
+
+        None
+    }
+
+    /// Reads a model URL from instance attributes.
+    fn extract_model_url(
+        attributes: &std::collections::HashMap<String, AttributeValue>,
+    ) -> Option<String> {
+        if let Some(AttributeValue::String(url)) = attributes.get("ModelUrl") {
+            let trimmed = url.trim();
+            if !trimmed.is_empty() {
+                return Some(trimmed.to_string());
+            }
+        }
+        None
+    }
+
+    /// Reads model local yaw correction (degrees) from instance attributes.
+    fn extract_model_yaw_offset_deg(
+        attributes: &std::collections::HashMap<String, AttributeValue>,
+    ) -> Option<f32> {
+        if let Some(AttributeValue::Number(value)) = attributes.get("ModelYawOffsetDeg") {
+            if value.is_finite() {
+                return Some(*value as f32);
+            }
+        }
+        None
+    }
+}
+
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct PlayerObservation {
     pub tick: u64,
