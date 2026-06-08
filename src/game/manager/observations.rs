@@ -1,7 +1,9 @@
 use uuid::Uuid;
 
-use super::instance::{MapInfo, PlayerObservation, SpectatorObservation};
-use super::{get_player_instance, GameManagerHandle};
+use crate::game::instance::{MapInfo, PlayerObservation, SpectatorObservation};
+use crate::game::GameManagerHandle;
+
+use super::instances::get_player_instance;
 
 pub fn get_observation(
     state: &GameManagerHandle,

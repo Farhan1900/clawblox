@@ -3,7 +3,9 @@ use std::backtrace::Backtrace;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use crate::game::{cleanup_empty_instances, manager_tick, GameManager};
+use crate::game::{cleanup_empty_instances, GameManager};
+
+use super::tick;
 
 const CLEANUP_INTERVAL_TICKS: u64 = 60;
 
@@ -35,7 +37,7 @@ impl GameManager {
             let start = Instant::now();
 
             let tick_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                manager_tick::tick_instances(&self.state);
+                tick::tick_instances(&self.state);
             }));
             if let Err(payload) = tick_result {
                 log_panic("manager_loop", "tick_instances", &*payload);

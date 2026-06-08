@@ -3,13 +3,7 @@ pub mod constants;
 pub mod humanoid_movement;
 pub mod instance;
 pub mod lua;
-mod manager_instances;
-mod manager_lifecycle;
-mod manager_listing;
-mod manager_observations;
-mod manager_players;
-mod manager_runtime;
-mod manager_tick;
+mod manager;
 pub mod physics;
 pub mod script_bundle;
 
@@ -102,7 +96,6 @@ impl GameManager {
     pub fn new_without_db(tick_rate: u64, error_mode: ErrorMode) -> (Self, GameManagerHandle) {
         Self::new_with_bridge(tick_rate, None, error_mode, true)
     }
-
 }
 
 // =============================================================================
@@ -123,7 +116,7 @@ pub fn find_or_create_instance(
     observation_radius: f32,
     script: Option<&str>,
 ) -> FindInstanceResult {
-    manager_instances::find_or_create_instance(
+    manager::instances::find_or_create_instance(
         state,
         game_id,
         max_players,
@@ -134,12 +127,12 @@ pub fn find_or_create_instance(
 
 /// Inserts a pre-built instance into the manager state.
 pub fn insert_instance(state: &GameManagerHandle, instance: GameInstance) -> Uuid {
-    manager_instances::insert_instance(state, instance)
+    manager::instances::insert_instance(state, instance)
 }
 
 /// Checks if any instance is running for this game
 pub fn is_instance_running(state: &GameManagerHandle, game_id: Uuid) -> bool {
-    manager_instances::is_instance_running(state, game_id)
+    manager::instances::is_instance_running(state, game_id)
 }
 
 /// Gets the instance_id a player is in for a specific game
@@ -148,7 +141,7 @@ pub fn get_player_instance(
     agent_id: Uuid,
     game_id: Uuid,
 ) -> Option<Uuid> {
-    manager_instances::get_player_instance(state, agent_id, game_id)
+    manager::instances::get_player_instance(state, agent_id, game_id)
 }
 
 // =============================================================================
@@ -163,7 +156,7 @@ pub fn join_instance(
     agent_id: Uuid,
     agent_name: &str,
 ) -> Result<(), String> {
-    manager_players::join_instance(state, instance_id, game_id, agent_id, agent_name)
+    manager::players::join_instance(state, instance_id, game_id, agent_id, agent_name)
 }
 
 /// Leaves a player from an instance
@@ -172,7 +165,7 @@ pub fn leave_instance(
     instance_id: Uuid,
     agent_id: Uuid,
 ) -> Result<(), String> {
-    manager_players::leave_instance(state, instance_id, agent_id)
+    manager::players::leave_instance(state, instance_id, agent_id)
 }
 
 /// Leaves a player from their instance in a game (lookup by game_id)
@@ -193,7 +186,7 @@ pub fn queue_input(
     input_type: String,
     data: serde_json::Value,
 ) -> Result<(), String> {
-    manager_players::queue_input(state, game_id, agent_id, input_type, data)
+    manager::players::queue_input(state, game_id, agent_id, input_type, data)
 }
 
 // =============================================================================
@@ -205,26 +198,26 @@ pub fn get_observation(
     game_id: Uuid,
     agent_id: Uuid,
 ) -> Result<PlayerObservation, String> {
-    manager_observations::get_observation(state, game_id, agent_id)
+    manager::observations::get_observation(state, game_id, agent_id)
 }
 
 pub fn get_spectator_observation(
     state: &GameManagerHandle,
     game_id: Uuid,
 ) -> Result<SpectatorObservation, String> {
-    manager_observations::get_spectator_observation(state, game_id)
+    manager::observations::get_spectator_observation(state, game_id)
 }
 
 pub fn get_spectator_observation_for_instance(
     state: &GameManagerHandle,
     instance_id: Uuid,
 ) -> Result<SpectatorObservation, String> {
-    manager_observations::get_spectator_observation_for_instance(state, instance_id)
+    manager::observations::get_spectator_observation_for_instance(state, instance_id)
 }
 
 /// Get static map geometry for a game (cached per game_id)
 pub fn get_map(state: &GameManagerHandle, game_id: Uuid) -> Result<MapInfo, String> {
-    manager_observations::get_map(state, game_id)
+    manager::observations::get_map(state, game_id)
 }
 
 // =============================================================================
@@ -250,15 +243,15 @@ pub struct InstanceInfo {
 }
 
 pub fn list_instances(state: &GameManagerHandle) -> Vec<InstanceInfo> {
-    manager_listing::list_instances(state)
+    manager::listing::list_instances(state)
 }
 
 pub fn list_games(state: &GameManagerHandle) -> Vec<GameInfo> {
-    manager_listing::list_games(state)
+    manager::listing::list_games(state)
 }
 
 pub fn get_game_info(state: &GameManagerHandle, game_id: Uuid) -> Option<GameInfo> {
-    manager_listing::get_game_info(state, game_id)
+    manager::listing::get_game_info(state, game_id)
 }
 
 // =============================================================================
@@ -266,7 +259,7 @@ pub fn get_game_info(state: &GameManagerHandle, game_id: Uuid) -> Option<GameInf
 // =============================================================================
 
 pub fn destroy_instance(state: &GameManagerHandle, instance_id: Uuid) -> bool {
-    manager_lifecycle::destroy_instance(state, instance_id)
+    manager::lifecycle::destroy_instance(state, instance_id)
 }
 
 pub fn cleanup_empty_instances(state: &GameManagerHandle) -> usize {
@@ -274,5 +267,5 @@ pub fn cleanup_empty_instances(state: &GameManagerHandle) -> usize {
 }
 
 pub fn cleanup_empty_instances_with_timeout(state: &GameManagerHandle, timeout: Duration) -> usize {
-    manager_lifecycle::cleanup_empty_instances_with_timeout(state, timeout)
+    manager::lifecycle::cleanup_empty_instances_with_timeout(state, timeout)
 }

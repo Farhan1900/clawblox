@@ -2,6 +2,8 @@ use uuid::Uuid;
 
 use crate::game::GameManagerHandle;
 
+use super::instances::get_player_instance;
+
 pub fn join_instance(
     state: &GameManagerHandle,
     instance_id: Uuid,
@@ -72,7 +74,7 @@ pub fn queue_input(
     input_type: String,
     data: serde_json::Value,
 ) -> Result<(), String> {
-    let instance_id = super::get_player_instance(state, agent_id, game_id)
+    let instance_id = get_player_instance(state, agent_id, game_id)
         .ok_or_else(|| "Not in any instance of this game".to_string())?;
 
     let instance_handle = state
