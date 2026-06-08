@@ -2,7 +2,15 @@ use nalgebra::{Translation3, UnitQuaternion};
 use rapier3d::prelude::*;
 
 use super::{PartInteractionState, PhysicsWorld};
+use crate::game::lua::services::physics_service::CollisionGroupMask;
 use crate::game::lua::types::{PartType, PhysicalProperties};
+
+fn interaction_groups(state: PartInteractionState) -> InteractionGroups {
+    InteractionGroups::new(
+        Group::from(state.collision_group.membership),
+        Group::from(state.collision_group.filter),
+    )
+}
 
 fn build_ring_shared_shape(size: [f32; 3]) -> SharedShape {
     let [sx, sy, sz] = size;
@@ -75,7 +83,8 @@ fn build_collider(
         } else {
             ActiveCollisionTypes::default()
         })
-        .collision_groups(InteractionGroups::new(super::GROUP_STATIC, Group::ALL))
+        .collision_groups(interaction_groups(interaction_state))
+        .solver_groups(interaction_groups(interaction_state))
         .build()
 }
 
@@ -119,10 +128,12 @@ impl PhysicsWorld {
                     can_collide: true,
                     can_touch: true,
                     can_query: true,
+                    collision_group: CollisionGroupMask::default(),
                 });
-        if let (Some(&handle), Some(&old_collider)) =
-            (self.lua_to_body.get(&lua_id), self.lua_to_collider.get(&lua_id))
-        {
+        if let (Some(&handle), Some(&old_collider)) = (
+            self.lua_to_body.get(&lua_id),
+            self.lua_to_collider.get(&lua_id),
+        ) {
             let local_frame = self
                 .lua_to_local_frame
                 .get(&lua_id)
@@ -160,6 +171,7 @@ impl PhysicsWorld {
                     can_collide,
                     can_touch: true,
                     can_query: true,
+                    collision_group: CollisionGroupMask::default(),
                 });
         state.can_collide = can_collide;
         self.set_interaction_state(lua_id, state);
@@ -174,6 +186,7 @@ impl PhysicsWorld {
                     can_collide: true,
                     can_touch,
                     can_query: true,
+                    collision_group: CollisionGroupMask::default(),
                 });
         state.can_touch = can_touch;
         self.set_interaction_state(lua_id, state);
@@ -188,6 +201,7 @@ impl PhysicsWorld {
                     can_collide: true,
                     can_touch: true,
                     can_query,
+                    collision_group: CollisionGroupMask::default(),
                 });
         state.can_query = can_query;
         self.set_interaction_state(lua_id, state);
@@ -209,6 +223,9 @@ impl PhysicsWorld {
                 } else {
                     ActiveCollisionTypes::default()
                 });
+                let groups = interaction_groups(state);
+                collider.set_collision_groups(groups);
+                collider.set_solver_groups(groups);
             }
         }
     }
@@ -229,10 +246,12 @@ impl PhysicsWorld {
                     can_collide: true,
                     can_touch: true,
                     can_query: true,
+                    collision_group: CollisionGroupMask::default(),
                 });
-        if let (Some(&handle), Some(&old_collider)) =
-            (self.lua_to_body.get(&lua_id), self.lua_to_collider.get(&lua_id))
-        {
+        if let (Some(&handle), Some(&old_collider)) = (
+            self.lua_to_body.get(&lua_id),
+            self.lua_to_collider.get(&lua_id),
+        ) {
             let local_frame = self
                 .lua_to_local_frame
                 .get(&lua_id)

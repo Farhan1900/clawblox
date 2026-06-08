@@ -2228,6 +2228,111 @@ fn test_touched_respects_physics_service_collision_groups() {
 }
 
 #[test]
+fn test_physics_service_collision_groups_filter_solver_contacts() {
+    let mut instance = GameInstance::new(Uuid::new_v4(), None);
+
+    instance.load_script(
+        r#"
+            local PhysicsService = game:GetService("PhysicsService")
+
+            PhysicsService:RegisterCollisionGroup("Ghost")
+            PhysicsService:RegisterCollisionGroup("Ground")
+            PhysicsService:CollisionGroupSetCollidable("Ghost", "Ground", false)
+
+            local floor = Instance.new("Part")
+            floor.Name = "FilteredFloor"
+            floor.Size = Vector3.new(40, 1, 40)
+            floor.Position = Vector3.new(0, 0, 0)
+            floor.Anchored = true
+            floor.CollisionGroup = "Ground"
+            floor.Parent = Workspace
+
+            local ghost = Instance.new("Part")
+            ghost.Name = "GhostBody"
+            ghost.Size = Vector3.new(2, 2, 2)
+            ghost.Position = Vector3.new(0, 8, 0)
+            ghost.Anchored = false
+            ghost.CollisionGroup = "Ghost"
+            ghost.Parent = Workspace
+        "#,
+    );
+
+    for _ in 0..90 {
+        instance.tick();
+    }
+
+    let runtime = instance.lua_runtime.as_ref().unwrap();
+    let descendants = runtime.workspace().get_descendants();
+    let ghost_y = descendants
+        .iter()
+        .find_map(|inst| {
+            let data = inst.data.lock().unwrap();
+            if data.name == "GhostBody" {
+                data.part_data.as_ref().map(|part| part.position.y)
+            } else {
+                None
+            }
+        })
+        .expect("GhostBody should exist");
+
+    assert!(
+        ghost_y < -2.0,
+        "GhostBody should fall through a floor in a non-collidable group; y={ghost_y}"
+    );
+}
+
+#[test]
+fn test_physics_service_collision_groups_filter_character_controller_contacts() {
+    let mut instance = GameInstance::new(Uuid::new_v4(), None);
+
+    instance.load_script(
+        r#"
+            local PhysicsService = game:GetService("PhysicsService")
+
+            PhysicsService:RegisterCollisionGroup("Ghost")
+            PhysicsService:RegisterCollisionGroup("Ground")
+            PhysicsService:CollisionGroupSetCollidable("Ghost", "Ground", false)
+
+            local floor = Instance.new("Part")
+            floor.Name = "CharacterFilteredFloor"
+            floor.Size = Vector3.new(80, 1, 80)
+            floor.Position = Vector3.new(0, 0, 0)
+            floor.Anchored = true
+            floor.CollisionGroup = "Ground"
+            floor.Parent = Workspace
+        "#,
+    );
+
+    let agent_id = Uuid::new_v4();
+    assert!(instance.add_player(agent_id, "GhostPlayer"));
+    let hrp_id = *instance.player_hrp_ids.get(&agent_id).unwrap();
+
+    let runtime = instance.lua_runtime.as_ref().unwrap();
+    for inst in runtime.workspace().get_descendants() {
+        let mut data = inst.data.lock().unwrap();
+        if data.id.0 == hrp_id {
+            let part = data.part_data.as_mut().expect("HRP should be a part");
+            part.collision_group = "Ghost".to_string();
+            part.interaction_dirty = true;
+        }
+    }
+
+    for _ in 0..90 {
+        instance.tick();
+    }
+
+    let character_y = instance
+        .physics
+        .get_character_position(hrp_id)
+        .expect("character should exist")[1];
+
+    assert!(
+        character_y < -2.0,
+        "Character controller should fall through a floor in a non-collidable group; y={character_y}"
+    );
+}
+
+#[test]
 fn test_touched_reports_specific_part_in_welded_assembly() {
     let mut instance = GameInstance::new(Uuid::new_v4(), None);
 

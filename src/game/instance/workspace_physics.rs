@@ -209,6 +209,7 @@ impl GameInstance {
             return;
         };
 
+        let physics_service = runtime.game().physics_service();
         let descendants = runtime.workspace().get_descendants();
         let mut part_instances: HashMap<u64, Instance> = HashMap::new();
         let mut adjacency: HashMap<u64, Vec<u64>> = HashMap::new();
@@ -342,6 +343,10 @@ impl GameInstance {
 
                 // Character-controlled parts keep their dedicated controller body.
                 if self.physics.has_character(*lua_id) {
+                    self.physics.set_character_collision_group(
+                        *lua_id,
+                        physics_service.collision_group_mask(&part_data.collision_group),
+                    );
                     if part_data.position_dirty {
                         self.physics.set_character_position(
                             *lua_id,
@@ -370,6 +375,8 @@ impl GameInstance {
                     can_collide: part_data.can_collide,
                     can_touch: part_data.can_touch,
                     can_query: part_data.can_query,
+                    collision_group: physics_service
+                        .collision_group_mask(&part_data.collision_group),
                     shape: part_data.shape,
                     physical_properties: Some(part_data.effective_physical_properties()),
                     velocity: [

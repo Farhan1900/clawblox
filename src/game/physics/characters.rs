@@ -4,9 +4,17 @@ use rapier3d::control::{
 };
 use rapier3d::prelude::*;
 
-use super::{PhysicsWorld, GROUP_CHARACTER, GROUP_STATIC};
+use super::PhysicsWorld;
 use crate::game::constants::humanoid as humanoid_consts;
 use crate::game::constants::physics as consts;
+use crate::game::lua::services::physics_service::CollisionGroupMask;
+
+fn interaction_groups(collision_group: CollisionGroupMask) -> InteractionGroups {
+    InteractionGroups::new(
+        Group::from(collision_group.membership),
+        Group::from(collision_group.filter),
+    )
+}
 
 /// State for a character controller (player or NPC)
 pub struct CharacterControllerState {
@@ -24,6 +32,7 @@ pub struct CharacterControllerState {
     pub move_to_elapsed: f32,
     pub grounded: bool,
     pub horizontal_velocity: [f32; 2],
+    pub collision_group: CollisionGroupMask,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -53,10 +62,8 @@ impl PhysicsWorld {
         let collider = ColliderBuilder::capsule_y(half_height, radius)
             .active_events(ActiveEvents::COLLISION_EVENTS)
             .active_collision_types(ActiveCollisionTypes::all())
-            .collision_groups(InteractionGroups::new(
-                GROUP_CHARACTER,
-                GROUP_STATIC | GROUP_CHARACTER,
-            ))
+            .collision_groups(InteractionGroups::all())
+            .solver_groups(InteractionGroups::all())
             .build();
         let collider_handle =
             self.collider_set
@@ -87,6 +94,7 @@ impl PhysicsWorld {
             move_to_elapsed: 0.0,
             grounded: false,
             horizontal_velocity: [0.0, 0.0],
+            collision_group: CollisionGroupMask::default(),
         };
 
         self.character_controllers.insert(lua_id, state);
@@ -94,8 +102,7 @@ impl PhysicsWorld {
         self.body_to_lua.insert(body_handle, lua_id);
         self.body_to_luas.insert(body_handle, vec![lua_id]);
         self.lua_to_collider.insert(lua_id, collider_handle);
-        self.lua_to_local_frame
-            .insert(lua_id, Isometry::identity());
+        self.lua_to_local_frame.insert(lua_id, Isometry::identity());
         self.collider_to_lua.insert(collider_handle, lua_id);
 
         body_handle
@@ -218,6 +225,26 @@ impl PhysicsWorld {
         true
     }
 
+    /// Updates the collision group used by the character controller collider and movement queries.
+    pub fn set_character_collision_group(
+        &mut self,
+        lua_id: u64,
+        collision_group: CollisionGroupMask,
+    ) {
+        let Some(state) = self.character_controllers.get_mut(&lua_id) else {
+            return;
+        };
+        if state.collision_group == collision_group {
+            return;
+        }
+        state.collision_group = collision_group;
+        if let Some(collider) = self.collider_set.get_mut(state.collider_handle) {
+            let groups = interaction_groups(collision_group);
+            collider.set_collision_groups(groups);
+            collider.set_solver_groups(groups);
+        }
+    }
+
     /// Gets the character controller state (for checking grounded, target, etc.)
     pub fn get_character_state(&self, lua_id: u64) -> Option<&CharacterControllerState> {
         self.character_controllers.get(&lua_id)
@@ -282,7 +309,7 @@ impl PhysicsWorld {
         let filter = QueryFilter::default()
             .exclude_rigid_body(state.body_handle)
             .exclude_sensors()
-            .groups(InteractionGroups::new(GROUP_CHARACTER, GROUP_STATIC));
+            .groups(interaction_groups(state.collision_group));
 
         let (hit_collider, toi) = self.query_pipeline.cast_ray(
             &self.rigid_body_set,
@@ -325,7 +352,7 @@ impl PhysicsWorld {
         let filter = QueryFilter::default()
             .exclude_rigid_body(state.body_handle)
             .exclude_sensors()
-            .groups(InteractionGroups::new(GROUP_CHARACTER, GROUP_STATIC));
+            .groups(interaction_groups(state.collision_group));
 
         let mut best: Option<[f32; 3]> = None;
         let mut best_horiz_speed_sq = 0.0_f32;
@@ -375,6 +402,7 @@ impl PhysicsWorld {
         let state = self.character_controllers.get(&lua_id)?;
         let body_handle = state.body_handle;
         let collider_handle = state.collider_handle;
+        let collision_group = state.collision_group;
 
         let body = self.rigid_body_set.get(body_handle)?;
         let collider = self.collider_set.get(collider_handle)?;
@@ -406,10 +434,7 @@ impl PhysicsWorld {
         let filter = QueryFilter::default()
             .exclude_rigid_body(body_handle)
             .exclude_sensors()
-            .groups(InteractionGroups::new(
-                GROUP_CHARACTER,
-                GROUP_STATIC | GROUP_CHARACTER,
-            ));
+            .groups(interaction_groups(collision_group));
 
         let movement = controller.move_shape(
             dt,

@@ -3,6 +3,7 @@ use rapier3d::prelude::*;
 use std::collections::{HashMap, HashSet};
 
 use super::constants::physics as consts;
+use super::lua::services::physics_service::CollisionGroupMask;
 use super::lua::types::{CFrame, PartType, PhysicalProperties, Vector3};
 
 mod assemblies;
@@ -66,17 +67,12 @@ pub fn quaternion_to_rotation_matrix(q: &UnitQuaternion<f32>) -> [[f32; 3]; 3] {
     ]
 }
 
-// Collision groups for Roblox-style physics behavior
-// Characters collide with static geometry and each other.
-// Note: rapier3d uses InteractionGroups (not CollisionGroups like bevy_rapier)
-const GROUP_STATIC: Group = Group::GROUP_1; // Walls, floors, obstacles
-const GROUP_CHARACTER: Group = Group::GROUP_2; // Player characters
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PartInteractionState {
     pub can_collide: bool,
     pub can_touch: bool,
     pub can_query: bool,
+    pub collision_group: CollisionGroupMask,
 }
 
 impl PartInteractionState {
@@ -95,6 +91,7 @@ pub struct PhysicsAssemblyPart {
     pub can_collide: bool,
     pub can_touch: bool,
     pub can_query: bool,
+    pub collision_group: CollisionGroupMask,
     pub shape: PartType,
     pub physical_properties: Option<PhysicalProperties>,
     pub velocity: [f32; 3],
@@ -363,6 +360,7 @@ impl PhysicsWorld {
             can_collide,
             can_touch,
             can_query,
+            collision_group: CollisionGroupMask::default(),
         };
 
         // Create collider with correct shape

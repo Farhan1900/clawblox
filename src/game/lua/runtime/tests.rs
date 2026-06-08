@@ -2550,7 +2550,29 @@ fn test_physics_service_api_exists() {
             PhysicsService:RegisterCollisionGroup("Players")
             PhysicsService:CollisionGroupSetCollidable("Players", "Players", true)
             PhysicsService:SetPartCollisionGroup(p, "Players")
-            _G.ok = PhysicsService ~= nil and p.CollisionGroup == "Players"
+            _G.ok = PhysicsService ~= nil
+                and p.CollisionGroup == "Players"
+                and PhysicsService:GetMaxCollisionGroups() == 32
+                and PhysicsService:IsCollisionGroupRegistered("Default") == true
+                and PhysicsService:IsCollisionGroupRegistered("Players") == true
+                and PhysicsService:CollisionGroupsAreCollidable("Players", "Players") == true
+                and PhysicsService:CollisionGroupsAreCollidable("Players", "MissingGroup") == true
+
+            local defaultOk = pcall(function()
+                PhysicsService:RegisterCollisionGroup("Default")
+            end)
+            local missingPairOk = pcall(function()
+                PhysicsService:CollisionGroupSetCollidable("Players", "MissingGroup", false)
+            end)
+            local missingPartOk = pcall(function()
+                PhysicsService:SetPartCollisionGroup(p, "MissingGroup")
+            end)
+
+            _G.ok = _G.ok
+                and defaultOk == false
+                and missingPairOk == false
+                and missingPartOk == false
+                and p.CollisionGroup == "Players"
         "#,
         )
         .expect("Failed to run script");

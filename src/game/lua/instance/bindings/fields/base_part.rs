@@ -65,6 +65,7 @@ pub(super) fn add_fields<F: UserDataFields<Instance>>(fields: &mut F) {
         let mut data = this.data.lock().unwrap();
         if let Some(part) = &mut data.part_data {
             part.collision_group = collision_group;
+            part.interaction_dirty = true;
         }
         Ok(())
     });

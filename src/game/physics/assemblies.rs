@@ -3,10 +3,9 @@ use std::collections::{HashMap, HashSet};
 use rapier3d::prelude::*;
 
 use super::{
-    build_collider_with_physical_properties, finite_vec3, part_isometry,
-    rotation_matrix_is_finite, transform_within_physics_envelope,
-    velocity_within_physics_envelope, PartInteractionState, PhysicsAssemblyPart,
-    PhysicsAssemblySpec, PhysicsWorld,
+    build_collider_with_physical_properties, finite_vec3, part_isometry, rotation_matrix_is_finite,
+    transform_within_physics_envelope, velocity_within_physics_envelope, PartInteractionState,
+    PhysicsAssemblyPart, PhysicsAssemblySpec, PhysicsWorld,
 };
 use crate::game::constants::physics as consts;
 
@@ -21,11 +20,20 @@ fn part_within_physics_envelope(part: &PhysicsAssemblyPart) -> bool {
 
 fn q5(value: f32) -> i64 {
     let quantized = (value * 100_000.0).round() as i64;
-    if quantized == 0 { 0 } else { quantized }
+    if quantized == 0 {
+        0
+    } else {
+        quantized
+    }
 }
 
 fn fmt_vec3(out: &mut String, values: [f32; 3]) {
-    out.push_str(&format!("{},{},{}", q5(values[0]), q5(values[1]), q5(values[2])));
+    out.push_str(&format!(
+        "{},{},{}",
+        q5(values[0]),
+        q5(values[1]),
+        q5(values[2])
+    ));
 }
 
 fn fmt_iso(out: &mut String, iso: &Isometry<Real>) {
@@ -33,7 +41,13 @@ fn fmt_iso(out: &mut String, iso: &Isometry<Real>) {
     let q = iso.rotation;
     out.push_str(&format!(
         "{},{},{}|{},{},{},{}",
-        q5(t.x), q5(t.y), q5(t.z), q5(q.i), q5(q.j), q5(q.k), q5(q.w)
+        q5(t.x),
+        q5(t.y),
+        q5(t.z),
+        q5(q.i),
+        q5(q.j),
+        q5(q.k),
+        q5(q.w)
     ));
 }
 
@@ -249,6 +263,7 @@ impl PhysicsWorld {
                 can_collide: part.can_collide,
                 can_touch: part.can_touch,
                 can_query: part.can_query,
+                collision_group: part.collision_group,
             };
             let local_frame = inv_root * part_isometry(part.position, &part.rotation);
             let mut collider = build_collider_with_physical_properties(
@@ -270,7 +285,8 @@ impl PhysicsWorld {
             self.lua_to_shape.insert(part.lua_id, part.shape);
             self.lua_to_physical_properties
                 .insert(part.lua_id, part.physical_properties);
-            self.lua_to_interactions.insert(part.lua_id, interaction_state);
+            self.lua_to_interactions
+                .insert(part.lua_id, interaction_state);
             self.collider_to_lua.insert(collider_handle, part.lua_id);
             lua_ids.push(part.lua_id);
 
@@ -311,6 +327,7 @@ impl PhysicsWorld {
                 can_collide: part.can_collide,
                 can_touch: part.can_touch,
                 can_query: part.can_query,
+                collision_group: part.collision_group,
             };
             if self.lua_to_interactions.get(&part.lua_id).copied() != Some(interaction_state) {
                 self.set_interaction_state(part.lua_id, interaction_state);
