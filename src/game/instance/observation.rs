@@ -1,5 +1,130 @@
 use super::*;
 
+/// Round a float to 2 decimal places (reduces JSON payload size)
+#[inline]
+pub(super) fn round_f32(v: f32) -> f32 {
+    (v * 100.0).round() / 100.0
+}
+
+/// Round a position array to 2 decimal places
+#[inline]
+pub(super) fn round_position(pos: [f32; 3]) -> [f32; 3] {
+    [round_f32(pos[0]), round_f32(pos[1]), round_f32(pos[2])]
+}
+
+#[inline]
+fn mat_mul_vec3(rot: &[[f32; 3]; 3], v: [f32; 3]) -> [f32; 3] {
+    [
+        rot[0][0] * v[0] + rot[0][1] * v[1] + rot[0][2] * v[2],
+        rot[1][0] * v[0] + rot[1][1] * v[1] + rot[1][2] * v[2],
+        rot[2][0] * v[0] + rot[2][1] * v[1] + rot[2][2] * v[2],
+    ]
+}
+
+pub(super) fn compute_part_bounds(
+    center: [f32; 3],
+    size: [f32; 3],
+    rotation: [[f32; 3]; 3],
+) -> (EntityAabb, EntityObb) {
+    let half = [
+        size[0].abs() * 0.5,
+        size[1].abs() * 0.5,
+        size[2].abs() * 0.5,
+    ];
+    let local_corners = [
+        [-half[0], -half[1], -half[2]],
+        [half[0], -half[1], -half[2]],
+        [-half[0], half[1], -half[2]],
+        [half[0], half[1], -half[2]],
+        [-half[0], -half[1], half[2]],
+        [half[0], -half[1], half[2]],
+        [-half[0], half[1], half[2]],
+        [half[0], half[1], half[2]],
+    ];
+
+    let mut raw_corners = [[0.0; 3]; 8];
+    for (i, corner) in local_corners.iter().enumerate() {
+        let rotated = mat_mul_vec3(&rotation, *corner);
+        raw_corners[i] = [
+            center[0] + rotated[0],
+            center[1] + rotated[1],
+            center[2] + rotated[2],
+        ];
+    }
+
+    let mut min = raw_corners[0];
+    let mut max = raw_corners[0];
+    for corner in raw_corners.iter().skip(1) {
+        min[0] = min[0].min(corner[0]);
+        min[1] = min[1].min(corner[1]);
+        min[2] = min[2].min(corner[2]);
+        max[0] = max[0].max(corner[0]);
+        max[1] = max[1].max(corner[1]);
+        max[2] = max[2].max(corner[2]);
+    }
+
+    let mut rounded_corners = [[0.0; 3]; 8];
+    for (i, corner) in raw_corners.iter().enumerate() {
+        rounded_corners[i] = round_position(*corner);
+    }
+
+    (
+        EntityAabb {
+            min: round_position(min),
+            max: round_position(max),
+        },
+        EntityObb {
+            center: round_position(center),
+            half_extents: round_position(half),
+            corners: rounded_corners,
+        },
+    )
+}
+
+#[inline]
+fn sq_distance_point_to_obb(
+    point: [f32; 3],
+    center: [f32; 3],
+    half_extents: [f32; 3],
+    rotation: [[f32; 3]; 3],
+) -> f32 {
+    let rel = [
+        point[0] - center[0],
+        point[1] - center[1],
+        point[2] - center[2],
+    ];
+    // Rotation is local->world, so transpose it to evaluate the point in
+    // the part's local frame.
+    let local = [
+        rotation[0][0] * rel[0] + rotation[1][0] * rel[1] + rotation[2][0] * rel[2],
+        rotation[0][1] * rel[0] + rotation[1][1] * rel[1] + rotation[2][1] * rel[2],
+        rotation[0][2] * rel[0] + rotation[1][2] * rel[1] + rotation[2][2] * rel[2],
+    ];
+
+    let mut sq_distance = 0.0;
+    for axis in 0..3 {
+        let overflow = (local[axis].abs() - half_extents[axis]).max(0.0);
+        sq_distance += overflow * overflow;
+    }
+    sq_distance
+}
+
+#[inline]
+pub(super) fn part_intersects_observation_radius(
+    observer_pos: [f32; 3],
+    center: [f32; 3],
+    size: [f32; 3],
+    rotation: [[f32; 3]; 3],
+    radius: f32,
+) -> bool {
+    let half_extents = [
+        size[0].abs() * 0.5,
+        size[1].abs() * 0.5,
+        size[2].abs() * 0.5,
+    ];
+    sq_distance_point_to_obb(observer_pos, center, half_extents, rotation) <= radius * radius
+}
+
 fn attr_string(
     attrs: &std::collections::HashMap<String, AttributeValue>,
     key: &str,
@@ -470,4 +595,306 @@ pub(super) fn build_spectator_observation(instance: &GameInstance) -> SpectatorO
         // Spectator feed is public-only: client-targeted FireClient events are excluded.
         recent_events: instance.recent_public_replicated_events(),
     }
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct PlayerObservation {
+    pub tick: u64,
+    pub game_status: String,
+    pub player: PlayerInfo,
+    pub other_players: Vec<OtherPlayerInfo>,
+    pub world: WorldInfo,
+    pub events: Vec<GameEvent>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub recent_events: Vec<SpectatorReplicatedEvent>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct WorldInfo {
+    pub entities: Vec<WorldEntity>,
+}
+
+/// Static map geometry (anchored entities that never change)
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct MapInfo {
+    pub entities: Vec<WorldEntity>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct WorldEntity {
+    pub id: u64,
+    pub name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub entity_type: Option<String>,
+    pub position: [f32; 3],
+    pub size: [f32; 3],
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rotation: Option<[[f32; 3]; 3]>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub aabb: Option<EntityAabb>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub obb: Option<EntityObb>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub color: Option<[f32; 3]>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub material: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub shape: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub transparency: Option<f32>,
+    pub anchored: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub attributes: Option<std::collections::HashMap<String, serde_json::Value>>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct EntityAabb {
+    pub min: [f32; 3],
+    pub max: [f32; 3],
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct EntityObb {
+    pub center: [f32; 3],
+    pub half_extents: [f32; 3],
+    pub corners: [[f32; 3]; 8],
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct PlayerInfo {
+    pub id: Uuid,
+    pub position: [f32; 3],
+    pub health: i32,
+    /// Game-specific attributes set by Lua scripts
+    pub attributes: std::collections::HashMap<String, serde_json::Value>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct OtherPlayerInfo {
+    pub id: Uuid,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    pub position: [f32; 3],
+    pub distance: f32,
+    pub health: i32,
+    /// Game-specific attributes set by Lua scripts
+    pub attributes: std::collections::HashMap<String, serde_json::Value>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct VisibleEntity {
+    pub id: u32,
+    #[serde(rename = "type")]
+    pub entity_type: String,
+    pub position: [f32; 3],
+    pub distance: f32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub health: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pickup_type: Option<String>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct GameEvent {
+    #[serde(rename = "type")]
+    pub event_type: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub target: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub damage: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub item: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub amount: Option<i32>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct SpectatorObservation {
+    pub instance_id: Uuid,
+    pub tick: u64,
+    /// Milliseconds since game instance was created (for client clock synchronization)
+    pub server_time_ms: u64,
+    pub game_status: String,
+    pub players: Vec<SpectatorPlayerInfo>,
+    pub entities: Vec<SpectatorEntity>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sounds: Vec<SpectatorSound>,
+    #[serde(default)]
+    pub recent_events: Vec<SpectatorReplicatedEvent>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct SpectatorSound {
+    pub id: u32,
+    pub stream_id: String,
+    pub volume: f32,
+    pub is_playing: bool,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct SpectatorReplicatedEvent {
+    pub id: u64,
+    pub tick: u64,
+    pub server_time_ms: u64,
+    pub name: String,
+    pub reliable: bool,
+    pub payload: serde_json::Value,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub target_user_id: Option<u64>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct SpectatorPlayerInfo {
+    pub id: Uuid,
+    pub name: String,
+    pub position: [f32; 3],
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub root_part_id: Option<u32>,
+    pub health: i32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub humanoid_state: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub attributes: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub gui: Option<Vec<GuiElement>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub active_animations: Option<Vec<SpectatorPlayerAnimation>>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct SpectatorPlayerAnimation {
+    pub track_id: u64,
+    pub animation_id: String,
+    pub length: f32,
+    pub priority: i32,
+    pub time_position: f32,
+    pub speed: f32,
+    pub looped: bool,
+    pub is_playing: bool,
+    pub is_stopping: bool,
+    pub weight_current: f32,
+    pub weight_target: f32,
+    pub effective_weight: f32,
+}
+
+/// Serialized GUI element for frontend rendering
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct GuiElement {
+    pub id: u64,
+    #[serde(rename = "type")]
+    pub element_type: String,
+    pub name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub position: Option<UDim2Json>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub size: Option<UDim2Json>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub anchor_point: Option<[f32; 2]>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rotation: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub z_index: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub visible: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub background_color: Option<[f32; 3]>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub background_transparency: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub border_color: Option<[f32; 3]>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub border_size_pixel: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub text: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub text_color: Option<[f32; 3]>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub text_size: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub text_transparency: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub text_x_alignment: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub text_y_alignment: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub image: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub image_color: Option<[f32; 3]>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub image_transparency: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub display_order: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub enabled: Option<bool>,
+    pub children: Vec<GuiElement>,
+}
+
+/// UDim2 serialization format
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct UDim2Json {
+    pub x_scale: f32,
+    pub x_offset: i32,
+    pub y_scale: f32,
+    pub y_offset: i32,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct SpectatorEntity {
+    pub id: u32,
+    #[serde(rename = "type")]
+    pub entity_type: String,
+    pub position: [f32; 3],
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rotation: Option<[[f32; 3]; 3]>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub size: Option<[f32; 3]>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub shape: Option<String>,
+    pub render: SpectatorRender,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub health: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pickup_type: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model_url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model_yaw_offset_deg: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub attributes: Option<std::collections::HashMap<String, serde_json::Value>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub billboard_gui: Option<BillboardGuiJson>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct SpectatorRender {
+    pub kind: String,
+    pub role: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub preset_id: Option<String>,
+    pub primitive: String,
+    pub material: String,
+    pub color: [f32; 3],
+    #[serde(rename = "static")]
+    pub is_static: bool,
+    pub casts_shadow: bool,
+    pub receives_shadow: bool,
+    pub visible: bool,
+    pub double_sided: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub transparency: Option<f32>,
+}
+
+/// BillboardGui serialization for 3D floating labels
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct BillboardGuiJson {
+    pub studs_offset: [f32; 3],
+    pub always_on_top: bool,
+    pub labels: Vec<BillboardLabelJson>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct BillboardLabelJson {
+    pub text: String,
+    pub color: [f32; 3],
+    pub size: f32,
 }
