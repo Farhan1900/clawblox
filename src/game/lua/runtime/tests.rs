@@ -2583,6 +2583,70 @@ fn test_physics_service_api_exists() {
 }
 
 #[test]
+fn test_physics_service_collision_group_lifecycle_parity() {
+    let mut runtime = test_runtime();
+    runtime
+        .load_script(
+            r#"
+            local PhysicsService = game:GetService("PhysicsService")
+
+            PhysicsService:RegisterCollisionGroup("Players")
+            PhysicsService:RegisterCollisionGroup("Ground")
+            local playersId = PhysicsService:GetCollisionGroupId("Players")
+            local createdId = PhysicsService:CreateCollisionGroup("Triggers")
+
+            PhysicsService:CollisionGroupSetCollidable("Players", "Ground", false)
+            PhysicsService:RenameCollisionGroup("Players", "Characters")
+
+            local registered = PhysicsService:GetRegisteredCollisionGroups()
+            local legacy = PhysicsService:GetCollisionGroups()
+            local sawCharacters = false
+            local sawLegacyId = false
+            for _, group in ipairs(registered) do
+                if group.name == "Characters" and group.mask then
+                    sawCharacters = true
+                end
+            end
+            for _, group in ipairs(legacy) do
+                if group.name == "Triggers" and group.id == createdId and group.mask then
+                    sawLegacyId = true
+                end
+            end
+
+            local removeDefaultOk = pcall(function()
+                PhysicsService:UnregisterCollisionGroup("Default")
+            end)
+            local renameDefaultOk = pcall(function()
+                PhysicsService:RenameCollisionGroup("Default", "Base")
+            end)
+            local duplicateRenameOk = pcall(function()
+                PhysicsService:RenameCollisionGroup("Characters", "Ground")
+            end)
+
+            PhysicsService:RemoveCollisionGroup("Triggers")
+
+            _G.ok = playersId == PhysicsService:GetCollisionGroupId("Characters")
+                and PhysicsService:GetCollisionGroupName(playersId) == "Characters"
+                and PhysicsService:IsCollisionGroupRegistered("Players") == false
+                and PhysicsService:IsCollisionGroupRegistered("Characters") == true
+                and PhysicsService:IsCollisionGroupRegistered("Triggers") == false
+                and PhysicsService:CollisionGroupsAreCollidable("Characters", "Ground") == false
+                and PhysicsService:CollisionGroupsAreCollidable("Triggers", "Ground") == true
+                and sawCharacters == true
+                and sawLegacyId == true
+                and removeDefaultOk == false
+                and renameDefaultOk == false
+                and duplicateRenameOk == false
+        "#,
+        )
+        .expect("Failed to run script");
+
+    let globals = runtime.lua().globals().get::<mlua::Table>("_G").unwrap();
+    let ok: bool = globals.get("ok").unwrap();
+    assert!(ok);
+}
+
+#[test]
 fn test_vector2_global_and_operations() {
     let mut runtime = test_runtime();
     runtime

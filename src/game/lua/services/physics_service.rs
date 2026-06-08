@@ -101,6 +101,94 @@ impl PhysicsService {
         self.data.lock().unwrap().registered_groups.contains(group)
     }
 
+    fn group_id(data: &PhysicsServiceData, group: &str) -> mlua::Result<u8> {
+        data.group_indices.get(group).copied().ok_or_else(|| {
+            mlua::Error::runtime(format!("collision group '{group}' is not registered"))
+        })
+    }
+
+    fn group_name(data: &PhysicsServiceData, id: u8) -> Option<String> {
+        data.group_indices
+            .iter()
+            .find_map(|(name, &index)| (index == id).then(|| name.clone()))
+    }
+
+    fn registered_group_snapshot(&self) -> Vec<(String, u8, u32)> {
+        let data = self.data.lock().unwrap();
+        let mut groups = data
+            .group_indices
+            .iter()
+            .map(|(name, &index)| {
+                let mut filter = 0u32;
+                for (other_name, &other_index) in &data.group_indices {
+                    let key = Self::canonical_pair(name, other_name);
+                    if data
+                        .explicit_pair_collidable
+                        .get(&key)
+                        .copied()
+                        .unwrap_or(true)
+                    {
+                        filter |= 1u32 << other_index;
+                    }
+                }
+                (name.clone(), index, filter)
+            })
+            .collect::<Vec<_>>();
+        groups.sort_by_key(|(_, index, _)| *index);
+        groups
+    }
+
+    fn unregister_group(data: &mut PhysicsServiceData, group: &str) -> mlua::Result<()> {
+        if group == DEFAULT_COLLISION_GROUP {
+            return Err(mlua::Error::runtime(
+                "cannot unregister collision group 'Default'",
+            ));
+        }
+        if !data.registered_groups.remove(group) {
+            return Ok(());
+        }
+        data.group_indices.remove(group);
+        data.explicit_pair_collidable
+            .retain(|(a, b), _| a != group && b != group);
+        Ok(())
+    }
+
+    fn rename_group(data: &mut PhysicsServiceData, from: &str, to: &str) -> mlua::Result<()> {
+        if from.is_empty()
+            || to.is_empty()
+            || from == DEFAULT_COLLISION_GROUP
+            || to == DEFAULT_COLLISION_GROUP
+        {
+            return Err(mlua::Error::runtime("invalid collision group name"));
+        }
+        if !data.registered_groups.contains(from) {
+            return Ok(());
+        }
+        if data.registered_groups.contains(to) {
+            return Err(mlua::Error::runtime(format!(
+                "collision group '{to}' is already registered"
+            )));
+        }
+
+        let index = data
+            .group_indices
+            .remove(from)
+            .expect("registered group should have an index");
+        data.registered_groups.remove(from);
+        data.registered_groups.insert(to.to_string());
+        data.group_indices.insert(to.to_string(), index);
+
+        let mut renamed_pairs = HashMap::with_capacity(data.explicit_pair_collidable.len());
+        for ((a, b), collidable) in data.explicit_pair_collidable.drain() {
+            let next_a = if a == from { to.to_string() } else { a };
+            let next_b = if b == from { to.to_string() } else { b };
+            let key = PhysicsService::canonical_pair(&next_a, &next_b);
+            renamed_pairs.insert(key, collidable);
+        }
+        data.explicit_pair_collidable = renamed_pairs;
+        Ok(())
+    }
+
     pub fn groups_collidable(&self, group1: &str, group2: &str) -> bool {
         let data = self.data.lock().unwrap();
         let key = Self::canonical_pair(group1, group2);
@@ -143,11 +231,52 @@ impl UserData for PhysicsService {
             this.ensure_registered_group(&name)?;
             Ok(())
         });
+        methods.add_method("CreateCollisionGroup", |_, this, name: String| {
+            this.ensure_registered_group(&name)?;
+            let data = this.data.lock().unwrap();
+            Ok(PhysicsService::group_id(&data, &name)? as i32)
+        });
         methods.add_method("GetMaxCollisionGroups", |_, _, ()| {
             Ok(MAX_COLLISION_GROUPS as i32)
         });
         methods.add_method("IsCollisionGroupRegistered", |_, this, name: String| {
             Ok(this.is_collision_group_registered(&name))
+        });
+        methods.add_method("GetCollisionGroupId", |_, this, name: String| {
+            let data = this.data.lock().unwrap();
+            Ok(PhysicsService::group_id(&data, &name)? as i32)
+        });
+        methods.add_method("GetCollisionGroupName", |_, this, id: i32| {
+            if !(0..MAX_COLLISION_GROUPS as i32).contains(&id) {
+                return Ok(None::<String>);
+            }
+            let data = this.data.lock().unwrap();
+            Ok(PhysicsService::group_name(&data, id as u8))
+        });
+        methods.add_method("GetRegisteredCollisionGroups", |lua, this, ()| {
+            let table = lua.create_table()?;
+            for (offset, (name, _id, mask)) in
+                this.registered_group_snapshot().into_iter().enumerate()
+            {
+                let entry = lua.create_table()?;
+                entry.set("name", name)?;
+                entry.set("mask", mask as i64)?;
+                table.set(offset + 1, entry)?;
+            }
+            Ok(table)
+        });
+        methods.add_method("GetCollisionGroups", |lua, this, ()| {
+            let table = lua.create_table()?;
+            for (offset, (name, id, mask)) in
+                this.registered_group_snapshot().into_iter().enumerate()
+            {
+                let entry = lua.create_table()?;
+                entry.set("name", name)?;
+                entry.set("id", id as i32)?;
+                entry.set("mask", mask as i64)?;
+                table.set(offset + 1, entry)?;
+            }
+            Ok(table)
         });
         methods.add_method(
             "CollisionGroupsAreCollidable",
@@ -164,6 +293,21 @@ impl UserData for PhysicsService {
                 let key = PhysicsService::canonical_pair(&group1, &group2);
                 data.explicit_pair_collidable.insert(key, collidable);
                 Ok(())
+            },
+        );
+        methods.add_method("UnregisterCollisionGroup", |_, this, name: String| {
+            let mut data = this.data.lock().unwrap();
+            PhysicsService::unregister_group(&mut data, &name)
+        });
+        methods.add_method("RemoveCollisionGroup", |_, this, name: String| {
+            let mut data = this.data.lock().unwrap();
+            PhysicsService::unregister_group(&mut data, &name)
+        });
+        methods.add_method(
+            "RenameCollisionGroup",
+            |_, this, (from, to): (String, String)| {
+                let mut data = this.data.lock().unwrap();
+                PhysicsService::rename_group(&mut data, &from, &to)
             },
         );
         methods.add_method(
