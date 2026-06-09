@@ -420,4 +420,83 @@ mod tests {
             "water drag should reduce submerged horizontal speed, got {vx}"
         );
     }
+
+    #[test]
+    fn terrain_water_floats_welded_wood_raft_assembly() {
+        let mut instance = GameInstance::new(Uuid::new_v4(), None);
+        instance.load_script(
+            r#"
+            local waterSurfaceY = 0
+            Workspace.Terrain:FillBlock(CFrame.new(0, waterSurfaceY - 8, 0), Vector3.new(48, 16, 48), Enum.Material.Water)
+
+            local function plank(name, x)
+                local p = Instance.new("Part")
+                p.Name = name
+                p.Size = Vector3.new(5.25, 0.35, 0.9)
+                p.Material = Enum.Material.Wood
+                p.Position = Vector3.new(x, -4, 0)
+                p.CanCollide = true
+                p.Parent = Workspace
+                return p
+            end
+
+            local root = plank("RaftPlankRoot", -1.9)
+            local middle = plank("RaftPlankMiddle", 0)
+            local right = plank("RaftPlankRight", 1.9)
+
+            local w1 = Instance.new("WeldConstraint")
+            w1.Part0 = root
+            w1.Part1 = middle
+            w1.Parent = root
+
+            local w2 = Instance.new("WeldConstraint")
+            w2.Part0 = middle
+            w2.Part1 = right
+            w2.Parent = middle
+
+            _G.root = root
+            _G.startY = root.Position.Y
+            _G.waterSurfaceY = waterSurfaceY
+        "#,
+        );
+
+        for _ in 0..180 {
+            instance.tick();
+        }
+
+        let (connected_count, start_y, end_y, water_surface_y, speed): (i64, f64, f64, f64, f64) =
+            instance
+                .lua_runtime
+                .as_ref()
+                .unwrap()
+                .lua()
+                .load(
+                    r#"
+                return #_G.root:GetConnectedParts(true),
+                    _G.startY,
+                    _G.root.Position.Y,
+                    _G.waterSurfaceY,
+                    _G.root.AssemblyLinearVelocity.Magnitude
+            "#,
+                )
+                .eval()
+                .unwrap();
+
+        assert_eq!(
+            connected_count, 2,
+            "raft should remain a welded three-part assembly"
+        );
+        assert!(
+            end_y > start_y,
+            "wood raft should rise from its initial submerged position: start={start_y}, end={end_y}"
+        );
+        assert!(
+            (water_surface_y - 0.75..=water_surface_y + 1.5).contains(&end_y),
+            "wood raft should settle near the water surface ({water_surface_y}), got y={end_y}"
+        );
+        assert!(
+            speed < 1.0,
+            "wood raft should be mostly settled after simulation, speed={speed}"
+        );
+    }
 }
