@@ -44,6 +44,17 @@ pub(super) fn add_fields<F: UserDataFields<Instance>>(fields: &mut F) {
         }
         Ok(())
     });
+    fields.add_field_method_get("EnableFluidForces", |_, this| {
+        let data = this.data.lock().unwrap();
+        Ok(data.part_data.as_ref().map(|p| p.enable_fluid_forces))
+    });
+    fields.add_field_method_set("EnableFluidForces", |_, this, enable_fluid_forces: bool| {
+        let mut data = this.data.lock().unwrap();
+        if let Some(part) = &mut data.part_data {
+            part.enable_fluid_forces = enable_fluid_forces;
+        }
+        Ok(())
+    });
 
     fields.add_field_method_get("CanQuery", |_, this| {
         let data = this.data.lock().unwrap();
@@ -217,6 +228,10 @@ pub(super) fn add_fields<F: UserDataFields<Instance>>(fields: &mut F) {
             .part_data
             .as_ref()
             .map(|p| p.current_physical_properties().density))
+    });
+    fields.add_field_method_get("SpecificGravity", |_, this| {
+        let data = this.data.lock().unwrap();
+        Ok(data.part_data.as_ref().map(|p| p.specific_gravity()))
     });
     fields.add_field_method_set("Density", |_, this, density: f32| {
         let mut data = this.data.lock().unwrap();

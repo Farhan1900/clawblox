@@ -33,6 +33,7 @@ struct FluidSample {
     local: Vector3,
     world: Vector3,
     volume: f32,
+    vertical_span: f32,
 }
 
 impl GameInstance {
@@ -56,11 +57,13 @@ impl GameInstance {
             }
 
             for sample in samples {
-                if !water_contains_point(sample.world, &water) {
+                let submerged_fraction =
+                    water_submerged_fraction(sample.world, sample.vertical_span, &water);
+                if submerged_fraction <= 0.0 {
                     continue;
                 }
 
-                let displaced_volume = sample.volume;
+                let displaced_volume = sample.volume * submerged_fraction;
                 let buoyancy = WATER_DENSITY * gravity * displaced_volume;
                 let mut force = [0.0, buoyancy, 0.0];
 
@@ -154,21 +157,43 @@ fn water_voxel_from_cell(cell: TerrainCell, voxel: TerrainVoxel) -> Option<Water
     })
 }
 
-fn water_contains_point(point: Vector3, water: &HashMap<TerrainCell, WaterVoxel>) -> bool {
-    let cell = TerrainCell {
-        x: (point.x / TERRAIN_VOXEL_SIZE).floor() as i32,
-        y: (point.y / TERRAIN_VOXEL_SIZE).floor() as i32,
-        z: (point.z / TERRAIN_VOXEL_SIZE).floor() as i32,
-    };
-    let Some(voxel) = water.get(&cell) else {
-        return false;
-    };
-    point.x >= voxel.min.x
-        && point.x <= voxel.max.x
-        && point.y >= voxel.min.y
-        && point.y <= voxel.max.y
-        && point.z >= voxel.min.z
-        && point.z <= voxel.max.z
+fn water_submerged_fraction(
+    point: Vector3,
+    vertical_span: f32,
+    water: &HashMap<TerrainCell, WaterVoxel>,
+) -> f32 {
+    let span = vertical_span.abs().max(0.001);
+    let bottom = point.y - span * 0.5;
+    let top = point.y + span * 0.5;
+    let cell_x = (point.x / TERRAIN_VOXEL_SIZE).floor() as i32;
+    let cell_z = (point.z / TERRAIN_VOXEL_SIZE).floor() as i32;
+    let min_y = (bottom / TERRAIN_VOXEL_SIZE).floor() as i32;
+    let max_y = (top / TERRAIN_VOXEL_SIZE).floor() as i32;
+
+    let mut submerged = 0.0;
+    for y in min_y..=max_y {
+        let cell = TerrainCell {
+            x: cell_x,
+            y,
+            z: cell_z,
+        };
+        let Some(voxel) = water.get(&cell) else {
+            continue;
+        };
+        if point.x < voxel.min.x
+            || point.x > voxel.max.x
+            || point.z < voxel.min.z
+            || point.z > voxel.max.z
+        {
+            continue;
+        }
+        let overlap_bottom = bottom.max(voxel.min.y);
+        let overlap_top = top.min(voxel.max.y);
+        if overlap_top > overlap_bottom {
+            submerged += overlap_top - overlap_bottom;
+        }
+    }
+    (submerged / span).clamp(0.0, 1.0)
 }
 
 fn fluid_samples(size: Vector3, shape: PartType) -> Vec<FluidSample> {
@@ -195,21 +220,38 @@ fn fluid_samples(size: Vector3, shape: PartType) -> Vec<FluidSample> {
     }
 
     let volume = part_volume(size, shape) / locals.len() as f32;
+    let local_cell_size = Vector3::new(
+        size.x.abs() / counts[0] as f32,
+        size.y.abs() / counts[1] as f32,
+        size.z.abs() / counts[2] as f32,
+    );
     locals
         .into_iter()
         .map(|local| FluidSample {
             local,
             world: Vector3::zero(),
             volume,
+            vertical_span: local_cell_size.y.max(0.001),
         })
         .collect()
 }
 
 fn fluid_samples_world(part: &FluidPart) -> Vec<FluidSample> {
+    let counts = sample_counts(part.size);
+    let local_cell_size = Vector3::new(
+        part.size.x.abs() / counts[0] as f32,
+        part.size.y.abs() / counts[1] as f32,
+        part.size.z.abs() / counts[2] as f32,
+    );
+    let world_vertical_span = (part.rotation[1][0] * local_cell_size.x).abs()
+        + (part.rotation[1][1] * local_cell_size.y).abs()
+        + (part.rotation[1][2] * local_cell_size.z).abs();
+
     fluid_samples(part.size, part.shape)
         .into_iter()
         .map(|mut sample| {
             sample.world = transform_local_to_world(part.position, &part.rotation, sample.local);
+            sample.vertical_span = world_vertical_span.max(0.001);
             sample
         })
         .collect()
@@ -418,6 +460,136 @@ mod tests {
         assert!(
             vx > 0.0 && vx < 20.0,
             "water drag should reduce submerged horizontal speed, got {vx}"
+        );
+    }
+
+    #[test]
+    fn terrain_water_empty_wood_raft_settles_to_archimedes_draft() {
+        let mut instance = GameInstance::new(Uuid::new_v4(), None);
+        instance.load_script(
+            r#"
+            local waterSurfaceY = 0
+            Workspace.Terrain:FillBlock(CFrame.new(0, waterSurfaceY - 8, 0), Vector3.new(48, 16, 48), Enum.Material.Water)
+
+            local raft = Instance.new("Part")
+            raft.Name = "DraftRaft"
+            raft.Size = Vector3.new(10, 1, 4)
+            raft.CustomPhysicalProperties = PhysicalProperties.new(0.35, 0.7, 0.0, 1, 1)
+            raft.Position = Vector3.new(0, -0.7, 0)
+            raft.CanCollide = false
+            raft.Parent = Workspace
+
+            _G.raft = raft
+        "#,
+        );
+
+        for _ in 0..420 {
+            instance.tick();
+        }
+
+        let (center_y, speed): (f64, f64) = instance
+            .lua_runtime
+            .as_ref()
+            .unwrap()
+            .lua()
+            .load("return _G.raft.Position.Y, _G.raft.AssemblyLinearVelocity.Magnitude")
+            .eval()
+            .unwrap();
+
+        // For an axis-aligned box with density 0.35 in water density 1.0,
+        // submerged fraction should be 0.35. With height 1, center is
+        // water + (0.5 - 0.35) * height = 0.15.
+        assert!(
+            (center_y - 0.15).abs() < 0.15,
+            "empty wood raft draft should settle near center_y=0.15, got {center_y}"
+        );
+        assert!(
+            speed < 0.35,
+            "empty wood raft should be near equilibrium, speed={speed}"
+        );
+    }
+
+    #[test]
+    fn terrain_water_load_equivalent_raft_settles_deeper_but_floats() {
+        let mut instance = GameInstance::new(Uuid::new_v4(), None);
+        instance.load_script(
+            r#"
+            local waterSurfaceY = 0
+            Workspace.Terrain:FillBlock(CFrame.new(0, waterSurfaceY - 8, 0), Vector3.new(64, 16, 64), Enum.Material.Water)
+
+            local raft = Instance.new("Part")
+            raft.Name = "LoadedDraftRaft"
+            raft.Size = Vector3.new(12, 1, 4)
+            -- Equivalent to a wood raft carrying centered additional load:
+            -- total supported mass / raft volume = 0.70, still below water.
+            raft.CustomPhysicalProperties = PhysicalProperties.new(0.70, 0.7, 0.0, 1, 1)
+            raft.Position = Vector3.new(0, -0.9, 0)
+            raft.CanCollide = false
+            raft.Parent = Workspace
+
+            _G.raft = raft
+        "#,
+        );
+
+        for _ in 0..480 {
+            instance.tick();
+        }
+
+        let (center_y, speed): (f64, f64) = instance
+            .lua_runtime
+            .as_ref()
+            .unwrap()
+            .lua()
+            .load("return _G.raft.Position.Y, _G.raft.AssemblyLinearVelocity.Magnitude")
+            .eval()
+            .unwrap();
+
+        // Submerged fraction 0.70, height 1: center_y = 0.5 - 0.70 = -0.20.
+        assert!(
+            (center_y + 0.20).abs() < 0.18,
+            "loaded raft should settle near center_y=-0.20, got {center_y}"
+        );
+        assert!(
+            speed < 0.4,
+            "loaded raft should be near equilibrium, speed={speed}"
+        );
+    }
+
+    #[test]
+    fn terrain_water_overloaded_raft_sinks() {
+        let mut instance = GameInstance::new(Uuid::new_v4(), None);
+        instance.load_script(
+            r#"
+            Workspace.Terrain:FillBlock(CFrame.new(0, -8, 0), Vector3.new(48, 16, 48), Enum.Material.Water)
+
+            local raft = Instance.new("Part")
+            raft.Name = "OverloadedRaft"
+            raft.Size = Vector3.new(10, 1, 4)
+            raft.CustomPhysicalProperties = PhysicalProperties.new(1.15, 0.7, 0.0, 1, 1)
+            raft.Position = Vector3.new(0, -0.5, 0)
+            raft.CanCollide = false
+            raft.Parent = Workspace
+
+            _G.raft = raft
+            _G.startY = raft.Position.Y
+        "#,
+        );
+
+        for _ in 0..180 {
+            instance.tick();
+        }
+
+        let (start_y, end_y): (f64, f64) = instance
+            .lua_runtime
+            .as_ref()
+            .unwrap()
+            .lua()
+            .load("return _G.startY, _G.raft.Position.Y")
+            .eval()
+            .unwrap();
+        assert!(
+            end_y < start_y - 0.5,
+            "density > water should sink: start={start_y}, end={end_y}"
         );
     }
 

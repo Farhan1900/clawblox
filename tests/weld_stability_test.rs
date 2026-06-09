@@ -228,8 +228,14 @@ fn single_dynamic_block_on_floor_sleeps_after_residual_motion() {
         initial_sleeping, final_sleeping, drift
     );
 
-    assert!(initial_sleeping, "single block did not sleep after settling");
-    assert!(final_sleeping, "single block woke up during idle simulation");
+    assert!(
+        initial_sleeping,
+        "single block did not sleep after settling"
+    );
+    assert!(
+        final_sleeping,
+        "single block woke up during idle simulation"
+    );
     assert!(
         drift < 0.001,
         "single dynamic block drifted {:.4} studs while idle",

@@ -43,7 +43,10 @@ impl ExternalWorldCommand {
             ));
         }
         if let Some(resume) = &self.resume {
-            env.push(("WORLD_RESUME_PATH".to_string(), resume.display().to_string()));
+            env.push((
+                "WORLD_RESUME_PATH".to_string(),
+                resume.display().to_string(),
+            ));
         }
         if let Some(clawblox_bin) = &self.clawblox_bin {
             env.push((
@@ -79,7 +82,11 @@ pub fn spawn_external_world(
         let sh_cmd = format!(
             "mount --bind {} /dev/shm && exec {}",
             shell_quote(&shm_dir.display().to_string()),
-            inner.iter().map(|a| shell_quote(a)).collect::<Vec<_>>().join(" "),
+            inner
+                .iter()
+                .map(|a| shell_quote(a))
+                .collect::<Vec<_>>()
+                .join(" "),
         );
         let mut cmd = Command::new("unshare");
         cmd.args(["--mount", "--map-root-user", "--", "sh", "-c", &sh_cmd]);
@@ -107,7 +114,9 @@ pub fn spawn_external_world(
         let err_log = log
             .try_clone()
             .map_err(|err| format!("failed to clone log file {}: {err}", log_file.display()))?;
-        command.stdout(Stdio::from(log)).stderr(Stdio::from(err_log));
+        command
+            .stdout(Stdio::from(log))
+            .stderr(Stdio::from(err_log));
     }
     command.spawn().map_err(|err| {
         format!(

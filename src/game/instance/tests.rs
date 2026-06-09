@@ -2341,6 +2341,170 @@ fn test_physics_service_collision_groups_filter_character_controller_contacts() 
 }
 
 #[test]
+fn test_character_off_center_load_torques_dynamic_support() {
+    let mut instance = GameInstance::new(Uuid::new_v4(), None);
+
+    instance.load_script(
+        r#"
+            Workspace.Gravity = 30
+
+            local support = Instance.new("Part")
+            support.Name = "DynamicSupport"
+            support.Size = Vector3.new(8, 1, 4)
+            support.Position = Vector3.new(0, 0, 0)
+            support.Anchored = false
+            support.CanCollide = true
+            support.CustomPhysicalProperties = PhysicalProperties.new(2, 0.8, 0, 1, 1)
+            support.Parent = Workspace
+
+            _G.support = support
+        "#,
+    );
+
+    let agent_id = Uuid::new_v4();
+    assert!(instance.add_player(agent_id, "LoadPlayer"));
+    let hrp_id = *instance.player_hrp_ids.get(&agent_id).unwrap();
+    instance
+        .physics
+        .set_character_position(hrp_id, [3.0, 3.0, 0.0]);
+
+    for _ in 0..12 {
+        instance.tick();
+    }
+
+    let angular_z: f64 = instance
+        .lua_runtime
+        .as_ref()
+        .unwrap()
+        .lua()
+        .load("return _G.support.AssemblyAngularVelocity.Z")
+        .eval()
+        .unwrap();
+
+    assert!(
+        angular_z.abs() > 0.01,
+        "off-center character load should torque dynamic support, angular_z={angular_z}"
+    );
+}
+
+#[test]
+fn test_sufficient_raft_floats_with_centered_character_load() {
+    let mut instance = GameInstance::new(Uuid::new_v4(), None);
+
+    instance.load_script(
+        r#"
+            Workspace.Gravity = 30
+            Workspace.Terrain:FillBlock(CFrame.new(0, -8, 0), Vector3.new(64, 16, 64), Enum.Material.Water)
+
+            local raft = Instance.new("Part")
+            raft.Name = "LargeCharacterRaft"
+            raft.Size = Vector3.new(12, 1, 4)
+            raft.Position = Vector3.new(0, -0.2, 0)
+            raft.Anchored = false
+            raft.CanCollide = true
+            raft.CustomPhysicalProperties = PhysicalProperties.new(0.35, 0.8, 0, 1, 1)
+            raft.Parent = Workspace
+
+            _G.raft = raft
+        "#,
+    );
+
+    let agent_id = Uuid::new_v4();
+    assert!(instance.add_player(agent_id, "CenteredRaftPlayer"));
+    let hrp_id = *instance.player_hrp_ids.get(&agent_id).unwrap();
+    instance
+        .physics
+        .set_character_position(hrp_id, [0.0, 3.4, 0.0]);
+
+    for _ in 0..540 {
+        instance.tick();
+    }
+
+    let (raft_y, raft_speed, player_y): (f64, f64, f64) = instance
+        .lua_runtime
+        .as_ref()
+        .unwrap()
+        .lua()
+        .load(
+            r#"
+            local hrp = game:GetService("Players"):GetPlayers()[1].Character:FindFirstChild("HumanoidRootPart")
+            return _G.raft.Position.Y, _G.raft.AssemblyLinearVelocity.Magnitude, hrp.Position.Y
+        "#,
+        )
+        .eval()
+        .unwrap();
+
+    // Raft volume is 48. Raft mass is 16.8. The default HRP is a 2x5x2
+    // cylinder at density 0.7: pi * 1^2 * 5 * 0.7 ~= 10.996.
+    // Expected submerged fraction ~= 27.796 / 48 = 0.579, so center_y
+    // should be about 0.5 - 0.579 = -0.079 for a height-1 box.
+    assert!(
+        (-0.35..=0.20).contains(&raft_y),
+        "large raft with centered character should float near predicted draft, raft_y={raft_y}"
+    );
+    assert!(
+        raft_speed < 0.5,
+        "large raft with centered character should be mostly settled, speed={raft_speed}"
+    );
+    assert!(
+        player_y > raft_y + 2.0,
+        "character should remain supported above raft, player_y={player_y}, raft_y={raft_y}"
+    );
+}
+
+#[test]
+fn test_off_center_character_load_rolls_floating_raft() {
+    let mut instance = GameInstance::new(Uuid::new_v4(), None);
+
+    instance.load_script(
+        r#"
+            Workspace.Gravity = 30
+            Workspace.Terrain:FillBlock(CFrame.new(0, -8, 0), Vector3.new(64, 16, 64), Enum.Material.Water)
+
+            local raft = Instance.new("Part")
+            raft.Name = "OffCenterCharacterRaft"
+            raft.Size = Vector3.new(12, 1, 4)
+            raft.Position = Vector3.new(0, -0.2, 0)
+            raft.Anchored = false
+            raft.CanCollide = true
+            raft.CustomPhysicalProperties = PhysicalProperties.new(0.35, 0.8, 0, 1, 1)
+            raft.Parent = Workspace
+
+            _G.raft = raft
+            _G.maxAngularZ = 0
+            game:GetService("RunService").Heartbeat:Connect(function()
+                _G.maxAngularZ = math.max(_G.maxAngularZ, math.abs(raft.AssemblyAngularVelocity.Z))
+            end)
+        "#,
+    );
+
+    let agent_id = Uuid::new_v4();
+    assert!(instance.add_player(agent_id, "OffCenterRaftPlayer"));
+    let hrp_id = *instance.player_hrp_ids.get(&agent_id).unwrap();
+    instance
+        .physics
+        .set_character_position(hrp_id, [4.0, 3.4, 0.0]);
+
+    for _ in 0..240 {
+        instance.tick();
+    }
+
+    let max_angular_z: f64 = instance
+        .lua_runtime
+        .as_ref()
+        .unwrap()
+        .lua()
+        .load("return _G.maxAngularZ")
+        .eval()
+        .unwrap();
+
+    assert!(
+        max_angular_z > 0.02,
+        "off-center character load should roll floating raft, max angular z={max_angular_z}"
+    );
+}
+
+#[test]
 fn test_touched_reports_specific_part_in_welded_assembly() {
     let mut instance = GameInstance::new(Uuid::new_v4(), None);
 

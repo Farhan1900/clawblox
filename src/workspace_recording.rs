@@ -156,8 +156,12 @@ pub fn start_workspace_recorder(
 }
 
 pub fn load_workspace_events(path: &Path) -> Result<Vec<WorkspaceEvent>, String> {
-    let raw = fs::read_to_string(path)
-        .map_err(|err| format!("failed to read workspace events '{}': {err}", path.display()))?;
+    let raw = fs::read_to_string(path).map_err(|err| {
+        format!(
+            "failed to read workspace events '{}': {err}",
+            path.display()
+        )
+    })?;
     let mut events = Vec::new();
     for line in raw.lines() {
         let line = line.trim();
@@ -351,7 +355,10 @@ fn write_blob(blobs_dir: &Path, sha256: &str, bytes: &[u8]) -> std::io::Result<(
     if sha256.len() < 4 {
         return Ok(());
     }
-    let path = blobs_dir.join(&sha256[0..2]).join(&sha256[2..4]).join(sha256);
+    let path = blobs_dir
+        .join(&sha256[0..2])
+        .join(&sha256[2..4])
+        .join(sha256);
     if path.is_file() {
         return Ok(());
     }
@@ -384,8 +391,7 @@ fn relative_workspace_path(root: &Path, path: &Path) -> Option<String> {
 }
 
 fn should_ignore_name(name: &str) -> bool {
-    matches!(name, ".venv" | "__pycache__" | ".pytest_cache" | ".git")
-        || name.ends_with(".pyc")
+    matches!(name, ".venv" | "__pycache__" | ".pytest_cache" | ".git") || name.ends_with(".pyc")
 }
 
 fn should_ignore_path(path: &str) -> bool {
@@ -398,7 +404,12 @@ fn should_ignore_path(path: &str) -> bool {
 
 fn recording_enabled() -> bool {
     std::env::var("CLAWBLOX_WORKSPACE_RECORD")
-        .map(|value| !matches!(value.trim().to_ascii_lowercase().as_str(), "0" | "false" | "no"))
+        .map(|value| {
+            !matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "0" | "false" | "no"
+            )
+        })
         .unwrap_or(true)
 }
 

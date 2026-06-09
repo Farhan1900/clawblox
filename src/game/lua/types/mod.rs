@@ -14,7 +14,9 @@ pub mod vector3;
 pub use cframe::CFrame;
 pub use color3::Color3;
 pub use datetime::DateTime;
-pub use enums::{ActuatorRelativeTo, HumanoidStateType, Material, PartType, RaycastFilterType};
+pub use enums::{
+    ActuatorRelativeTo, FluidForces, HumanoidStateType, Material, PartType, RaycastFilterType,
+};
 pub use physical_properties::PhysicalProperties;
 pub use ray::Ray;
 pub use region3::Region3;

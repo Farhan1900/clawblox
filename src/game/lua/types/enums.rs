@@ -89,6 +89,57 @@ pub enum ActuatorRelativeTo {
     World,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FluidForces {
+    Default,
+    Experimental,
+}
+
+impl FluidForces {
+    pub fn name(&self) -> &'static str {
+        match self {
+            FluidForces::Default => "Default",
+            FluidForces::Experimental => "Experimental",
+        }
+    }
+
+    pub fn value(&self) -> i32 {
+        match self {
+            FluidForces::Default => 0,
+            FluidForces::Experimental => 1,
+        }
+    }
+}
+
+impl FromLua for FluidForces {
+    fn from_lua(value: Value, _lua: &Lua) -> Result<Self> {
+        match value {
+            Value::UserData(ud) => ud.borrow::<FluidForces>().map(|v| *v),
+            _ => Err(mlua::Error::FromLuaConversionError {
+                from: value.type_name(),
+                to: "FluidForces".to_string(),
+                message: Some("expected FluidForces".to_string()),
+            }),
+        }
+    }
+}
+
+impl UserData for FluidForces {
+    fn add_fields<F: UserDataFields<Self>>(fields: &mut F) {
+        fields.add_field_method_get("Name", |_, this| Ok(this.name().to_string()));
+        fields.add_field_method_get("Value", |_, this| Ok(this.value()));
+    }
+
+    fn add_methods<M: UserDataMethods<Self>>(methods: &mut M) {
+        methods.add_meta_method(mlua::MetaMethod::ToString, |_, this, ()| {
+            Ok(format!("Enum.FluidForces.{}", this.name()))
+        });
+        methods.add_meta_method(mlua::MetaMethod::Eq, |_, this, other: FluidForces| {
+            Ok(*this == other)
+        });
+    }
+}
+
 impl ActuatorRelativeTo {
     pub fn name(&self) -> &'static str {
         match self {
@@ -445,6 +496,11 @@ pub fn register_enums(lua: &Lua) -> Result<()> {
     actuator_relative_to_table.set("Attachment1", ActuatorRelativeTo::Attachment1)?;
     actuator_relative_to_table.set("World", ActuatorRelativeTo::World)?;
     enum_table.set("ActuatorRelativeTo", actuator_relative_to_table)?;
+
+    let fluid_forces_table = lua.create_table()?;
+    fluid_forces_table.set("Default", FluidForces::Default)?;
+    fluid_forces_table.set("Experimental", FluidForces::Experimental)?;
+    enum_table.set("FluidForces", fluid_forces_table)?;
 
     let state_type_table = lua.create_table()?;
     state_type_table.set("Running", HumanoidStateType::Running)?;

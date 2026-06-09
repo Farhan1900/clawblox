@@ -221,6 +221,9 @@ pub(super) fn update_character_movement(instance: &mut GameInstance, dt: f32) {
                 state.horizontal_velocity = motion_plan.new_horizontal_velocity;
             }
         }
+        if post_move_grounded {
+            apply_character_support_load(instance, hrp_id, controller_config.ground_query_distance);
+        }
         if motion_plan.reached_move_to {
             fire_move_to_finished(instance, agent_id, true);
         } else if move_to_timed_out {
@@ -245,6 +248,39 @@ pub(super) fn update_character_movement(instance: &mut GameInstance, dt: f32) {
             }
         }
     }
+}
+
+fn apply_character_support_load(instance: &mut GameInstance, hrp_id: u64, max_distance: f32) {
+    let Some(contact) = instance
+        .physics
+        .get_ground_dynamic_support(hrp_id, max_distance)
+    else {
+        return;
+    };
+    let Some(mass) = character_part_mass(instance, hrp_id) else {
+        return;
+    };
+    let load = mass * instance.physics.gravity.y.abs();
+    if !load.is_finite() || load <= 0.0 {
+        return;
+    }
+    instance.physics.add_force_at_position_to_part(
+        contact.lua_id,
+        [0.0, -load, 0.0],
+        contact.point,
+    );
+}
+
+fn character_part_mass(instance: &GameInstance, hrp_id: u64) -> Option<f32> {
+    let runtime = instance.lua_runtime.as_ref()?;
+    for candidate in runtime.workspace().get_descendants() {
+        let data = candidate.data.lock().unwrap();
+        if data.id.0 != hrp_id {
+            continue;
+        }
+        return data.part_data.as_ref().map(|part| part.mass());
+    }
+    None
 }
 
 fn warn_once_move_to(instance: &GameInstance, agent_id: Uuid, reason: &str) {

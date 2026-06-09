@@ -148,8 +148,12 @@ pub fn update(
 
 pub fn write(path: &Path, manifest: &ClawbloxManifest) -> Result<(), String> {
     if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)
-            .map_err(|err| format!("failed to create manifest directory '{}': {err}", parent.display()))?;
+        fs::create_dir_all(parent).map_err(|err| {
+            format!(
+                "failed to create manifest directory '{}': {err}",
+                parent.display()
+            )
+        })?;
     }
     let raw = serde_json::to_string_pretty(manifest)
         .map_err(|err| format!("failed to serialize manifest '{}': {err}", path.display()))?;

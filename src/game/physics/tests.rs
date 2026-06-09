@@ -291,6 +291,83 @@ fn test_get_ground_kinematic_velocity() {
 }
 
 #[test]
+fn test_get_ground_dynamic_support_reports_off_center_contact() {
+    let mut world = PhysicsWorld::new();
+
+    world.add_part(
+        1,
+        [2.0, 0.0, 0.0],
+        &[[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
+        [8.0, 1.0, 4.0],
+        false,
+        true,
+        true,
+        true,
+        PartType::Block,
+        None,
+    );
+
+    let char_id = 100;
+    world.add_character(char_id, [4.0, 3.0, 0.0], 1.0, 5.0);
+    world.step(1.0 / 60.0);
+    world.query_pipeline.update(&world.collider_set);
+
+    let support = world
+        .get_ground_dynamic_support(char_id, 4.0)
+        .expect("expected dynamic support under character");
+
+    assert_eq!(support.lua_id, 1);
+    assert!(
+        support.point[0] > 3.9 && support.point[0] < 4.1,
+        "support point should preserve off-center x, got {:?}",
+        support.point
+    );
+    assert!(
+        support.point[1] > 0.4 && support.point[1] < 0.6,
+        "support point should be on plank top surface, got {:?}",
+        support.point
+    );
+}
+
+#[test]
+fn test_off_center_support_load_creates_torque_on_dynamic_body() {
+    let mut world = PhysicsWorld::new();
+
+    let plank = world.add_part(
+        1,
+        [0.0, 0.0, 0.0],
+        &[[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
+        [8.0, 1.0, 4.0],
+        false,
+        true,
+        true,
+        true,
+        PartType::Block,
+        None,
+    );
+
+    let char_id = 100;
+    world.add_character(char_id, [3.0, 3.0, 0.0], 1.0, 5.0);
+    world.step(1.0 / 60.0);
+    world.query_pipeline.update(&world.collider_set);
+
+    let support = world
+        .get_ground_dynamic_support(char_id, 4.0)
+        .expect("expected dynamic support under character");
+    world.add_force_at_position_to_part(1, [0.0, -1_000.0, 0.0], support.point);
+    world.step(1.0 / 60.0);
+
+    let angular_velocity = world
+        .get_angular_velocity(plank)
+        .expect("plank should still have a physics body");
+    assert!(
+        angular_velocity[2].abs() > 0.01,
+        "off-center vertical load should create roll torque, got {:?}",
+        angular_velocity
+    );
+}
+
+#[test]
 fn test_get_character_contact_kinematic_velocity_for_rotating_body() {
     let mut world = PhysicsWorld::new();
 

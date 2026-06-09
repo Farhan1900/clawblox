@@ -24,8 +24,7 @@ pub fn build_motion_plan(
 ) -> MotionPlan {
     let mut new_vertical_velocity = vertical_velocity + gravity * dt;
     if let Some(jump) = jump_power {
-        let max_launch_speed =
-            (2.0 * gravity.abs() * humanoid_consts::DEFAULT_JUMP_HEIGHT).sqrt();
+        let max_launch_speed = (2.0 * gravity.abs() * humanoid_consts::DEFAULT_JUMP_HEIGHT).sqrt();
         new_vertical_velocity = jump.max(0.0).min(max_launch_speed);
     }
 

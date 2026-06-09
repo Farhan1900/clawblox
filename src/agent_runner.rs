@@ -1138,10 +1138,17 @@ fn canonicalize_if_possible(path: &Path) -> Result<PathBuf, String> {
     }
     let resolved = std::fs::canonicalize(path)
         .map_err(|err| format!("failed to canonicalize {}: {err}", path.display()))?;
-    let metadata = std::fs::metadata(&resolved)
-        .map_err(|err| format!("failed to inspect agent binary {}: {err}", resolved.display()))?;
+    let metadata = std::fs::metadata(&resolved).map_err(|err| {
+        format!(
+            "failed to inspect agent binary {}: {err}",
+            resolved.display()
+        )
+    })?;
     if !metadata.is_file() {
-        return Err(format!("agent binary is not a file: {}", resolved.display()));
+        return Err(format!(
+            "agent binary is not a file: {}",
+            resolved.display()
+        ));
     }
     if metadata.len() == 0 {
         return Err(format!("agent binary is empty: {}", resolved.display()));

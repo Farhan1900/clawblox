@@ -17,11 +17,15 @@ use crate::game::lua::services::physics_service::{
 };
 use crate::game::lua::services::remote_event::ReplicatedEvent;
 use crate::game::lua::types::{
-    ActuatorRelativeTo, CFrame, Color3, HumanoidStateType, Material, PartType, PhysicalProperties,
-    UDim, UDim2, Vector3,
+    ActuatorRelativeTo, CFrame, Color3, FluidForces, HumanoidStateType, Material, PartType,
+    PhysicalProperties, UDim, UDim2, Vector3,
 };
 
 const SNAPSHOT_SCHEMA_VERSION: u32 = 2;
+
+fn default_fluid_forces_snapshot() -> String {
+    "Default".to_string()
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GameInstanceSnapshot {
@@ -30,6 +34,8 @@ pub struct GameInstanceSnapshot {
     pub instance_id: Uuid,
     pub tick: u64,
     pub workspace_gravity: f32,
+    #[serde(default = "default_fluid_forces_snapshot")]
+    pub workspace_fluid_forces: String,
     #[serde(default)]
     pub physics_collision_groups: Vec<PhysicsCollisionGroupSnapshot>,
     #[serde(default)]
@@ -216,6 +222,8 @@ pub struct PartSnapshot {
     pub velocity: [f32; 3],
     pub angular_velocity: [f32; 3],
     pub massless: bool,
+    #[serde(default)]
+    pub enable_fluid_forces: bool,
     #[serde(default)]
     pub custom_physical_properties: Option<PhysicalPropertiesSnapshot>,
     pub shape: String,
@@ -489,7 +497,10 @@ pub fn capture_game_instance(instance: &GameInstance) -> Result<GameInstanceSnap
         .ok_or_else(|| "cannot snapshot instance without an initialized Lua runtime".to_string())?;
 
     let workspace = runtime.workspace();
-    let workspace_gravity = workspace.data.lock().unwrap().gravity;
+    let (workspace_gravity, workspace_fluid_forces) = {
+        let data = workspace.data.lock().unwrap();
+        (data.gravity, snapshot_fluid_forces(data.fluid_forces))
+    };
     let physics_service = runtime.game().physics_service();
     let physics_collision_groups = physics_service
         .snapshot_registry()
@@ -579,6 +590,7 @@ pub fn capture_game_instance(instance: &GameInstance) -> Result<GameInstanceSnap
         instance_id: instance.instance_id,
         tick: instance.tick,
         workspace_gravity,
+        workspace_fluid_forces,
         physics_collision_groups,
         physics_collision_group_pairs,
         workspace_children,
@@ -632,7 +644,9 @@ pub fn restore_game_instance(
     instance.tick = snapshot.tick;
 
     {
-        workspace.data.lock().unwrap().gravity = snapshot.workspace_gravity;
+        let mut data = workspace.data.lock().unwrap();
+        data.gravity = snapshot.workspace_gravity;
+        data.fluid_forces = restore_fluid_forces(&snapshot.workspace_fluid_forces)?;
     }
     restore_physics_service(
         &physics_service,
@@ -1620,6 +1634,7 @@ fn apply_part_snapshot(part: &mut PartData, snapshot: &PartSnapshot) -> Result<(
     part.velocity = restore_vector3(snapshot.velocity);
     part.angular_velocity = restore_vector3(snapshot.angular_velocity);
     part.massless = snapshot.massless;
+    part.enable_fluid_forces = snapshot.enable_fluid_forces;
     part.custom_physical_properties = snapshot
         .custom_physical_properties
         .as_ref()
@@ -1717,6 +1732,7 @@ fn snapshot_part_data(part: &PartData) -> PartSnapshot {
         velocity: snapshot_vector3(part.velocity),
         angular_velocity: snapshot_vector3(part.angular_velocity),
         massless: part.massless,
+        enable_fluid_forces: part.enable_fluid_forces,
         custom_physical_properties: part
             .custom_physical_properties
             .map(snapshot_physical_properties),
@@ -2097,6 +2113,18 @@ fn restore_part_type(v: &str) -> Result<PartType, String> {
         "Ring" => Ok(PartType::Ring),
         "Wedge" => Ok(PartType::Wedge),
         other => Err(format!("unsupported PartType '{}'", other)),
+    }
+}
+
+fn snapshot_fluid_forces(v: FluidForces) -> String {
+    v.name().to_string()
+}
+
+fn restore_fluid_forces(v: &str) -> Result<FluidForces, String> {
+    match v {
+        "Default" => Ok(FluidForces::Default),
+        "Experimental" => Ok(FluidForces::Experimental),
+        other => Err(format!("unsupported FluidForces '{}'", other)),
     }
 }
 

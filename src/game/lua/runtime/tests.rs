@@ -2513,6 +2513,86 @@ fn test_part_massless_property_and_get_mass_parity() {
 }
 
 #[test]
+fn test_fluid_forces_api_surface_parity() {
+    let mut runtime = test_runtime();
+    runtime
+        .load_script(
+            r#"
+            local p = Instance.new("Part")
+
+            _G.defaultEnable = p.EnableFluidForces
+            p.EnableFluidForces = true
+            _G.afterEnable = p.EnableFluidForces
+
+            _G.defaultWorkspace = tostring(Workspace.FluidForces)
+            _G.defaultWorkspaceName = Workspace.FluidForces.Name
+            _G.defaultWorkspaceValue = Workspace.FluidForces.Value
+            Workspace.FluidForces = Enum.FluidForces.Experimental
+            _G.afterWorkspace = tostring(Workspace.FluidForces)
+            _G.afterWorkspaceName = Workspace.FluidForces.Name
+            _G.experimentalValue = Enum.FluidForces.Experimental.Value
+        "#,
+        )
+        .expect("Failed to run script");
+
+    let globals = runtime.lua().globals().get::<mlua::Table>("_G").unwrap();
+    let default_enable: bool = globals.get("defaultEnable").unwrap();
+    let after_enable: bool = globals.get("afterEnable").unwrap();
+    let default_workspace: String = globals.get("defaultWorkspace").unwrap();
+    let default_workspace_name: String = globals.get("defaultWorkspaceName").unwrap();
+    let default_workspace_value: i64 = globals.get("defaultWorkspaceValue").unwrap();
+    let after_workspace: String = globals.get("afterWorkspace").unwrap();
+    let after_workspace_name: String = globals.get("afterWorkspaceName").unwrap();
+    let experimental_value: i64 = globals.get("experimentalValue").unwrap();
+
+    assert!(!default_enable);
+    assert!(after_enable);
+    assert_eq!(default_workspace, "Enum.FluidForces.Default");
+    assert_eq!(default_workspace_name, "Default");
+    assert_eq!(default_workspace_value, 0);
+    assert_eq!(after_workspace, "Enum.FluidForces.Experimental");
+    assert_eq!(after_workspace_name, "Experimental");
+    assert_eq!(experimental_value, 1);
+}
+
+#[test]
+fn test_specific_gravity_tracks_current_density() {
+    let mut runtime = test_runtime();
+    runtime
+        .load_script(
+            r#"
+            local p = Instance.new("Part")
+            p.Material = Enum.Material.Wood
+            _G.woodSpecificGravity = p.SpecificGravity
+
+            p.CustomPhysicalProperties = PhysicalProperties.new(1.25, 0.3, 0.5, 1, 1)
+            _G.customSpecificGravity = p.SpecificGravity
+
+            local ok = pcall(function()
+                p.SpecificGravity = 2
+            end)
+            _G.setOk = ok
+            _G.afterSetAttempt = p.SpecificGravity
+        "#,
+        )
+        .expect("Failed to run script");
+
+    let globals = runtime.lua().globals().get::<mlua::Table>("_G").unwrap();
+    let wood_specific_gravity: f32 = globals.get("woodSpecificGravity").unwrap();
+    let custom_specific_gravity: f32 = globals.get("customSpecificGravity").unwrap();
+    let set_ok: bool = globals.get("setOk").unwrap();
+    let after_set_attempt: f32 = globals.get("afterSetAttempt").unwrap();
+
+    assert!((wood_specific_gravity - 0.35).abs() < 1e-4);
+    assert!((custom_specific_gravity - 1.25).abs() < 1e-4);
+    assert!(
+        !set_ok,
+        "SpecificGravity is a read-only compatibility property"
+    );
+    assert!((after_set_attempt - 1.25).abs() < 1e-4);
+}
+
+#[test]
 fn test_brickcolor_and_surfacetype_parity_basics() {
     let mut runtime = test_runtime();
     runtime

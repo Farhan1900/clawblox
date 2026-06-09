@@ -209,7 +209,10 @@ impl TranscriptLineParser for KimiTranscriptParser {
     }
 
     fn parse_message(&self, value: &Value, ts_ms: i64) -> Option<RawReplayAgentMessage> {
-        let event_type = value.get("type").and_then(|v| v.as_str()).unwrap_or_default();
+        let event_type = value
+            .get("type")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default();
         match event_type {
             "context.append_message" => {
                 let message = value.get("message")?;
@@ -233,11 +236,17 @@ impl TranscriptLineParser for KimiTranscriptParser {
             }
             "context.append_loop_event" => {
                 let event = value.get("event")?;
-                let et = event.get("type").and_then(|v| v.as_str()).unwrap_or_default();
+                let et = event
+                    .get("type")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default();
                 match et {
                     "content.part" => {
                         let part = event.get("part")?;
-                        let pt = part.get("type").and_then(|v| v.as_str()).unwrap_or_default();
+                        let pt = part
+                            .get("type")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or_default();
                         match pt {
                             "think" => {
                                 let text = part
@@ -443,7 +452,10 @@ pub fn load_agent_timeline_with_external_anchors(
         })
         .collect();
     let mut raw_messages: Vec<RawReplayAgentMessage> = Vec::new();
-    let first_external_anchor_ts = external_anchors.iter().map(|anchor| anchor.timestamp_ms).min();
+    let first_external_anchor_ts = external_anchors
+        .iter()
+        .map(|anchor| anchor.timestamp_ms)
+        .min();
 
     for line in reader.lines() {
         let line = line.map_err(|e| format!("read failed: {}", e))?;
@@ -546,7 +558,12 @@ fn extract_message_id(value: &Value) -> String {
         .get("id")
         .and_then(|v| v.as_str())
         .or_else(|| value.get("uuid").and_then(|v| v.as_str()))
-        .or_else(|| value.get("payload").and_then(|p| p.get("id")).and_then(|v| v.as_str()))
+        .or_else(|| {
+            value
+                .get("payload")
+                .and_then(|p| p.get("id"))
+                .and_then(|v| v.as_str())
+        })
         .or_else(|| {
             value
                 .get("payload")
@@ -945,9 +962,10 @@ fn parse_codex_response_item(
             .get("role")
             .and_then(|v| v.as_str())
             .unwrap_or_default(),
-        "function_call" | "custom_tool_call" | "function_call_output" | "custom_tool_call_output" => {
-            "assistant"
-        }
+        "function_call"
+        | "custom_tool_call"
+        | "function_call_output"
+        | "custom_tool_call_output" => "assistant",
         _ => "",
     };
     if role != "assistant" && role != "user" {
@@ -957,13 +975,25 @@ fn parse_codex_response_item(
     let blocks = match payload_type {
         "message" => extract_raw_blocks(payload),
         "function_call" => vec![RawBlock::Block(build_tool_use_block(
-            payload.get("call_id").and_then(|v| v.as_str()).unwrap_or_default(),
-            payload.get("name").and_then(|v| v.as_str()).unwrap_or("tool"),
+            payload
+                .get("call_id")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default(),
+            payload
+                .get("name")
+                .and_then(|v| v.as_str())
+                .unwrap_or("tool"),
             parse_json_string_arg(payload.get("arguments")),
         ))],
         "custom_tool_call" => vec![RawBlock::Block(build_tool_use_block(
-            payload.get("call_id").and_then(|v| v.as_str()).unwrap_or_default(),
-            payload.get("name").and_then(|v| v.as_str()).unwrap_or("tool"),
+            payload
+                .get("call_id")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default(),
+            payload
+                .get("name")
+                .and_then(|v| v.as_str())
+                .unwrap_or("tool"),
             payload.get("input").cloned().unwrap_or(Value::Null),
         ))],
         "function_call_output" => vec![RawBlock::ToolResult(PendingToolResult {

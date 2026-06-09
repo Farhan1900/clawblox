@@ -169,8 +169,8 @@ fn mesa_small_world_resume_preserves_workspace_inventory() {
 #[test]
 fn mesa_small_world_legacy_resume_rebinds_input_handlers() {
     let mut legacy_instance = GameInstance::new(Uuid::new_v4(), None);
-    let raw_source =
-        fs::read_to_string(mesa_small_world_dir().join("main.lua")).expect("failed to read main.lua");
+    let raw_source = fs::read_to_string(mesa_small_world_dir().join("main.lua"))
+        .expect("failed to read main.lua");
     legacy_instance.load_script(&raw_source);
 
     let agent_id = Uuid::new_v4();
@@ -264,9 +264,9 @@ fn mesa_small_world_legacy_resume_rebinds_input_handlers() {
     let horizontal_velocity = final_state.horizontal_velocity;
     let final_target = final_state.target_position;
     let move_to_elapsed = final_state.move_to_elapsed;
-    let horizontal_distance =
-        ((after_move[0] - before_move[0]).powi(2) + (after_move[2] - before_move[2]).powi(2))
-            .sqrt();
+    let horizontal_distance = ((after_move[0] - before_move[0]).powi(2)
+        + (after_move[2] - before_move[2]).powi(2))
+    .sqrt();
 
     assert!(
         horizontal_distance > 1.0,
@@ -325,9 +325,9 @@ fn mesa_small_world_modern_resume_preserves_player_movement() {
         .physics
         .get_character_position(restored_hrp_id)
         .expect("missing moved player position");
-    let horizontal_distance =
-        ((after_move[0] - before_move[0]).powi(2) + (after_move[2] - before_move[2]).powi(2))
-            .sqrt();
+    let horizontal_distance = ((after_move[0] - before_move[0]).powi(2)
+        + (after_move[2] - before_move[2]).powi(2))
+    .sqrt();
 
     assert!(
         horizontal_distance > 1.0,
@@ -368,10 +368,9 @@ fn mesa_small_world_modern_resume_preserves_direct_controller_motion() {
         .get_character_position(restored_hrp_id)
         .expect("missing restored player position");
 
-    restored.physics.set_character_target(
-        restored_hrp_id,
-        Some([20.0, before_move[1], 0.0]),
-    );
+    restored
+        .physics
+        .set_character_target(restored_hrp_id, Some([20.0, before_move[1], 0.0]));
 
     for _ in 0..120 {
         restored.tick();
@@ -393,9 +392,9 @@ fn mesa_small_world_modern_resume_preserves_direct_controller_motion() {
             format!("{other}:{other_name}")
         })
         .collect();
-    let horizontal_distance =
-        ((after_move[0] - before_move[0]).powi(2) + (after_move[2] - before_move[2]).powi(2))
-            .sqrt();
+    let horizontal_distance = ((after_move[0] - before_move[0]).powi(2)
+        + (after_move[2] - before_move[2]).powi(2))
+    .sqrt();
 
     assert!(
         horizontal_distance > 1.0,
@@ -438,9 +437,9 @@ fn mesa_small_world_fresh_direct_controller_motion_works() {
         .physics
         .get_character_position(hrp_id)
         .expect("missing moved player position");
-    let horizontal_distance =
-        ((after_move[0] - before_move[0]).powi(2) + (after_move[2] - before_move[2]).powi(2))
-            .sqrt();
+    let horizontal_distance = ((after_move[0] - before_move[0]).powi(2)
+        + (after_move[2] - before_move[2]).powi(2))
+    .sqrt();
 
     assert!(
         horizontal_distance > 1.0,
@@ -589,9 +588,9 @@ fn generic_resume_preserves_direct_controller_motion() {
         .physics
         .get_character_position(restored_hrp_id)
         .expect("missing moved player position");
-    let horizontal_distance =
-        ((after_move[0] - before_move[0]).powi(2) + (after_move[2] - before_move[2]).powi(2))
-            .sqrt();
+    let horizontal_distance = ((after_move[0] - before_move[0]).powi(2)
+        + (after_move[2] - before_move[2]).powi(2))
+    .sqrt();
 
     assert!(
         horizontal_distance > 1.0,

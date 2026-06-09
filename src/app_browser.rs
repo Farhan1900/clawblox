@@ -870,7 +870,8 @@ fn load_agent_timeline_from_manifest_paths(
     let mut anchor_count = 0usize;
 
     for (path, parser) in transcript_paths {
-        match load_agent_timeline_with_parser(path, tick_rate, first_tick, anchors, parser.as_ref()) {
+        match load_agent_timeline_with_parser(path, tick_rate, first_tick, anchors, parser.as_ref())
+        {
             Ok(timeline) => {
                 anchor_count += timeline.anchor_count;
                 messages.extend(timeline.messages);
@@ -921,12 +922,8 @@ fn load_workspace_timeline_from_manifest_paths(
             Ok(workspace_events) => {
                 for event in workspace_events {
                     let timestamp_ms = (event.wall_time * 1000.0).round() as i64;
-                    let (tick, approx) = infer_external_replay_tick(
-                        timestamp_ms,
-                        anchors,
-                        ticks_per_ms,
-                        first_tick,
-                    );
+                    let (tick, approx) =
+                        infer_external_replay_tick(timestamp_ms, anchors, ticks_per_ms, first_tick);
                     events.push(ReplayWorkspaceEvent {
                         event_type: event.event_type,
                         wall_time: event.wall_time,
@@ -1083,7 +1080,13 @@ async fn open_external_replay_command(
     let command = command_template
         .iter()
         .map(|arg| {
-            substitute_external_replay_arg(arg, &recording_path, &manifest_path, &manifest_dir, port)
+            substitute_external_replay_arg(
+                arg,
+                &recording_path,
+                &manifest_path,
+                &manifest_dir,
+                port,
+            )
         })
         .collect::<Vec<_>>();
     let executable = command[0].clone();
@@ -1339,10 +1342,7 @@ fn join_external_replay_url(base: &str, path: &str) -> String {
 }
 
 fn app_external_replay_base_path(state: &AppState, id: &str) -> String {
-    join_base_path(
-        &app_session_base_path(state, id),
-        "/replay/external",
-    )
+    join_base_path(&app_session_base_path(state, id), "/replay/external")
 }
 
 fn app_external_replay_path(state: &AppState, id: &str, path: &str) -> String {
@@ -1485,21 +1485,15 @@ async fn proxy_external_replay_http(
             builder = builder.header(name, value);
         }
     }
-    builder
-        .body(axum::body::Body::from(bytes))
-        .map_err(|e| {
-            (
-                axum::http::StatusCode::BAD_GATEWAY,
-                format!("failed to build external replay response: {}", e),
-            )
-        })
+    builder.body(axum::body::Body::from(bytes)).map_err(|e| {
+        (
+            axum::http::StatusCode::BAD_GATEWAY,
+            format!("failed to build external replay response: {}", e),
+        )
+    })
 }
 
-async fn proxy_external_replay_ws(
-    socket: WebSocket,
-    target_url: String,
-    protocols: Vec<String>,
-) {
+async fn proxy_external_replay_ws(socket: WebSocket, target_url: String, protocols: Vec<String>) {
     let mut request = match tungstenite::client::IntoClientRequest::into_client_request(&target_url)
     {
         Ok(request) => request,
@@ -1507,10 +1501,9 @@ async fn proxy_external_replay_ws(
     };
     if !protocols.is_empty() {
         if let Ok(value) = axum::http::HeaderValue::from_str(&protocols.join(", ")) {
-            request.headers_mut().insert(
-                axum::http::header::SEC_WEBSOCKET_PROTOCOL,
-                value,
-            );
+            request
+                .headers_mut()
+                .insert(axum::http::header::SEC_WEBSOCKET_PROTOCOL, value);
         }
     }
 
@@ -1566,19 +1559,20 @@ async fn app_external_replay_proxy(
     let session = get_app_external_session(&state, &id)?;
     let target_path = external_replay_target_path(&path, &original_uri);
     if is_ws_upgrade(&headers) {
-        let ws = ws.map_err(|_| (
-            axum::http::StatusCode::BAD_REQUEST,
-            "invalid websocket upgrade request".to_string(),
-        ))?;
+        let ws = ws.map_err(|_| {
+            (
+                axum::http::StatusCode::BAD_REQUEST,
+                "invalid websocket upgrade request".to_string(),
+            )
+        })?;
         let protocols = selected_ws_protocols(&headers);
         let target_url = external_replay_ws_url(&session.url, &target_path)
             .map_err(|e| (axum::http::StatusCode::BAD_GATEWAY, e))?;
         let response = if protocols.is_empty() {
             ws.on_upgrade(move |socket| proxy_external_replay_ws(socket, target_url, protocols))
         } else {
-            ws.protocols(protocols.clone()).on_upgrade(move |socket| {
-                proxy_external_replay_ws(socket, target_url, protocols)
-            })
+            ws.protocols(protocols.clone())
+                .on_upgrade(move |socket| proxy_external_replay_ws(socket, target_url, protocols))
         };
         return Ok(response.into_response());
     }
@@ -1812,15 +1806,7 @@ async fn app_external_replay_proxy_path(
     headers: axum::http::HeaderMap,
     ws: Result<WebSocketUpgrade, WebSocketUpgradeRejection>,
 ) -> Result<axum::response::Response, (axum::http::StatusCode, String)> {
-    app_external_replay_proxy(
-        state,
-        params.id,
-        params.path,
-        original_uri,
-        headers,
-        ws,
-    )
-    .await
+    app_external_replay_proxy(state, params.id, params.path, original_uri, headers, ws).await
 }
 
 async fn app_replay_state_at(

@@ -56,7 +56,8 @@ fn workspace_inventory(instance: &GameInstance) -> (i64, i64, i64, i64, i64, i64
 #[test]
 fn mesa_world_2_resume_preserves_existing_player_position() {
     let mut instance = GameInstance::new(Uuid::new_v4(), None);
-    let source = fs::read_to_string(mesa_world_2_script_path()).expect("failed to read mesa-world-2");
+    let source =
+        fs::read_to_string(mesa_world_2_script_path()).expect("failed to read mesa-world-2");
     instance.load_script(&source);
 
     let agent_id = Uuid::new_v4();

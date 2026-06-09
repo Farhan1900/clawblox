@@ -72,7 +72,9 @@ fn mesa_world_resume_preserves_existing_player_position() {
 
     // Place the player on top of the large mesa so the restored position remains stable under
     // the world's default gravity after the script reloads.
-    instance.physics.set_character_position(hrp_id, [20.0, 8.0, 20.0]);
+    instance
+        .physics
+        .set_character_position(hrp_id, [20.0, 8.0, 20.0]);
 
     for _ in 0..30 {
         instance.tick();

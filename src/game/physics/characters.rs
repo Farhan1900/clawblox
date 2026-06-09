@@ -41,6 +41,13 @@ pub struct GroundKinematicSupport {
     pub distance: f32,
 }
 
+#[derive(Debug, Clone, Copy)]
+pub struct DynamicSupportContact {
+    pub lua_id: u64,
+    pub point: [f32; 3],
+    pub distance: f32,
+}
+
 impl PhysicsWorld {
     /// Adds a character controller for player movement
     /// Uses a capsule shape for smooth collisions with environment
@@ -335,6 +342,49 @@ impl PhysicsWorld {
             .unwrap_or([v.x, v.y, v.z]);
         Some(GroundKinematicSupport {
             velocity: sampled_v,
+            distance: toi,
+        })
+    }
+
+    /// Returns the dynamic rigid body directly supporting this character.
+    pub fn get_ground_dynamic_support(
+        &self,
+        lua_id: u64,
+        max_distance: f32,
+    ) -> Option<DynamicSupportContact> {
+        let state = self.character_controllers.get(&lua_id)?;
+        let body = self.rigid_body_set.get(state.body_handle)?;
+        let origin = body.translation();
+
+        let ray = Ray::new(
+            point![origin.x, origin.y, origin.z],
+            vector![0.0, -1.0, 0.0],
+        );
+
+        let filter = QueryFilter::default()
+            .exclude_rigid_body(state.body_handle)
+            .exclude_sensors()
+            .groups(interaction_groups(state.collision_group));
+
+        let (hit_collider, toi) = self.query_pipeline.cast_ray(
+            &self.rigid_body_set,
+            &self.collider_set,
+            &ray,
+            max_distance,
+            true,
+            filter,
+        )?;
+
+        let collider = self.collider_set.get(hit_collider)?;
+        let parent = collider.parent()?;
+        let ground_body = self.rigid_body_set.get(parent)?;
+        if !ground_body.is_dynamic() {
+            return None;
+        }
+        let lua_id = self.body_to_lua.get(&parent).copied()?;
+        Some(DynamicSupportContact {
+            lua_id,
+            point: [origin.x, origin.y - toi, origin.z],
             distance: toi,
         })
     }

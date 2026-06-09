@@ -156,10 +156,7 @@ fn construction_world_recording_prefix_does_not_float_or_fly_away() {
     let mut instance = GameInstance::new(Uuid::new_v4(), None);
     instance.load_script(&source);
     let agent_id = Uuid::parse_str("c0c709ef-0bee-43ba-8455-78ffd6bb76dd").unwrap();
-    assert!(instance.add_player(
-        agent_id,
-        "Eko-rgenexp-claude-20260604T002926Z-g001-w0-a0"
-    ));
+    assert!(instance.add_player(agent_id, "Eko-rgenexp-claude-20260604T002926Z-g001-w0-a0"));
     let user_id = *instance.players.get(&agent_id).expect("missing player");
 
     let mut next = 0usize;

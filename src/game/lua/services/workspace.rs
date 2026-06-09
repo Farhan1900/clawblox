@@ -5,7 +5,7 @@ use crate::game::constants::physics as consts;
 use crate::game::lua::instance::{ClassName, Instance};
 use crate::game::lua::runtime::Game;
 use crate::game::lua::services::PhysicsService;
-use crate::game::lua::types::{CFrame, Material, Ray, RaycastFilterType, Vector3};
+use crate::game::lua::types::{CFrame, FluidForces, Material, Ray, RaycastFilterType, Vector3};
 use crate::game::world_root::{OverlapQueryParams, RaycastHit, RaycastQueryParams, WorldRoot};
 
 fn physics_service_from_lua(lua: &Lua) -> Result<PhysicsService> {
@@ -243,6 +243,7 @@ pub fn register_overlap_params(lua: &Lua) -> Result<()> {
 
 pub struct WorkspaceServiceData {
     pub gravity: f32,
+    pub fluid_forces: FluidForces,
     pub current_camera: Option<Instance>,
     pub children: Vec<Instance>,
 }
@@ -251,6 +252,7 @@ impl WorkspaceServiceData {
     pub fn new() -> Self {
         Self {
             gravity: consts::DEFAULT_GRAVITY,
+            fluid_forces: FluidForces::Default,
             current_camera: None,
             children: Vec::new(),
         }
@@ -356,6 +358,13 @@ impl UserData for WorkspaceService {
         fields.add_field_method_get("Gravity", |_, this| Ok(this.data.lock().unwrap().gravity));
         fields.add_field_method_set("Gravity", |_, this, gravity: f32| {
             this.data.lock().unwrap().gravity = gravity;
+            Ok(())
+        });
+        fields.add_field_method_get("FluidForces", |_, this| {
+            Ok(this.data.lock().unwrap().fluid_forces)
+        });
+        fields.add_field_method_set("FluidForces", |_, this, fluid_forces: FluidForces| {
+            this.data.lock().unwrap().fluid_forces = fluid_forces;
             Ok(())
         });
 

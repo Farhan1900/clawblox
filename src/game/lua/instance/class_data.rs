@@ -30,6 +30,7 @@ pub struct PartData {
     pub velocity: Vector3,
     pub angular_velocity: Vector3,
     pub massless: bool,
+    pub enable_fluid_forces: bool,
     pub custom_physical_properties: Option<PhysicalProperties>,
     pub custom_physical_properties_dirty: bool,
     pub shape: PartType,
@@ -70,6 +71,7 @@ impl Default for PartData {
             velocity: Vector3::zero(),
             angular_velocity: Vector3::zero(),
             massless: false,
+            enable_fluid_forces: false,
             custom_physical_properties: None,
             custom_physical_properties_dirty: false,
             shape: PartType::Block,
@@ -130,6 +132,42 @@ impl PartData {
             props.density = 0.0;
         }
         props
+    }
+
+    pub fn specific_gravity(&self) -> f32 {
+        self.current_physical_properties().density
+    }
+
+    pub fn volume(&self) -> f32 {
+        let sx = self.size.x.max(0.0);
+        let sy = self.size.y.max(0.0);
+        let sz = self.size.z.max(0.0);
+        match self.shape {
+            PartType::Block => sx * sy * sz,
+            PartType::Wedge => 0.5 * sx * sy * sz,
+            PartType::Ball => {
+                let r = sx * 0.5;
+                (4.0 / 3.0) * std::f32::consts::PI * r * r * r
+            }
+            PartType::Cylinder => {
+                let r = sx * 0.5;
+                std::f32::consts::PI * r * r * sy
+            }
+            PartType::Ring => {
+                let outer_radius = 0.5 * sx.min(sz);
+                let tube_radius = (sy * 0.5).min(outer_radius * 0.45);
+                let major_radius = (outer_radius - tube_radius).max(0.0);
+                2.0 * std::f32::consts::PI
+                    * std::f32::consts::PI
+                    * major_radius
+                    * tube_radius
+                    * tube_radius
+            }
+        }
+    }
+
+    pub fn mass(&self) -> f32 {
+        self.volume() * self.effective_physical_properties().density
     }
 }
 

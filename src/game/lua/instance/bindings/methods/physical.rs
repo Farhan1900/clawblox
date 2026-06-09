@@ -1,7 +1,7 @@
 use mlua::{UserDataMethods, Value};
 
 use crate::game::lua::runtime::{Game, PhysicsCommand};
-use crate::game::lua::types::{CFrame, PartType, Vector3};
+use crate::game::lua::types::{CFrame, Vector3};
 
 use super::super::super::*;
 
@@ -57,34 +57,7 @@ pub(super) fn add_methods<M: UserDataMethods<Instance>>(methods: &mut M) {
             ));
         };
 
-        let density = part.effective_physical_properties().density;
-
-        let sx = part.size.x.max(0.0);
-        let sy = part.size.y.max(0.0);
-        let sz = part.size.z.max(0.0);
-        let volume = match part.shape {
-            PartType::Block => sx * sy * sz,
-            PartType::Wedge => 0.5 * sx * sy * sz,
-            PartType::Ball => {
-                let r = sx * 0.5;
-                (4.0 / 3.0) * std::f32::consts::PI * r * r * r
-            }
-            PartType::Cylinder => {
-                let r = sx * 0.5;
-                std::f32::consts::PI * r * r * sy
-            }
-            PartType::Ring => {
-                let outer_radius = 0.5 * sx.min(sz);
-                let tube_radius = (sy * 0.5).min(outer_radius * 0.45);
-                let major_radius = (outer_radius - tube_radius).max(0.0);
-                2.0 * std::f32::consts::PI
-                    * std::f32::consts::PI
-                    * major_radius
-                    * tube_radius
-                    * tube_radius
-            }
-        };
-        Ok(volume * density)
+        Ok(part.mass())
     });
 
     methods.add_method("ApplyImpulse", |lua, this, impulse: Vector3| {

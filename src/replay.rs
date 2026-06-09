@@ -183,7 +183,9 @@ impl ReplayPlayback {
     }
 
     fn is_active_tick(&self, tick: u64) -> bool {
-        let idx = self.active_ranges.partition_point(|range| range.end_tick < tick);
+        let idx = self
+            .active_ranges
+            .partition_point(|range| range.end_tick < tick);
         self.active_ranges
             .get(idx)
             .map(|range| range.start_tick <= tick && tick <= range.end_tick)
@@ -191,7 +193,9 @@ impl ReplayPlayback {
     }
 
     fn next_active_tick_after(&self, tick: u64) -> Option<u64> {
-        let idx = self.active_ranges.partition_point(|range| range.end_tick <= tick);
+        let idx = self
+            .active_ranges
+            .partition_point(|range| range.end_tick <= tick);
         self.active_ranges.get(idx).map(|range| range.start_tick)
     }
 }
