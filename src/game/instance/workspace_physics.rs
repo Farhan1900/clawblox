@@ -198,10 +198,15 @@ impl GameInstance {
                             (desired_velocity[2] - current_velocity[2]) * mass / dt,
                         ]
                     } else {
+                        // Critically damped spring (Roblox AlignPosition is ~ζ=1).
+                        // The cascaded P-loop (desired_velocity = error * k, then
+                        // force ∝ (desired_velocity - v) * k) is only ζ=0.5 and rings;
+                        // doubling the velocity-feedback term raises it to ζ=1 so a
+                        // held object settles instead of oscillating.
                         [
-                            (desired_velocity[0] - current_velocity[0]) * mass * responsiveness,
-                            (desired_velocity[1] - current_velocity[1]) * mass * responsiveness,
-                            (desired_velocity[2] - current_velocity[2]) * mass * responsiveness,
+                            (desired_velocity[0] - 2.0 * current_velocity[0]) * mass * responsiveness,
+                            (desired_velocity[1] - 2.0 * current_velocity[1]) * mass * responsiveness,
+                            (desired_velocity[2] - 2.0 * current_velocity[2]) * mass * responsiveness,
                         ]
                     };
                     let force = clamp_magnitude(
@@ -278,17 +283,25 @@ impl GameInstance {
                             desired_angular_velocity,
                         );
                     } else {
-                        let torque = clamp_components(
-                            [
-                                (desired_angular_velocity[0] - current_angular_velocity[0])
-                                    * responsiveness,
-                                (desired_angular_velocity[1] - current_angular_velocity[1])
-                                    * responsiveness,
-                                (desired_angular_velocity[2] - current_angular_velocity[2])
-                                    * responsiveness,
-                            ],
-                            align.max_torque.to_array(),
-                        );
+                        // Critically damped (ζ=1) AND inertia-aware. The desired
+                        // angular acceleration mirrors the linear controller
+                        // (double the velocity-feedback term for ζ=1); converting
+                        // it to torque through the body's inertia tensor makes the
+                        // response independent of inertia, so a long/heavy object
+                        // is held steady instead of swinging.
+                        let angular_accel = [
+                            (desired_angular_velocity[0] - 2.0 * current_angular_velocity[0])
+                                * responsiveness,
+                            (desired_angular_velocity[1] - 2.0 * current_angular_velocity[1])
+                                * responsiveness,
+                            (desired_angular_velocity[2] - 2.0 * current_angular_velocity[2])
+                                * responsiveness,
+                        ];
+                        let raw_torque = self
+                            .physics
+                            .assembly_torque_for_angular_accel(parent_part.id().0, angular_accel)
+                            .unwrap_or(angular_accel);
+                        let torque = clamp_components(raw_torque, align.max_torque.to_array());
                         self.physics.add_torque_to_part(parent_part.id().0, torque);
                     }
                     continue;
@@ -456,6 +469,14 @@ impl GameInstance {
                             ],
                         );
                         part_data.position_dirty = false;
+                    }
+                    // Roblox parity: writing a character part's CFrame sets its
+                    // facing. Propagate the authored yaw to the kinematic body;
+                    // otherwise rotation writes on a character are silently dropped.
+                    if part_data.cframe_dirty {
+                        let r = &part_data.cframe.rotation;
+                        let yaw = r[0][2].atan2(r[2][2]);
+                        self.physics.set_character_yaw(*lua_id, yaw);
                         part_data.cframe_dirty = false;
                     }
                     continue;

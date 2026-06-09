@@ -3417,6 +3417,126 @@ fn test_align_constraints_settle_long_held_part_at_fixed_target() {
 }
 
 #[test]
+fn test_align_constraints_settle_offcenter_held_part_under_gravity() {
+    // Regression for held-object wobble. The earlier settle test runs at
+    // Gravity = 0, so it never exercises the forced oscillation that appears when
+    // a grip is offset from the center of mass under gravity: gravity + the
+    // position/orientation constraints pump a coupled swing. Here gravity is on
+    // and the grip is near one end, and we assert the part actually SETTLES
+    // (small peak-to-peak motion over a window), not just that it reaches a pose.
+    let mut instance = GameInstance::new(Uuid::new_v4(), None);
+
+    instance.load_script(
+        r#"
+            Workspace.Gravity = 50
+
+            local plank = Instance.new("Part")
+            plank.Name = "HeldPlank"
+            plank.Size = Vector3.new(8, 0.35, 0.9)
+            plank.Position = Vector3.new(-5, 3, 0)
+            plank.CanCollide = true
+            plank.Parent = Workspace
+            _G.plank = plank
+
+            local target = Instance.new("Part")
+            target.Name = "HandTarget"
+            target.Anchored = true
+            target.Size = Vector3.new(0.2, 0.2, 0.2)
+            target.CFrame = CFrame.new(0, 3, 0)
+            target.CanCollide = false
+            target.Parent = Workspace
+
+            -- Grip near one END of the plank (offset from the center of mass).
+            local a0 = Instance.new("Attachment")
+            a0.CFrame = CFrame.new(3.5, 0, 0)
+            a0.Parent = plank
+
+            local a1 = Instance.new("Attachment")
+            a1.Parent = target
+
+            -- Force/torque are high enough to hold the weight, so any residual
+            -- motion is wobble (underdamping), not sag.
+            local alignPosition = Instance.new("AlignPosition")
+            alignPosition.Attachment0 = a0
+            alignPosition.Attachment1 = a1
+            alignPosition.Responsiveness = 10
+            alignPosition.MaxForce = 100000
+            alignPosition.MaxVelocity = 30
+            alignPosition.Parent = Workspace
+
+            local alignOrientation = Instance.new("AlignOrientation")
+            alignOrientation.Attachment0 = a0
+            alignOrientation.Attachment1 = a1
+            alignOrientation.Responsiveness = 10
+            alignOrientation.MaxTorque = Vector3.new(100000, 100000, 100000)
+            alignOrientation.Parent = Workspace
+        "#,
+    );
+
+    // Warm up toward steady state.
+    for _ in 0..240 {
+        instance.tick();
+    }
+
+    // Measure peak-to-peak position motion over a window: a settled hold barely
+    // moves, a wobbling (underdamped) hold keeps oscillating.
+    let (mut min_x, mut min_y, mut min_z) = (f32::INFINITY, f32::INFINITY, f32::INFINITY);
+    let (mut max_x, mut max_y, mut max_z) =
+        (f32::NEG_INFINITY, f32::NEG_INFINITY, f32::NEG_INFINITY);
+    for _ in 0..90 {
+        instance.tick();
+        let (x, y, z): (f32, f32, f32) = instance
+            .lua_runtime
+            .as_ref()
+            .unwrap()
+            .lua()
+            .load("return _G.plank.Position.X, _G.plank.Position.Y, _G.plank.Position.Z")
+            .eval()
+            .unwrap();
+        min_x = min_x.min(x);
+        max_x = max_x.max(x);
+        min_y = min_y.min(y);
+        max_y = max_y.max(y);
+        min_z = min_z.min(z);
+        max_z = max_z.max(z);
+    }
+    let peak_to_peak = (max_x - min_x).max(max_y - min_y).max(max_z - min_z);
+
+    let (vx, vy, vz, wx, wy, wz): (f32, f32, f32, f32, f32, f32) = instance
+        .lua_runtime
+        .as_ref()
+        .unwrap()
+        .lua()
+        .load(
+            r#"
+            return _G.plank.AssemblyLinearVelocity.X,
+                _G.plank.AssemblyLinearVelocity.Y,
+                _G.plank.AssemblyLinearVelocity.Z,
+                _G.plank.AssemblyAngularVelocity.X,
+                _G.plank.AssemblyAngularVelocity.Y,
+                _G.plank.AssemblyAngularVelocity.Z
+        "#,
+        )
+        .eval()
+        .unwrap();
+    let linear_speed = (vx * vx + vy * vy + vz * vz).sqrt();
+    let angular_speed = (wx * wx + wy * wy + wz * wz).sqrt();
+
+    assert!(
+        peak_to_peak < 0.05,
+        "off-center held part under gravity should settle, not wobble; peak-to-peak={peak_to_peak}"
+    );
+    assert!(
+        linear_speed < 0.5,
+        "residual linear speed should decay; speed={linear_speed}"
+    );
+    assert!(
+        angular_speed < 0.5,
+        "residual angular speed should decay; speed={angular_speed}"
+    );
+}
+
+#[test]
 fn test_two_hand_align_position_manipulates_long_part_stably() {
     let mut instance = GameInstance::new(Uuid::new_v4(), None);
 

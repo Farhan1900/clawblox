@@ -191,6 +191,29 @@ impl PhysicsWorld {
         self.get_angular_velocity(handle)
     }
 
+    /// Torque that produces the requested world-space angular acceleration on this
+    /// part's assembly: `torque = I_world * accel`, where `I_world` is the body's
+    /// world-space inertia tensor. Lets an orientation controller be inertia-aware
+    /// (analogous to multiplying a linear controller by mass), so heavy/long
+    /// objects are actuated correctly instead of swinging.
+    pub fn assembly_torque_for_angular_accel(
+        &self,
+        lua_id: u64,
+        accel: [f32; 3],
+    ) -> Option<[f32; 3]> {
+        let handle = *self.lua_to_body.get(&lua_id)?;
+        let body = self
+            .rigid_body_set
+            .get(handle)
+            .filter(|body| body.is_dynamic())?;
+        let inertia_local = body.mass_properties().local_mprops.reconstruct_inertia_matrix();
+        let rotation = body.rotation().to_rotation_matrix();
+        let r = rotation.matrix();
+        let inertia_world = r * inertia_local * r.transpose();
+        let torque = inertia_world * vector![accel[0], accel[1], accel[2]];
+        Some([torque.x, torque.y, torque.z])
+    }
+
     pub fn get_velocity_at_position_for_part(
         &self,
         lua_id: u64,
