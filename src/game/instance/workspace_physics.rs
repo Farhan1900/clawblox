@@ -2,12 +2,14 @@ use std::collections::{HashMap, HashSet};
 
 use crate::game::lua::events::{track_yielded_threads, RBXScriptSignal};
 use crate::game::lua::instance::{Instance, WeakInstanceRef};
-use crate::game::lua::types::CFrame;
 use crate::game::physics::{
     rotation_matrix_to_quaternion, PhysicsAssemblyPart, PhysicsAssemblySpec,
 };
 
 use super::GameInstance;
+
+const RIGID_ALIGN_MAX_SPEED: f32 = 60.0;
+const RIGID_ALIGN_MAX_ANGULAR_SPEED: f32 = 30.0;
 
 /// Pair-wise touch lifecycle for one tick.
 #[derive(Debug, Default, Clone)]
@@ -36,17 +38,6 @@ fn compute_touch_transitions(
     TouchTransitions { began, ended }
 }
 
-fn set_part_cframe_from_constraint(part: &Instance, cframe: CFrame) {
-    let cframe = cframe.orthonormalized();
-    let mut data = part.data.lock().unwrap();
-    if let Some(part_data) = &mut data.part_data {
-        part_data.cframe = cframe;
-        part_data.position = cframe.position;
-        part_data.position_dirty = true;
-        part_data.cframe_dirty = true;
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use std::collections::HashSet;
@@ -64,12 +55,59 @@ mod tests {
     }
 }
 
-fn attachment_target_part_cframe(
-    attachment0: &Instance,
-    target_attachment_world: CFrame,
-) -> Option<CFrame> {
-    let local_cframe = attachment0.attachment_local_cframe()?;
-    Some(target_attachment_world.multiply(&local_cframe.inverse()))
+fn clamp_magnitude(mut value: [f32; 3], limit: f32) -> [f32; 3] {
+    if limit.is_infinite() && limit.is_sign_positive() {
+        return value;
+    }
+    if !limit.is_finite() || limit < 0.0 {
+        return [0.0, 0.0, 0.0];
+    }
+    if limit == 0.0 {
+        return [0.0, 0.0, 0.0];
+    }
+    let magnitude = (value[0] * value[0] + value[1] * value[1] + value[2] * value[2]).sqrt();
+    if magnitude > limit && magnitude > f32::EPSILON {
+        let scale = limit / magnitude;
+        value[0] *= scale;
+        value[1] *= scale;
+        value[2] *= scale;
+    }
+    value
+}
+
+fn clamp_components(mut value: [f32; 3], limits: [f32; 3]) -> [f32; 3] {
+    for i in 0..3 {
+        let limit = limits[i].abs();
+        if !limit.is_finite() {
+            continue;
+        }
+        value[i] = value[i].clamp(-limit, limit);
+    }
+    value
+}
+
+fn rotation_error_vector(current: [[f32; 3]; 3], target: [[f32; 3]; 3]) -> [f32; 3] {
+    let c0 = [current[0][0], current[1][0], current[2][0]];
+    let c1 = [current[0][1], current[1][1], current[2][1]];
+    let c2 = [current[0][2], current[1][2], current[2][2]];
+    let t0 = [target[0][0], target[1][0], target[2][0]];
+    let t1 = [target[0][1], target[1][1], target[2][1]];
+    let t2 = [target[0][2], target[1][2], target[2][2]];
+    let cross = |a: [f32; 3], b: [f32; 3]| -> [f32; 3] {
+        [
+            a[1] * b[2] - a[2] * b[1],
+            a[2] * b[0] - a[0] * b[2],
+            a[0] * b[1] - a[1] * b[0],
+        ]
+    };
+    let x = cross(c0, t0);
+    let y = cross(c1, t1);
+    let z = cross(c2, t2);
+    [
+        (x[0] + y[0] + z[0]) * 0.5,
+        (x[1] + y[1] + z[1]) * 0.5,
+        (x[2] + y[2] + z[2]) * 0.5,
+    ]
 }
 
 impl GameInstance {
@@ -120,30 +158,67 @@ impl GameInstance {
                     align.position
                 };
 
-                let target_attachment_world = CFrame {
-                    position: target_position,
-                    rotation: current_attachment_world.rotation,
-                };
-                let Some(target_part_cframe) =
-                    attachment_target_part_cframe(&attachment0, target_attachment_world)
-                else {
-                    continue;
-                };
-
-                let alpha = if align.rigidity_enabled {
-                    1.0
-                } else {
-                    (dt * align.responsiveness.max(0.0)).clamp(0.0, 1.0)
-                };
-                let current_part_cframe = {
-                    let data = parent_part.data.lock().unwrap();
-                    let Some(part) = data.part_data.as_ref() else {
+                let mass = self.physics.get_assembly_mass_for_part(parent_part.id().0);
+                let current_velocity = self
+                    .physics
+                    .get_velocity_at_position_for_part(
+                        parent_part.id().0,
+                        current_attachment_world.position.to_array(),
+                    )
+                    .unwrap_or([0.0, 0.0, 0.0]);
+                if let Some(mass) = mass {
+                    if dt <= f32::EPSILON {
                         continue;
+                    }
+                    let responsiveness = align.responsiveness.max(0.0);
+                    let error = [
+                        target_position.x - current_attachment_world.position.x,
+                        target_position.y - current_attachment_world.position.y,
+                        target_position.z - current_attachment_world.position.z,
+                    ];
+                    let desired_velocity = if align.rigidity_enabled {
+                        clamp_magnitude(
+                            [error[0] / dt, error[1] / dt, error[2] / dt],
+                            RIGID_ALIGN_MAX_SPEED,
+                        )
+                    } else {
+                        clamp_magnitude(
+                            [
+                                error[0] * responsiveness,
+                                error[1] * responsiveness,
+                                error[2] * responsiveness,
+                            ],
+                            align.max_velocity,
+                        )
                     };
-                    part.cframe
-                };
-                let next_cframe = current_part_cframe.lerp(&target_part_cframe, alpha);
-                set_part_cframe_from_constraint(&parent_part, next_cframe);
+                    let force = if align.rigidity_enabled {
+                        [
+                            (desired_velocity[0] - current_velocity[0]) * mass / dt,
+                            (desired_velocity[1] - current_velocity[1]) * mass / dt,
+                            (desired_velocity[2] - current_velocity[2]) * mass / dt,
+                        ]
+                    } else {
+                        [
+                            (desired_velocity[0] - current_velocity[0]) * mass * responsiveness,
+                            (desired_velocity[1] - current_velocity[1]) * mass * responsiveness,
+                            (desired_velocity[2] - current_velocity[2]) * mass * responsiveness,
+                        ]
+                    };
+                    let force = clamp_magnitude(
+                        force,
+                        if align.rigidity_enabled {
+                            f32::INFINITY
+                        } else {
+                            align.max_force
+                        },
+                    );
+                    self.physics.add_force_at_position_to_part(
+                        parent_part.id().0,
+                        force,
+                        current_attachment_world.position.to_array(),
+                    );
+                    continue;
+                }
             }
 
             if let Some(align) = align_orientation {
@@ -170,30 +245,54 @@ impl GameInstance {
                     current_attachment_world.rotation
                 };
 
-                let target_attachment_world = CFrame {
-                    position: current_attachment_world.position,
-                    rotation: target_rotation,
-                };
-                let Some(target_part_cframe) =
-                    attachment_target_part_cframe(&attachment0, target_attachment_world)
-                else {
-                    continue;
-                };
-
-                let alpha = if align.rigidity_enabled {
-                    1.0
-                } else {
-                    (dt * align.responsiveness.max(0.0)).clamp(0.0, 1.0)
-                };
-                let current_part_cframe = {
-                    let data = parent_part.data.lock().unwrap();
-                    let Some(part) = data.part_data.as_ref() else {
+                if self
+                    .physics
+                    .get_assembly_mass_for_part(parent_part.id().0)
+                    .is_some()
+                {
+                    if dt <= f32::EPSILON {
                         continue;
+                    }
+                    let current_angular_velocity = self
+                        .physics
+                        .get_assembly_angular_velocity_for_part(parent_part.id().0)
+                        .unwrap_or([0.0, 0.0, 0.0]);
+                    let responsiveness = align.responsiveness.max(0.0);
+                    let error =
+                        rotation_error_vector(current_attachment_world.rotation, target_rotation);
+                    let desired_angular_velocity = if align.rigidity_enabled {
+                        clamp_magnitude(
+                            [error[0] / dt, error[1] / dt, error[2] / dt],
+                            RIGID_ALIGN_MAX_ANGULAR_SPEED,
+                        )
+                    } else {
+                        [
+                            error[0] * responsiveness,
+                            error[1] * responsiveness,
+                            error[2] * responsiveness,
+                        ]
                     };
-                    part.cframe
-                };
-                let next_cframe = current_part_cframe.lerp(&target_part_cframe, alpha);
-                set_part_cframe_from_constraint(&parent_part, next_cframe);
+                    if align.rigidity_enabled {
+                        self.physics.set_assembly_angular_velocity_for_part(
+                            parent_part.id().0,
+                            desired_angular_velocity,
+                        );
+                    } else {
+                        let torque = clamp_components(
+                            [
+                                (desired_angular_velocity[0] - current_angular_velocity[0])
+                                    * responsiveness,
+                                (desired_angular_velocity[1] - current_angular_velocity[1])
+                                    * responsiveness,
+                                (desired_angular_velocity[2] - current_angular_velocity[2])
+                                    * responsiveness,
+                            ],
+                            align.max_torque.to_array(),
+                        );
+                        self.physics.add_torque_to_part(parent_part.id().0, torque);
+                    }
+                    continue;
+                }
             }
         }
     }

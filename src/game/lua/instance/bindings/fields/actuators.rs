@@ -42,6 +42,21 @@ pub(super) fn add_fields<F: UserDataFields<Instance>>(fields: &mut F) {
         Ok(())
     });
 
+    fields.add_field_method_get("MaxVelocity", |_, this| {
+        let data = this.data.lock().unwrap();
+        Ok(data
+            .align_position_data
+            .as_ref()
+            .map(|align| align.max_velocity))
+    });
+    fields.add_field_method_set("MaxVelocity", |_, this, max_velocity: f32| {
+        let mut data = this.data.lock().unwrap();
+        if let Some(align) = &mut data.align_position_data {
+            align.max_velocity = max_velocity;
+        }
+        Ok(())
+    });
+
     fields.add_field_method_get("P", |_, this| {
         let data = this.data.lock().unwrap();
         if let Some(bv) = &data.body_velocity_data {
@@ -140,12 +155,20 @@ pub(super) fn add_fields<F: UserDataFields<Instance>>(fields: &mut F) {
         Ok(data
             .body_angular_velocity_data
             .as_ref()
-            .map(|bav| bav.max_torque))
+            .map(|bav| bav.max_torque)
+            .or_else(|| {
+                data.align_orientation_data
+                    .as_ref()
+                    .map(|align| align.max_torque)
+            }))
     });
     fields.add_field_method_set("MaxTorque", |_, this, max_torque: Vector3| {
         let mut data = this.data.lock().unwrap();
         if let Some(bav) = &mut data.body_angular_velocity_data {
             bav.max_torque = max_torque;
+        }
+        if let Some(align) = &mut data.align_orientation_data {
+            align.max_torque = max_torque;
         }
         Ok(())
     });

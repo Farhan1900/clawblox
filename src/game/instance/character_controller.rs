@@ -37,6 +37,15 @@ pub fn sample_ground_sensor(
             support_velocity: Some(support.velocity),
             support_distance: Some(support.distance),
         }
+    } else if let Some(support) =
+        physics.get_ground_dynamic_support(character_id, config.ground_query_distance)
+    {
+        GroundSensorSample {
+            grounded,
+            support_velocity: physics
+                .get_velocity_at_position_for_part(support.lua_id, support.point),
+            support_distance: Some(support.distance),
+        }
     } else {
         GroundSensorSample {
             grounded,
@@ -60,5 +69,50 @@ pub fn evaluate_ground_controller(
     GroundControllerDecision {
         carry_by_platform,
         platform_velocity: sample.support_velocity,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::game::lua::types::PartType;
+    use crate::game::physics::PhysicsWorld;
+
+    #[test]
+    fn dynamic_support_reports_platform_velocity_for_character_carry() {
+        let mut physics = PhysicsWorld::new();
+        let platform = physics.add_part(
+            1,
+            [0.0, 0.0, 0.0],
+            &[[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
+            [10.0, 1.0, 10.0],
+            false,
+            true,
+            true,
+            true,
+            PartType::Block,
+            None,
+        );
+        physics.set_velocity(platform, [0.0, 0.0, 4.0]);
+
+        let character_id = 100;
+        physics.add_character(character_id, [0.0, 3.0, 0.0], 1.0, 5.0);
+        physics.query_pipeline.update(&physics.collider_set);
+
+        let config = ControllerManagerConfig {
+            ground_query_distance: 4.0,
+            platform_stick_distance: 4.0,
+        };
+        let sample = sample_ground_sensor(&physics, character_id, false, config);
+        let decision = evaluate_ground_controller(sample, config);
+
+        assert!(decision.carry_by_platform);
+        let velocity = decision
+            .platform_velocity
+            .expect("dynamic support should provide point velocity");
+        assert!(
+            velocity[2] > 3.9,
+            "expected dynamic platform z velocity, got {velocity:?}"
+        );
     }
 }

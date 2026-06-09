@@ -2978,7 +2978,7 @@ fn test_align_position_moves_part_to_attachment_target() {
 
     let mover_pos = mover_pos.expect("Mover part missing");
     assert!(
-        (mover_pos.x - 10.0).abs() < 0.25 && (mover_pos.y - 8.0).abs() < 0.25,
+        (mover_pos.x - 10.0).abs() < 1.0 && (mover_pos.y - 8.0).abs() < 1.0,
         "AlignPosition should move the attachment parent to the target; got ({}, {}, {})",
         mover_pos.x,
         mover_pos.y,
@@ -3047,6 +3047,571 @@ fn test_align_orientation_matches_target_attachment_rotation() {
         "AlignOrientation should rotate the part toward the target attachment; got look=({}, {})",
         mover_look_x,
         mover_look_z
+    );
+}
+
+#[test]
+fn test_align_position_respects_blocking_collision() {
+    let mut instance = GameInstance::new(Uuid::new_v4(), None);
+
+    instance.load_script(
+        r#"
+            Workspace.Gravity = 0
+
+            local mover = Instance.new("Part")
+            mover.Name = "Mover"
+            mover.Size = Vector3.new(2, 2, 2)
+            mover.Position = Vector3.new(0, 5, 0)
+            mover.CanCollide = true
+            mover.Parent = Workspace
+            _G.mover = mover
+
+            local wall = Instance.new("Part")
+            wall.Name = "Wall"
+            wall.Size = Vector3.new(1, 12, 12)
+            wall.Position = Vector3.new(4, 5, 0)
+            wall.Anchored = true
+            wall.CanCollide = true
+            wall.Parent = Workspace
+
+            local target = Instance.new("Part")
+            target.Name = "Target"
+            target.Anchored = true
+            target.Position = Vector3.new(10, 5, 0)
+            target.CanCollide = false
+            target.Parent = Workspace
+
+            local a0 = Instance.new("Attachment")
+            a0.Parent = mover
+
+            local a1 = Instance.new("Attachment")
+            a1.Parent = target
+
+            local align = Instance.new("AlignPosition")
+            align.Attachment0 = a0
+            align.Attachment1 = a1
+            align.RigidityEnabled = true
+            align.Parent = Workspace
+        "#,
+    );
+
+    for _ in 0..60 {
+        instance.tick();
+    }
+
+    let mover_x: f32 = instance
+        .lua_runtime
+        .as_ref()
+        .unwrap()
+        .lua()
+        .load("return _G.mover.Position.X")
+        .eval()
+        .unwrap();
+    assert!(
+        mover_x < 3.05,
+        "AlignPosition should not teleport/tunnel through blocking collision, x={mover_x}"
+    );
+}
+
+#[test]
+fn test_align_position_release_preserves_velocity() {
+    let mut instance = GameInstance::new(Uuid::new_v4(), None);
+
+    instance.load_script(
+        r#"
+            Workspace.Gravity = 0
+
+            local mover = Instance.new("Part")
+            mover.Name = "Mover"
+            mover.Position = Vector3.new(0, 5, 0)
+            mover.CanCollide = false
+            mover.Parent = Workspace
+            _G.mover = mover
+
+            local target = Instance.new("Part")
+            target.Name = "Target"
+            target.Anchored = true
+            target.Position = Vector3.new(30, 5, 0)
+            target.CanCollide = false
+            target.Parent = Workspace
+
+            local a0 = Instance.new("Attachment")
+            a0.Parent = mover
+
+            local a1 = Instance.new("Attachment")
+            a1.Parent = target
+
+            local align = Instance.new("AlignPosition")
+            align.Attachment0 = a0
+            align.Attachment1 = a1
+            align.Responsiveness = 20
+            align.MaxForce = 100000
+            align.Parent = Workspace
+            _G.align = align
+        "#,
+    );
+
+    for _ in 0..5 {
+        instance.tick();
+    }
+
+    let (release_x, release_vx): (f32, f32) = instance
+        .lua_runtime
+        .as_ref()
+        .unwrap()
+        .lua()
+        .load("return _G.mover.Position.X, _G.mover.AssemblyLinearVelocity.X")
+        .eval()
+        .unwrap();
+
+    instance
+        .lua_runtime
+        .as_ref()
+        .unwrap()
+        .lua()
+        .load("_G.align:Destroy()")
+        .exec()
+        .unwrap();
+
+    for _ in 0..10 {
+        instance.tick();
+    }
+
+    let after_x: f32 = instance
+        .lua_runtime
+        .as_ref()
+        .unwrap()
+        .lua()
+        .load("return _G.mover.Position.X")
+        .eval()
+        .unwrap();
+    assert!(
+        release_vx > 0.5 && after_x > release_x + 0.5,
+        "released AlignPosition body should keep moving, release_x={release_x}, release_vx={release_vx}, after_x={after_x}"
+    );
+}
+
+#[test]
+fn test_align_constraints_keep_long_held_part_bounded_under_contact() {
+    let mut instance = GameInstance::new(Uuid::new_v4(), None);
+
+    instance.load_script(
+        r#"
+            Workspace.Gravity = 0
+
+            local plank = Instance.new("Part")
+            plank.Name = "HeldPlank"
+            plank.Size = Vector3.new(8, 0.35, 0.9)
+            plank.Position = Vector3.new(0, 3, 0)
+            plank.CanCollide = true
+            plank.Parent = Workspace
+            _G.plank = plank
+
+            local obstacle = Instance.new("Part")
+            obstacle.Name = "DynamicObstacle"
+            obstacle.Size = Vector3.new(3, 3, 3)
+            obstacle.Position = Vector3.new(2.5, 3, 0)
+            obstacle.CanCollide = true
+            obstacle.Parent = Workspace
+            _G.obstacle = obstacle
+
+            local target = Instance.new("Part")
+            target.Name = "HandTarget"
+            target.Anchored = true
+            target.Size = Vector3.new(0.2, 0.2, 0.2)
+            target.Position = Vector3.new(0, 3, 0)
+            target.CanCollide = false
+            target.Parent = Workspace
+            _G.target = target
+
+            local a0 = Instance.new("Attachment")
+            a0.Parent = plank
+
+            local a1 = Instance.new("Attachment")
+            a1.Parent = target
+
+            local alignPosition = Instance.new("AlignPosition")
+            alignPosition.Attachment0 = a0
+            alignPosition.Attachment1 = a1
+            alignPosition.Responsiveness = 10
+            alignPosition.MaxForce = 1500
+            alignPosition.MaxVelocity = 18
+            alignPosition.Parent = Workspace
+
+            local alignOrientation = Instance.new("AlignOrientation")
+            alignOrientation.Attachment0 = a0
+            alignOrientation.Attachment1 = a1
+            alignOrientation.Responsiveness = 10
+            alignOrientation.MaxTorque = Vector3.new(120, 120, 120)
+            alignOrientation.Parent = Workspace
+        "#,
+    );
+
+    let poses = [
+        (0.0_f32, 3.0_f32, 0.0_f32, 0.0_f32),
+        (0.0, 2.2, -2.0, 0.35),
+        (0.0, 2.2, 2.0, -0.35),
+        (0.5, 2.1, -2.0, 0.35),
+        (-0.5, 2.1, 2.0, -0.35),
+        (0.0, 3.0, 0.0, 0.0),
+    ];
+
+    let mut max_linear_speed = 0.0_f32;
+    let mut max_angular_speed = 0.0_f32;
+    let mut max_abs_position = 0.0_f32;
+
+    for (x, y, z, roll) in poses {
+        instance
+            .lua_runtime
+            .as_ref()
+            .unwrap()
+            .lua()
+            .load(format!(
+                "_G.target.CFrame = CFrame.new({x}, {y}, {z}) * CFrame.Angles(0, math.rad(90), {roll})"
+            ))
+            .exec()
+            .unwrap();
+
+        for _ in 0..20 {
+            instance.tick();
+            let (px, py, pz, vx, vy, vz, wx, wy, wz): (
+                f32,
+                f32,
+                f32,
+                f32,
+                f32,
+                f32,
+                f32,
+                f32,
+                f32,
+            ) = instance
+                .lua_runtime
+                .as_ref()
+                .unwrap()
+                .lua()
+                .load(
+                    r#"
+                    return _G.plank.Position.X,
+                        _G.plank.Position.Y,
+                        _G.plank.Position.Z,
+                        _G.plank.AssemblyLinearVelocity.X,
+                        _G.plank.AssemblyLinearVelocity.Y,
+                        _G.plank.AssemblyLinearVelocity.Z,
+                        _G.plank.AssemblyAngularVelocity.X,
+                        _G.plank.AssemblyAngularVelocity.Y,
+                        _G.plank.AssemblyAngularVelocity.Z
+                "#,
+                )
+                .eval()
+                .unwrap();
+
+            max_linear_speed = max_linear_speed.max((vx * vx + vy * vy + vz * vz).sqrt());
+            max_angular_speed = max_angular_speed.max((wx * wx + wy * wy + wz * wz).sqrt());
+            max_abs_position = max_abs_position.max(px.abs().max(py.abs()).max(pz.abs()));
+        }
+    }
+
+    assert!(
+        max_linear_speed < 35.0,
+        "held plank linear speed should stay bounded, max={max_linear_speed}"
+    );
+    assert!(
+        max_angular_speed < 20.0,
+        "held plank angular speed should stay bounded, max={max_angular_speed}"
+    );
+    assert!(
+        max_abs_position < 15.0,
+        "held plank should remain near manipulation area, max_abs_position={max_abs_position}"
+    );
+}
+
+#[test]
+fn test_align_constraints_settle_long_held_part_at_fixed_target() {
+    let mut instance = GameInstance::new(Uuid::new_v4(), None);
+
+    instance.load_script(
+        r#"
+            Workspace.Gravity = 0
+
+            local plank = Instance.new("Part")
+            plank.Name = "HeldPlank"
+            plank.Size = Vector3.new(8, 0.35, 0.9)
+            plank.Position = Vector3.new(-5, 3, 0)
+            plank.CanCollide = true
+            plank.Parent = Workspace
+            _G.plank = plank
+
+            local target = Instance.new("Part")
+            target.Name = "HandTarget"
+            target.Anchored = true
+            target.Size = Vector3.new(0.2, 0.2, 0.2)
+            target.CFrame = CFrame.new(0, 3, 0) * CFrame.Angles(0, math.rad(90), 0)
+            target.CanCollide = false
+            target.Parent = Workspace
+
+            local a0 = Instance.new("Attachment")
+            a0.Parent = plank
+
+            local a1 = Instance.new("Attachment")
+            a1.Parent = target
+
+            local alignPosition = Instance.new("AlignPosition")
+            alignPosition.Attachment0 = a0
+            alignPosition.Attachment1 = a1
+            alignPosition.Responsiveness = 10
+            alignPosition.MaxForce = 1500
+            alignPosition.MaxVelocity = 18
+            alignPosition.Parent = Workspace
+
+            local alignOrientation = Instance.new("AlignOrientation")
+            alignOrientation.Attachment0 = a0
+            alignOrientation.Attachment1 = a1
+            alignOrientation.Responsiveness = 10
+            alignOrientation.MaxTorque = Vector3.new(120, 120, 120)
+            alignOrientation.Parent = Workspace
+        "#,
+    );
+
+    for _ in 0..180 {
+        instance.tick();
+    }
+
+    let (px, py, pz, vx, vy, vz, wx, wy, wz): (f32, f32, f32, f32, f32, f32, f32, f32, f32) =
+        instance
+            .lua_runtime
+            .as_ref()
+            .unwrap()
+            .lua()
+            .load(
+                r#"
+            return _G.plank.Position.X,
+                _G.plank.Position.Y,
+                _G.plank.Position.Z,
+                _G.plank.AssemblyLinearVelocity.X,
+                _G.plank.AssemblyLinearVelocity.Y,
+                _G.plank.AssemblyLinearVelocity.Z,
+                _G.plank.AssemblyAngularVelocity.X,
+                _G.plank.AssemblyAngularVelocity.Y,
+                _G.plank.AssemblyAngularVelocity.Z
+        "#,
+            )
+            .eval()
+            .unwrap();
+
+    let position_error = (px * px + (py - 3.0) * (py - 3.0) + pz * pz).sqrt();
+    let linear_speed = (vx * vx + vy * vy + vz * vz).sqrt();
+    let angular_speed = (wx * wx + wy * wy + wz * wz).sqrt();
+
+    assert!(
+        position_error < 0.5,
+        "fixed held plank should settle near target, error={position_error}, pos=({px}, {py}, {pz})"
+    );
+    assert!(
+        linear_speed < 0.5,
+        "fixed held plank linear speed should decay, speed={linear_speed}"
+    );
+    assert!(
+        angular_speed < 0.5,
+        "fixed held plank angular speed should decay, speed={angular_speed}"
+    );
+}
+
+#[test]
+fn test_two_hand_align_position_manipulates_long_part_stably() {
+    let mut instance = GameInstance::new(Uuid::new_v4(), None);
+
+    instance.load_script(
+        r#"
+            Workspace.Gravity = 0
+
+            local plank = Instance.new("Part")
+            plank.Name = "TwoHandPlank"
+            plank.Size = Vector3.new(8, 0.35, 0.9)
+            plank.Position = Vector3.new(0, 3, -1.5)
+            plank.CanCollide = true
+            plank.Parent = Workspace
+            _G.plank = plank
+
+            local leftTarget = Instance.new("Part")
+            leftTarget.Name = "LeftHandTarget"
+            leftTarget.Anchored = true
+            leftTarget.Size = Vector3.new(0.2, 0.2, 0.2)
+            leftTarget.Position = Vector3.new(-1.2, 3, -1.5)
+            leftTarget.CanCollide = false
+            leftTarget.Parent = Workspace
+            _G.leftTarget = leftTarget
+
+            local rightTarget = Instance.new("Part")
+            rightTarget.Name = "RightHandTarget"
+            rightTarget.Anchored = true
+            rightTarget.Size = Vector3.new(0.2, 0.2, 0.2)
+            rightTarget.Position = Vector3.new(1.2, 3, -1.5)
+            rightTarget.CanCollide = false
+            rightTarget.Parent = Workspace
+            _G.rightTarget = rightTarget
+
+            local leftGrip = Instance.new("Attachment")
+            leftGrip.CFrame = CFrame.new(-1.2, 0, 0)
+            leftGrip.Parent = plank
+
+            local rightGrip = Instance.new("Attachment")
+            rightGrip.CFrame = CFrame.new(1.2, 0, 0)
+            rightGrip.Parent = plank
+
+            local leftHand = Instance.new("Attachment")
+            leftHand.Parent = leftTarget
+
+            local rightHand = Instance.new("Attachment")
+            rightHand.Parent = rightTarget
+
+            local leftAlign = Instance.new("AlignPosition")
+            leftAlign.Attachment0 = leftGrip
+            leftAlign.Attachment1 = leftHand
+            leftAlign.Responsiveness = 10
+            leftAlign.MaxForce = 1500
+            leftAlign.MaxVelocity = 18
+            leftAlign.Parent = Workspace
+
+            local rightAlign = Instance.new("AlignPosition")
+            rightAlign.Attachment0 = rightGrip
+            rightAlign.Attachment1 = rightHand
+            rightAlign.Responsiveness = 10
+            rightAlign.MaxForce = 1500
+            rightAlign.MaxVelocity = 18
+            rightAlign.Parent = Workspace
+        "#,
+    );
+
+    let poses = [
+        (-1.2_f32, 3.0_f32, -1.5_f32, 1.2_f32, 3.0_f32, -1.5_f32),
+        (-1.4, 2.6, -2.4, 1.0, 2.9, -1.8),
+        (-1.4, 2.5, -1.2, 1.0, 2.8, -0.6),
+        (-1.2, 3.0, -1.5, 1.2, 3.0, -1.5),
+    ];
+
+    let mut max_linear_speed = 0.0_f32;
+    let mut max_angular_speed = 0.0_f32;
+    let mut max_abs_position = 0.0_f32;
+
+    for window in poses.windows(2) {
+        let start = window[0];
+        let end = window[1];
+        for step in 1..=20 {
+            let alpha = step as f32 / 20.0;
+            let lerp = |a: f32, b: f32| a + (b - a) * alpha;
+            instance
+                .lua_runtime
+                .as_ref()
+                .unwrap()
+                .lua()
+                .load(format!(
+                    r#"
+                    _G.leftTarget.Position = Vector3.new({}, {}, {})
+                    _G.rightTarget.Position = Vector3.new({}, {}, {})
+                    "#,
+                    lerp(start.0, end.0),
+                    lerp(start.1, end.1),
+                    lerp(start.2, end.2),
+                    lerp(start.3, end.3),
+                    lerp(start.4, end.4),
+                    lerp(start.5, end.5)
+                ))
+                .exec()
+                .unwrap();
+
+            for _ in 0..3 {
+                instance.tick();
+                let (px, py, pz, vx, vy, vz, wx, wy, wz): (
+                    f32,
+                    f32,
+                    f32,
+                    f32,
+                    f32,
+                    f32,
+                    f32,
+                    f32,
+                    f32,
+                ) = instance
+                    .lua_runtime
+                    .as_ref()
+                    .unwrap()
+                    .lua()
+                    .load(
+                        r#"
+                        return _G.plank.Position.X,
+                            _G.plank.Position.Y,
+                            _G.plank.Position.Z,
+                            _G.plank.AssemblyLinearVelocity.X,
+                            _G.plank.AssemblyLinearVelocity.Y,
+                            _G.plank.AssemblyLinearVelocity.Z,
+                            _G.plank.AssemblyAngularVelocity.X,
+                            _G.plank.AssemblyAngularVelocity.Y,
+                            _G.plank.AssemblyAngularVelocity.Z
+                    "#,
+                    )
+                    .eval()
+                    .unwrap();
+
+                max_linear_speed = max_linear_speed.max((vx * vx + vy * vy + vz * vz).sqrt());
+                max_angular_speed = max_angular_speed.max((wx * wx + wy * wy + wz * wz).sqrt());
+                max_abs_position = max_abs_position.max(px.abs().max(py.abs()).max(pz.abs()));
+            }
+        }
+    }
+
+    for _ in 0..120 {
+        instance.tick();
+    }
+
+    let (px, py, pz, vx, vy, vz, wx, wy, wz): (f32, f32, f32, f32, f32, f32, f32, f32, f32) =
+        instance
+            .lua_runtime
+            .as_ref()
+            .unwrap()
+            .lua()
+            .load(
+                r#"
+                return _G.plank.Position.X,
+                    _G.plank.Position.Y,
+                    _G.plank.Position.Z,
+                    _G.plank.AssemblyLinearVelocity.X,
+                    _G.plank.AssemblyLinearVelocity.Y,
+                    _G.plank.AssemblyLinearVelocity.Z,
+                    _G.plank.AssemblyAngularVelocity.X,
+                    _G.plank.AssemblyAngularVelocity.Y,
+                    _G.plank.AssemblyAngularVelocity.Z
+            "#,
+            )
+            .eval()
+            .unwrap();
+
+    let final_error = (px * px + (py - 3.0) * (py - 3.0) + (pz + 1.5) * (pz + 1.5)).sqrt();
+    let final_linear_speed = (vx * vx + vy * vy + vz * vz).sqrt();
+    let final_angular_speed = (wx * wx + wy * wy + wz * wz).sqrt();
+
+    assert!(
+        max_linear_speed < 35.0,
+        "two-hand manipulation linear speed should stay bounded, max={max_linear_speed}"
+    );
+    assert!(
+        max_angular_speed < 20.0,
+        "two-hand manipulation angular speed should stay bounded, max={max_angular_speed}"
+    );
+    assert!(
+        max_abs_position < 10.0,
+        "two-hand manipulated plank should remain near hand targets, max_abs_position={max_abs_position}"
+    );
+    assert!(
+        final_error < 0.6,
+        "two-hand manipulated plank should settle near final hand pose, error={final_error}, pos=({px}, {py}, {pz})"
+    );
+    assert!(
+        final_linear_speed < 0.75,
+        "two-hand manipulated plank linear speed should decay, speed={final_linear_speed}"
+    );
+    assert!(
+        final_angular_speed < 0.75,
+        "two-hand manipulated plank angular speed should decay, speed={final_angular_speed}"
     );
 }
 

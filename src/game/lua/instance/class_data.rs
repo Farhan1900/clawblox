@@ -721,6 +721,7 @@ pub struct AlignPositionData {
     pub responsiveness: f32,
     pub rigidity_enabled: bool,
     pub max_force: f32,
+    pub max_velocity: f32,
 }
 
 impl Default for AlignPositionData {
@@ -732,6 +733,7 @@ impl Default for AlignPositionData {
             responsiveness: 10.0,
             rigidity_enabled: false,
             max_force: 10000.0,
+            max_velocity: f32::INFINITY,
         }
     }
 }
@@ -742,6 +744,7 @@ pub struct AlignOrientationData {
     pub attachment1: Option<WeakInstanceRef>,
     pub responsiveness: f32,
     pub rigidity_enabled: bool,
+    pub max_torque: Vector3,
 }
 
 impl Default for AlignOrientationData {
@@ -751,6 +754,7 @@ impl Default for AlignOrientationData {
             attachment1: None,
             responsiveness: 10.0,
             rigidity_enabled: false,
+            max_torque: Vector3::new(10000.0, 10000.0, 10000.0),
         }
     }
 }

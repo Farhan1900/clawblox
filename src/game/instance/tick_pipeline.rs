@@ -20,9 +20,6 @@ pub(super) fn run_tick_phases(instance: &mut GameInstance, dt: f32) {
         }
     }
 
-    // Resolve attachment-driven constraints from script state before syncing parts to physics.
-    instance.apply_attachment_constraints(dt);
-
     // Sync new/changed Lua parts to physics (skip character-controlled parts).
     instance.sync_lua_to_physics(dt);
 
@@ -36,6 +33,10 @@ pub(super) fn run_tick_phases(instance: &mut GameInstance, dt: f32) {
     // Rapier user forces persist until reset. Roblox BodyMovers, VectorForce,
     // and water forces are evaluated continuously for the current step.
     instance.physics.reset_continuous_forces();
+
+    // Apply attachment-driven constraints after Lua state has a physics body
+    // and after force reset so they participate in the current solver step.
+    instance.apply_attachment_constraints(dt);
 
     // Apply continuous legacy body movers after assemblies exist and before
     // the solver advances, matching Roblox's assembly-level mover semantics.
