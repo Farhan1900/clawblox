@@ -8,7 +8,8 @@ use crate::game::lua::instance::{
     AlignOrientationData, AlignPositionData, AttachmentData, AttributeValue, BillboardGuiData,
     BodyAngularVelocityData, BodyForceData, BodyVelocityData, CFrameValueData, ClassName,
     GuiObjectData, HumanoidData, Instance, InstanceData, ModelData, ObjectValueData, PartData,
-    ScriptData, TextXAlignment, TextYAlignment, UICornerData, WeldConstraintData, WeldData,
+    ScriptData, TerrainCell, TerrainData, TerrainVoxel, TextXAlignment, TextYAlignment,
+    UICornerData, VectorForceData, WeldConstraintData, WeldData,
 };
 use crate::game::lua::services::agent_input::AgentInput;
 use crate::game::lua::services::physics_service::{
@@ -16,7 +17,8 @@ use crate::game::lua::services::physics_service::{
 };
 use crate::game::lua::services::remote_event::ReplicatedEvent;
 use crate::game::lua::types::{
-    CFrame, Color3, HumanoidStateType, Material, PartType, PhysicalProperties, UDim, UDim2, Vector3,
+    ActuatorRelativeTo, CFrame, Color3, HumanoidStateType, Material, PartType, PhysicalProperties,
+    UDim, UDim2, Vector3,
 };
 
 const SNAPSHOT_SCHEMA_VERSION: u32 = 2;
@@ -149,6 +151,8 @@ pub struct InstanceSnapshot {
     #[serde(default)]
     pub model: Option<ModelSnapshot>,
     #[serde(default)]
+    pub terrain: Option<TerrainSnapshot>,
+    #[serde(default)]
     pub humanoid: Option<HumanoidSnapshot>,
     #[serde(default)]
     pub script: Option<ScriptSnapshot>,
@@ -172,6 +176,8 @@ pub struct InstanceSnapshot {
     pub body_angular_velocity: Option<BodyAngularVelocitySnapshot>,
     #[serde(default)]
     pub attachment: Option<AttachmentSnapshot>,
+    #[serde(default)]
+    pub vector_force: Option<VectorForceSnapshot>,
     #[serde(default)]
     pub align_position: Option<AlignPositionSnapshot>,
     #[serde(default)]
@@ -255,9 +261,25 @@ pub struct ObjectRefSnapshot {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TerrainSnapshot {
+    #[serde(default)]
+    pub voxels: Vec<TerrainVoxelSnapshot>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TerrainVoxelSnapshot {
+    pub cell: [i32; 3],
+    pub solid_material: String,
+    pub solid_occupancy: f32,
+    pub liquid_occupancy: f32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BodyVelocitySnapshot {
     pub velocity: [f32; 3],
     pub max_force: [f32; 3],
+    #[serde(default = "default_body_mover_p")]
+    pub p: f32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -269,6 +291,12 @@ pub struct BodyForceSnapshot {
 pub struct BodyAngularVelocitySnapshot {
     pub angular_velocity: [f32; 3],
     pub max_torque: [f32; 3],
+    #[serde(default = "default_body_mover_p")]
+    pub p: f32,
+}
+
+fn default_body_mover_p() -> f32 {
+    1250.0
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -298,6 +326,23 @@ pub struct WeldConstraintSnapshot {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AttachmentSnapshot {
     pub cframe: SnapshotCFrame,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VectorForceSnapshot {
+    #[serde(default)]
+    pub attachment0_id: Option<u64>,
+    #[serde(default)]
+    pub attachment1_id: Option<u64>,
+    pub force: [f32; 3],
+    pub relative_to: String,
+    pub apply_at_center_of_mass: bool,
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -419,6 +464,8 @@ pub enum SnapshotAttributeValue {
 enum RefFixupKind {
     ObjectValue(Option<u64>),
     ModelPrimaryPart(Option<u64>),
+    VectorForceAttachment0(Option<u64>),
+    VectorForceAttachment1(Option<u64>),
     AlignPositionAttachment0(Option<u64>),
     AlignPositionAttachment1(Option<u64>),
     AlignOrientationAttachment0(Option<u64>),
@@ -681,6 +728,7 @@ fn snapshot_instance(instance: Instance) -> Result<InstanceSnapshot, String> {
             .collect(),
         part: data.part_data.as_ref().map(snapshot_part_data),
         model: data.model_data.as_ref().map(snapshot_model_data),
+        terrain: data.terrain_data.as_ref().map(snapshot_terrain_data),
         humanoid: data.humanoid_data.as_ref().map(snapshot_humanoid_data),
         script: data.script_data.as_ref().map(snapshot_script_data),
         int_value: data.int_value_data.as_ref().map(|v| v.value),
@@ -705,6 +753,10 @@ fn snapshot_instance(instance: Instance) -> Result<InstanceSnapshot, String> {
             .as_ref()
             .map(snapshot_body_angular_velocity_data),
         attachment: data.attachment_data.as_ref().map(snapshot_attachment_data),
+        vector_force: data
+            .vector_force_data
+            .as_ref()
+            .map(snapshot_vector_force_data),
         align_position: data
             .align_position_data
             .as_ref()
@@ -1187,12 +1239,18 @@ fn apply_instance_snapshot(
         ) {
             value.value = restore_cframe(saved);
         }
+        if let (Some(terrain), Some(saved)) =
+            (data.terrain_data.as_mut(), snapshot.terrain.as_ref())
+        {
+            *terrain = restore_terrain_data(saved)?;
+        }
         if let (Some(body_velocity), Some(saved)) = (
             data.body_velocity_data.as_mut(),
             snapshot.body_velocity.as_ref(),
         ) {
             body_velocity.velocity = restore_vector3(saved.velocity);
             body_velocity.max_force = restore_vector3(saved.max_force);
+            body_velocity.p = saved.p;
         }
         if let (Some(body_force), Some(saved)) =
             (data.body_force_data.as_mut(), snapshot.body_force.as_ref())
@@ -1205,11 +1263,31 @@ fn apply_instance_snapshot(
         ) {
             body_angular_velocity.angular_velocity = restore_vector3(saved.angular_velocity);
             body_angular_velocity.max_torque = restore_vector3(saved.max_torque);
+            body_angular_velocity.p = saved.p;
         }
         if let (Some(attachment), Some(saved)) =
             (data.attachment_data.as_mut(), snapshot.attachment.as_ref())
         {
             attachment.cframe = restore_cframe(&saved.cframe);
+        }
+        if let (Some(vector_force), Some(saved)) = (
+            data.vector_force_data.as_mut(),
+            snapshot.vector_force.as_ref(),
+        ) {
+            vector_force.force = restore_vector3(saved.force);
+            vector_force.relative_to = restore_actuator_relative_to(&saved.relative_to)?;
+            vector_force.apply_at_center_of_mass = saved.apply_at_center_of_mass;
+            vector_force.enabled = saved.enabled;
+            vector_force.attachment0 = None;
+            vector_force.attachment1 = None;
+            fixups.push(RefFixup {
+                instance: instance.clone(),
+                kind: RefFixupKind::VectorForceAttachment0(saved.attachment0_id),
+            });
+            fixups.push(RefFixup {
+                instance: instance.clone(),
+                kind: RefFixupKind::VectorForceAttachment1(saved.attachment1_id),
+            });
         }
         if let (Some(align), Some(saved)) = (
             data.align_position_data.as_mut(),
@@ -1320,6 +1398,8 @@ fn apply_ref_fixups(map: &HashMap<u64, Instance>, fixups: Vec<RefFixup>) {
         let target = match &fixup.kind {
             RefFixupKind::ObjectValue(id)
             | RefFixupKind::ModelPrimaryPart(id)
+            | RefFixupKind::VectorForceAttachment0(id)
+            | RefFixupKind::VectorForceAttachment1(id)
             | RefFixupKind::AlignPositionAttachment0(id)
             | RefFixupKind::AlignPositionAttachment1(id)
             | RefFixupKind::AlignOrientationAttachment0(id)
@@ -1342,6 +1422,18 @@ fn apply_ref_fixups(map: &HashMap<u64, Instance>, fixups: Vec<RefFixup>) {
             RefFixupKind::ModelPrimaryPart(_) => {
                 if let Some(model) = data.model_data.as_mut() {
                     model.primary_part =
+                        target.map(|instance| std::sync::Arc::downgrade(&instance.data));
+                }
+            }
+            RefFixupKind::VectorForceAttachment0(_) => {
+                if let Some(vector_force) = data.vector_force_data.as_mut() {
+                    vector_force.attachment0 =
+                        target.map(|instance| std::sync::Arc::downgrade(&instance.data));
+                }
+            }
+            RefFixupKind::VectorForceAttachment1(_) => {
+                if let Some(vector_force) = data.vector_force_data.as_mut() {
+                    vector_force.attachment1 =
                         target.map(|instance| std::sync::Arc::downgrade(&instance.data));
                 }
             }
@@ -1447,6 +1539,9 @@ fn create_instance_from_class_name(class_name: &str, name: &str) -> Result<Insta
         "CFrameValue" => Instance::from_data(
             crate::game::lua::instance::InstanceData::new_cframe_value(name),
         ),
+        "Terrain" => {
+            Instance::from_data(crate::game::lua::instance::InstanceData::new_terrain(name))
+        }
         "BodyVelocity" => Instance::from_data(
             crate::game::lua::instance::InstanceData::new_body_velocity(name),
         ),
@@ -1458,6 +1553,9 @@ fn create_instance_from_class_name(class_name: &str, name: &str) -> Result<Insta
         ),
         "Attachment" => Instance::from_data(
             crate::game::lua::instance::InstanceData::new_attachment(name),
+        ),
+        "VectorForce" => Instance::from_data(
+            crate::game::lua::instance::InstanceData::new_vector_force(name),
         ),
         "AlignPosition" => {
             Instance::from_data(crate::game::lua::instance::InstanceData::new_align_position(name))
@@ -1636,6 +1734,40 @@ fn snapshot_model_data(model: &ModelData) -> ModelSnapshot {
     }
 }
 
+fn snapshot_terrain_data(terrain: &TerrainData) -> TerrainSnapshot {
+    TerrainSnapshot {
+        voxels: terrain
+            .voxels
+            .iter()
+            .map(|(cell, voxel)| TerrainVoxelSnapshot {
+                cell: [cell.x, cell.y, cell.z],
+                solid_material: snapshot_material(voxel.solid_material),
+                solid_occupancy: voxel.solid_occupancy,
+                liquid_occupancy: voxel.liquid_occupancy,
+            })
+            .collect(),
+    }
+}
+
+fn restore_terrain_data(snapshot: &TerrainSnapshot) -> Result<TerrainData, String> {
+    let mut terrain = TerrainData::default();
+    for saved in &snapshot.voxels {
+        terrain.voxels.insert(
+            TerrainCell {
+                x: saved.cell[0],
+                y: saved.cell[1],
+                z: saved.cell[2],
+            },
+            TerrainVoxel {
+                solid_material: restore_material(&saved.solid_material)?,
+                solid_occupancy: saved.solid_occupancy.clamp(0.0, 1.0),
+                liquid_occupancy: saved.liquid_occupancy.clamp(0.0, 1.0),
+            },
+        );
+    }
+    Ok(terrain)
+}
+
 fn snapshot_humanoid_data(humanoid: &HumanoidData) -> HumanoidSnapshot {
     HumanoidSnapshot {
         health: humanoid.health,
@@ -1682,6 +1814,7 @@ fn snapshot_body_velocity_data(value: &BodyVelocityData) -> BodyVelocitySnapshot
     BodyVelocitySnapshot {
         velocity: snapshot_vector3(value.velocity),
         max_force: snapshot_vector3(value.max_force),
+        p: value.p,
     }
 }
 
@@ -1697,12 +1830,32 @@ fn snapshot_body_angular_velocity_data(
     BodyAngularVelocitySnapshot {
         angular_velocity: snapshot_vector3(value.angular_velocity),
         max_torque: snapshot_vector3(value.max_torque),
+        p: value.p,
     }
 }
 
 fn snapshot_attachment_data(data: &AttachmentData) -> AttachmentSnapshot {
     AttachmentSnapshot {
         cframe: snapshot_cframe(data.cframe),
+    }
+}
+
+fn snapshot_vector_force_data(data: &VectorForceData) -> VectorForceSnapshot {
+    VectorForceSnapshot {
+        attachment0_id: data
+            .attachment0
+            .as_ref()
+            .and_then(|weak| weak.upgrade())
+            .map(|instance| instance.lock().unwrap().id.0),
+        attachment1_id: data
+            .attachment1
+            .as_ref()
+            .and_then(|weak| weak.upgrade())
+            .map(|instance| instance.lock().unwrap().id.0),
+        force: snapshot_vector3(data.force),
+        relative_to: snapshot_actuator_relative_to(data.relative_to),
+        apply_at_center_of_mass: data.apply_at_center_of_mass,
+        enabled: data.enabled,
     }
 }
 
@@ -1953,6 +2106,7 @@ fn snapshot_material(v: Material) -> String {
 
 fn restore_material(v: &str) -> Result<Material, String> {
     match v {
+        "Air" => Ok(Material::Air),
         "Plastic" => Ok(Material::Plastic),
         "Wood" => Ok(Material::Wood),
         "Metal" => Ok(Material::Metal),
@@ -1969,7 +2123,21 @@ fn restore_material(v: &str) -> Result<Material, String> {
         "Slate" => Ok(Material::Slate),
         "SmoothPlastic" => Ok(Material::SmoothPlastic),
         "ForceField" => Ok(Material::ForceField),
+        "Water" => Ok(Material::Water),
         other => Err(format!("unsupported Material '{}'", other)),
+    }
+}
+
+fn snapshot_actuator_relative_to(v: ActuatorRelativeTo) -> String {
+    v.name().to_string()
+}
+
+fn restore_actuator_relative_to(v: &str) -> Result<ActuatorRelativeTo, String> {
+    match v {
+        "Attachment0" => Ok(ActuatorRelativeTo::Attachment0),
+        "Attachment1" => Ok(ActuatorRelativeTo::Attachment1),
+        "World" => Ok(ActuatorRelativeTo::World),
+        other => Err(format!("unsupported ActuatorRelativeTo '{}'", other)),
     }
 }
 

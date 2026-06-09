@@ -176,25 +176,12 @@ pub(super) fn add_fields<F: UserDataFields<Instance>>(fields: &mut F) {
         }
     });
     fields.add_field_method_set("Velocity", |_, this, velocity: Vector3| {
-        let parent_part = {
-            let mut data = this.data.lock().unwrap();
-            if let Some(bv) = &mut data.body_velocity_data {
-                bv.velocity = velocity;
-                data.parent.as_ref().and_then(|w| w.upgrade())
-            } else {
-                if let Some(part) = &mut data.part_data {
-                    part.velocity = velocity;
-                    part.velocity_dirty = true;
-                }
-                None
-            }
-        };
-        if let Some(parent_ref) = parent_part {
-            let mut parent_data = parent_ref.lock().unwrap();
-            if let Some(part) = &mut parent_data.part_data {
-                part.velocity = velocity;
-                part.velocity_dirty = true;
-            }
+        let mut data = this.data.lock().unwrap();
+        if let Some(bv) = &mut data.body_velocity_data {
+            bv.velocity = velocity;
+        } else if let Some(part) = &mut data.part_data {
+            part.velocity = velocity;
+            part.velocity_dirty = true;
         }
         Ok(())
     });

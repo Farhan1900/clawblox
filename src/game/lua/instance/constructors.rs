@@ -26,7 +26,6 @@ pub(super) fn parent_instance_from_lua_value(parent: Value) -> Result<Option<Ins
     }
 }
 
-
 pub fn register_instance(lua: &Lua) -> Result<()> {
     let instance_table = lua.create_table()?;
 
@@ -42,6 +41,7 @@ pub fn register_instance(lua: &Lua) -> Result<()> {
                     "Animation" => Instance::from_data(InstanceData::new_animation("Animation")),
                     "Animator" => Instance::from_data(InstanceData::new_animator("Animator")),
                     "Folder" => Instance::new(ClassName::Folder, "Folder"),
+                    "Terrain" => Instance::from_data(InstanceData::new_terrain("Terrain")),
                     "Script" => Instance::from_data(InstanceData::new_script("Script")),
                     "ModuleScript" => {
                         Instance::from_data(InstanceData::new_module_script("ModuleScript"))
@@ -75,6 +75,9 @@ pub fn register_instance(lua: &Lua) -> Result<()> {
                         InstanceData::new_body_angular_velocity("BodyAngularVelocity"),
                     ),
                     "Attachment" => Instance::from_data(InstanceData::new_attachment("Attachment")),
+                    "VectorForce" => {
+                        Instance::from_data(InstanceData::new_vector_force("VectorForce"))
+                    }
                     "AlignPosition" => {
                         Instance::from_data(InstanceData::new_align_position("AlignPosition"))
                     }

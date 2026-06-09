@@ -1,7 +1,7 @@
 use mlua::{UserDataFields, Value};
 use std::sync::Arc;
 
-use crate::game::lua::types::Vector3;
+use crate::game::lua::types::{ActuatorRelativeTo, Vector3};
 
 use super::super::super::*;
 
@@ -42,14 +42,80 @@ pub(super) fn add_fields<F: UserDataFields<Instance>>(fields: &mut F) {
         Ok(())
     });
 
+    fields.add_field_method_get("P", |_, this| {
+        let data = this.data.lock().unwrap();
+        if let Some(bv) = &data.body_velocity_data {
+            return Ok(Some(bv.p));
+        }
+        if let Some(bav) = &data.body_angular_velocity_data {
+            return Ok(Some(bav.p));
+        }
+        Ok(None)
+    });
+    fields.add_field_method_set("P", |_, this, value: f32| {
+        let mut data = this.data.lock().unwrap();
+        if let Some(bv) = &mut data.body_velocity_data {
+            bv.p = value;
+        }
+        if let Some(bav) = &mut data.body_angular_velocity_data {
+            bav.p = value;
+        }
+        Ok(())
+    });
+
     fields.add_field_method_get("Force", |_, this| {
         let data = this.data.lock().unwrap();
-        Ok(data.body_force_data.as_ref().map(|bf| bf.force))
+        if let Some(bf) = &data.body_force_data {
+            return Ok(Some(bf.force));
+        }
+        Ok(data.vector_force_data.as_ref().map(|vf| vf.force))
     });
     fields.add_field_method_set("Force", |_, this, force: Vector3| {
         let mut data = this.data.lock().unwrap();
         if let Some(bf) = &mut data.body_force_data {
             bf.force = force;
+        }
+        if let Some(vf) = &mut data.vector_force_data {
+            vf.force = force;
+        }
+        Ok(())
+    });
+
+    fields.add_field_method_get("RelativeTo", |_, this| {
+        let data = this.data.lock().unwrap();
+        Ok(data.vector_force_data.as_ref().map(|vf| vf.relative_to))
+    });
+    fields.add_field_method_set("RelativeTo", |_, this, relative_to: ActuatorRelativeTo| {
+        let mut data = this.data.lock().unwrap();
+        if let Some(vf) = &mut data.vector_force_data {
+            vf.relative_to = relative_to;
+        }
+        Ok(())
+    });
+
+    fields.add_field_method_get("ApplyAtCenterOfMass", |_, this| {
+        let data = this.data.lock().unwrap();
+        Ok(data
+            .vector_force_data
+            .as_ref()
+            .map(|vf| vf.apply_at_center_of_mass))
+    });
+    fields.add_field_method_set("ApplyAtCenterOfMass", |_, this, enabled: bool| {
+        let mut data = this.data.lock().unwrap();
+        if let Some(vf) = &mut data.vector_force_data {
+            vf.apply_at_center_of_mass = enabled;
+        }
+        Ok(())
+    });
+
+    fields.add_field_method_get("Enabled", |_, this| {
+        let data = this.data.lock().unwrap();
+        Ok(data.vector_force_data.as_ref().map(|vf| vf.enabled))
+    });
+    fields.add_field_method_set("Enabled", |_, this, enabled: bool| {
+        let mut data = this.data.lock().unwrap();
+        if let Some(vf) = &mut data.vector_force_data {
+            vf.enabled = enabled;
         }
         Ok(())
     });
@@ -87,9 +153,14 @@ pub(super) fn add_fields<F: UserDataFields<Instance>>(fields: &mut F) {
     fields.add_field_method_get("Attachment0", |_, this| {
         let data = this.data.lock().unwrap();
         Ok(data
-            .align_position_data
+            .vector_force_data
             .as_ref()
             .and_then(|a| a.attachment0.as_ref())
+            .or_else(|| {
+                data.align_position_data
+                    .as_ref()
+                    .and_then(|a| a.attachment0.as_ref())
+            })
             .or_else(|| {
                 data.align_orientation_data
                     .as_ref()
@@ -100,6 +171,9 @@ pub(super) fn add_fields<F: UserDataFields<Instance>>(fields: &mut F) {
     });
     fields.add_field_method_set("Attachment0", |_, this, attachment: Option<Instance>| {
         let mut data = this.data.lock().unwrap();
+        if let Some(vector_force) = &mut data.vector_force_data {
+            vector_force.attachment0 = attachment.as_ref().map(|a| Arc::downgrade(&a.data));
+        }
         if let Some(align) = &mut data.align_position_data {
             align.attachment0 = attachment.as_ref().map(|a| Arc::downgrade(&a.data));
         }
@@ -112,9 +186,14 @@ pub(super) fn add_fields<F: UserDataFields<Instance>>(fields: &mut F) {
     fields.add_field_method_get("Attachment1", |_, this| {
         let data = this.data.lock().unwrap();
         Ok(data
-            .align_position_data
+            .vector_force_data
             .as_ref()
             .and_then(|a| a.attachment1.as_ref())
+            .or_else(|| {
+                data.align_position_data
+                    .as_ref()
+                    .and_then(|a| a.attachment1.as_ref())
+            })
             .or_else(|| {
                 data.align_orientation_data
                     .as_ref()
@@ -125,6 +204,9 @@ pub(super) fn add_fields<F: UserDataFields<Instance>>(fields: &mut F) {
     });
     fields.add_field_method_set("Attachment1", |_, this, attachment: Option<Instance>| {
         let mut data = this.data.lock().unwrap();
+        if let Some(vector_force) = &mut data.vector_force_data {
+            vector_force.attachment1 = attachment.as_ref().map(|a| Arc::downgrade(&a.data));
+        }
         if let Some(align) = &mut data.align_position_data {
             align.attachment1 = attachment.as_ref().map(|a| Arc::downgrade(&a.data));
         }

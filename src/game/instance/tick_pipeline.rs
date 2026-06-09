@@ -33,6 +33,21 @@ pub(super) fn run_tick_phases(instance: &mut GameInstance, dt: f32) {
     // ApplyImpulse after assemblies exist and before the solver advances.
     instance.process_physics_commands();
 
+    // Rapier user forces persist until reset. Roblox BodyMovers, VectorForce,
+    // and water forces are evaluated continuously for the current step.
+    instance.physics.reset_continuous_forces();
+
+    // Apply continuous legacy body movers after assemblies exist and before
+    // the solver advances, matching Roblox's assembly-level mover semantics.
+    instance.apply_body_movers();
+
+    // Apply modern constraint actuators such as VectorForce through the same
+    // continuous-force path used by water and legacy compatibility shims.
+    instance.apply_modern_actuators();
+
+    // Apply Terrain liquid-channel fluid forces before the solver advances.
+    instance.apply_fluid_forces();
+
     // Sync script control targets to physics character controllers.
     instance.sync_controller_targets();
 

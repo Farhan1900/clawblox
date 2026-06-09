@@ -8,6 +8,7 @@ pub enum ClassName {
     Player,
     Folder,
     Workspace,
+    Terrain,
     Players,
     RunService,
     Camera,
@@ -32,6 +33,7 @@ pub enum ClassName {
     BodyForce,
     BodyAngularVelocity,
     Attachment,
+    VectorForce,
     AlignPosition,
     AlignOrientation,
     // GUI classes
@@ -58,6 +60,7 @@ impl ClassName {
             ClassName::Player => "Player",
             ClassName::Folder => "Folder",
             ClassName::Workspace => "Workspace",
+            ClassName::Terrain => "Terrain",
             ClassName::Players => "Players",
             ClassName::RunService => "RunService",
             ClassName::Camera => "Camera",
@@ -81,6 +84,7 @@ impl ClassName {
             ClassName::BodyForce => "BodyForce",
             ClassName::BodyAngularVelocity => "BodyAngularVelocity",
             ClassName::Attachment => "Attachment",
+            ClassName::VectorForce => "VectorForce",
             ClassName::AlignPosition => "AlignPosition",
             ClassName::AlignOrientation => "AlignOrientation",
             ClassName::BillboardGui => "BillboardGui",
@@ -106,6 +110,7 @@ impl ClassName {
             "Player" => matches!(self, ClassName::Player),
             "Folder" => matches!(self, ClassName::Folder),
             "Workspace" => matches!(self, ClassName::Workspace),
+            "Terrain" => matches!(self, ClassName::Terrain),
             "Players" => matches!(self, ClassName::Players),
             "RunService" => matches!(self, ClassName::RunService),
             "Camera" => matches!(self, ClassName::Camera),
@@ -136,6 +141,7 @@ impl ClassName {
                 self,
                 ClassName::Weld
                     | ClassName::WeldConstraint
+                    | ClassName::VectorForce
                     | ClassName::AlignPosition
                     | ClassName::AlignOrientation
             ),
@@ -146,6 +152,7 @@ impl ClassName {
             "BodyForce" => matches!(self, ClassName::BodyForce),
             "BodyAngularVelocity" => matches!(self, ClassName::BodyAngularVelocity),
             "Attachment" => matches!(self, ClassName::Attachment),
+            "VectorForce" => matches!(self, ClassName::VectorForce),
             "AlignPosition" => matches!(self, ClassName::AlignPosition),
             "AlignOrientation" => matches!(self, ClassName::AlignOrientation),
             "BodyMover" => matches!(

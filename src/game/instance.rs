@@ -10,8 +10,11 @@ use super::lua::instance::{
 use super::lua::LuaRuntime;
 use super::physics::PhysicsWorld;
 
+mod body_movers;
 mod character_controller;
 mod controller_runtime;
+mod fluid_physics;
+mod modern_actuators;
 mod observation;
 mod physics_commands;
 mod player_lifecycle;

@@ -408,19 +408,6 @@ impl Instance {
                 .unwrap()
                 .children
                 .push(Arc::clone(&self.data));
-
-            // BodyVelocity compatibility shim: parenting under a Part applies current velocity.
-            let body_velocity = {
-                let data = self.data.lock().unwrap();
-                data.body_velocity_data.clone()
-            };
-            if let Some(bv) = body_velocity {
-                let mut parent_data = new_parent.data.lock().unwrap();
-                if let Some(part) = &mut parent_data.part_data {
-                    part.velocity = bv.velocity;
-                    part.velocity_dirty = true;
-                }
-            }
         } else {
             self.data.lock().unwrap().parent = None;
         }
@@ -600,8 +587,10 @@ impl Instance {
         new_data.body_force_data = data.body_force_data;
         new_data.body_angular_velocity_data = data.body_angular_velocity_data;
         new_data.attachment_data = data.attachment_data.clone();
+        new_data.vector_force_data = data.vector_force_data.clone();
         new_data.align_position_data = data.align_position_data.clone();
         new_data.align_orientation_data = data.align_orientation_data.clone();
+        new_data.terrain_data = data.terrain_data.clone();
 
         // Clone GUI data but create fresh signals to avoid sharing handlers
         if let Some(gui) = &data.gui_data {

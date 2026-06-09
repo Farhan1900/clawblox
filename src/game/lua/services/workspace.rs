@@ -5,7 +5,7 @@ use crate::game::constants::physics as consts;
 use crate::game::lua::instance::{ClassName, Instance};
 use crate::game::lua::runtime::Game;
 use crate::game::lua::services::PhysicsService;
-use crate::game::lua::types::{CFrame, Ray, RaycastFilterType, Vector3};
+use crate::game::lua::types::{CFrame, Material, Ray, RaycastFilterType, Vector3};
 use crate::game::world_root::{OverlapQueryParams, RaycastHit, RaycastQueryParams, WorldRoot};
 
 fn physics_service_from_lua(lua: &Lua) -> Result<PhysicsService> {
@@ -20,6 +20,7 @@ pub struct RaycastResult {
     pub position: Vector3,
     pub normal: Vector3,
     pub distance: f32,
+    pub material: Material,
 }
 
 impl UserData for RaycastResult {
@@ -28,6 +29,7 @@ impl UserData for RaycastResult {
         fields.add_field_method_get("Position", |_, this| Ok(this.position));
         fields.add_field_method_get("Normal", |_, this| Ok(this.normal));
         fields.add_field_method_get("Distance", |_, this| Ok(this.distance));
+        fields.add_field_method_get("Material", |_, this| Ok(this.material));
     }
 }
 
@@ -38,6 +40,7 @@ impl From<RaycastHit> for RaycastResult {
             position: hit.position,
             normal: hit.normal,
             distance: hit.distance,
+            material: hit.material,
         }
     }
 }
@@ -70,6 +73,7 @@ impl RaycastParams {
             filter_instances: self.filter_instances,
             collision_group: self.collision_group,
             respect_can_collide: self.respect_can_collide,
+            ignore_water: self.ignore_water,
         }
     }
 }
@@ -262,6 +266,10 @@ pub struct WorkspaceService {
 impl WorkspaceService {
     pub fn new() -> Self {
         let instance = Instance::new(ClassName::Workspace, "Workspace");
+        let terrain = Instance::from_data(crate::game::lua::instance::InstanceData::new_terrain(
+            "Terrain",
+        ));
+        terrain.set_parent(Some(&instance));
         Self {
             instance,
             data: Arc::new(Mutex::new(WorkspaceServiceData::new())),

@@ -26,8 +26,8 @@ fn test_simple_script() {
         .expect("Failed to load script");
 
     let children = runtime.workspace().get_children();
-    assert_eq!(children.len(), 1);
-    assert_eq!(children[0].name(), "TestPart");
+    assert!(children.iter().any(|child| child.name() == "Terrain"));
+    assert!(children.iter().any(|child| child.name() == "TestPart"));
 }
 
 #[test]
@@ -582,6 +582,101 @@ fn test_workspace_raycast_hits_rotated_thin_part() {
         .get("hitName")
         .unwrap();
     assert_eq!(hit_name.as_deref(), Some("ThinBar"));
+}
+
+#[test]
+fn test_workspace_terrain_fillblock_water_raycast_and_ignore_water() {
+    let mut runtime = test_runtime();
+    runtime
+        .load_script(
+            r#"
+            local terrain = Workspace.Terrain
+            terrain:FillBlock(CFrame.new(0, 0, 0), Vector3.new(20, 4, 20), Enum.Material.Water)
+
+            local hit = Workspace:Raycast(Vector3.new(0, 10, 0), Vector3.new(0, -30, 0))
+
+            local params = RaycastParams.new()
+            params.IgnoreWater = true
+            local ignored = Workspace:Raycast(Vector3.new(0, 10, 0), Vector3.new(0, -30, 0), params)
+
+            _G.terrainName = terrain.Name
+            _G.hitName = hit and hit.Instance and hit.Instance.Name or nil
+            _G.hitMaterial = hit and tostring(hit.Material) or nil
+            _G.hitY = hit and hit.Position.Y or nil
+            _G.ignored = ignored == nil
+        "#,
+        )
+        .expect("Failed to load script");
+
+    let globals = runtime.lua().globals().get::<mlua::Table>("_G").unwrap();
+    let terrain_name: String = globals.get("terrainName").unwrap();
+    let hit_name: Option<String> = globals.get("hitName").unwrap();
+    let hit_material: Option<String> = globals.get("hitMaterial").unwrap();
+    let hit_y: Option<f64> = globals.get("hitY").unwrap();
+    let ignored: bool = globals.get("ignored").unwrap();
+
+    assert_eq!(terrain_name, "Terrain");
+    assert_eq!(hit_name.as_deref(), Some("Terrain"));
+    assert_eq!(hit_material.as_deref(), Some("Enum.Material.Water"));
+    assert!(
+        (hit_y.unwrap() - 2.0).abs() < 1e-4,
+        "expected water top surface at y=2"
+    );
+    assert!(
+        ignored,
+        "RaycastParams.IgnoreWater should skip Terrain water"
+    );
+}
+
+#[test]
+fn test_terrain_read_write_voxel_channels_round_trip_liquid_occupancy() {
+    let mut runtime = test_runtime();
+    runtime
+        .load_script(
+            r#"
+            local terrain = Workspace.Terrain
+            local region = Region3.new(Vector3.new(0, 0, 0), Vector3.new(4, 4, 4))
+
+            local materials = {{{Enum.Material.Air}}}
+            local solid = {{{0}}}
+            local liquid = {{{0.75}}}
+
+            terrain:WriteVoxelChannels(region, 4, {
+                SolidMaterial = materials,
+                SolidOccupancy = solid,
+                LiquidOccupancy = liquid,
+            })
+
+            local channels = terrain:ReadVoxelChannels(region, 4, {
+                "SolidMaterial",
+                "SolidOccupancy",
+                "LiquidOccupancy",
+            })
+
+            _G.sizeX = channels.Size.X
+            _G.sizeY = channels.Size.Y
+            _G.sizeZ = channels.Size.Z
+            _G.material = tostring(channels.SolidMaterial[1][1][1])
+            _G.solid = channels.SolidOccupancy[1][1][1]
+            _G.liquid = channels.LiquidOccupancy[1][1][1]
+        "#,
+        )
+        .expect("Failed to load script");
+
+    let globals = runtime.lua().globals().get::<mlua::Table>("_G").unwrap();
+    let size_x: f64 = globals.get("sizeX").unwrap();
+    let size_y: f64 = globals.get("sizeY").unwrap();
+    let size_z: f64 = globals.get("sizeZ").unwrap();
+    let material: String = globals.get("material").unwrap();
+    let solid: f64 = globals.get("solid").unwrap();
+    let liquid: f64 = globals.get("liquid").unwrap();
+
+    assert_eq!(size_x, 1.0);
+    assert_eq!(size_y, 1.0);
+    assert_eq!(size_z, 1.0);
+    assert_eq!(material, "Enum.Material.Air");
+    assert!((solid - 0.0).abs() < 1e-6);
+    assert!((liquid - 0.75).abs() < 1e-6);
 }
 
 #[test]
@@ -2121,7 +2216,7 @@ fn test_cframe_value_value_and_changed_signal_parity() {
 }
 
 #[test]
-fn test_body_velocity_applies_to_parent_part_velocity() {
+fn test_body_velocity_class_properties_and_defaults() {
     let mut runtime = test_runtime();
     runtime
         .load_script(
@@ -2130,18 +2225,35 @@ fn test_body_velocity_applies_to_parent_part_velocity() {
             p.Parent = Workspace
 
             local bv = Instance.new("BodyVelocity")
+            _G.defaultVelocityY = bv.Velocity.Y
+            _G.defaultMaxForceX = bv.MaxForce.X
+            _G.defaultP = bv.P
+
             bv.MaxForce = Vector3.new(100000, 0, 100000)
+            bv.P = 500
             bv.Velocity = Vector3.new(0, 0, -70)
             bv.Parent = p
 
-            _G.vz = p.Velocity.Z
+            _G.vz = bv.Velocity.Z
+            _G.maxForceX = bv.MaxForce.X
+            _G.p = bv.P
         "#,
         )
         .expect("Failed to run script");
 
     let globals = runtime.lua().globals().get::<mlua::Table>("_G").unwrap();
     let vz: f32 = globals.get("vz").unwrap();
+    let max_force_x: f32 = globals.get("maxForceX").unwrap();
+    let p: f32 = globals.get("p").unwrap();
+    let default_velocity_y: f32 = globals.get("defaultVelocityY").unwrap();
+    let default_max_force_x: f32 = globals.get("defaultMaxForceX").unwrap();
+    let default_p: f32 = globals.get("defaultP").unwrap();
     assert!((vz + 70.0).abs() < 0.001);
+    assert!((max_force_x - 100000.0).abs() < 0.001);
+    assert!((p - 500.0).abs() < 0.001);
+    assert!((default_velocity_y - 2.0).abs() < 0.001);
+    assert!((default_max_force_x - 4000.0).abs() < 0.001);
+    assert!((default_p - 1250.0).abs() < 0.001);
 }
 
 #[test]

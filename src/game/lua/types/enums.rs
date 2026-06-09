@@ -62,6 +62,7 @@ impl UserData for PartType {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Material {
+    Air,
     Plastic,
     Wood,
     Metal,
@@ -78,11 +79,68 @@ pub enum Material {
     Slate,
     SmoothPlastic,
     ForceField,
+    Water,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ActuatorRelativeTo {
+    Attachment0,
+    Attachment1,
+    World,
+}
+
+impl ActuatorRelativeTo {
+    pub fn name(&self) -> &'static str {
+        match self {
+            ActuatorRelativeTo::Attachment0 => "Attachment0",
+            ActuatorRelativeTo::Attachment1 => "Attachment1",
+            ActuatorRelativeTo::World => "World",
+        }
+    }
+
+    pub fn value(&self) -> i32 {
+        match self {
+            ActuatorRelativeTo::Attachment0 => 0,
+            ActuatorRelativeTo::Attachment1 => 1,
+            ActuatorRelativeTo::World => 2,
+        }
+    }
+}
+
+impl FromLua for ActuatorRelativeTo {
+    fn from_lua(value: Value, _lua: &Lua) -> Result<Self> {
+        match value {
+            Value::UserData(ud) => ud.borrow::<ActuatorRelativeTo>().map(|v| *v),
+            _ => Err(mlua::Error::FromLuaConversionError {
+                from: value.type_name(),
+                to: "ActuatorRelativeTo".to_string(),
+                message: Some("expected ActuatorRelativeTo".to_string()),
+            }),
+        }
+    }
+}
+
+impl UserData for ActuatorRelativeTo {
+    fn add_fields<F: UserDataFields<Self>>(fields: &mut F) {
+        fields.add_field_method_get("Name", |_, this| Ok(this.name().to_string()));
+        fields.add_field_method_get("Value", |_, this| Ok(this.value()));
+    }
+
+    fn add_methods<M: UserDataMethods<Self>>(methods: &mut M) {
+        methods.add_meta_method(mlua::MetaMethod::ToString, |_, this, ()| {
+            Ok(format!("Enum.ActuatorRelativeTo.{}", this.name()))
+        });
+        methods.add_meta_method(
+            mlua::MetaMethod::Eq,
+            |_, this, other: ActuatorRelativeTo| Ok(*this == other),
+        );
+    }
 }
 
 impl Material {
     pub fn name(&self) -> &'static str {
         match self {
+            Material::Air => "Air",
             Material::Plastic => "Plastic",
             Material::Wood => "Wood",
             Material::Metal => "Metal",
@@ -99,11 +157,13 @@ impl Material {
             Material::Slate => "Slate",
             Material::SmoothPlastic => "SmoothPlastic",
             Material::ForceField => "ForceField",
+            Material::Water => "Water",
         }
     }
 
     pub fn value(&self) -> i32 {
         match self {
+            Material::Air => 1792,
             Material::Plastic => 256,
             Material::Wood => 512,
             Material::Metal => 1040,
@@ -120,6 +180,7 @@ impl Material {
             Material::Slate => 800,
             Material::SmoothPlastic => 272,
             Material::ForceField => 1584,
+            Material::Water => 2048,
         }
     }
 }
@@ -359,6 +420,7 @@ pub fn register_enums(lua: &Lua) -> Result<()> {
     enum_table.set("PartShape", part_shape_table)?;
 
     let material_table = lua.create_table()?;
+    material_table.set("Air", Material::Air)?;
     material_table.set("Plastic", Material::Plastic)?;
     material_table.set("Wood", Material::Wood)?;
     material_table.set("Metal", Material::Metal)?;
@@ -375,7 +437,14 @@ pub fn register_enums(lua: &Lua) -> Result<()> {
     material_table.set("Slate", Material::Slate)?;
     material_table.set("SmoothPlastic", Material::SmoothPlastic)?;
     material_table.set("ForceField", Material::ForceField)?;
+    material_table.set("Water", Material::Water)?;
     enum_table.set("Material", material_table)?;
+
+    let actuator_relative_to_table = lua.create_table()?;
+    actuator_relative_to_table.set("Attachment0", ActuatorRelativeTo::Attachment0)?;
+    actuator_relative_to_table.set("Attachment1", ActuatorRelativeTo::Attachment1)?;
+    actuator_relative_to_table.set("World", ActuatorRelativeTo::World)?;
+    enum_table.set("ActuatorRelativeTo", actuator_relative_to_table)?;
 
     let state_type_table = lua.create_table()?;
     state_type_table.set("Running", HumanoidStateType::Running)?;

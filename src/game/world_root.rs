@@ -2,9 +2,9 @@ use nalgebra::{Isometry3, Matrix3, Rotation3, Translation3, UnitQuaternion};
 use rapier3d::parry::query::intersection_test;
 use rapier3d::prelude::{point, SharedShape};
 
-use crate::game::lua::instance::Instance;
+use crate::game::lua::instance::{Instance, TerrainCell, TerrainVoxel, TERRAIN_VOXEL_SIZE};
 use crate::game::lua::services::PhysicsService;
-use crate::game::lua::types::{CFrame, PartType, RaycastFilterType, Vector3};
+use crate::game::lua::types::{CFrame, Material, PartType, RaycastFilterType, Vector3};
 
 #[derive(Clone)]
 pub struct RaycastQueryParams {
@@ -12,6 +12,7 @@ pub struct RaycastQueryParams {
     pub filter_instances: Vec<Instance>,
     pub collision_group: String,
     pub respect_can_collide: bool,
+    pub ignore_water: bool,
 }
 
 #[derive(Clone)]
@@ -29,6 +30,7 @@ pub struct RaycastHit {
     pub position: Vector3,
     pub normal: Vector3,
     pub distance: f32,
+    pub material: Material,
 }
 
 pub struct WorldRoot {
@@ -56,7 +58,7 @@ impl WorldRoot {
         let ray_length = direction.magnitude();
         let ray_dir = direction.unit();
 
-        let mut closest: Option<(f32, Instance, Vector3)> = None;
+        let mut closest: Option<(f32, Instance, Vector3, Material)> = None;
 
         for descendant in self.descendants() {
             let part_info = {
@@ -70,12 +72,21 @@ impl WorldRoot {
                         part.cframe.position,
                         part.cframe.rotation,
                         part.shape,
+                        part.material,
                     )
                 })
             };
 
-            let Some((can_query, can_collide, collision_group_id, size, position, rotation, shape)) =
-                part_info
+            let Some((
+                can_query,
+                can_collide,
+                collision_group_id,
+                size,
+                position,
+                rotation,
+                shape,
+                material,
+            )) = part_info
             else {
                 continue;
             };
@@ -126,12 +137,39 @@ impl WorldRoot {
                 let normal = Vector3::new(world_normal[0], world_normal[1], world_normal[2]);
 
                 if closest.is_none() || t < closest.as_ref().unwrap().0 {
-                    closest = Some((t, descendant.clone(), normal));
+                    closest = Some((t, descendant.clone(), normal, material));
                 }
             }
         }
 
-        Ok(closest.map(|(dist, instance, normal)| {
+        if !params.ignore_water {
+            for terrain in self.descendants() {
+                let water_blocks = {
+                    let data = terrain.data.lock().unwrap();
+                    data.terrain_data
+                        .as_ref()
+                        .map(|terrain| terrain.water_voxels().collect::<Vec<_>>())
+                };
+                let Some(water_voxels) = water_blocks else {
+                    continue;
+                };
+                if query_filter_skips(&terrain, &params.filter_instances, params.filter_type) {
+                    continue;
+                }
+
+                for (cell, voxel) in water_voxels {
+                    if let Some((t, normal)) =
+                        intersect_terrain_water_voxel(cell, voxel, origin, ray_dir, ray_length)
+                    {
+                        if closest.is_none() || t < closest.as_ref().unwrap().0 {
+                            closest = Some((t, terrain.clone(), normal, Material::Water));
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok(closest.map(|(dist, instance, normal, material)| {
             let position = Vector3::new(
                 origin.x + ray_dir.x * dist,
                 origin.y + ray_dir.y * dist,
@@ -142,6 +180,7 @@ impl WorldRoot {
                 position,
                 normal,
                 distance: dist,
+                material,
             }
         }))
     }
@@ -399,6 +438,45 @@ fn mat_t_mul_vec(m: &[[f32; 3]; 3], v: [f32; 3]) -> [f32; 3] {
         m[0][1] * v[0] + m[1][1] * v[1] + m[2][1] * v[2],
         m[0][2] * v[0] + m[1][2] * v[1] + m[2][2] * v[2],
     ]
+}
+
+fn intersect_terrain_water_voxel(
+    cell: TerrainCell,
+    voxel: TerrainVoxel,
+    origin: Vector3,
+    ray_dir: Vector3,
+    ray_length: f32,
+) -> Option<(f32, Vector3)> {
+    if voxel.liquid_occupancy <= 0.0 {
+        return None;
+    }
+    let center = cell.center();
+    let center = [center.x, center.y, center.z];
+    let water_height = TERRAIN_VOXEL_SIZE * voxel.liquid_occupancy.clamp(0.0, 1.0);
+    let half = [
+        TERRAIN_VOXEL_SIZE / 2.0,
+        water_height / 2.0,
+        TERRAIN_VOXEL_SIZE / 2.0,
+    ];
+    let water_center_y = center[1] - TERRAIN_VOXEL_SIZE / 2.0 + water_height / 2.0;
+    let local_origin = mat_t_mul_vec(
+        &CFrame::identity().rotation,
+        [
+            origin.x - center[0],
+            origin.y - water_center_y,
+            origin.z - center[2],
+        ],
+    );
+    let local_dir = [ray_dir.x, ray_dir.y, ray_dir.z];
+    let (t, local_normal) = intersect_box_local(local_origin, local_dir, half)?;
+    if t < 0.0 || t > ray_length {
+        return None;
+    }
+
+    Some((
+        t,
+        Vector3::new(local_normal[0], local_normal[1], local_normal[2]),
+    ))
 }
 
 fn intersect_box_local(origin: [f32; 3], dir: [f32; 3], half: [f32; 3]) -> Option<(f32, [f32; 3])> {

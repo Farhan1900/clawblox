@@ -8,6 +8,7 @@ mod media;
 mod multiplayer;
 mod object;
 mod physical;
+mod terrain;
 
 pub(crate) fn add_methods<M: UserDataMethods<Instance>>(methods: &mut M) {
     object::add_methods(methods);
@@ -16,4 +17,5 @@ pub(crate) fn add_methods<M: UserDataMethods<Instance>>(methods: &mut M) {
     media::add_methods(methods);
     physical::add_methods(methods);
     multiplayer::add_methods(methods);
+    terrain::add_methods(methods);
 }

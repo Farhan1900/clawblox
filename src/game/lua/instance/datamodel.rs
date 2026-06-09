@@ -49,6 +49,7 @@ pub struct InstanceData {
     pub animation_data: Option<AnimationData>,
     pub animator_data: Option<AnimatorData>,
     pub model_data: Option<ModelData>,
+    pub terrain_data: Option<TerrainData>,
     pub gui_data: Option<GuiObjectData>,
     pub weld_data: Option<WeldData>,
     pub weld_constraint_data: Option<WeldConstraintData>,
@@ -66,6 +67,7 @@ pub struct InstanceData {
     pub body_force_data: Option<BodyForceData>,
     pub body_angular_velocity_data: Option<BodyAngularVelocityData>,
     pub attachment_data: Option<AttachmentData>,
+    pub vector_force_data: Option<VectorForceData>,
     pub align_position_data: Option<AlignPositionData>,
     pub align_orientation_data: Option<AlignOrientationData>,
     pub sound_data: Option<SoundData>,
@@ -134,6 +136,7 @@ impl InstanceData {
             animation_data: None,
             animator_data: None,
             model_data: None,
+            terrain_data: None,
             gui_data: None,
             weld_data: None,
             weld_constraint_data: None,
@@ -151,6 +154,7 @@ impl InstanceData {
             body_force_data: None,
             body_angular_velocity_data: None,
             attachment_data: None,
+            vector_force_data: None,
             align_position_data: None,
             align_orientation_data: None,
             sound_data: None,
@@ -280,6 +284,12 @@ impl InstanceData {
         inst
     }
 
+    pub fn new_terrain(name: &str) -> Self {
+        let mut inst = Self::new(ClassName::Terrain, name);
+        inst.terrain_data = Some(TerrainData::default());
+        inst
+    }
+
     pub fn new_body_velocity(name: &str) -> Self {
         let mut inst = Self::new(ClassName::BodyVelocity, name);
         inst.body_velocity_data = Some(BodyVelocityData::default());
@@ -301,6 +311,12 @@ impl InstanceData {
     pub fn new_attachment(name: &str) -> Self {
         let mut inst = Self::new(ClassName::Attachment, name);
         inst.attachment_data = Some(AttachmentData::default());
+        inst
+    }
+
+    pub fn new_vector_force(name: &str) -> Self {
+        let mut inst = Self::new(ClassName::VectorForce, name);
+        inst.vector_force_data = Some(VectorForceData::default());
         inst
     }
 

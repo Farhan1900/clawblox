@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use super::datamodel::WeakInstanceRef;
 use crate::game::constants::humanoid as humanoid_consts;
 pub use crate::game::lua::animation::{
@@ -5,7 +7,8 @@ pub use crate::game::lua::animation::{
 };
 use crate::game::lua::events::{create_signal, RBXScriptSignal};
 use crate::game::lua::types::{
-    CFrame, Color3, HumanoidStateType, Material, PartType, PhysicalProperties, UDim, UDim2, Vector3,
+    ActuatorRelativeTo, CFrame, Color3, HumanoidStateType, Material, PartType, PhysicalProperties,
+    UDim, UDim2, Vector3,
 };
 
 #[derive(Debug, Clone)]
@@ -88,21 +91,23 @@ impl Default for PartData {
 impl PartData {
     fn default_density_for_material(material: Material) -> f32 {
         match material {
+            Material::Air => 0.0,
             Material::Wood => 0.35,
-            Material::Metal => 0.7,
-            Material::Glass => 0.6,
+            Material::Metal => 7.85,
+            Material::Glass => 2.5,
             Material::Neon => 0.7,
-            Material::Concrete => 0.7,
-            Material::Brick => 0.7,
-            Material::Granite => 0.7,
+            Material::Concrete => 2.403,
+            Material::Brick => 1.922,
+            Material::Granite => 2.691,
             Material::Grass => 0.7,
-            Material::Ice => 0.65,
-            Material::Sand => 0.65,
+            Material::Ice => 0.919,
+            Material::Sand => 1.602,
             Material::Fabric => 0.3,
-            Material::Marble => 0.7,
-            Material::Slate => 0.7,
+            Material::Marble => 2.563,
+            Material::Slate => 2.691,
             Material::SmoothPlastic => 0.7,
             Material::ForceField => 0.0,
+            Material::Water => 1.0,
             Material::Plastic => 0.7,
         }
     }
@@ -126,6 +131,217 @@ impl PartData {
         }
         props
     }
+}
+
+pub const TERRAIN_VOXEL_SIZE: f32 = 4.0;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct TerrainCell {
+    pub x: i32,
+    pub y: i32,
+    pub z: i32,
+}
+
+impl TerrainCell {
+    pub fn center(self) -> Vector3 {
+        Vector3::new(
+            (self.x as f32 + 0.5) * TERRAIN_VOXEL_SIZE,
+            (self.y as f32 + 0.5) * TERRAIN_VOXEL_SIZE,
+            (self.z as f32 + 0.5) * TERRAIN_VOXEL_SIZE,
+        )
+    }
+
+    pub fn min(self) -> Vector3 {
+        Vector3::new(
+            self.x as f32 * TERRAIN_VOXEL_SIZE,
+            self.y as f32 * TERRAIN_VOXEL_SIZE,
+            self.z as f32 * TERRAIN_VOXEL_SIZE,
+        )
+    }
+
+    pub fn max(self) -> Vector3 {
+        Vector3::new(
+            (self.x as f32 + 1.0) * TERRAIN_VOXEL_SIZE,
+            (self.y as f32 + 1.0) * TERRAIN_VOXEL_SIZE,
+            (self.z as f32 + 1.0) * TERRAIN_VOXEL_SIZE,
+        )
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct TerrainVoxel {
+    pub solid_material: Material,
+    pub solid_occupancy: f32,
+    pub liquid_occupancy: f32,
+}
+
+impl Default for TerrainVoxel {
+    fn default() -> Self {
+        Self {
+            solid_material: Material::Air,
+            solid_occupancy: 0.0,
+            liquid_occupancy: 0.0,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct TerrainData {
+    pub voxels: HashMap<TerrainCell, TerrainVoxel>,
+}
+
+impl TerrainData {
+    pub fn fill_block(&mut self, cframe: CFrame, size: Vector3, material: Material) {
+        let size = Vector3::new(size.x.abs(), size.y.abs(), size.z.abs());
+        if size.x <= 0.0 || size.y <= 0.0 || size.z <= 0.0 {
+            return;
+        }
+
+        let half = Vector3::new(size.x / 2.0, size.y / 2.0, size.z / 2.0);
+        let bounds = terrain_fill_bounds(cframe, size);
+        for x in bounds[0].0..=bounds[0].1 {
+            for y in bounds[1].0..=bounds[1].1 {
+                for z in bounds[2].0..=bounds[2].1 {
+                    let cell = TerrainCell { x, y, z };
+                    let occupancy = if terrain_rotation_is_axis_aligned(cframe.rotation) {
+                        terrain_axis_aligned_overlap_fraction(cframe.position, size, cell)
+                    } else {
+                        // Parity note: Roblox supports rotated FillBlock. This sampled
+                        // integration preserves channel semantics, but it is not the final
+                        // analytic terrain voxelizer needed for exact rotated FillBlock parity.
+                        terrain_sampled_overlap_fraction(cframe, half, cell)
+                    };
+                    if occupancy <= 0.0 {
+                        continue;
+                    }
+
+                    if material == Material::Air {
+                        self.voxels.remove(&cell);
+                    } else if material == Material::Water {
+                        self.voxels.insert(
+                            cell,
+                            TerrainVoxel {
+                                solid_material: Material::Air,
+                                solid_occupancy: 0.0,
+                                liquid_occupancy: occupancy,
+                            },
+                        );
+                    } else {
+                        self.voxels.insert(
+                            cell,
+                            TerrainVoxel {
+                                solid_material: material,
+                                solid_occupancy: occupancy,
+                                liquid_occupancy: 0.0,
+                            },
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    pub fn water_voxels(&self) -> impl Iterator<Item = (TerrainCell, TerrainVoxel)> + '_ {
+        self.voxels
+            .iter()
+            .filter(|(_, voxel)| voxel.liquid_occupancy > 0.0)
+            .map(|(cell, voxel)| (*cell, *voxel))
+    }
+}
+
+fn terrain_fill_bounds(cframe: CFrame, size: Vector3) -> [(i32, i32); 3] {
+    let radius = 0.5 * (size.x * size.x + size.y * size.y + size.z * size.z).sqrt();
+    let min = Vector3::new(
+        cframe.position.x - radius,
+        cframe.position.y - radius,
+        cframe.position.z - radius,
+    );
+    let max = Vector3::new(
+        cframe.position.x + radius,
+        cframe.position.y + radius,
+        cframe.position.z + radius,
+    );
+    [
+        terrain_axis_bounds(min.x, max.x),
+        terrain_axis_bounds(min.y, max.y),
+        terrain_axis_bounds(min.z, max.z),
+    ]
+}
+
+fn terrain_axis_bounds(min: f32, max: f32) -> (i32, i32) {
+    (
+        (min / TERRAIN_VOXEL_SIZE).floor() as i32,
+        (max / TERRAIN_VOXEL_SIZE).ceil() as i32 - 1,
+    )
+}
+
+fn terrain_mat_t_mul_vec(m: &[[f32; 3]; 3], v: Vector3) -> Vector3 {
+    Vector3::new(
+        m[0][0] * v.x + m[1][0] * v.y + m[2][0] * v.z,
+        m[0][1] * v.x + m[1][1] * v.y + m[2][1] * v.z,
+        m[0][2] * v.x + m[1][2] * v.y + m[2][2] * v.z,
+    )
+}
+
+fn terrain_rotation_is_axis_aligned(rotation: [[f32; 3]; 3]) -> bool {
+    let identity = CFrame::identity().rotation;
+    rotation
+        .iter()
+        .flatten()
+        .zip(identity.iter().flatten())
+        .all(|(a, b)| (*a - *b).abs() < 1e-5)
+}
+
+fn terrain_axis_aligned_overlap_fraction(
+    position: Vector3,
+    size: Vector3,
+    cell: TerrainCell,
+) -> f32 {
+    let block_min = Vector3::new(
+        position.x - size.x / 2.0,
+        position.y - size.y / 2.0,
+        position.z - size.z / 2.0,
+    );
+    let block_max = Vector3::new(
+        position.x + size.x / 2.0,
+        position.y + size.y / 2.0,
+        position.z + size.z / 2.0,
+    );
+    let cell_min = cell.min();
+    let cell_max = cell.max();
+    let overlap_x = (block_max.x.min(cell_max.x) - block_min.x.max(cell_min.x)).max(0.0);
+    let overlap_y = (block_max.y.min(cell_max.y) - block_min.y.max(cell_min.y)).max(0.0);
+    let overlap_z = (block_max.z.min(cell_max.z) - block_min.z.max(cell_min.z)).max(0.0);
+    let voxel_volume = TERRAIN_VOXEL_SIZE * TERRAIN_VOXEL_SIZE * TERRAIN_VOXEL_SIZE;
+    (overlap_x * overlap_y * overlap_z / voxel_volume).clamp(0.0, 1.0)
+}
+
+fn terrain_sampled_overlap_fraction(cframe: CFrame, half: Vector3, cell: TerrainCell) -> f32 {
+    const SAMPLES_PER_AXIS: usize = 4;
+    let cell_min = cell.min();
+    let step = TERRAIN_VOXEL_SIZE / SAMPLES_PER_AXIS as f32;
+    let mut inside = 0usize;
+    for x in 0..SAMPLES_PER_AXIS {
+        for y in 0..SAMPLES_PER_AXIS {
+            for z in 0..SAMPLES_PER_AXIS {
+                let world = Vector3::new(
+                    cell_min.x + (x as f32 + 0.5) * step,
+                    cell_min.y + (y as f32 + 0.5) * step,
+                    cell_min.z + (z as f32 + 0.5) * step,
+                );
+                let relative = Vector3::new(
+                    world.x - cframe.position.x,
+                    world.y - cframe.position.y,
+                    world.z - cframe.position.z,
+                );
+                let local = terrain_mat_t_mul_vec(&cframe.rotation, relative);
+                if local.x.abs() <= half.x && local.y.abs() <= half.y && local.z.abs() <= half.z {
+                    inside += 1;
+                }
+            }
+        }
+    }
+    inside as f32 / (SAMPLES_PER_AXIS * SAMPLES_PER_AXIS * SAMPLES_PER_AXIS) as f32
 }
 
 #[derive(Debug, Clone)]
@@ -380,13 +596,15 @@ pub struct RemoteEventData {
 pub struct BodyVelocityData {
     pub velocity: Vector3,
     pub max_force: Vector3,
+    pub p: f32,
 }
 
 impl Default for BodyVelocityData {
     fn default() -> Self {
         Self {
-            velocity: Vector3::zero(),
-            max_force: Vector3::zero(),
+            velocity: Vector3::new(0.0, 2.0, 0.0),
+            max_force: Vector3::new(4000.0, 4000.0, 4000.0),
+            p: 1250.0,
         }
     }
 }
@@ -399,7 +617,7 @@ pub struct BodyForceData {
 impl Default for BodyForceData {
     fn default() -> Self {
         Self {
-            force: Vector3::zero(),
+            force: Vector3::new(0.0, 1.0, 0.0),
         }
     }
 }
@@ -408,13 +626,15 @@ impl Default for BodyForceData {
 pub struct BodyAngularVelocityData {
     pub angular_velocity: Vector3,
     pub max_torque: Vector3,
+    pub p: f32,
 }
 
 impl Default for BodyAngularVelocityData {
     fn default() -> Self {
         Self {
-            angular_velocity: Vector3::zero(),
-            max_torque: Vector3::zero(),
+            angular_velocity: Vector3::new(0.0, 2.0, 0.0),
+            max_torque: Vector3::new(4000.0, 4000.0, 4000.0),
+            p: 1250.0,
         }
     }
 }
@@ -428,6 +648,29 @@ impl Default for AttachmentData {
     fn default() -> Self {
         Self {
             cframe: CFrame::identity(),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct VectorForceData {
+    pub attachment0: Option<WeakInstanceRef>,
+    pub attachment1: Option<WeakInstanceRef>,
+    pub force: Vector3,
+    pub relative_to: ActuatorRelativeTo,
+    pub apply_at_center_of_mass: bool,
+    pub enabled: bool,
+}
+
+impl Default for VectorForceData {
+    fn default() -> Self {
+        Self {
+            attachment0: None,
+            attachment1: None,
+            force: Vector3::new(1000.0, 0.0, 0.0),
+            relative_to: ActuatorRelativeTo::Attachment0,
+            apply_at_center_of_mass: false,
+            enabled: true,
         }
     }
 }

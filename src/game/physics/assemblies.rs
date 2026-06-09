@@ -9,6 +9,10 @@ use super::{
 };
 use crate::game::constants::physics as consts;
 
+fn finite_force(values: [f32; 3]) -> bool {
+    values.iter().all(|v| v.is_finite())
+}
+
 fn part_within_physics_envelope(part: &PhysicsAssemblyPart) -> bool {
     transform_within_physics_envelope(part.position)
         && finite_vec3(part.size)
@@ -98,6 +102,109 @@ fn assembly_signature(
 }
 
 impl PhysicsWorld {
+    pub fn reset_continuous_forces(&mut self) {
+        for body in self.rigid_body_set.iter_mut().map(|(_, body)| body) {
+            if body.is_dynamic() {
+                body.reset_forces(true);
+                body.reset_torques(true);
+            }
+        }
+    }
+
+    pub fn add_force_to_part(&mut self, lua_id: u64, force: [f32; 3]) {
+        if !finite_force(force) {
+            return;
+        }
+        let Some(&handle) = self.lua_to_body.get(&lua_id) else {
+            return;
+        };
+        if let Some(body) = self.rigid_body_set.get_mut(handle) {
+            if body.is_dynamic() {
+                body.add_force(vector![force[0], force[1], force[2]], true);
+            }
+        }
+    }
+
+    pub fn add_force_at_position_to_part(
+        &mut self,
+        lua_id: u64,
+        force: [f32; 3],
+        position: [f32; 3],
+    ) {
+        if !finite_force(force) || !transform_within_physics_envelope(position) {
+            return;
+        }
+        let Some(&handle) = self.lua_to_body.get(&lua_id) else {
+            return;
+        };
+        if let Some(body) = self.rigid_body_set.get_mut(handle) {
+            if body.is_dynamic() {
+                body.add_force_at_point(
+                    vector![force[0], force[1], force[2]],
+                    point![position[0], position[1], position[2]],
+                    true,
+                );
+            }
+        }
+    }
+
+    pub fn add_torque_to_part(&mut self, lua_id: u64, torque: [f32; 3]) {
+        if !finite_force(torque) {
+            return;
+        }
+        let Some(&handle) = self.lua_to_body.get(&lua_id) else {
+            return;
+        };
+        if let Some(body) = self.rigid_body_set.get_mut(handle) {
+            if body.is_dynamic() {
+                body.add_torque(vector![torque[0], torque[1], torque[2]], true);
+            }
+        }
+    }
+
+    pub fn set_assembly_angular_velocity_for_part(
+        &mut self,
+        lua_id: u64,
+        angular_velocity: [f32; 3],
+    ) {
+        let Some(&handle) = self.lua_to_body.get(&lua_id) else {
+            return;
+        };
+        self.set_angular_velocity(handle, angular_velocity);
+    }
+
+    pub fn get_assembly_mass_for_part(&self, lua_id: u64) -> Option<f32> {
+        let handle = *self.lua_to_body.get(&lua_id)?;
+        self.rigid_body_set
+            .get(handle)
+            .filter(|body| body.is_dynamic())
+            .map(|body| body.mass())
+    }
+
+    pub fn get_assembly_linear_velocity_for_part(&self, lua_id: u64) -> Option<[f32; 3]> {
+        let handle = *self.lua_to_body.get(&lua_id)?;
+        self.get_velocity(handle)
+    }
+
+    pub fn get_assembly_angular_velocity_for_part(&self, lua_id: u64) -> Option<[f32; 3]> {
+        let handle = *self.lua_to_body.get(&lua_id)?;
+        self.get_angular_velocity(handle)
+    }
+
+    pub fn get_velocity_at_position_for_part(
+        &self,
+        lua_id: u64,
+        position: [f32; 3],
+    ) -> Option<[f32; 3]> {
+        if !transform_within_physics_envelope(position) {
+            return None;
+        }
+        let handle = *self.lua_to_body.get(&lua_id)?;
+        let body = self.rigid_body_set.get(handle)?;
+        let vel = body.velocity_at_point(&point![position[0], position[1], position[2]]);
+        Some([vel.x, vel.y, vel.z])
+    }
+
     pub fn apply_impulse_to_part(&mut self, lua_id: u64, impulse: [f32; 3]) {
         if !velocity_within_physics_envelope(impulse) {
             return;

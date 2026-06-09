@@ -10,7 +10,8 @@ impl GameInstance {
         for command in runtime.game().drain_physics_commands() {
             match command {
                 PhysicsCommand::ApplyImpulse { part_id, impulse } => {
-                    self.physics.apply_impulse_to_part(part_id, impulse.to_array());
+                    self.physics
+                        .apply_impulse_to_part(part_id, impulse.to_array());
                 }
                 PhysicsCommand::ApplyImpulseAtPosition {
                     part_id,
