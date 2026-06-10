@@ -17,6 +17,8 @@ mod fluid_physics;
 mod modern_actuators;
 mod observation;
 mod physics_commands;
+#[cfg(test)]
+mod physics_stability_tests;
 mod player_lifecycle;
 mod tick_pipeline;
 mod workspace_physics;

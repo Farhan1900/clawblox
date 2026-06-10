@@ -3,10 +3,27 @@ use std::collections::{HashMap, HashSet};
 use crate::game::lua::events::{track_yielded_threads, RBXScriptSignal};
 use crate::game::lua::instance::{Instance, WeakInstanceRef};
 use crate::game::physics::{
-    rotation_matrix_to_quaternion, PhysicsAssemblyPart, PhysicsAssemblySpec,
+    rotation_matrix_to_quaternion, AlignKind, AlignMotorSpec, AlignTarget, PhysicsAssemblyPart,
+    PhysicsAssemblySpec,
 };
 
 use super::GameInstance;
+
+type PhysIsometry = rapier3d::prelude::Isometry<rapier3d::prelude::Real>;
+
+fn cframe_to_isometry(cframe: &crate::game::lua::types::CFrame) -> PhysIsometry {
+    PhysIsometry::from_parts(
+        nalgebra::Translation3::new(cframe.position.x, cframe.position.y, cframe.position.z),
+        rotation_matrix_to_quaternion(&cframe.rotation),
+    )
+}
+
+fn attachment_local_isometry(attachment: &Instance) -> Option<PhysIsometry> {
+    let data = attachment.data.lock().unwrap();
+    data.attachment_data
+        .as_ref()
+        .map(|attachment| cframe_to_isometry(&attachment.cframe))
+}
 
 const RIGID_ALIGN_MAX_SPEED: f32 = 60.0;
 const RIGID_ALIGN_MAX_ANGULAR_SPEED: f32 = 30.0;
@@ -75,17 +92,6 @@ fn clamp_magnitude(mut value: [f32; 3], limit: f32) -> [f32; 3] {
     value
 }
 
-fn clamp_components(mut value: [f32; 3], limits: [f32; 3]) -> [f32; 3] {
-    for i in 0..3 {
-        let limit = limits[i].abs();
-        if !limit.is_finite() {
-            continue;
-        }
-        value[i] = value[i].clamp(-limit, limit);
-    }
-    value
-}
-
 fn rotation_error_vector(current: [[f32; 3]; 3], target: [[f32; 3]; 3]) -> [f32; 3] {
     let c0 = [current[0][0], current[1][0], current[2][0]];
     let c1 = [current[0][1], current[1][1], current[2][1]];
@@ -125,6 +131,10 @@ impl GameInstance {
             return;
         };
 
+        // Align constraints represented by a live motor joint this tick;
+        // joints for everything else are swept afterward.
+        let mut live_motors: HashSet<u64> = HashSet::new();
+
         for inst in runtime.workspace().get_descendants() {
             let (align_position, align_orientation) = {
                 let data = inst.data.lock().unwrap();
@@ -146,10 +156,60 @@ impl GameInstance {
                 let Some(current_attachment_world) = attachment0.attachment_world_cframe() else {
                     continue;
                 };
-                let target_position = if let Some(attachment1_ref) =
-                    align.attachment1.as_ref().and_then(|w| w.upgrade())
-                {
-                    let attachment1 = Instance::from_ref(attachment1_ref);
+                let attachment1 = align
+                    .attachment1
+                    .as_ref()
+                    .and_then(|w| w.upgrade())
+                    .map(Instance::from_ref);
+
+                // Non-rigid aligns are persistent motorized joints, solved
+                // implicitly with the rest of the system: several constraints
+                // on one body stay stable, and conflicting targets resolve to
+                // a bounded compromise instead of pumping energy. Targets on
+                // dynamic bodies are followed through the world anchor inside
+                // upsert_align_motor (Roblox aligns are reactionless). An
+                // upsert can only fail while a body is missing (e.g. the part
+                // is not yet synced); the constraint simply waits a tick.
+                if !align.rigidity_enabled {
+                    let target = match &attachment1 {
+                        Some(att1) => att1.attachment_parent_part().and_then(|part1| {
+                            attachment_local_isometry(att1).map(|frame| AlignTarget::Part {
+                                part_id: part1.id().0,
+                                attachment_frame: frame,
+                            })
+                        }),
+                        None => Some(AlignTarget::World(PhysIsometry::from_parts(
+                            nalgebra::Translation3::new(
+                                align.position.x,
+                                align.position.y,
+                                align.position.z,
+                            ),
+                            nalgebra::UnitQuaternion::identity(),
+                        ))),
+                    };
+                    if let (Some(target), Some(frame0)) =
+                        (target, attachment_local_isometry(&attachment0))
+                    {
+                        let spec = AlignMotorSpec {
+                            align_id: inst.id().0,
+                            kind: AlignKind::Position,
+                            part_id: parent_part.id().0,
+                            attachment_frame: frame0,
+                            target,
+                            responsiveness: align.responsiveness.max(0.0),
+                            max_output: [align.max_force; 3],
+                            max_velocity: align.max_velocity,
+                        };
+                        if self.physics.upsert_align_motor(&spec) {
+                            live_motors.insert(spec.align_id);
+                        }
+                    }
+                    continue;
+                }
+
+                // RigidityEnabled: a velocity-level hard tracker, not a
+                // spring — kept as a direct velocity solve.
+                let target_position = if let Some(attachment1) = &attachment1 {
                     let Some(target_world) = attachment1.attachment_world_cframe() else {
                         continue;
                     };
@@ -170,53 +230,20 @@ impl GameInstance {
                     if dt <= f32::EPSILON {
                         continue;
                     }
-                    let responsiveness = align.responsiveness.max(0.0);
                     let error = [
                         target_position.x - current_attachment_world.position.x,
                         target_position.y - current_attachment_world.position.y,
                         target_position.z - current_attachment_world.position.z,
                     ];
-                    let desired_velocity = if align.rigidity_enabled {
-                        clamp_magnitude(
-                            [error[0] / dt, error[1] / dt, error[2] / dt],
-                            RIGID_ALIGN_MAX_SPEED,
-                        )
-                    } else {
-                        clamp_magnitude(
-                            [
-                                error[0] * responsiveness,
-                                error[1] * responsiveness,
-                                error[2] * responsiveness,
-                            ],
-                            align.max_velocity,
-                        )
-                    };
-                    let force = if align.rigidity_enabled {
-                        [
-                            (desired_velocity[0] - current_velocity[0]) * mass / dt,
-                            (desired_velocity[1] - current_velocity[1]) * mass / dt,
-                            (desired_velocity[2] - current_velocity[2]) * mass / dt,
-                        ]
-                    } else {
-                        // Critically damped spring (Roblox AlignPosition is ~ζ=1).
-                        // The cascaded P-loop (desired_velocity = error * k, then
-                        // force ∝ (desired_velocity - v) * k) is only ζ=0.5 and rings;
-                        // doubling the velocity-feedback term raises it to ζ=1 so a
-                        // held object settles instead of oscillating.
-                        [
-                            (desired_velocity[0] - 2.0 * current_velocity[0]) * mass * responsiveness,
-                            (desired_velocity[1] - 2.0 * current_velocity[1]) * mass * responsiveness,
-                            (desired_velocity[2] - 2.0 * current_velocity[2]) * mass * responsiveness,
-                        ]
-                    };
-                    let force = clamp_magnitude(
-                        force,
-                        if align.rigidity_enabled {
-                            f32::INFINITY
-                        } else {
-                            align.max_force
-                        },
+                    let desired_velocity = clamp_magnitude(
+                        [error[0] / dt, error[1] / dt, error[2] / dt],
+                        RIGID_ALIGN_MAX_SPEED,
                     );
+                    let force = [
+                        (desired_velocity[0] - current_velocity[0]) * mass / dt,
+                        (desired_velocity[1] - current_velocity[1]) * mass / dt,
+                        (desired_velocity[2] - current_velocity[2]) * mass / dt,
+                    ];
                     self.physics.add_force_at_position_to_part(
                         parent_part.id().0,
                         force,
@@ -238,10 +265,47 @@ impl GameInstance {
                 let Some(current_attachment_world) = attachment0.attachment_world_cframe() else {
                     continue;
                 };
-                let target_rotation = if let Some(attachment1_ref) =
-                    align.attachment1.as_ref().and_then(|w| w.upgrade())
-                {
-                    let attachment1 = Instance::from_ref(attachment1_ref);
+                let attachment1 = align
+                    .attachment1
+                    .as_ref()
+                    .and_then(|w| w.upgrade())
+                    .map(Instance::from_ref);
+
+                // Motor path (see the AlignPosition branch above). Without an
+                // Attachment1 the constraint has no target and applies no
+                // torque, matching the force path's behavior.
+                if !align.rigidity_enabled {
+                    if let Some(att1) = &attachment1 {
+                        let target = att1.attachment_parent_part().and_then(|part1| {
+                            attachment_local_isometry(att1).map(|frame| AlignTarget::Part {
+                                part_id: part1.id().0,
+                                attachment_frame: frame,
+                            })
+                        });
+                        if let (Some(target), Some(frame0)) =
+                            (target, attachment_local_isometry(&attachment0))
+                        {
+                            let spec = AlignMotorSpec {
+                                align_id: inst.id().0,
+                                kind: AlignKind::Orientation,
+                                part_id: parent_part.id().0,
+                                attachment_frame: frame0,
+                                target,
+                                responsiveness: align.responsiveness.max(0.0),
+                                max_output: align.max_torque.to_array(),
+                                max_velocity: 0.0,
+                            };
+                            if self.physics.upsert_align_motor(&spec) {
+                                live_motors.insert(spec.align_id);
+                            }
+                        }
+                    }
+                    continue;
+                }
+
+                // RigidityEnabled: a velocity-level hard tracker, not a
+                // spring — kept as a direct angular velocity solve.
+                let target_rotation = if let Some(attachment1) = &attachment1 {
                     let Some(target_world) = attachment1.attachment_world_cframe() else {
                         continue;
                     };
@@ -258,56 +322,22 @@ impl GameInstance {
                     if dt <= f32::EPSILON {
                         continue;
                     }
-                    let current_angular_velocity = self
-                        .physics
-                        .get_assembly_angular_velocity_for_part(parent_part.id().0)
-                        .unwrap_or([0.0, 0.0, 0.0]);
-                    let responsiveness = align.responsiveness.max(0.0);
                     let error =
                         rotation_error_vector(current_attachment_world.rotation, target_rotation);
-                    let desired_angular_velocity = if align.rigidity_enabled {
-                        clamp_magnitude(
-                            [error[0] / dt, error[1] / dt, error[2] / dt],
-                            RIGID_ALIGN_MAX_ANGULAR_SPEED,
-                        )
-                    } else {
-                        [
-                            error[0] * responsiveness,
-                            error[1] * responsiveness,
-                            error[2] * responsiveness,
-                        ]
-                    };
-                    if align.rigidity_enabled {
-                        self.physics.set_assembly_angular_velocity_for_part(
-                            parent_part.id().0,
-                            desired_angular_velocity,
-                        );
-                    } else {
-                        // Critically damped (ζ=1) AND inertia-aware. The desired
-                        // angular acceleration mirrors the linear controller
-                        // (double the velocity-feedback term for ζ=1); converting
-                        // it to torque through the body's inertia tensor makes the
-                        // response independent of inertia, so a long/heavy object
-                        // is held steady instead of swinging.
-                        let angular_accel = [
-                            (desired_angular_velocity[0] - 2.0 * current_angular_velocity[0])
-                                * responsiveness,
-                            (desired_angular_velocity[1] - 2.0 * current_angular_velocity[1])
-                                * responsiveness,
-                            (desired_angular_velocity[2] - 2.0 * current_angular_velocity[2])
-                                * responsiveness,
-                        ];
-                        let raw_torque = self
-                            .physics
-                            .assembly_torque_for_angular_accel(parent_part.id().0, angular_accel)
-                            .unwrap_or(angular_accel);
-                        let torque = clamp_components(raw_torque, align.max_torque.to_array());
-                        self.physics.add_torque_to_part(parent_part.id().0, torque);
-                    }
+                    let desired_angular_velocity = clamp_magnitude(
+                        [error[0] / dt, error[1] / dt, error[2] / dt],
+                        RIGID_ALIGN_MAX_ANGULAR_SPEED,
+                    );
+                    self.physics.set_assembly_angular_velocity_for_part(
+                        parent_part.id().0,
+                        desired_angular_velocity,
+                    );
                     continue;
                 }
             }
         }
+
+        self.physics.retain_align_motors(&live_motors);
     }
 
     /// Syncs Lua parts to the physics world as Roblox-style rigid assemblies.
@@ -849,7 +879,7 @@ impl GameInstance {
         };
 
         let descendants = runtime.workspace().get_descendants();
-        self.physics.clear_impulse_joints();
+        self.physics.clear_weld_joints();
 
         let cframe_to_isometry = |cframe: crate::game::lua::types::CFrame| {
             rapier3d::prelude::Isometry::from_parts(

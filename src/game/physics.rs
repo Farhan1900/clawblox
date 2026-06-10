@@ -6,10 +6,12 @@ use super::constants::physics as consts;
 use super::lua::services::physics_service::CollisionGroupMask;
 use super::lua::types::{CFrame, PartType, PhysicalProperties, Vector3};
 
+mod align_motors;
 mod assemblies;
 mod characters;
 mod parts;
 
+pub use align_motors::{AlignKind, AlignMotorSpec, AlignTarget};
 pub use characters::{CharacterControllerState, GroundKinematicSupport};
 use parts::build_collider_with_physical_properties;
 
@@ -152,6 +154,16 @@ pub struct PhysicsWorld {
     pub kinematic_linear_velocities: HashMap<RigidBodyHandle, [f32; 3]>,
     /// Bodies queued for removal after the current physics step finishes.
     pending_body_removals: Vec<RigidBodyHandle>,
+    /// Fixed joints mirroring Lua weld constraints across distinct bodies.
+    /// Rebuilt from Lua every tick (see `clear_weld_joints`).
+    weld_joint_handles: Vec<ImpulseJointHandle>,
+    /// Persistent motor joints backing AlignPosition/AlignOrientation, keyed
+    /// by the constraint instance's Lua ID. Kept across ticks so the solver
+    /// retains warm-start impulses; recreated only when the involved bodies
+    /// change (e.g. an assembly rebuild).
+    align_joints: HashMap<u64, align_motors::AlignJointEntry>,
+    /// Lazily created fixed body that world-space align targets attach to.
+    world_anchor_body: Option<RigidBodyHandle>,
 }
 
 fn part_isometry(position: [f32; 3], rotation: &[[f32; 3]; 3]) -> Isometry<Real> {
@@ -268,6 +280,9 @@ impl PhysicsWorld {
             body_to_luas: HashMap::new(),
             assembly_signatures: HashMap::new(),
             kinematic_linear_velocities: HashMap::new(),
+            weld_joint_handles: Vec::new(),
+            align_joints: HashMap::new(),
+            world_anchor_body: None,
             pending_body_removals: Vec::new(),
         }
     }
@@ -299,14 +314,10 @@ impl PhysicsWorld {
         self.purge_invalid_bodies();
     }
 
-    /// Removes all impulse joints. Constraints are rebuilt from Lua every tick.
-    pub fn clear_impulse_joints(&mut self) {
-        let handles: Vec<_> = self
-            .impulse_joint_set
-            .iter()
-            .map(|(handle, _)| handle)
-            .collect();
-        for handle in handles {
+    /// Removes the weld-mirror joints. Weld constraints are rebuilt from Lua
+    /// every tick; align motor joints are persistent and managed separately.
+    pub fn clear_weld_joints(&mut self) {
+        for handle in std::mem::take(&mut self.weld_joint_handles) {
             self.impulse_joint_set.remove(handle, true);
         }
     }
@@ -323,7 +334,9 @@ impl PhysicsWorld {
             .contacts_enabled(false)
             .local_frame1(local_frame1)
             .local_frame2(local_frame2);
-        self.impulse_joint_set.insert(body1, body2, joint, true)
+        let handle = self.impulse_joint_set.insert(body1, body2, joint, true);
+        self.weld_joint_handles.push(handle);
+        handle
     }
 
     /// Adds a part to the physics world

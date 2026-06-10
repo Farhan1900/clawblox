@@ -486,6 +486,7 @@ impl PhysicsWorld {
             .exclude_sensors()
             .groups(interaction_groups(collision_group));
 
+        let mut collisions = Vec::new();
         let movement = controller.move_shape(
             dt,
             &self.rigid_body_set,
@@ -495,8 +496,25 @@ impl PhysicsWorld {
             &current_pos,
             desired,
             filter,
-            |_collision| {},
+            |collision| collisions.push(collision),
         );
+
+        // Shove dynamic bodies out of the walking path. Without this, the
+        // controller treats every collider as an immovable wall, so a loose
+        // part that comes to rest against the capsule (and then falls
+        // asleep) walls the character in permanently.
+        if !collisions.is_empty() {
+            controller.solve_character_collision_impulses(
+                dt,
+                &mut self.rigid_body_set,
+                &self.collider_set,
+                &self.query_pipeline,
+                shape,
+                consts::CHARACTER_PUSH_MASS,
+                collisions.iter(),
+                filter,
+            );
+        }
 
         // Use set_next_kinematic_translation like physics-world
         // This schedules the movement for the next physics step

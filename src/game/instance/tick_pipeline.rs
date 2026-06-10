@@ -47,7 +47,7 @@ pub(super) fn run_tick_phases(instance: &mut GameInstance, dt: f32) {
     instance.apply_modern_actuators();
 
     // Apply Terrain liquid-channel fluid forces before the solver advances.
-    instance.apply_fluid_forces();
+    instance.apply_fluid_forces(dt);
 
     // Sync script control targets to physics character controllers.
     instance.sync_controller_targets();

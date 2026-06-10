@@ -40,6 +40,11 @@ pub mod physics {
     /// Max support gap for "sticky" moving-platform carry when briefly not grounded.
     pub const CHARACTER_PLATFORM_STICK_DISTANCE: f32 = 0.6;
 
+    /// Effective character mass used to push dynamic bodies out of the
+    /// walking path. Light debris gets shoved aside, heavy objects still
+    /// block the way.
+    pub const CHARACTER_PUSH_MASS: f32 = 12.0;
+
     /// Small epsilon for float comparisons
     pub const EPSILON: f32 = 0.001;
 }

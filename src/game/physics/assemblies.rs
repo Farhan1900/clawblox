@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 
 use rapier3d::prelude::*;
 
@@ -56,36 +56,17 @@ fn fmt_iso(out: &mut String, iso: &Isometry<Real>) {
 }
 
 fn assembly_signature(
-    root_iso: &Isometry<Real>,
     anchored: bool,
     parts: &[PhysicsAssemblyPart],
-    existing_local_frames: &HashMap<u64, Isometry<Real>>,
+    local_frames: &[Isometry<Real>],
 ) -> String {
     let mut out = format!("anchored={};", anchored);
-    let inv_root = root_iso.inverse();
-    let assembly_cframe_write = parts.iter().any(|part| part.cframe_dirty);
-    let mut sorted = parts.to_vec();
-    sorted.sort_by_key(|p| p.lua_id);
-    for part in &sorted {
-        // Roblox weld parity: setting Position on a welded part recalculates
-        // that part's assembly-local offset, but setting CFrame moves the whole
-        // assembly through the existing offsets. If any assembly member had a
-        // CFrame write this frame, preserve every stored local frame; otherwise
-        // moving the root part would make every other part look like it changed
-        // weld offset relative to the new root transform.
-        let local = if assembly_cframe_write {
-            existing_local_frames
-                .get(&part.lua_id)
-                .copied()
-                .unwrap_or_else(|| inv_root * part_isometry(part.position, &part.rotation))
-        } else {
-            inv_root * part_isometry(part.position, &part.rotation)
-        };
+    for (part, local) in parts.iter().zip(local_frames) {
         out.push_str(&format!("id={};shape={:?};", part.lua_id, part.shape));
         out.push_str("size=");
         fmt_vec3(&mut out, part.size);
         out.push_str(";local=");
-        fmt_iso(&mut out, &local);
+        fmt_iso(&mut out, local);
         out.push(';');
         if let Some(props) = part.physical_properties {
             out.push_str(&format!(
@@ -102,6 +83,61 @@ fn assembly_signature(
 }
 
 impl PhysicsWorld {
+    /// True when `spec`'s parts are exactly the parts of one existing body.
+    fn component_composition_unchanged(&self, spec: &PhysicsAssemblySpec) -> bool {
+        let Some(&body) = self.lua_to_body.get(&spec.root_id) else {
+            return false;
+        };
+        let Some(luas) = self.body_to_luas.get(&body) else {
+            return false;
+        };
+        if luas.len() != spec.parts.len() {
+            return false;
+        }
+        let mut current: Vec<u64> = luas.clone();
+        current.sort_unstable();
+        spec.parts
+            .iter()
+            .map(|part| part.lua_id)
+            .eq(current.into_iter())
+    }
+
+    /// Resolves the weld-local frame of every part in an assembly component.
+    ///
+    /// Local frames define the assembly's rigid geometry, so they must stay
+    /// bit-identical while the assembly merely moves. They are re-derived
+    /// from world poses only when the geometry can actually have changed: on
+    /// first build, when the component's composition changed (weld
+    /// added/removed, assemblies merged or split), or for a part whose
+    /// Position was written (Roblox parity: a Position write re-seats that
+    /// part within its assembly, while a CFrame write moves the whole
+    /// assembly through the existing offsets). Re-deriving them every tick
+    /// would bake f32 round-trip noise into the assembly signature and
+    /// rebuild the physics body — resetting sleep, contacts, and momentum —
+    /// on nearly every tick the assembly is in motion.
+    fn resolve_local_frames(
+        &self,
+        spec: &PhysicsAssemblySpec,
+        root_iso: &Isometry<Real>,
+    ) -> Vec<Isometry<Real>> {
+        let inv_root = root_iso.inverse();
+        let composition_unchanged = self.component_composition_unchanged(spec);
+        let assembly_cframe_write = spec.parts.iter().any(|part| part.cframe_dirty);
+        spec.parts
+            .iter()
+            .map(|part| {
+                let position_write =
+                    part.position_dirty && !part.cframe_dirty && !assembly_cframe_write;
+                let stored = if composition_unchanged && !position_write {
+                    self.lua_to_local_frame.get(&part.lua_id).copied()
+                } else {
+                    None
+                };
+                stored.unwrap_or_else(|| inv_root * part_isometry(part.position, &part.rotation))
+            })
+            .collect()
+    }
+
     pub fn reset_continuous_forces(&mut self) {
         for body in self.rigid_body_set.iter_mut().map(|(_, body)| body) {
             if body.is_dynamic() {
@@ -313,12 +349,12 @@ impl PhysicsWorld {
                 .unwrap_or(&spec.parts[0]);
             let root_iso = part_isometry(root_part.position, &root_part.rotation);
             let anchored = spec.parts.iter().any(|part| part.anchored);
-            let signature =
-                assembly_signature(&root_iso, anchored, &spec.parts, &self.lua_to_local_frame);
+            let local_frames = self.resolve_local_frames(&spec, &root_iso);
+            let signature = assembly_signature(anchored, &spec.parts, &local_frames);
             let existing_signature = self.assembly_signatures.get(&spec.root_id);
 
             if existing_signature != Some(&signature) {
-                self.rebuild_assembly(&spec, root_iso, anchored, signature);
+                self.rebuild_assembly(&spec, root_iso, anchored, signature, &local_frames);
                 continue;
             }
 
@@ -354,7 +390,22 @@ impl PhysicsWorld {
         root_iso: Isometry<Real>,
         anchored: bool,
         signature: String,
+        local_frames: &[Isometry<Real>],
     ) {
+        // Capture the root part's old body motion before tearing the bodies
+        // down, so the assembly keeps its momentum across the rebuild.
+        let carry_over = self
+            .lua_to_body
+            .get(&spec.root_id)
+            .or_else(|| {
+                spec.parts
+                    .iter()
+                    .find_map(|part| self.lua_to_body.get(&part.lua_id))
+            })
+            .and_then(|&handle| self.rigid_body_set.get(handle))
+            .filter(|body| body.is_dynamic())
+            .map(|body| (*body.linvel(), *body.angvel(), *body.center_of_mass()));
+
         let mut old_roots: Vec<u64> = spec
             .parts
             .iter()
@@ -383,19 +434,15 @@ impl PhysicsWorld {
         .build();
         let body_handle = self.rigid_body_set.insert(body);
 
-        let inv_root = root_iso.inverse();
         let mut lua_ids = Vec::with_capacity(spec.parts.len());
-        let mut initial_velocity = None;
-        let mut initial_angular_velocity = None;
 
-        for part in &spec.parts {
+        for (part, &local_frame) in spec.parts.iter().zip(local_frames) {
             let interaction_state = PartInteractionState {
                 can_collide: part.can_collide,
                 can_touch: part.can_touch,
                 can_query: part.can_query,
                 collision_group: part.collision_group,
             };
-            let local_frame = inv_root * part_isometry(part.position, &part.rotation);
             let mut collider = build_collider_with_physical_properties(
                 part.size,
                 part.shape,
@@ -419,15 +466,6 @@ impl PhysicsWorld {
                 .insert(part.lua_id, interaction_state);
             self.collider_to_lua.insert(collider_handle, part.lua_id);
             lua_ids.push(part.lua_id);
-
-            if initial_velocity.is_none() && (part.velocity_dirty || part.lua_id == spec.root_id) {
-                initial_velocity = Some(part.velocity);
-            }
-            if initial_angular_velocity.is_none()
-                && (part.angular_velocity_dirty || part.lua_id == spec.root_id)
-            {
-                initial_angular_velocity = Some(part.angular_velocity);
-            }
         }
 
         self.body_to_lua.insert(body_handle, spec.root_id);
@@ -435,12 +473,29 @@ impl PhysicsWorld {
         self.assembly_signatures.insert(spec.root_id, signature);
 
         if !anchored {
-            if let Some(velocity) = initial_velocity {
-                self.set_velocity(body_handle, velocity);
+            // Default: preserve the old body's momentum through the rebuild.
+            // Angular velocity transfers directly; linear velocity is the old
+            // body's velocity evaluated at the new body's center of mass.
+            // Seeding from a part's point velocity instead would silently add
+            // w x r of COM speed on every rebuild of a rotating assembly.
+            let mut linvel = [0.0, 0.0, 0.0];
+            let mut angvel = [0.0, 0.0, 0.0];
+            if let Some((old_linvel, old_angvel, old_com)) = carry_over {
+                if let Some(body) = self.rigid_body_set.get(body_handle) {
+                    let v = old_linvel + old_angvel.cross(&(body.center_of_mass() - old_com));
+                    linvel = [v.x, v.y, v.z];
+                    angvel = [old_angvel.x, old_angvel.y, old_angvel.z];
+                }
             }
-            if let Some(angular_velocity) = initial_angular_velocity {
-                self.set_angular_velocity(body_handle, angular_velocity);
+            // Explicit Lua velocity writes still win.
+            if let Some(part) = spec.parts.iter().find(|part| part.velocity_dirty) {
+                linvel = part.velocity;
             }
+            if let Some(part) = spec.parts.iter().find(|part| part.angular_velocity_dirty) {
+                angvel = part.angular_velocity;
+            }
+            self.set_velocity(body_handle, linvel);
+            self.set_angular_velocity(body_handle, angvel);
         } else {
             self.kinematic_linear_velocities
                 .insert(body_handle, [0.0, 0.0, 0.0]);

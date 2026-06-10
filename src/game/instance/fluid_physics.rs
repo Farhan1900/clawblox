@@ -26,6 +26,7 @@ struct FluidPart {
     shape: PartType,
     position: [f32; 3],
     rotation: [[f32; 3]; 3],
+    density: f32,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -37,10 +38,13 @@ struct FluidSample {
 }
 
 impl GameInstance {
-    pub(super) fn apply_fluid_forces(&mut self) {
+    pub(super) fn apply_fluid_forces(&mut self, dt: f32) {
         let Some(runtime) = &self.lua_runtime else {
             return;
         };
+        if dt <= f32::EPSILON {
+            return;
+        }
 
         let water = collect_water_voxels(&runtime.workspace().get_descendants());
         if water.is_empty() {
@@ -74,6 +78,16 @@ impl GameInstance {
                     let speed = vector_length(velocity);
                     let drag_scale = displaced_volume
                         * (LINEAR_WATER_DRAG + QUADRATIC_WATER_DRAG * speed).max(0.0);
+                    // Drag is explicitly integrated (computed from pre-step
+                    // velocity, applied for the whole step), so it must be
+                    // capped to stay dissipative: limit the drag impulse to
+                    // the momentum of this sample's share of the part mass.
+                    // It can then stop local motion within one step but never
+                    // reverse it; uncapped, any submerged part moving faster
+                    // than ~2 * density / (drag_coeff * dt) overshoots,
+                    // flips its velocity with gain each tick, and explodes.
+                    let sample_mass = (part.density * sample.volume).max(1e-6);
+                    let drag_scale = drag_scale.min(sample_mass / dt);
                     force[0] -= velocity[0] * drag_scale;
                     force[1] -= velocity[1] * drag_scale;
                     force[2] -= velocity[2] * drag_scale;
@@ -95,12 +109,18 @@ impl GameInstance {
     fn collect_fluid_parts(&self, descendants: Vec<Instance>) -> Vec<FluidPart> {
         let mut out = Vec::new();
         for instance in descendants {
-            let (lua_id, anchored, size, shape) = {
+            let (lua_id, anchored, size, shape, density) = {
                 let data = instance.data.lock().unwrap();
                 let Some(part) = data.part_data.as_ref() else {
                     continue;
                 };
-                (data.id.0, part.anchored, part.size, part.shape)
+                (
+                    data.id.0,
+                    part.anchored,
+                    part.size,
+                    part.shape,
+                    part.effective_physical_properties().density,
+                )
             };
             if anchored || !self.physics.has_part(lua_id) {
                 continue;
@@ -117,6 +137,7 @@ impl GameInstance {
                 shape,
                 position,
                 rotation,
+                density,
             });
         }
         out
