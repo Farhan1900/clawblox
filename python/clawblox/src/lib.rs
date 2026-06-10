@@ -1123,6 +1123,22 @@ impl PyWorld {
 
     #[pyo3(signature = (*, grace_seconds = 10))]
     fn stop(&mut self, grace_seconds: u64) -> PyResult<()> {
+        // Ports sandboxed agents bridge to via daemonized socat processes;
+        // collected before teardown so leftovers can be reaped afterwards.
+        let mut bridge_ports: Vec<u16> = self
+            .world_proxies
+            .iter()
+            .map(|proxy| proxy.port())
+            .collect();
+        if let Ok(port) = self.running_port() {
+            bridge_ports.push(port);
+        }
+        let result = self.stop_teardown(grace_seconds);
+        reap_socat_bridges(&bridge_ports);
+        result
+    }
+
+    fn stop_teardown(&mut self, grace_seconds: u64) -> PyResult<()> {
         self.leave_connected_sessions();
         self.stop_world_proxies();
         if let Some(session) = self.tmux_session.take() {
@@ -1291,6 +1307,44 @@ impl PyWorld {
         for session in std::mem::take(&mut self.connected_sessions) {
             let headers = vec![("X-Session".to_string(), session)];
             let _ = http_request("POST", port, &request_path, &headers, "");
+        }
+    }
+}
+
+/// Claude Code's native sandbox spawns daemonized `socat` bridges
+/// (`UNIX-LISTEN:/tmp/claude-http-*.sock -> TCP:localhost:<port>`) that
+/// outlive the agent when its tmux window is torn down. Left alone they
+/// accumulate across runs until new agent launches fail with EAGAIN
+/// (hundreds were observed on a shared host), so on world stop any bridge
+/// still targeting one of this world's ports is killed.
+fn reap_socat_bridges(ports: &[u16]) {
+    if ports.is_empty() {
+        return;
+    }
+    let needles: Vec<String> = ports
+        .iter()
+        .map(|port| format!("TCP:localhost:{port}"))
+        .collect();
+    let Ok(entries) = std::fs::read_dir("/proc") else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(pid) = name.to_str().and_then(|value| value.parse::<u32>().ok()) else {
+            continue;
+        };
+        let Ok(raw) = std::fs::read(entry.path().join("cmdline")) else {
+            continue;
+        };
+        let cmdline = String::from_utf8_lossy(&raw);
+        let argv0 = cmdline.split('\0').next().unwrap_or("");
+        if !argv0.ends_with("socat") {
+            continue;
+        }
+        if needles.iter().any(|needle| cmdline.contains(needle.as_str())) {
+            let _ = std::process::Command::new("kill")
+                .args(["-9", &pid.to_string()])
+                .status();
         }
     }
 }
