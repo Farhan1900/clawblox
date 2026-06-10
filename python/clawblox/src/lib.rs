@@ -15,8 +15,8 @@ use clawblox::agent_runner::{
 };
 use clawblox::config::{SandboxConfig, WorldConfig};
 use clawblox::manifest::{
-    manifest_path_for_state_root, record_agent_connected, record_world_started,
-    refresh_agent_from_dir, AgentConnected, WorldStarted,
+    manifest_path_for_state_root, record_agent_connected, record_checkpoint,
+    record_world_started, refresh_agent_from_dir, AgentConnected, WorldStarted,
 };
 use clawblox::world_capability_proxy::{
     start_world_capability_proxy, WorldCapabilityProxy, WorldCapabilityProxyConfig,
@@ -98,6 +98,8 @@ struct PyWorld {
     world_proxies: Vec<WorldCapabilityProxy>,
     connected_sessions: Vec<String>,
     shm_dir: Option<PathBuf>,
+    resume: Option<PathBuf>,
+    operator_token: Option<String>,
 }
 
 #[pyclass(name = "WorldStartResult")]
@@ -493,6 +495,8 @@ impl PyWorld {
             world_proxies: Vec::new(),
             connected_sessions: Vec::new(),
             shm_dir: None,
+            resume: None,
+            operator_token: None,
         })
     }
 
@@ -652,7 +656,7 @@ impl PyWorld {
         json_to_py(py, &env)
     }
 
-    #[pyo3(signature = (*, port, base_path = "/".to_string(), record = false, record_dir = None, health_timeout = 30, port_wait = 120, command_file = None, log_file = None, _tmux_session = None))]
+    #[pyo3(signature = (*, port, base_path = "/".to_string(), record = false, record_dir = None, resume = None, health_timeout = 30, port_wait = 120, command_file = None, log_file = None, _tmux_session = None))]
     #[allow(clippy::too_many_arguments)]
     fn start(
         &mut self,
@@ -660,6 +664,7 @@ impl PyWorld {
         base_path: String,
         record: bool,
         record_dir: Option<PathBuf>,
+        resume: Option<PathBuf>,
         health_timeout: u64,
         port_wait: u64,
         command_file: Option<PathBuf>,
@@ -678,6 +683,7 @@ impl PyWorld {
                         &self.base_path,
                         self.record,
                         self.record_dir.as_ref(),
+                        self.resume.as_ref(),
                     )
                 };
                 return Ok(PyWorldStartResult {
@@ -706,6 +712,7 @@ impl PyWorld {
                             &self.base_path,
                             self.record,
                             self.record_dir.as_ref(),
+                            self.resume.as_ref(),
                         )
                     },
                     start_command: self.start_command(),
@@ -732,6 +739,22 @@ impl PyWorld {
         }
         self.record = record;
         self.record_dir = record_dir;
+        self.resume = match resume {
+            Some(path) if !path.is_file() => {
+                return Err(PyAgentError::new_err(format!(
+                    "resume snapshot not found: {}",
+                    path.display()
+                )));
+            }
+            other => other.map(|path| {
+                if path.is_absolute() {
+                    path
+                } else {
+                    std::env::current_dir().unwrap_or_default().join(path)
+                }
+            }),
+        };
+        self.operator_token = Some(generate_operator_token());
         self.health_timeout = health_timeout;
         self.port_wait = port_wait;
         self.command_file =
@@ -805,6 +828,7 @@ impl PyWorld {
                 &self.base_path,
                 self.record,
                 self.record_dir.as_ref(),
+                self.resume.as_ref(),
             );
             write_world_command_file(&command_file, &bin, self, tmux_session.is_none())?;
             if let Some(parent) = log_file.parent() {
@@ -856,6 +880,12 @@ impl PyWorld {
                             .map(|path| {
                                 vec!["--record-dir".to_string(), path.display().to_string()]
                             })
+                            .unwrap_or_default(),
+                    )
+                    .args(
+                        self.resume
+                            .as_ref()
+                            .map(|path| vec!["--resume".to_string(), path.display().to_string()])
                             .unwrap_or_default(),
                     )
                     .stdout(Stdio::from(log))
@@ -1121,6 +1151,55 @@ impl PyWorld {
         }
     }
 
+    #[pyo3(signature = (*, dir, name = None))]
+    fn save<'py>(
+        &mut self,
+        py: Python<'py>,
+        dir: PathBuf,
+        name: Option<String>,
+    ) -> PyResult<Bound<'py, PyDict>> {
+        let port = self.running_port()?;
+        let mut headers = Vec::new();
+        if let Some(token) = &self.operator_token {
+            headers.push(("X-Operator-Token".to_string(), token.clone()));
+        }
+        let request_path = join_url_path(&self.base_path, "/snapshot");
+        let response = http_request("GET", port, &request_path, &headers, "")?;
+        if response.status != 200 {
+            return Err(PyAgentError::new_err(format!(
+                "GET /snapshot returned HTTP {}; this world may not implement the save/load protocol\nbody: {}",
+                response.status,
+                response.body.chars().take(400).collect::<String>()
+            )));
+        }
+        let (format, sim_time) = serde_json::from_str::<serde_json::Value>(&response.body)
+            .map(|doc| {
+                (
+                    doc.get("format")
+                        .and_then(|value| value.as_str())
+                        .unwrap_or("world-snapshot")
+                        .to_string(),
+                    doc.get("time").and_then(|value| value.as_f64()),
+                )
+            })
+            .unwrap_or_else(|_| ("world-snapshot".to_string(), None));
+        std::fs::create_dir_all(&dir).map_err(io_error)?;
+        let file_name = name.unwrap_or_else(|| {
+            format!("{}.snapshot", chrono::Utc::now().format("%Y%m%dT%H%M%S%3fZ"))
+        });
+        let snapshot_path = dir.join(file_name);
+        std::fs::write(&snapshot_path, &response.body).map_err(io_error)?;
+        if let Some(manifest_path) = &self.manifest_path {
+            record_checkpoint(manifest_path, &snapshot_path, &format, sim_time)
+                .map_err(PyAgentError::new_err)?;
+        }
+        let result = PyDict::new_bound(py);
+        result.set_item("path", snapshot_path)?;
+        result.set_item("format", format)?;
+        result.set_item("sim_time", sim_time)?;
+        Ok(result)
+    }
+
     #[pyo3(signature = (*, grace_seconds = 10))]
     fn stop(&mut self, grace_seconds: u64) -> PyResult<()> {
         // Ports sandboxed agents bridge to via daemonized socat processes;
@@ -1214,7 +1293,8 @@ impl PyWorld {
             record: self.record,
             record_dir: self.record_dir.clone(),
             manifest_path: self.manifest_path.clone(),
-            resume: None,
+            resume: self.resume.clone(),
+            operator_token: self.operator_token.clone(),
             clawblox_bin: None,
             shm_dir: self.shm_dir.clone(),
         })
@@ -1241,6 +1321,18 @@ impl PyWorld {
                 env.push((
                     "CLAWBLOX_MANIFEST_PATH".to_string(),
                     manifest_path.display().to_string(),
+                ));
+            }
+            if let Some(resume) = &self.resume {
+                env.push((
+                    "WORLD_RESUME_PATH".to_string(),
+                    resume.display().to_string(),
+                ));
+            }
+            if let Some(operator_token) = &self.operator_token {
+                env.push((
+                    "WORLD_OPERATOR_TOKEN".to_string(),
+                    operator_token.clone(),
                 ));
             }
             env
@@ -1508,31 +1600,43 @@ fn resolve_clawblox_bin() -> PyResult<PathBuf> {
             return Ok(path);
         }
     }
+    // Prefer the most recently built binary. Debug and release builds can
+    // both exist; blindly preferring debug runs worlds on a build that can
+    // be an order of magnitude slower per tick, which starves the world's
+    // HTTP responses and surfaces as EAGAIN timeouts in agent setup.
+    let newest_existing = |candidates: &[PathBuf]| -> Option<PathBuf> {
+        candidates
+            .iter()
+            .filter(|path| path.exists())
+            .max_by_key(|path| {
+                std::fs::metadata(path)
+                    .and_then(|meta| meta.modified())
+                    .unwrap_or(std::time::SystemTime::UNIX_EPOCH)
+            })
+            .cloned()
+    };
     let workspace_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .and_then(|path| path.parent())
         .map(Path::to_path_buf);
     if let Some(root) = workspace_root {
-        for candidate in ["target/debug/clawblox", "target/release/clawblox"] {
-            let path = root.join(candidate);
-            if path.exists() {
-                return Ok(path);
-            }
-        }
-    }
-    for candidate in [
-        "target/debug/clawblox",
-        "target/release/clawblox",
-        "clawblox",
-    ] {
-        let path = PathBuf::from(candidate);
-        if candidate.contains('/') {
-            if path.exists() {
-                return Ok(path);
-            }
-        } else if command_exists(candidate) {
+        let candidates = [
+            root.join("target/debug/clawblox"),
+            root.join("target/release/clawblox"),
+        ];
+        if let Some(path) = newest_existing(&candidates) {
             return Ok(path);
         }
+    }
+    let candidates = [
+        PathBuf::from("target/debug/clawblox"),
+        PathBuf::from("target/release/clawblox"),
+    ];
+    if let Some(path) = newest_existing(&candidates) {
+        return Ok(path);
+    }
+    if command_exists("clawblox") {
+        return Ok(PathBuf::from("clawblox"));
     }
     Err(PyAgentError::new_err(
         "could not find clawblox binary; set CLAWBLOX_BIN or build target/debug/clawblox"
@@ -1779,6 +1883,7 @@ fn build_world_start_argv(
     base_path: &str,
     record: bool,
     record_dir: Option<&PathBuf>,
+    resume: Option<&PathBuf>,
 ) -> Vec<String> {
     let mut argv = vec![
         bin.display().to_string(),
@@ -1796,7 +1901,23 @@ fn build_world_start_argv(
         argv.push("--record-dir".to_string());
         argv.push(record_dir.display().to_string());
     }
+    if let Some(resume) = resume {
+        argv.push("--resume".to_string());
+        argv.push(resume.display().to_string());
+    }
     argv
+}
+
+fn generate_operator_token() -> String {
+    use std::collections::hash_map::RandomState;
+    use std::hash::{BuildHasher, Hasher};
+    let mut token = String::with_capacity(32);
+    for _ in 0..2 {
+        let mut hasher = RandomState::new().build_hasher();
+        hasher.write_u64(std::process::id() as u64);
+        token.push_str(&format!("{:016x}", hasher.finish()));
+    }
+    token
 }
 
 fn write_world_command_file(
@@ -1823,6 +1944,10 @@ fn write_world_command_file(
     if let Some(record_dir) = &world.record_dir {
         parts.push("--record-dir".to_string());
         parts.push(shell_quote(&record_dir.display().to_string()));
+    }
+    if let Some(resume) = &world.resume {
+        parts.push("--resume".to_string());
+        parts.push(shell_quote(&resume.display().to_string()));
     }
     if redirect_to_log {
         parts.push(">>".to_string());
