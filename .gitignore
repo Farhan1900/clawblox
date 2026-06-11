@@ -44,7 +44,7 @@ agent/piper_linux_x86_64.tar.gz
 .codex_pydeps/
 
 # Local multi-world and build cache artifacts
-.clawblox-multi/*.env
+.clawblox-multi/
 .clawblox-watchdog/
 worlds/mesa-island/.cargo-target/
 
