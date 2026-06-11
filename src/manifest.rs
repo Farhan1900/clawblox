@@ -148,8 +148,12 @@ pub fn update(
 
 pub fn write(path: &Path, manifest: &ClawbloxManifest) -> Result<(), String> {
     if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)
-            .map_err(|err| format!("failed to create manifest directory '{}': {err}", parent.display()))?;
+        fs::create_dir_all(parent).map_err(|err| {
+            format!(
+                "failed to create manifest directory '{}': {err}",
+                parent.display()
+            )
+        })?;
     }
     let raw = serde_json::to_string_pretty(manifest)
         .map_err(|err| format!("failed to serialize manifest '{}': {err}", path.display()))?;
@@ -164,8 +168,8 @@ pub fn record_world_started(path: &Path, started: WorldStarted<'_>) -> Result<()
     update(path, |manifest| {
         let state_root = manifest_state_root(path);
         manifest.world = Some(ManifestWorld {
-            source_dir: path_value(&state_root, started.source_dir),
-            config: path_value(&state_root, &started.source_dir.join("world.toml")),
+            source_dir: relocatable_path_value(&state_root, started.source_dir),
+            config: relocatable_path_value(&state_root, &started.source_dir.join("world.toml")),
             runtime_mode: started.runtime_mode.to_string(),
             url: started.url.to_string(),
             port: Some(started.port),
@@ -349,6 +353,38 @@ fn path_value(base: &Path, path: &Path) -> String {
         .unwrap_or(path)
         .to_string_lossy()
         .to_string()
+}
+
+/// Express `path` relative to `base`, allowing upward `..` segments, so the
+/// manifest stays valid when the state tree is viewed from a different mount
+/// point (for example written under a container bind mount and read from the
+/// host). Falls back to the original path when the two share no common
+/// directory beyond the filesystem root.
+fn relocatable_path_value(base: &Path, path: &Path) -> String {
+    if let Ok(stripped) = path.strip_prefix(base) {
+        return stripped.to_string_lossy().to_string();
+    }
+    if base.is_absolute() && path.is_absolute() {
+        let base_components: Vec<_> = base.components().collect();
+        let path_components: Vec<_> = path.components().collect();
+        let common = base_components
+            .iter()
+            .zip(&path_components)
+            .take_while(|(a, b)| a == b)
+            .count();
+        // components()[0] is the root; require a real shared directory.
+        if common > 1 {
+            let mut relative = PathBuf::new();
+            for _ in common..base_components.len() {
+                relative.push("..");
+            }
+            for component in &path_components[common..] {
+                relative.push(component);
+            }
+            return relative.to_string_lossy().to_string();
+        }
+    }
+    path.to_string_lossy().to_string()
 }
 
 fn read_trimmed(path: &Path) -> Option<String> {

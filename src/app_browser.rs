@@ -364,7 +364,7 @@ pub fn run_app(path: PathBuf, port: u16, base_path: &str) {
 fn should_hide_project_dir(name: &str) -> bool {
     matches!(
         name,
-        ".git" | "node_modules" | "__pycache__" | "target" | ".venv" | ".clawblox"
+        ".git" | "node_modules" | "__pycache__" | "target" | ".venv" | ".clawblox" | "sandbox-home"
     )
 }
 
@@ -373,10 +373,15 @@ fn scan_recordings_recursive(
     dir: &Path,
     out: &mut Vec<ReplayListEntry>,
 ) -> Result<(), String> {
-    let entries = std::fs::read_dir(dir)
-        .map_err(|e| format!("failed to read directory '{}': {}", dir.display(), e))?;
+    // Agents write arbitrary content (and permissions) into the scanned
+    // tree; an unreadable directory must not fail the whole scan.
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Ok(());
+    };
     for entry in entries {
-        let entry = entry.map_err(|e| format!("failed to read directory entry: {}", e))?;
+        let Ok(entry) = entry else {
+            continue;
+        };
         let path = entry.path();
         let name = entry.file_name();
         let name = name.to_string_lossy();
@@ -520,6 +525,17 @@ fn resolve_clawblox_manifest_path(manifest_path: &Path, value: &str) -> PathBuf 
     } else {
         manifest::manifest_state_root(manifest_path).join(path)
     }
+}
+
+/// Locate the world directory by searching the state root's ancestors for the
+/// config file the manifest recorded (its basename, typically `world.toml`).
+fn find_world_dir_above(state_root: &Path, config_value: &str) -> Option<PathBuf> {
+    let config_name = Path::new(config_value).file_name()?;
+    state_root
+        .ancestors()
+        .skip(1)
+        .find(|dir| dir.join(config_name).is_file())
+        .map(Path::to_path_buf)
 }
 
 fn collect_session_transcripts_recursive(dir: &Path, out: &mut Vec<PathBuf>) {
@@ -870,7 +886,8 @@ fn load_agent_timeline_from_manifest_paths(
     let mut anchor_count = 0usize;
 
     for (path, parser) in transcript_paths {
-        match load_agent_timeline_with_parser(path, tick_rate, first_tick, anchors, parser.as_ref()) {
+        match load_agent_timeline_with_parser(path, tick_rate, first_tick, anchors, parser.as_ref())
+        {
             Ok(timeline) => {
                 anchor_count += timeline.anchor_count;
                 messages.extend(timeline.messages);
@@ -921,12 +938,8 @@ fn load_workspace_timeline_from_manifest_paths(
             Ok(workspace_events) => {
                 for event in workspace_events {
                     let timestamp_ms = (event.wall_time * 1000.0).round() as i64;
-                    let (tick, approx) = infer_external_replay_tick(
-                        timestamp_ms,
-                        anchors,
-                        ticks_per_ms,
-                        first_tick,
-                    );
+                    let (tick, approx) =
+                        infer_external_replay_tick(timestamp_ms, anchors, ticks_per_ms, first_tick);
                     events.push(ReplayWorkspaceEvent {
                         event_type: event.event_type,
                         wall_time: event.wall_time,
@@ -1083,7 +1096,13 @@ async fn open_external_replay_command(
     let command = command_template
         .iter()
         .map(|arg| {
-            substitute_external_replay_arg(arg, &recording_path, &manifest_path, &manifest_dir, port)
+            substitute_external_replay_arg(
+                arg,
+                &recording_path,
+                &manifest_path,
+                &manifest_dir,
+                port,
+            )
         })
         .collect::<Vec<_>>();
     let executable = command[0].clone();
@@ -1236,7 +1255,16 @@ async fn open_external_replay_from_clawblox_manifest(
     let cwd = if world.source_dir.is_empty() {
         state_root.clone()
     } else {
-        resolve_clawblox_manifest_path(&manifest_path, &world.source_dir)
+        let resolved = resolve_clawblox_manifest_path(&manifest_path, &world.source_dir);
+        if resolved.is_dir() {
+            resolved
+        } else {
+            // Manifests written before relocatable paths may record an
+            // absolute path from another mount namespace (e.g. a container
+            // bind mount). Recover by finding the recorded world config in
+            // the state root's ancestors.
+            find_world_dir_above(&state_root, &world.config).unwrap_or(resolved)
+        }
     };
     let transcript_paths: Vec<(PathBuf, Box<dyn TranscriptLineParser>)> = manifest
         .agents
@@ -1339,10 +1367,7 @@ fn join_external_replay_url(base: &str, path: &str) -> String {
 }
 
 fn app_external_replay_base_path(state: &AppState, id: &str) -> String {
-    join_base_path(
-        &app_session_base_path(state, id),
-        "/replay/external",
-    )
+    join_base_path(&app_session_base_path(state, id), "/replay/external")
 }
 
 fn app_external_replay_path(state: &AppState, id: &str, path: &str) -> String {
@@ -1485,21 +1510,15 @@ async fn proxy_external_replay_http(
             builder = builder.header(name, value);
         }
     }
-    builder
-        .body(axum::body::Body::from(bytes))
-        .map_err(|e| {
-            (
-                axum::http::StatusCode::BAD_GATEWAY,
-                format!("failed to build external replay response: {}", e),
-            )
-        })
+    builder.body(axum::body::Body::from(bytes)).map_err(|e| {
+        (
+            axum::http::StatusCode::BAD_GATEWAY,
+            format!("failed to build external replay response: {}", e),
+        )
+    })
 }
 
-async fn proxy_external_replay_ws(
-    socket: WebSocket,
-    target_url: String,
-    protocols: Vec<String>,
-) {
+async fn proxy_external_replay_ws(socket: WebSocket, target_url: String, protocols: Vec<String>) {
     let mut request = match tungstenite::client::IntoClientRequest::into_client_request(&target_url)
     {
         Ok(request) => request,
@@ -1507,10 +1526,9 @@ async fn proxy_external_replay_ws(
     };
     if !protocols.is_empty() {
         if let Ok(value) = axum::http::HeaderValue::from_str(&protocols.join(", ")) {
-            request.headers_mut().insert(
-                axum::http::header::SEC_WEBSOCKET_PROTOCOL,
-                value,
-            );
+            request
+                .headers_mut()
+                .insert(axum::http::header::SEC_WEBSOCKET_PROTOCOL, value);
         }
     }
 
@@ -1566,19 +1584,20 @@ async fn app_external_replay_proxy(
     let session = get_app_external_session(&state, &id)?;
     let target_path = external_replay_target_path(&path, &original_uri);
     if is_ws_upgrade(&headers) {
-        let ws = ws.map_err(|_| (
-            axum::http::StatusCode::BAD_REQUEST,
-            "invalid websocket upgrade request".to_string(),
-        ))?;
+        let ws = ws.map_err(|_| {
+            (
+                axum::http::StatusCode::BAD_REQUEST,
+                "invalid websocket upgrade request".to_string(),
+            )
+        })?;
         let protocols = selected_ws_protocols(&headers);
         let target_url = external_replay_ws_url(&session.url, &target_path)
             .map_err(|e| (axum::http::StatusCode::BAD_GATEWAY, e))?;
         let response = if protocols.is_empty() {
             ws.on_upgrade(move |socket| proxy_external_replay_ws(socket, target_url, protocols))
         } else {
-            ws.protocols(protocols.clone()).on_upgrade(move |socket| {
-                proxy_external_replay_ws(socket, target_url, protocols)
-            })
+            ws.protocols(protocols.clone())
+                .on_upgrade(move |socket| proxy_external_replay_ws(socket, target_url, protocols))
         };
         return Ok(response.into_response());
     }
@@ -1812,15 +1831,7 @@ async fn app_external_replay_proxy_path(
     headers: axum::http::HeaderMap,
     ws: Result<WebSocketUpgrade, WebSocketUpgradeRejection>,
 ) -> Result<axum::response::Response, (axum::http::StatusCode, String)> {
-    app_external_replay_proxy(
-        state,
-        params.id,
-        params.path,
-        original_uri,
-        headers,
-        ws,
-    )
-    .await
+    app_external_replay_proxy(state, params.id, params.path, original_uri, headers, ws).await
 }
 
 async fn app_replay_state_at(
