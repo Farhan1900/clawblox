@@ -17,12 +17,15 @@ agent/results/
 agent/logs/
 agent/workspace/
 **/.clawblox/
+**/.clawblox*.log
 mc-server/
 examples/minecraft/client-mod-fabric/.gradle/
 examples/minecraft/client-mod-fabric/.tooling/
 examples/minecraft/client-mod-fabric/build/
 examples/minecraft/launcher/.cache/
 examples/minecraft/launcher/.runtime/
+examples/minecraft/launcher/launcher-config.json
+examples/minecraft/tests/strict/artifacts/
 
 results/
 recordings/
