@@ -33,6 +33,10 @@ pub struct CharacterControllerState {
     pub grounded: bool,
     pub horizontal_velocity: [f32; 2],
     pub collision_group: CollisionGroupMask,
+    /// Half of the capsule's total height (center to tip). The ground
+    /// sensor ray starts at the body center, so a support reported closer
+    /// than this is inside the capsule (penetrating), not under it.
+    pub capsule_half_extent: f32,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -102,6 +106,7 @@ impl PhysicsWorld {
             grounded: false,
             horizontal_velocity: [0.0, 0.0],
             collision_group: CollisionGroupMask::default(),
+            capsule_half_extent: height * 0.5,
         };
 
         self.character_controllers.insert(lua_id, state);
@@ -487,7 +492,7 @@ impl PhysicsWorld {
             .groups(interaction_groups(collision_group));
 
         let mut collisions = Vec::new();
-        let movement = controller.move_shape(
+        let mut movement = controller.move_shape(
             dt,
             &self.rigid_body_set,
             &self.collider_set,
@@ -498,6 +503,95 @@ impl PhysicsWorld {
             filter,
             |collision| collisions.push(collision),
         );
+
+        // Floor-wedge recovery. When the capsule comes to rest marginally
+        // below the controller's contact offset (landing/snap leaves the
+        // bottom at clearance <= offset), every horizontal sweep returns an
+        // immediate toi=0 hit against the floor's up-facing normal. The
+        // slide projection cannot make progress against a normal
+        // perpendicular to the motion, so move_shape burns its iteration
+        // budget on the same contact and returns zero translation — the
+        // character wedges permanently on flat walkable ground until its
+        // height changes. Detect that degenerate result (horizontal motion
+        // requested, none applied, every blocking contact floor-like) and
+        // redo the sweep once from a slightly lifted pose; snap-to-ground
+        // restores proper clearance within the same call.
+        let desired_horiz = (desired.x * desired.x + desired.z * desired.z).sqrt();
+        let applied_horiz = (movement.translation.x * movement.translation.x
+            + movement.translation.z * movement.translation.z)
+            .sqrt();
+        if desired_horiz > 1.0e-5
+            && applied_horiz < desired_horiz * 0.05
+            && !collisions.is_empty()
+            && collisions
+                .iter()
+                .all(|c| c.hit.normal1.y.abs().max(c.hit.normal2.y.abs()) > 0.7)
+            // Kill-switch for faithful replay of recordings made before this
+            // recovery existed (A/B debugging).
+            && std::env::var_os("CLAWBLOX_DISABLE_WEDGE_RECOVERY").is_none()
+        {
+            const WEDGE_LIFT: f32 = 0.02;
+            let mut lifted_pos = current_pos;
+            lifted_pos.translation.y += WEDGE_LIFT;
+            let mut lifted_collisions = Vec::new();
+            let lifted_movement = controller.move_shape(
+                dt,
+                &self.rigid_body_set,
+                &self.collider_set,
+                &self.query_pipeline,
+                shape,
+                &lifted_pos,
+                desired,
+                filter,
+                |collision| lifted_collisions.push(collision),
+            );
+            let lifted_horiz = (lifted_movement.translation.x * lifted_movement.translation.x
+                + lifted_movement.translation.z * lifted_movement.translation.z)
+                .sqrt();
+            if lifted_horiz > applied_horiz + 1.0e-5 {
+                movement = lifted_movement;
+                movement.translation.y += WEDGE_LIFT;
+                collisions = lifted_collisions;
+            }
+        }
+
+        // Diagnostic trace for wedged horizontal movement (CLAWBLOX_TRACE_MOVE=1).
+        if std::env::var_os("CLAWBLOX_TRACE_MOVE").is_some() {
+            let want = (desired.x * desired.x + desired.z * desired.z).sqrt();
+            let got = (movement.translation.x * movement.translation.x
+                + movement.translation.z * movement.translation.z)
+                .sqrt();
+            if want > 1.0e-4 && got < want * 0.1 {
+                eprintln!(
+                    "[move-blocked] pos=({:.4},{:.4},{:.4}) desired=({:.5},{:.5},{:.5}) applied=({:.6},{:.6},{:.6}) grounded={} collisions={}",
+                    current_pos.translation.x,
+                    current_pos.translation.y,
+                    current_pos.translation.z,
+                    desired.x,
+                    desired.y,
+                    desired.z,
+                    movement.translation.x,
+                    movement.translation.y,
+                    movement.translation.z,
+                    movement.grounded,
+                    collisions.len()
+                );
+                for c in &collisions {
+                    let lua = self.collider_to_lua.get(&c.handle);
+                    eprintln!(
+                        "  contact lua_id={:?} toi={:.5} normal1=({:.3},{:.3},{:.3}) witness1=({:.3},{:.3},{:.3})",
+                        lua,
+                        c.hit.time_of_impact,
+                        c.hit.normal1.x,
+                        c.hit.normal1.y,
+                        c.hit.normal1.z,
+                        c.hit.witness1.x,
+                        c.hit.witness1.y,
+                        c.hit.witness1.z
+                    );
+                }
+            }
+        }
 
         // Shove dynamic bodies out of the walking path. Without this, the
         // controller treats every collider as an immovable wall, so a loose
@@ -527,5 +621,100 @@ impl PhysicsWorld {
             state.grounded = movement.grounded;
         }
         Some(movement)
+    }
+
+    /// Snapshot the speeds of dynamic bodies near any character capsule
+    /// (within one tick of possible relative closure). Used with
+    /// [`clamp_character_contact_speed_gains`] to bound how much speed such a
+    /// body can gain in one step: the capsule is kinematic, so its contacts
+    /// otherwise carry unlimited authority and pump trapped bodies a little
+    /// faster every tick (or eject deeply penetrated ones in a single step)
+    /// until they discharge as a launch.
+    pub fn snapshot_character_contact_speeds(&self) -> Vec<(RigidBodyHandle, f32, f32)> {
+        // Covers the capsule's own per-tick motion plus an already-capped
+        // body closing from the other side.
+        const CONTACT_MARGIN: f32 = 2.0;
+        let mut snapshot: Vec<(RigidBodyHandle, f32, f32)> = Vec::new();
+        for state in self.character_controllers.values() {
+            let Some(body) = self.rigid_body_set.get(state.body_handle) else {
+                continue;
+            };
+            let Some(collider) = self.collider_set.get(state.collider_handle) else {
+                continue;
+            };
+            let Some(capsule) = collider.shape().as_capsule() else {
+                continue;
+            };
+            let inflated = Capsule::new(
+                capsule.segment.a,
+                capsule.segment.b,
+                capsule.radius + CONTACT_MARGIN,
+            );
+            let pos = *body.position();
+            let filter = QueryFilter::default()
+                .exclude_rigid_body(state.body_handle)
+                .exclude_sensors()
+                .groups(interaction_groups(state.collision_group));
+            self.query_pipeline.intersections_with_shape(
+                &self.rigid_body_set,
+                &self.collider_set,
+                &pos,
+                &inflated,
+                filter,
+                |other_collider| {
+                    if let Some(other) = self.collider_set.get(other_collider) {
+                        if let Some(parent) = other.parent() {
+                            if let Some(other_body) = self.rigid_body_set.get(parent) {
+                                if other_body.is_dynamic()
+                                    && !snapshot.iter().any(|(handle, ..)| *handle == parent)
+                                {
+                                    snapshot.push((
+                                        parent,
+                                        other_body.linvel().norm(),
+                                        other_body.angvel().norm(),
+                                    ));
+                                }
+                            }
+                        }
+                    }
+                    true
+                },
+            );
+        }
+        snapshot
+    }
+
+    /// Cap the post-step speed of bodies captured by
+    /// [`snapshot_character_contact_speeds`]: each may keep the speed it
+    /// already had, but may not gain past `cap` from a step spent in contact
+    /// with a character capsule.
+    pub fn clamp_character_contact_speed_gains(
+        &mut self,
+        snapshot: &[(RigidBodyHandle, f32, f32)],
+        cap: f32,
+    ) {
+        // Spin is energy too: an uncapped angular kick moves an assembly's
+        // outer parts at omega*r well past any linear cap.
+        const ANGULAR_CAP: f32 = 8.0;
+        for &(handle, pre_speed, pre_spin) in snapshot {
+            let Some(body) = self.rigid_body_set.get_mut(handle) else {
+                continue;
+            };
+            if !body.is_dynamic() {
+                continue;
+            }
+            let allowed = cap.max(pre_speed);
+            let velocity = *body.linvel();
+            let speed = velocity.norm();
+            if speed > allowed {
+                body.set_linvel(velocity * (allowed / speed), true);
+            }
+            let allowed_spin = ANGULAR_CAP.max(pre_spin);
+            let spin = *body.angvel();
+            let spin_speed = spin.norm();
+            if spin_speed > allowed_spin {
+                body.set_angvel(spin * (allowed_spin / spin_speed), true);
+            }
+        }
     }
 }

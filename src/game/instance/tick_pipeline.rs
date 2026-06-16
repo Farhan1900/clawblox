@@ -58,11 +58,27 @@ pub(super) fn run_tick_phases(instance: &mut GameInstance, dt: f32) {
         .query_pipeline
         .update(&instance.physics.collider_set);
 
+    // Bound the speed dynamic bodies can gain from character contact this
+    // step (kinematic capsules otherwise pump trapped bodies without limit).
+    let character_contact_speeds = if std::env::var_os("CLAWBLOX_DISABLE_WEDGE_RECOVERY").is_none()
+    {
+        Some(instance.physics.snapshot_character_contact_speeds())
+    } else {
+        None
+    };
+
     // Update character controller movement.
     instance.update_character_movement(dt);
 
     // Step physics simulation.
     instance.physics.step(dt);
+
+    if let Some(pre_step_speeds) = &character_contact_speeds {
+        instance.physics.clamp_character_contact_speed_gains(
+            pre_step_speeds,
+            crate::game::constants::physics::CHARACTER_CONTACT_SPEED_GAIN_CAP,
+        );
+    }
 
     // Detect touch overlaps and fire Touched/TouchEnded events.
     instance.fire_touch_events();

@@ -242,7 +242,10 @@ impl PhysicsWorld {
             .rigid_body_set
             .get(handle)
             .filter(|body| body.is_dynamic())?;
-        let inertia_local = body.mass_properties().local_mprops.reconstruct_inertia_matrix();
+        let inertia_local = body
+            .mass_properties()
+            .local_mprops
+            .reconstruct_inertia_matrix();
         let rotation = body.rotation().to_rotation_matrix();
         let r = rotation.matrix();
         let inertia_world = r * inertia_local * r.transpose();

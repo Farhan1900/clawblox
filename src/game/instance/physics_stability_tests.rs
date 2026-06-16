@@ -441,7 +441,12 @@ fn single_offcenter_grip_welded_assembly_hold_settles() {
 /// explicit stability limit.
 #[test]
 fn dual_grip_welded_assembly_hold_settles() {
-    assert_hold_settles("welded pair, symmetric dual grip", 2, (0.0, 0.9), &[-1.5, 1.5]);
+    assert_hold_settles(
+        "welded pair, symmetric dual grip",
+        2,
+        (0.0, 0.9),
+        &[-1.5, 1.5],
+    );
 }
 
 /// A long welded beam held by two closely spaced central grips must settle.
@@ -714,5 +719,585 @@ fn pressed_release_does_not_catapult() {
     assert!(
         horizontal < 3.0,
         "released part flew {horizontal:.1} studs sideways"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Walking across multi-part ground
+// ---------------------------------------------------------------------------
+//
+// Large floors are commonly assembled from several anchored boxes. The
+// character sweep collides with each collider independently and has no
+// internal-edge filtering, so at a box boundary the neighbor's full-height
+// vertical face terminates exactly at the walking plane and a sweep can
+// treat the flat floor as a wall. The character must be able to walk across
+// such a boundary from any rest position, including standing directly on it.
+
+/// Two abutting layouts share the main box (x in [-50, 46], top y = 0); the
+/// western box is supplied by `lobe`. The character is parked with its
+/// capsule straddling x = `straddle`, then must cross to x < -53 with a
+/// single MoveTo.
+fn ground_boundary_cross_from_rest(lobe: &str, straddles: &[f64]) -> Vec<(f64, f64)> {
+    let mut instance = new_instance(&format!(
+        r#"
+        Workspace.Gravity = 10
+
+        local terrain = PhysicalProperties.new(2.0, 1.4, 0.0, 1, 1)
+
+        local center = Instance.new("Part")
+        center.Name = "GroundCenter"
+        center.Size = Vector3.new(96, 10, 100)
+        center.Position = Vector3.new(-2, -5, 0)
+        center.Anchored = true
+        center.CustomPhysicalProperties = terrain
+        center.Parent = Workspace
+
+        {lobe}
+
+        local Players = game:GetService("Players")
+        Players.PlayerAdded:Connect(function(player)
+            _G.player = player
+        end)
+    "#
+    ));
+
+    assert!(instance.add_player(Uuid::new_v4(), "BoundaryWalker"));
+    for _ in 0..120 {
+        instance.tick(); // land and settle
+    }
+
+    let mut wedged = Vec::new();
+    for &straddle in straddles {
+        // Park the capsule straddling the boundary, fully at rest.
+        instance
+            .lua_runtime
+            .as_ref()
+            .unwrap()
+            .lua()
+            .load(&format!(
+                "_G.player.Character.HumanoidRootPart.Position = Vector3.new({straddle}, 3.2, -3)"
+            ))
+            .exec()
+            .unwrap();
+        for _ in 0..90 {
+            instance.tick();
+        }
+        let p = eval_vec3(&instance, "_G.player.Character.HumanoidRootPart.Position");
+        assert!(
+            (p[0] - straddle).abs() < 0.4 && p[1] > 1.0,
+            "staging teleport to x={straddle} did not hold (at {p:?})"
+        );
+
+        // One plain MoveTo across the boundary; 360 ticks = 6 s for ~4 studs.
+        instance
+            .lua_runtime
+            .as_ref()
+            .unwrap()
+            .lua()
+            .load(
+                r#"
+                local humanoid = _G.player.Character:FindFirstChild("Humanoid")
+                humanoid:MoveTo(Vector3.new(-54, 0, -3))
+            "#,
+            )
+            .exec()
+            .unwrap();
+        let mut crossed = false;
+        for _ in 0..360 {
+            instance.tick();
+            let p = eval_vec3(&instance, "_G.player.Character.HumanoidRootPart.Position");
+            if p[0] < -53.0 {
+                crossed = true;
+                break;
+            }
+        }
+        if !crossed {
+            let p = eval_vec3(&instance, "_G.player.Character.HumanoidRootPart.Position");
+            wedged.push((straddle, p[0]));
+        }
+    }
+    wedged
+}
+
+/// Boundary positions a resting capsule (radius 1.0) can straddle.
+const BOUNDARY_STRADDLES: &[f64] = &[
+    -50.8, -50.6, -50.4, -50.2, -50.1, -50.0, -49.9, -49.8, -49.6, -49.4, -49.2,
+];
+
+/// Exact tiling: the boxes share the face plane x = -50 with coplanar tops.
+#[test]
+fn character_resting_on_exact_tiled_ground_boundary_crosses_it() {
+    let tiled = r#"
+        local lobe = Instance.new("Part")
+        lobe.Name = "GroundW"
+        lobe.Size = Vector3.new(13, 10, 40)
+        lobe.Position = Vector3.new(-56.5, -5, -3)
+        lobe.Anchored = true
+        lobe.CustomPhysicalProperties = terrain
+        lobe.Parent = Workspace
+    "#;
+    let wedged = ground_boundary_cross_from_rest(tiled, BOUNDARY_STRADDLES);
+    assert!(
+        wedged.is_empty(),
+        "walker wedged on the exact-tiled boundary from rest at: {wedged:?}"
+    );
+}
+
+/// Overlap + offset: the boxes overlap by 2 studs and the western top sits
+/// 0.02 below the main top, so no box edge coincides with the walking plane.
+/// The 0.02 riser is far below the controller's contact offset (0.05) and
+/// autostep limit. This is the recommended layout for multi-part floors.
+#[test]
+fn character_resting_on_overlapped_offset_ground_boundary_crosses_it() {
+    let overlapped = r#"
+        local lobe = Instance.new("Part")
+        lobe.Name = "GroundW"
+        lobe.Size = Vector3.new(14, 10, 40)
+        lobe.Position = Vector3.new(-56, -5.02, -3)
+        lobe.Anchored = true
+        lobe.CustomPhysicalProperties = terrain
+        lobe.Parent = Workspace
+    "#;
+    let wedged = ground_boundary_cross_from_rest(overlapped, BOUNDARY_STRADDLES);
+    assert!(
+        wedged.is_empty(),
+        "walker wedged on the overlapped/offset boundary from rest at: {wedged:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Character push impulses
+// ---------------------------------------------------------------------------
+//
+// The kinematic character shoves dynamic bodies out of its walking path with
+// per-tick impulses. The impulse repeats every tick the capsule still
+// overlaps the obstacle, with no cumulative cap, so an obstacle that cannot
+// clear the path (heavy, wedged against static geometry, or held by
+// friction) can be pumped far beyond the character's own speed. A walking
+// character must never accelerate anything past ~1.5x its walk speed.
+
+/// Walking into a welded assembly trapped against an anchored wall: the
+/// character may be blocked or may climb, but the assembly must not be
+/// launched.
+#[test]
+fn character_pushing_welded_assembly_into_wall_does_not_launch_it() {
+    let mut instance = new_instance(
+        r#"
+        Workspace.Gravity = 10
+
+        local floor = Instance.new("Part")
+        floor.Name = "Floor"
+        floor.Size = Vector3.new(80, 1, 80)
+        floor.Position = Vector3.new(0, -0.5, 0)
+        floor.Anchored = true
+        floor.CustomPhysicalProperties = PhysicalProperties.new(2.0, 1.4, 0.0, 1, 1)
+        floor.Parent = Workspace
+
+        local wall = Instance.new("Part")
+        wall.Name = "Wall"
+        wall.Size = Vector3.new(1, 4, 12)
+        wall.Position = Vector3.new(6.75, 2, 0)
+        wall.Anchored = true
+        wall.Parent = Workspace
+
+        local prev = nil
+        for i = 0, 5 do
+            local b = Instance.new("Part")
+            b.Name = "Slab" .. i
+            b.Size = Vector3.new(0.75, 0.75, 0.75)
+            b.CustomPhysicalProperties = PhysicalProperties.new(0.7, 0.7, 0.05, 1, 1)
+            b.Position = Vector3.new(2.125 + i * 0.75, 0.375, 0)
+            b.Parent = Workspace
+            if prev then
+                local w = Instance.new("WeldConstraint")
+                w.Part0 = prev
+                w.Part1 = b
+                w.Parent = prev
+            end
+            if i == 0 then _G.slab = b end
+            prev = b
+        end
+
+        local Players = game:GetService("Players")
+        Players.PlayerAdded:Connect(function(player)
+            _G.player = player
+        end)
+    "#,
+    );
+
+    assert!(instance.add_player(Uuid::new_v4(), "Pusher"));
+    for _ in 0..120 {
+        instance.tick();
+    }
+
+    instance
+        .lua_runtime
+        .as_ref()
+        .unwrap()
+        .lua()
+        .load(
+            r#"
+            local humanoid = _G.player.Character:FindFirstChild("Humanoid")
+            humanoid:MoveTo(Vector3.new(10, 0, 0))
+        "#,
+        )
+        .exec()
+        .unwrap();
+
+    let start = eval_vec3(&instance, "_G.slab.Position");
+    let mut max_speed: f64 = 0.0;
+    let mut max_disp: f64 = 0.0;
+    for _ in 0..600 {
+        instance.tick();
+        let speed = eval_f64(&instance, "return _G.slab.AssemblyLinearVelocity.Magnitude");
+        max_speed = max_speed.max(speed);
+        let p = eval_vec3(&instance, "_G.slab.Position");
+        let disp =
+            ((p[0] - start[0]).powi(2) + (p[1] - start[1]).powi(2) + (p[2] - start[2]).powi(2))
+                .sqrt();
+        max_disp = max_disp.max(disp);
+    }
+    // The capped shove may still pop the assembly over the wall with a
+    // ballistic hop (part-level readings add spin and post-escape gravity to
+    // the governed body speed), but launch-grade energy must be gone: the
+    // ungoverned pathology reached 65-130 u/s and carried assemblies tens of
+    // studs.
+    assert!(
+        max_speed < 45.0,
+        "walking into a wall-trapped welded assembly pumped it to {max_speed:.1} u/s"
+    );
+    assert!(
+        max_disp < 30.0,
+        "wall-trapped assembly was carried {max_disp:.1} studs by character pushes"
+    );
+}
+
+/// Walking over a loose plank lying in the path: it may be kicked aside, but
+/// never launched.
+#[test]
+fn character_walking_over_loose_plank_does_not_launch_it() {
+    let mut instance = new_instance(
+        r#"
+        Workspace.Gravity = 10
+
+        local floor = Instance.new("Part")
+        floor.Name = "Floor"
+        floor.Size = Vector3.new(80, 1, 80)
+        floor.Position = Vector3.new(0, -0.5, 0)
+        floor.Anchored = true
+        floor.CustomPhysicalProperties = PhysicalProperties.new(2.0, 1.4, 0.0, 1, 1)
+        floor.Parent = Workspace
+
+        local plank = Instance.new("Part")
+        plank.Name = "Plank"
+        plank.Size = Vector3.new(0.9, 0.35, 5.25)
+        plank.CustomPhysicalProperties = PhysicalProperties.new(0.35, 0.75, 0.08, 1, 1)
+        plank.Position = Vector3.new(2, 0.175, 0)
+        plank.Parent = Workspace
+        _G.plank = plank
+
+        local Players = game:GetService("Players")
+        Players.PlayerAdded:Connect(function(player)
+            _G.player = player
+        end)
+    "#,
+    );
+
+    assert!(instance.add_player(Uuid::new_v4(), "Walker"));
+    for _ in 0..120 {
+        instance.tick();
+    }
+
+    instance
+        .lua_runtime
+        .as_ref()
+        .unwrap()
+        .lua()
+        .load(
+            r#"
+            local humanoid = _G.player.Character:FindFirstChild("Humanoid")
+            humanoid:MoveTo(Vector3.new(8, 0, 0))
+        "#,
+        )
+        .exec()
+        .unwrap();
+
+    let mut max_speed: f64 = 0.0;
+    for _ in 0..360 {
+        instance.tick();
+        let speed = eval_f64(
+            &instance,
+            "return _G.plank.AssemblyLinearVelocity.Magnitude",
+        );
+        max_speed = max_speed.max(speed);
+    }
+    assert!(
+        max_speed < 24.0,
+        "walking over a loose plank launched it at {max_speed:.1} u/s"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Character standing on a floating assembly
+// ---------------------------------------------------------------------------
+//
+// A character standing on a buoyant assembly couples three mechanisms: the
+// support load pressing the assembly down, platform carry feeding the
+// assembly's velocity back into the capsule, and one-way contacts (forces
+// can never push a dynamic body through the kinematic capsule). If the pair
+// starts descending, buoyancy cannot arrest it through the capsule and the
+// stack can ratchet downward indefinitely. A raft with ample reserve
+// buoyancy must keep both itself and its rider at the surface.
+
+#[test]
+fn character_standing_on_floating_raft_stays_at_surface() {
+    let mut instance = new_instance(
+        r#"
+        Workspace.Gravity = 10
+        Workspace.Terrain:FillBlock(CFrame.new(0, -8, 0), Vector3.new(96, 16, 96), Enum.Material.Water)
+
+        -- 54 volume at density 0.25: reserve buoyancy ~40 mass units.
+        local prev = nil
+        for i = -1, 1 do
+            local p = Instance.new("Part")
+            p.Name = "RaftPlank" .. i
+            p.Size = Vector3.new(12, 1, 1.5)
+            p.CustomPhysicalProperties = PhysicalProperties.new(0.25, 0.75, 0.08, 1, 1)
+            p.Position = Vector3.new(-4.5, -0.25, i * 1.5)
+            p.CanCollide = true
+            p.Parent = Workspace
+            if prev then
+                local w = Instance.new("WeldConstraint")
+                w.Part0 = prev
+                w.Part1 = p
+                w.Parent = prev
+            end
+            if i == 0 then _G.raft = p end
+            prev = p
+        end
+
+        local Players = game:GetService("Players")
+        Players.PlayerAdded:Connect(function(player)
+            _G.player = player
+        end)
+    "#,
+    );
+
+    // Let the raft find its float height before the rider arrives.
+    for _ in 0..240 {
+        instance.tick();
+    }
+    // First player spawns at (-4.5, 6, 0): directly above the raft center.
+    assert!(instance.add_player(Uuid::new_v4(), "Rider"));
+    for _ in 0..240 {
+        instance.tick();
+    }
+
+    // Walk to one end of the deck and back, then ride for 30 s. Deck motion
+    // (reaction drift, heel) is expected; sinking is not.
+    let mut min_raft_y = f64::INFINITY;
+    let mut min_player_y = f64::INFINITY;
+    let track = |instance: &GameInstance, min_raft_y: &mut f64, min_player_y: &mut f64| {
+        let raft_y = eval_f64(instance, "return _G.raft.Position.Y");
+        let player_y = eval_f64(
+            instance,
+            "return _G.player.Character.HumanoidRootPart.Position.Y",
+        );
+        *min_raft_y = min_raft_y.min(raft_y);
+        *min_player_y = min_player_y.min(player_y);
+    };
+    for target in [
+        "Vector3.new(0, 0, 0)",
+        "Vector3.new(-9, 0, 0)",
+        "Vector3.new(-4.5, 0, 0)",
+    ] {
+        instance
+            .lua_runtime
+            .as_ref()
+            .unwrap()
+            .lua()
+            .load(&format!(
+                r#"
+                local humanoid = _G.player.Character:FindFirstChild("Humanoid")
+                humanoid:MoveTo({target})
+            "#
+            ))
+            .exec()
+            .unwrap();
+        for _ in 0..240 {
+            instance.tick();
+            track(&instance, &mut min_raft_y, &mut min_player_y);
+        }
+    }
+    for _ in 0..1800 {
+        instance.tick();
+        track(&instance, &mut min_raft_y, &mut min_player_y);
+    }
+
+    assert!(
+        min_raft_y > -2.0,
+        "raft was driven under by its rider (min raft y = {min_raft_y:.2})"
+    );
+    assert!(
+        min_player_y > 0.0,
+        "rider sank with the raft (min root y = {min_player_y:.2})"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Floor-wedged character recovery
+// ---------------------------------------------------------------------------
+
+/// A capsule can come to rest with its bottom marginally below the
+/// controller's contact offset (landing and ground-snap both target the
+/// offset exactly; integration rounding can finish a hair low). From that
+/// pose every horizontal sweep returns an immediate floor hit whose
+/// up-facing normal defeats the slide projection, and the controller burns
+/// its iteration budget making no progress: the character wedges permanently
+/// on open flat ground. The controller must recover and keep walking.
+#[test]
+fn character_resting_below_contact_offset_still_walks() {
+    let mut instance = new_instance(
+        r#"
+        Workspace.Gravity = 10
+
+        local floor = Instance.new("Part")
+        floor.Name = "Floor"
+        floor.Size = Vector3.new(80, 1, 80)
+        floor.Position = Vector3.new(0, -0.5, 0)
+        floor.Anchored = true
+        floor.CustomPhysicalProperties = PhysicalProperties.new(2.0, 1.4, 0.0, 1, 1)
+        floor.Parent = Workspace
+
+        local Players = game:GetService("Players")
+        Players.PlayerAdded:Connect(function(player)
+            _G.player = player
+        end)
+    "#,
+    );
+
+    let agent = Uuid::new_v4();
+    assert!(instance.add_player(agent, "LowWalker"));
+    for _ in 0..120 {
+        instance.tick();
+    }
+    let hrp = *instance.player_hrp_ids.get(&agent).unwrap();
+
+    // Park the capsule bottom 0.0014 below the 0.05 contact offset — a pose
+    // observed after ordinary walking (floor top y=0, capsule half extent 2.5).
+    instance
+        .physics
+        .set_character_position(hrp, [0.0, 2.5486, 0.0]);
+    for _ in 0..30 {
+        instance.tick();
+    }
+
+    instance
+        .lua_runtime
+        .as_ref()
+        .unwrap()
+        .lua()
+        .load(
+            r#"
+            local humanoid = _G.player.Character:FindFirstChild("Humanoid")
+            humanoid:MoveTo(Vector3.new(12, 0, 0))
+        "#,
+        )
+        .exec()
+        .unwrap();
+    for _ in 0..240 {
+        instance.tick();
+    }
+
+    let p = instance.physics.get_character_position(hrp).unwrap();
+    assert!(
+        p[0] > 6.0,
+        "capsule wedged on flat ground from clearance below offset (x={:.3}, y={:.4})",
+        p[0],
+        p[1]
+    );
+}
+
+/// A character capsule overlapping a floating welded assembly (stepped off
+/// the deck into the water; the hull now sits against the capsule) must not
+/// drag it under. Capsule contacts are one-way — the assembly can never push
+/// the kinematic capsule up — so any controller descent grinds the assembly
+/// down with infinite authority and buoyancy never wins; conversely,
+/// platform-carry from a body the capsule itself displaces pumps the pair
+/// upward without bound. The capsule must hold height and the assembly must
+/// keep floating.
+#[test]
+fn character_overlapping_floating_assembly_does_not_drag_it_under() {
+    let mut instance = new_instance(
+        r#"
+        Workspace.Gravity = 10
+        Workspace.Terrain:FillBlock(CFrame.new(0, -8.25, 0), Vector3.new(96, 15.5, 96), Enum.Material.Water)
+
+        local prev = nil
+        for i = -1, 1 do
+            local p = Instance.new("Part")
+            p.Name = "Hull" .. i
+            p.Size = Vector3.new(12, 1, 1.5)
+            p.CustomPhysicalProperties = PhysicalProperties.new(0.25, 0.75, 0.08, 1, 1)
+            p.Position = Vector3.new(0, -0.3, i * 1.5)
+            p.CanCollide = true
+            p.Parent = Workspace
+            if prev then
+                local w = Instance.new("WeldConstraint")
+                w.Part0 = prev; w.Part1 = p; w.Parent = prev
+            end
+            if i == 0 then _G.hull = p end
+            prev = p
+        end
+
+        local Players = game:GetService("Players")
+        Players.PlayerAdded:Connect(function(player) _G.player = player end)
+    "#,
+    );
+
+    let agent = Uuid::new_v4();
+    assert!(instance.add_player(agent, "Overboard"));
+    let hrp = *instance.player_hrp_ids.get(&agent).unwrap();
+    for _ in 0..240 {
+        instance.tick(); // land on the deck, raft settles
+    }
+
+    // Capsule shoved down into the water so the hull sits against it.
+    instance
+        .physics
+        .set_character_position(hrp, [0.0, -0.30, 0.0]);
+
+    // The hull may transiently squeeze below the capsule tip (~-3.4) while
+    // working itself free; what must never happen is a runaway in either
+    // direction or a failure to return to the surface. The broken behaviors
+    // this guards against ratcheted the hull below -10 (and to the void in
+    // longer runs) or pumped the pair above +8 within this window.
+    // Only the assembly's fate is asserted: the capsule may legitimately
+    // work itself free of the hull and sink in open water (characters have
+    // no water interaction; resets are the world layer's responsibility).
+    let mut min_hull_y = f64::INFINITY;
+    let mut max_hull_y = f64::NEG_INFINITY;
+    for _ in 0..1800 {
+        instance.tick();
+        let hull_y = eval_f64(&instance, "return _G.hull.Position.Y");
+        min_hull_y = min_hull_y.min(hull_y);
+        max_hull_y = max_hull_y.max(hull_y);
+    }
+    let final_hull_y = eval_f64(&instance, "return _G.hull.Position.Y");
+
+    assert!(
+        min_hull_y > -6.0,
+        "floating assembly was ratcheted under by the overlapping capsule (min hull y = {min_hull_y:.2})"
+    );
+    assert!(
+        max_hull_y < 5.0,
+        "capsule/assembly pair pumped itself upward (max hull y = {max_hull_y:.2})"
+    );
+    // The hull either floats free near the surface or rests pinned against
+    // the capsule's underside (capsule bottom is at -2.8 in this setup) —
+    // both are stable held states. Anything deeper means it kept sinking.
+    assert!(
+        final_hull_y > -3.5,
+        "assembly did not stay at the surface or against the capsule (final hull y = {final_hull_y:.2})"
     );
 }

@@ -202,9 +202,7 @@ impl PhysicsWorld {
         let reuse = self
             .align_joints
             .get(&spec.align_id)
-            .filter(|entry| {
-                entry.body1 == body1 && entry.body2 == body2 && entry.kind == spec.kind
-            })
+            .filter(|entry| entry.body1 == body1 && entry.body2 == body2 && entry.kind == spec.kind)
             .map(|entry| entry.handle)
             .filter(|&handle| self.impulse_joint_set.get(handle).is_some());
 

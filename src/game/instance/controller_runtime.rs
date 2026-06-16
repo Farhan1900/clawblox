@@ -121,6 +121,7 @@ pub(super) fn update_character_movement(instance: &mut GameInstance, dt: f32) {
             horizontal_velocity,
             grounded,
             move_to_elapsed,
+            capsule_half_extent,
         ) = {
             let Some(state) = instance.physics.get_character_state(hrp_id) else {
                 continue;
@@ -135,6 +136,7 @@ pub(super) fn update_character_movement(instance: &mut GameInstance, dt: f32) {
                 state.horizontal_velocity,
                 state.grounded,
                 state.move_to_elapsed,
+                state.capsule_half_extent,
             )
         };
 
@@ -163,7 +165,35 @@ pub(super) fn update_character_movement(instance: &mut GameInstance, dt: f32) {
         let contact_velocity = instance
             .physics
             .get_character_contact_kinematic_velocity(hrp_id);
-        let motion_plan = build_motion_plan(
+        // Carry hygiene: never inherit velocity from a support the capsule is
+        // penetrating (the ground ray starts at the body center, so a support
+        // closer than the capsule half extent is inside it). A penetrating
+        // dynamic support is being pushed by the capsule's own depenetration;
+        // feeding its velocity back into the capsule closes a feedback loop
+        // that levitates or submerges the pair. Cap the inherited speed as a
+        // final guard against riding any runaway body.
+        const MAX_CARRY_SPEED: f32 = 24.0;
+        let support_outside_capsule = ground_sample
+            .support_distance
+            .map(|d| d >= capsule_half_extent - 0.1)
+            .unwrap_or(false);
+        // Kinematic platforms cannot be displaced by the capsule, so riding
+        // them is safe even while interpenetrating (lifts work only through
+        // carry). Only a dynamic support both penetrating and carrying is the
+        // runaway feedback case.
+        let platform_velocity = ground_decision
+            .platform_velocity
+            .filter(|_| support_outside_capsule || !ground_sample.support_is_dynamic)
+            .map(|v| {
+                let speed = (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt();
+                if speed > MAX_CARRY_SPEED {
+                    let scale = MAX_CARRY_SPEED / speed;
+                    [v[0] * scale, v[1] * scale, v[2] * scale]
+                } else {
+                    v
+                }
+            });
+        let mut motion_plan = build_motion_plan(
             current_pos,
             target,
             walk_speed,
@@ -174,9 +204,25 @@ pub(super) fn update_character_movement(instance: &mut GameInstance, dt: f32) {
             grounded,
             ground_decision.carry_by_platform,
             jump_power,
-            ground_decision.platform_velocity,
+            platform_velocity,
             contact_velocity,
         );
+        // Overlapping a dynamic support (it is inside the capsule, not under
+        // it): hold height instead of grinding downward. Contacts with the
+        // kinematic capsule are one-way, so descending into the support
+        // shoves it down with infinite authority — a buoyant body underneath
+        // gets ratcheted below the surface tick by tick, buoyancy never
+        // winning. Holding height lets the body settle against the capsule
+        // and the character step or jump off.
+        let penetrating_support = ground_sample.support_is_dynamic
+            && ground_sample
+                .support_distance
+                .map(|d| d < capsule_half_extent - 0.1)
+                .unwrap_or(false);
+        if penetrating_support && motion_plan.desired[1] < 0.0 {
+            motion_plan.desired[1] = 0.0;
+            motion_plan.new_vertical_velocity = motion_plan.new_vertical_velocity.max(0.0);
+        }
 
         let mut new_vertical_velocity = motion_plan.new_vertical_velocity;
         let mut new_move_to_elapsed = move_to_elapsed;
@@ -201,6 +247,16 @@ pub(super) fn update_character_movement(instance: &mut GameInstance, dt: f32) {
             .physics
             .move_character(hrp_id, motion_plan.desired, dt)
         {
+            if std::env::var_os("CLAWBLOX_TRACE_VMOVE").is_some() {
+                eprintln!(
+                    "[vmove] pos_y={:.4} desired_y={:.5} applied_y={:.5} grounded={} vvel_in={:.3}",
+                    current_pos[1],
+                    motion_plan.desired[1],
+                    movement.translation.y,
+                    movement.grounded,
+                    vertical_velocity
+                );
+            }
             new_vertical_velocity = resolve_vertical_velocity_after_move(
                 new_vertical_velocity,
                 motion_plan.desired[1],
@@ -208,6 +264,17 @@ pub(super) fn update_character_movement(instance: &mut GameInstance, dt: f32) {
                 movement.grounded,
             );
             post_move_grounded = movement.grounded;
+            // A mostly-blocked downward move means something below holds the
+            // capsule even when the controller's ground test missed it (e.g.
+            // resting between the parts of a floating assembly). Treat it as
+            // standing so the next tick doesn't retry the descent: repeated
+            // micro-descents slide off oblique edges and ratchet one-way
+            // contacts (and anything buoyant under them) below the surface.
+            if motion_plan.desired[1] < -1.0e-4
+                && movement.translation.y > motion_plan.desired[1] * 0.5
+            {
+                post_move_grounded = true;
+            }
             applied_horizontal = [movement.translation.x, movement.translation.z];
         }
 
