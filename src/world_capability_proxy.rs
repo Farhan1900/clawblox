@@ -11,6 +11,8 @@ use std::{
     time::Duration,
 };
 
+const PROXY_THREAD_STACK_SIZE: usize = 256 * 1024;
+
 const HOP_BY_HOP_HEADERS: &[&str] = &[
     "connection",
     "keep-alive",
@@ -95,31 +97,51 @@ pub fn start_world_capability_proxy(
     let public_host = config.public_host.to_ascii_lowercase();
     let session_header = config.session_header.clone();
     let session_token_file = config.session_token_file.clone();
-    let thread = thread::spawn(move || {
-        while !thread_stop.load(Ordering::SeqCst) {
-            match listener.accept() {
-                Ok((stream, _addr)) => {
-                    let target = target.clone();
-                    let public_host = public_host.clone();
-                    let session_header = session_header.clone();
-                    let session_token_file = session_token_file.clone();
-                    thread::spawn(move || {
-                        let _ = handle_client(
-                            stream,
-                            &target,
-                            &public_host,
-                            &session_header,
-                            &session_token_file,
-                        );
-                    });
+    let thread = thread::Builder::new()
+        .name("clawblox-world-capability-proxy".to_string())
+        .stack_size(PROXY_THREAD_STACK_SIZE)
+        .spawn(move || {
+            while !thread_stop.load(Ordering::SeqCst) {
+                match listener.accept() {
+                    Ok((stream, _addr)) => {
+                        let mut error_stream = stream.try_clone().ok();
+                        let target = target.clone();
+                        let public_host = public_host.clone();
+                        let session_header = session_header.clone();
+                        let session_token_file = session_token_file.clone();
+                        if let Err(err) = thread::Builder::new()
+                            .name("clawblox-world-capability-client".to_string())
+                            .stack_size(PROXY_THREAD_STACK_SIZE)
+                            .spawn(move || {
+                                let _ = handle_client(
+                                    stream,
+                                    &target,
+                                    &public_host,
+                                    &session_header,
+                                    &session_token_file,
+                                );
+                            })
+                        {
+                            if let Some(stream) = &mut error_stream {
+                                let _ = write_json_response(
+                                    stream,
+                                    503,
+                                    &format!(
+                                        "World capability proxy could not accept client: {err}"
+                                    ),
+                                    false,
+                                );
+                            }
+                        }
+                    }
+                    Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
+                        thread::sleep(Duration::from_millis(20));
+                    }
+                    Err(_) => break,
                 }
-                Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
-                    thread::sleep(Duration::from_millis(20));
-                }
-                Err(_) => break,
             }
-        }
-    });
+        })
+        .map_err(|err| format!("failed to start world capability proxy thread: {err}"))?;
 
     Ok(WorldCapabilityProxy {
         port,

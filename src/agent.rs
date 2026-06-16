@@ -1222,11 +1222,10 @@ fn prepare_claude_sandbox_home(ctx: &AgentContext, layout: &SandboxLayout) -> Ag
         &layout.host_home_dir.join(".local/bin/claude"),
     )?;
 
-    let host_claude_dir = std::env::var_os("CLAUDE_CONFIG_DIR")
+    let host_claude_dir = effective_env_value(ctx, "CLAUDE_CONFIG_DIR")
         .map(PathBuf::from)
         .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".claude")));
-    if let Some(token) = std::env::var_os("ANTHROPIC_OAUTH_TOKEN") {
-        let token = token.to_string_lossy();
+    if let Some(token) = effective_env_value(ctx, "ANTHROPIC_OAUTH_TOKEN") {
         write_file(
             &claude_dir.join(".credentials.json"),
             &format!(
@@ -1235,7 +1234,7 @@ fn prepare_claude_sandbox_home(ctx: &AgentContext, layout: &SandboxLayout) -> Ag
                     .map_err(|err| AgentError::InvalidConfig(err.to_string()))?
             ),
         )?;
-    } else if std::env::var_os("CLAUDE_CODE_OAUTH_TOKEN").is_some() {
+    } else if effective_env_value(ctx, "CLAUDE_CODE_OAUTH_TOKEN").is_some() {
         let _ = std::fs::remove_file(claude_dir.join(".credentials.json"));
     } else if let Some(host_dir) = &host_claude_dir {
         copy_if_exists(
@@ -1446,6 +1445,10 @@ fn env_value(ctx: &AgentContext, key: &str) -> Option<String> {
         .iter()
         .rev()
         .find_map(|(name, value)| (name == key).then(|| value.clone()))
+}
+
+fn effective_env_value(ctx: &AgentContext, key: &str) -> Option<String> {
+    env_value(ctx, key).or_else(|| std::env::var(key).ok())
 }
 
 fn world_proxy_port(ctx: &AgentContext) -> Option<u16> {
@@ -2646,6 +2649,36 @@ mod tests {
             settings["permissions"]["defaultMode"],
             serde_json::json!("auto")
         );
+    }
+
+    #[test]
+    fn claude_sandbox_home_respects_context_oauth_token() {
+        let mut ctx = test_context();
+        ctx.prepare_paths().unwrap();
+        let host_claude_dir = ctx.paths.runtime_dir.join("host-claude");
+        std::fs::create_dir_all(&host_claude_dir).unwrap();
+        std::fs::write(
+            host_claude_dir.join(".credentials.json"),
+            r#"{"claudeAiOauth":{"accessToken":"stale-host-token"}}"#,
+        )
+        .unwrap();
+        ctx.settings.env.push((
+            "CLAUDE_CONFIG_DIR".to_string(),
+            host_claude_dir.display().to_string(),
+        ));
+        ctx.settings.env.push((
+            "CLAUDE_CODE_OAUTH_TOKEN".to_string(),
+            "fresh-context-token".to_string(),
+        ));
+        let layout = SandboxLayout::for_agent(&ctx, PathBuf::from("/bin/echo"), "claude")
+            .with_claude_plugin();
+
+        prepare_claude_sandbox_home(&ctx, &layout).unwrap();
+
+        assert!(!layout
+            .host_home_dir
+            .join(".claude/.credentials.json")
+            .exists());
     }
 
     #[test]
