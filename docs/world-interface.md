@@ -96,6 +96,7 @@ WORLD_BASE_PATH
 WORLD_RECORD
 WORLD_RECORD_DIR
 WORLD_RESUME_PATH
+WORLD_OPERATOR_TOKEN
 CLAWBLOX_BIN
 ```
 
@@ -118,6 +119,58 @@ optional recording and renderer commands
 The reason to add this is not aesthetics. It lets MuJoCo, Minecraft, external
 servers, and built-in Clawblox worlds use the same `World` interface without
 pretending they all use the Clawblox Lua engine.
+
+## Save / Load
+
+A world supports save/load by implementing exactly two things:
+
+```text
+1. GET /snapshot      Return a complete, restorable state document for the
+                      running instance. The format is world-owned and opaque
+                      to Clawblox. Gate the endpoint: accept requests whose
+                      X-Operator-Token header matches WORLD_OPERATOR_TOKEN.
+                      Never document it in the agent-facing API.
+
+2. WORLD_RESUME_PATH  If set at launch, restore full state from that file
+                      before serving. The file contains a previous GET
+                      /snapshot response body. (--resume as a CLI flag
+                      should override the env value, like other WORLD_*.)
+```
+
+Vocabulary: a *snapshot* is the state document a world can produce and
+consume; a *checkpoint* is a saved snapshot registered in the run manifest,
+possibly bundled with agent state (see `docs/checkpoints.md`).
+
+Everything else is generic and lives in Clawblox:
+
+```python
+ckpt = world.save(dir=run_dir / "checkpoints")   # GET /snapshot -> file
+                                                 # + manifest "checkpoints" entry
+world.start(port=8085, resume=ckpt["path"])      # sets WORLD_RESUME_PATH
+```
+
+Semantic requirements for a conforming world:
+
+- Restore is exact. A restored instance is observationally identical to the
+  instance at snapshot time: physics state, sim time, sessions (the same
+  `X-Session` ids keep working without re-join), and chat history.
+- If the snapshot is JSON with top-level `format` and `time` fields, Clawblox
+  records them in the manifest; otherwise the checkpoint is registered with
+  format `world-snapshot`.
+- Snapshots should identify their world content (for example a scene hash)
+  and refuse to restore into a mismatched world.
+- Agent-visible payloads expose simulation time only, never host wall-clock
+  time. Wall time both leaks the host and makes restores observable; the
+  save/load design keeps checkpoints invisible to agents.
+
+Recordings answer "what happened"; snapshots answer "where were we". Keep
+history in the recording protocol and state in the snapshot — a snapshot
+should not embed event history.
+
+Large-state worlds: the v1 protocol returns state inline from `GET
+/snapshot`. If a world's state is too large for that, a future revision may
+let the endpoint return a file reference instead; do not invent a private
+variant.
 
 ## Debugging Contract
 

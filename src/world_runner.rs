@@ -15,6 +15,7 @@ pub struct ExternalWorldCommand {
     pub record_dir: Option<PathBuf>,
     pub manifest_path: Option<PathBuf>,
     pub resume: Option<PathBuf>,
+    pub operator_token: Option<String>,
     pub clawblox_bin: Option<PathBuf>,
     pub shm_dir: Option<PathBuf>,
 }
@@ -47,6 +48,9 @@ impl ExternalWorldCommand {
                 "WORLD_RESUME_PATH".to_string(),
                 resume.display().to_string(),
             ));
+        }
+        if let Some(operator_token) = &self.operator_token {
+            env.push(("WORLD_OPERATOR_TOKEN".to_string(), operator_token.clone()));
         }
         if let Some(clawblox_bin) = &self.clawblox_bin {
             env.push((

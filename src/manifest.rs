@@ -14,6 +14,8 @@ pub struct ClawbloxManifest {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub recordings: Vec<ManifestRecording>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub checkpoints: Vec<ManifestCheckpoint>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub agents: Vec<ManifestAgent>,
 }
 
@@ -50,6 +52,17 @@ pub struct ManifestRecording {
     pub events: Option<String>,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub format: String,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ManifestCheckpoint {
+    pub path: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub format: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub created_at: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sim_time: Option<f64>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -277,6 +290,28 @@ pub fn record_recording(path: &Path, recording_path: &Path, format: &str) -> Res
             path: rel,
             events,
             format: format.to_string(),
+        });
+        Ok(())
+    })
+}
+
+pub fn record_checkpoint(
+    path: &Path,
+    checkpoint_path: &Path,
+    format: &str,
+    sim_time: Option<f64>,
+) -> Result<(), String> {
+    update(path, |manifest| {
+        let state_root = manifest_state_root(path);
+        let rel = path_value(&state_root, checkpoint_path);
+        if manifest.checkpoints.iter().any(|item| item.path == rel) {
+            return Ok(());
+        }
+        manifest.checkpoints.push(ManifestCheckpoint {
+            path: rel,
+            format: format.to_string(),
+            created_at: chrono::Utc::now().to_rfc3339(),
+            sim_time,
         });
         Ok(())
     })

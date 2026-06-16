@@ -15,8 +15,8 @@ use clawblox::agent_runner::{
 };
 use clawblox::config::{SandboxConfig, WorldConfig};
 use clawblox::manifest::{
-    manifest_path_for_state_root, record_agent_connected, record_checkpoint,
-    record_world_started, refresh_agent_from_dir, AgentConnected, WorldStarted,
+    manifest_path_for_state_root, record_agent_connected, record_checkpoint, record_world_started,
+    refresh_agent_from_dir, AgentConnected, WorldStarted,
 };
 use clawblox::world_capability_proxy::{
     start_world_capability_proxy, WorldCapabilityProxy, WorldCapabilityProxyConfig,
@@ -843,12 +843,17 @@ impl PyWorld {
             if let Some(session) = &tmux_session {
                 drop(log);
                 drop(err_log);
+                let builtin_env: Vec<(String, String)> = self
+                    .operator_token
+                    .as_ref()
+                    .map(|token| vec![("WORLD_OPERATOR_TOKEN".to_string(), token.clone())])
+                    .unwrap_or_default();
                 let created_tmux_session = start_tmux_command_file(
                     session,
                     tmux_window.as_deref().unwrap_or("world-0"),
                     &command_file,
                     &log_file,
-                    &[],
+                    &builtin_env,
                 )?;
                 self.tmux_session = Some(session.clone());
                 self.tmux_window = tmux_window.clone();
@@ -886,6 +891,12 @@ impl PyWorld {
                         self.resume
                             .as_ref()
                             .map(|path| vec!["--resume".to_string(), path.display().to_string()])
+                            .unwrap_or_default(),
+                    )
+                    .envs(
+                        self.operator_token
+                            .as_ref()
+                            .map(|token| vec![("WORLD_OPERATOR_TOKEN".to_string(), token.clone())])
                             .unwrap_or_default(),
                     )
                     .stdout(Stdio::from(log))
@@ -989,7 +1000,14 @@ impl PyWorld {
             join_url_path(&self.base_path, "/join"),
             percent_encode(agent.name())
         );
-        let response = http_request("POST", port, &path, &join_headers, "")?;
+        let response = http_request("POST", port, &path, &join_headers, "").map_err(|err| {
+            PyAgentError::new_err(format!(
+                "failed to join world at {}{}: {err}",
+                self.url()
+                    .unwrap_or_else(|_| format!("http://localhost:{port}")),
+                path
+            ))
+        })?;
         if response.status != 200 {
             return Err(PyAgentError::new_err(format!(
                 "failed to join world at {}{}: HTTP {}\nbody: {}",
@@ -1021,9 +1039,19 @@ impl PyWorld {
             .unwrap_or("");
 
         if let Some(parent) = session_file.parent() {
-            std::fs::create_dir_all(parent).map_err(io_error)?;
+            std::fs::create_dir_all(parent).map_err(|err| {
+                PyAgentError::new_err(format!(
+                    "failed to create agent session directory {}: {err}",
+                    parent.display()
+                ))
+            })?;
         }
-        std::fs::write(&session_file, format!("{session}\n")).map_err(io_error)?;
+        std::fs::write(&session_file, format!("{session}\n")).map_err(|err| {
+            PyAgentError::new_err(format!(
+                "failed to write world session file {}: {err}",
+                session_file.display()
+            ))
+        })?;
         if !self.connected_sessions.iter().any(|value| value == session) {
             self.connected_sessions.push(session.to_string());
         }
@@ -1052,10 +1080,25 @@ impl PyWorld {
             ("WORLD_AGENT_NAME".to_string(), agent.name().to_string()),
         ];
         if agent.sandbox {
-            agent.set_sandbox_config(self.world_config.sandbox.clone())?;
-            let proxy_port = self.start_capability_proxy(agent, &internal_base_url)?;
-            let agent_impl =
-                build_agent(&agent.agent, None, false).map_err(PyAgentError::new_err)?;
+            agent
+                .set_sandbox_config(self.world_config.sandbox.clone())
+                .map_err(|err| {
+                    PyAgentError::new_err(format!(
+                        "failed to configure sandbox for world connection: {err}"
+                    ))
+                })?;
+            let proxy_port = self
+                .start_capability_proxy(agent, &internal_base_url)
+                .map_err(|err| {
+                    PyAgentError::new_err(format!(
+                        "failed to start world capability proxy for sandboxed agent: {err}"
+                    ))
+                })?;
+            let agent_impl = build_agent(&agent.agent, None, false).map_err(|err| {
+                PyAgentError::new_err(format!(
+                    "failed to build agent implementation for world connection: {err}"
+                ))
+            })?;
             let uses_socat = agent_impl.needs_socat_sandbox();
             base_url = if agent_impl.name() == "claude" && !agent.claude_native_sandbox {
                 // Claude can opt out of its native sandbox when Clawblox's
@@ -1185,7 +1228,10 @@ impl PyWorld {
             .unwrap_or_else(|_| ("world-snapshot".to_string(), None));
         std::fs::create_dir_all(&dir).map_err(io_error)?;
         let file_name = name.unwrap_or_else(|| {
-            format!("{}.snapshot", chrono::Utc::now().format("%Y%m%dT%H%M%S%3fZ"))
+            format!(
+                "{}.snapshot",
+                chrono::Utc::now().format("%Y%m%dT%H%M%S%3fZ")
+            )
         });
         let snapshot_path = dir.join(file_name);
         std::fs::write(&snapshot_path, &response.body).map_err(io_error)?;
@@ -1330,10 +1376,7 @@ impl PyWorld {
                 ));
             }
             if let Some(operator_token) = &self.operator_token {
-                env.push((
-                    "WORLD_OPERATOR_TOKEN".to_string(),
-                    operator_token.clone(),
-                ));
+                env.push(("WORLD_OPERATOR_TOKEN".to_string(), operator_token.clone()));
             }
             env
         } else {
@@ -1433,7 +1476,10 @@ fn reap_socat_bridges(ports: &[u16]) {
         if !argv0.ends_with("socat") {
             continue;
         }
-        if needles.iter().any(|needle| cmdline.contains(needle.as_str())) {
+        if needles
+            .iter()
+            .any(|needle| cmdline.contains(needle.as_str()))
+        {
             let _ = std::process::Command::new("kill")
                 .args(["-9", &pid.to_string()])
                 .status();
@@ -2004,7 +2050,7 @@ fn http_request(
 ) -> PyResult<HttpResponse> {
     let mut stream = TcpStream::connect(("127.0.0.1", port)).map_err(io_error)?;
     stream
-        .set_read_timeout(Some(Duration::from_secs(5)))
+        .set_read_timeout(Some(Duration::from_secs(60)))
         .map_err(io_error)?;
     let mut request = format!(
         "{method} {path} HTTP/1.1\r\nHost: localhost:{port}\r\nConnection: close\r\nContent-Length: {}\r\n",
@@ -2019,19 +2065,60 @@ fn http_request(
     request.push_str("\r\n");
     request.push_str(body);
     stream.write_all(request.as_bytes()).map_err(io_error)?;
-    let mut raw = String::new();
-    stream.read_to_string(&mut raw).map_err(io_error)?;
-    let (head, body) = raw.split_once("\r\n\r\n").unwrap_or((&raw, ""));
+    let raw = read_http_response(&mut stream)?;
+    let header_end = response_header_end(&raw).unwrap_or(raw.len());
+    let head = String::from_utf8_lossy(&raw[..header_end]);
+    let body_start = (header_end + 4).min(raw.len());
+    let body = String::from_utf8_lossy(&raw[body_start..]).to_string();
     let status = head
         .lines()
         .next()
         .and_then(|line| line.split_whitespace().nth(1))
         .and_then(|value| value.parse::<u16>().ok())
         .unwrap_or(0);
-    Ok(HttpResponse {
-        status,
-        body: body.to_string(),
-    })
+    Ok(HttpResponse { status, body })
+}
+
+fn read_http_response(stream: &mut TcpStream) -> PyResult<Vec<u8>> {
+    let mut raw = Vec::new();
+    let mut buffer = [0u8; 4096];
+    let mut expected_len = None;
+    loop {
+        let count = stream.read(&mut buffer).map_err(io_error)?;
+        if count == 0 {
+            return Ok(raw);
+        }
+        raw.extend_from_slice(&buffer[..count]);
+        if expected_len.is_none() {
+            if let Some(header_end) = response_header_end(&raw) {
+                expected_len = response_expected_len(&raw, header_end);
+            }
+        }
+        if let Some(expected_len) = expected_len {
+            if raw.len() >= expected_len {
+                raw.truncate(expected_len);
+                return Ok(raw);
+            }
+        }
+    }
+}
+
+fn response_header_end(raw: &[u8]) -> Option<usize> {
+    raw.windows(4).position(|window| window == b"\r\n\r\n")
+}
+
+fn response_expected_len(raw: &[u8], header_end: usize) -> Option<usize> {
+    let head = String::from_utf8_lossy(&raw[..header_end]);
+    for line in head.lines().skip(1) {
+        let Some((name, value)) = line.split_once(':') else {
+            continue;
+        };
+        if name.eq_ignore_ascii_case("content-length") {
+            let content_len = value.trim().parse::<usize>().unwrap_or(0);
+            return Some(header_end + 4 + content_len);
+        }
+    }
+    None
 }
 
 fn access_headers(access: Option<&Bound<'_, PyDict>>) -> PyResult<Vec<(String, String)>> {
@@ -2372,6 +2459,25 @@ fn default_tmux_session(world_dir: &Path) -> String {
         .collect();
     let ts = chrono::Utc::now().format("%Y%m%dT%H%M%SZ").to_string();
     format!("{safe}-{ts}")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{response_expected_len, response_header_end};
+
+    #[test]
+    fn response_expected_len_uses_content_length() {
+        let raw = b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nhelloextra";
+        let header_end = response_header_end(raw).unwrap();
+        assert_eq!(response_expected_len(raw, header_end), Some(43));
+    }
+
+    #[test]
+    fn response_expected_len_reads_to_close_without_content_length() {
+        let raw = b"HTTP/1.1 200 OK\r\nConnection: close\r\n\r\nhello";
+        let header_end = response_header_end(raw).unwrap();
+        assert_eq!(response_expected_len(raw, header_end), None);
+    }
 }
 
 #[pymodule]

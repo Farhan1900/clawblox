@@ -2844,6 +2844,7 @@ fn run_external_world_command(
         record_dir: record_dir.cloned(),
         manifest_path: None,
         resume: resume.cloned(),
+        operator_token: std::env::var("WORLD_OPERATOR_TOKEN").ok(),
         clawblox_bin: Some(PathBuf::from(current_exe)),
         shm_dir: None,
     };
@@ -3845,11 +3846,13 @@ async fn local_snapshot(
     if let Some(err) = check_halted(&state) {
         return Err((axum::http::StatusCode::SERVICE_UNAVAILABLE, err));
     }
-    require_spectator_access(
-        &state.spectator_token,
-        &headers,
-        query.spectator_token.as_deref(),
-    )?;
+    if !operator_token_matches(&headers) {
+        require_spectator_access(
+            &state.spectator_token,
+            &headers,
+            query.spectator_token.as_deref(),
+        )?;
+    }
 
     let snapshot = capture_local_runtime_snapshot(&state)
         .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e))?;
@@ -4051,6 +4054,24 @@ fn get_session(
 #[derive(Deserialize)]
 struct SpectatorAccessQuery {
     spectator_token: Option<String>,
+}
+
+/// Accept the save/load protocol's operator token as an alternative to
+/// spectator access: clawblox sets WORLD_OPERATOR_TOKEN when it launches a
+/// world and presents it via X-Operator-Token when pulling snapshots.
+fn operator_token_matches(headers: &axum::http::HeaderMap) -> bool {
+    let Ok(expected) = std::env::var("WORLD_OPERATOR_TOKEN") else {
+        return false;
+    };
+    let expected = expected.trim();
+    if expected.is_empty() {
+        return false;
+    }
+    headers
+        .get("X-Operator-Token")
+        .and_then(|h| h.to_str().ok())
+        .map(str::trim)
+        .is_some_and(|token| token == expected)
 }
 
 fn require_spectator_access(
