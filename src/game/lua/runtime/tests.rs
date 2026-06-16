@@ -291,7 +291,9 @@ fn test_tick_function() {
     let runtime = test_runtime();
     let result: f64 = runtime.lua().load("return tick()").eval().unwrap();
     assert!(result >= 0.0);
-    std::thread::sleep(std::time::Duration::from_millis(50));
+    // The script clock is frame-bound: it advances with simulated frames,
+    // never with host wall time.
+    runtime.tick(1.0 / 60.0).expect("Failed to tick");
     let result2: f64 = runtime.lua().load("return tick()").eval().unwrap();
     assert!(result2 > result);
 }
@@ -301,7 +303,9 @@ fn test_time_function() {
     let runtime = test_runtime();
     let result: f64 = runtime.lua().load("return time()").eval().unwrap();
     assert!(result >= 0.0);
-    std::thread::sleep(std::time::Duration::from_millis(50));
+    // The script clock is frame-bound: it advances with simulated frames,
+    // never with host wall time.
+    runtime.tick(1.0 / 60.0).expect("Failed to tick");
     let result2: f64 = runtime.lua().load("return time()").eval().unwrap();
     assert!(result2 > result);
 }
@@ -1416,11 +1420,10 @@ fn test_task_delay() {
         .unwrap();
     assert!(!delayed, "task.delay should not fire immediately");
 
-    // Wait for the delay to elapse
-    std::thread::sleep(std::time::Duration::from_millis(60));
-
-    // Tick to trigger resume
-    runtime.tick(1.0 / 60.0).expect("Failed to tick");
+    // 0.05 s of frame-bound time = 4 simulated frames.
+    for _ in 0..4 {
+        runtime.tick(1.0 / 60.0).expect("Failed to tick");
+    }
 
     let delayed: bool = runtime
         .lua()
@@ -1446,8 +1449,10 @@ fn test_task_delay_with_args() {
         )
         .expect("Failed to load script");
 
-    std::thread::sleep(std::time::Duration::from_millis(60));
-    runtime.tick(1.0 / 60.0).expect("Failed to tick");
+    // 0.05 s of frame-bound time = 4 simulated frames.
+    for _ in 0..4 {
+        runtime.tick(1.0 / 60.0).expect("Failed to tick");
+    }
 
     let val: i64 = runtime
         .lua()
@@ -1484,8 +1489,10 @@ fn test_task_wait() {
         .unwrap();
     assert!(!done, "task.wait should yield");
 
-    std::thread::sleep(std::time::Duration::from_millis(60));
-    runtime.tick(1.0 / 60.0).expect("Failed to tick");
+    // 0.05 s of frame-bound time = 4 simulated frames.
+    for _ in 0..4 {
+        runtime.tick(1.0 / 60.0).expect("Failed to tick");
+    }
 
     let done: bool = runtime
         .lua()
@@ -1549,8 +1556,10 @@ fn test_task_cancel() {
         )
         .expect("Failed to load script");
 
-    std::thread::sleep(std::time::Duration::from_millis(60));
-    runtime.tick(1.0 / 60.0).expect("Failed to tick");
+    // 0.05 s of frame-bound time = 4 simulated frames.
+    for _ in 0..4 {
+        runtime.tick(1.0 / 60.0).expect("Failed to tick");
+    }
 
     let cancelled: bool = runtime
         .lua()
@@ -1589,8 +1598,10 @@ fn test_global_wait_delegates_to_task_wait() {
         .unwrap();
     assert!(!done, "global wait() should yield");
 
-    std::thread::sleep(std::time::Duration::from_millis(60));
-    runtime.tick(1.0 / 60.0).expect("Failed to tick");
+    // 0.05 s of frame-bound time = 4 simulated frames.
+    for _ in 0..4 {
+        runtime.tick(1.0 / 60.0).expect("Failed to tick");
+    }
 
     let done: bool = runtime
         .lua()
@@ -1728,9 +1739,11 @@ fn test_wait_for_child_returns_child() {
         )
         .expect("Failed to run script");
 
-    std::thread::sleep(std::time::Duration::from_millis(70));
-    runtime.tick(1.0 / 60.0).unwrap();
-    runtime.tick(1.0 / 60.0).unwrap();
+    // The 0.05 s task.delay fires after 4 simulated frames; give
+    // WaitForChild a few more frames to observe the new child.
+    for _ in 0..8 {
+        runtime.tick(1.0 / 60.0).unwrap();
+    }
 
     let globals = runtime.lua().globals().get::<mlua::Table>("_G").unwrap();
     let child_name: String = globals.get("childName").unwrap();

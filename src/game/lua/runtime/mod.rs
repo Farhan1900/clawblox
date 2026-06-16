@@ -3,7 +3,6 @@ use mlua::{
 };
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
 use uuid::Uuid;
 
 use crate::game::instance::ErrorMode;
@@ -27,33 +26,32 @@ pub use data_model::{Game, GameDataModel, KickRequest, PhysicsCommand};
 
 const DEFAULT_PLAYER_MODEL_URL: &str = "asset://player.glb";
 
+/// Simulation clock for script-visible time (`time()`, `task.wait`,
+/// `task.delay`, Debris lifetimes). Purely tick-driven: it advances only
+/// with simulated frames, never with the host's wall clock. Mixing in wall
+/// time makes every script timer depend on host load (a deadline stamped
+/// during a slow script load lands beyond the frames that should expire
+/// it) and breaks deterministic replay of recorded sessions.
 #[derive(Clone)]
 struct RuntimeClock {
-    start_time: Instant,
     now_secs: Arc<Mutex<f64>>,
 }
 
 impl RuntimeClock {
     fn new() -> Self {
         Self {
-            start_time: Instant::now(),
             now_secs: Arc::new(Mutex::new(0.0)),
         }
     }
 
-    fn wall_secs(&self) -> f64 {
-        self.start_time.elapsed().as_secs_f64()
-    }
-
     fn now(&self) -> f64 {
-        let sim = *self.now_secs.lock().unwrap();
-        sim.max(self.wall_secs())
+        *self.now_secs.lock().unwrap()
     }
 
     fn advance(&self, dt_secs: f64) -> f64 {
         let mut now = self.now_secs.lock().unwrap();
         *now += dt_secs.max(0.0);
-        (*now).max(self.wall_secs())
+        *now
     }
 }
 
