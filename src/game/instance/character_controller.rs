@@ -30,6 +30,7 @@ pub fn sample_ground_sensor(
     character_id: u64,
     grounded: bool,
     config: ControllerManagerConfig,
+    player_object_physics: bool,
 ) -> GroundSensorSample {
     if let Some(support) =
         physics.get_ground_kinematic_support(character_id, config.ground_query_distance)
@@ -40,15 +41,24 @@ pub fn sample_ground_sensor(
             support_distance: Some(support.distance),
             support_is_dynamic: false,
         }
-    } else if let Some(support) =
-        physics.get_ground_dynamic_support(character_id, config.ground_query_distance)
-    {
-        GroundSensorSample {
-            grounded,
-            support_velocity: physics
-                .get_velocity_at_position_for_part(support.lua_id, support.point),
-            support_distance: Some(support.distance),
-            support_is_dynamic: true,
+    } else if player_object_physics {
+        if let Some(support) =
+            physics.get_ground_dynamic_support(character_id, config.ground_query_distance)
+        {
+            GroundSensorSample {
+                grounded,
+                support_velocity: physics
+                    .get_velocity_at_position_for_part(support.lua_id, support.point),
+                support_distance: Some(support.distance),
+                support_is_dynamic: true,
+            }
+        } else {
+            GroundSensorSample {
+                grounded,
+                support_velocity: None,
+                support_distance: None,
+                support_is_dynamic: false,
+            }
         }
     } else {
         GroundSensorSample {
@@ -116,7 +126,7 @@ mod tests {
             ground_query_distance: 4.0,
             platform_stick_distance: 4.0,
         };
-        let sample = sample_ground_sensor(&physics, character_id, false, config);
+        let sample = sample_ground_sensor(&physics, character_id, false, config, true);
         let decision = evaluate_ground_controller(sample, config);
 
         assert!(decision.carry_by_platform);
@@ -126,6 +136,13 @@ mod tests {
         assert!(
             velocity[2] > 3.9,
             "expected dynamic platform z velocity, got {velocity:?}"
+        );
+
+        let disabled_sample = sample_ground_sensor(&physics, character_id, false, config, false);
+        let disabled_decision = evaluate_ground_controller(disabled_sample, config);
+        assert!(
+            !disabled_decision.carry_by_platform,
+            "dynamic support should be ignored when player-object physics is disabled"
         );
     }
 }

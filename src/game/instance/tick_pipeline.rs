@@ -60,7 +60,8 @@ pub(super) fn run_tick_phases(instance: &mut GameInstance, dt: f32) {
 
     // Bound the speed dynamic bodies can gain from character contact this
     // step (kinematic capsules otherwise pump trapped bodies without limit).
-    let character_contact_speeds = if std::env::var_os("CLAWBLOX_DISABLE_WEDGE_RECOVERY").is_none()
+    let character_contact_speeds = if instance.player_object_physics()
+        && std::env::var_os("CLAWBLOX_DISABLE_WEDGE_RECOVERY").is_none()
     {
         Some(instance.physics.snapshot_character_contact_speeds())
     } else {

@@ -454,6 +454,18 @@ impl PhysicsWorld {
         desired_translation: [f32; 3],
         dt: f32,
     ) -> Option<EffectiveCharacterMovement> {
+        self.move_character_with_object_physics(lua_id, desired_translation, dt, true)
+    }
+
+    /// Moves a character using the kinematic controller, optionally applying
+    /// newer dynamic-object coupling such as explicit push impulses.
+    pub fn move_character_with_object_physics(
+        &mut self,
+        lua_id: u64,
+        desired_translation: [f32; 3],
+        dt: f32,
+        player_object_physics: bool,
+    ) -> Option<EffectiveCharacterMovement> {
         let state = self.character_controllers.get(&lua_id)?;
         let body_handle = state.body_handle;
         let collider_handle = state.collider_handle;
@@ -597,7 +609,7 @@ impl PhysicsWorld {
         // controller treats every collider as an immovable wall, so a loose
         // part that comes to rest against the capsule (and then falls
         // asleep) walls the character in permanently.
-        if !collisions.is_empty() {
+        if player_object_physics && !collisions.is_empty() {
             controller.solve_character_collision_impulses(
                 dt,
                 &mut self.rigid_body_set,

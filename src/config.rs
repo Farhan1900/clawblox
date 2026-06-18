@@ -129,6 +129,26 @@ impl Default for AgentApiConfig {
     }
 }
 
+/// Built-in Clawblox runtime configuration.
+#[derive(Debug, Clone, Deserialize)]
+pub struct ClawbloxConfig {
+    /// Whether player character controllers physically couple to dynamic world objects.
+    #[serde(default = "default_player_object_physics")]
+    pub player_object_physics: bool,
+}
+
+impl Default for ClawbloxConfig {
+    fn default() -> Self {
+        Self {
+            player_object_physics: default_player_object_physics(),
+        }
+    }
+}
+
+fn default_player_object_physics() -> bool {
+    true
+}
+
 /// Speech delivery mode.
 #[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
@@ -216,6 +236,9 @@ pub struct WorldConfig {
     /// Agent sandbox configuration
     #[serde(default)]
     pub sandbox: SandboxConfig,
+    /// Built-in Clawblox runtime configuration.
+    #[serde(default)]
+    pub clawblox: ClawbloxConfig,
     /// AFK timeout in seconds (0 = disabled). Players idle longer than this are kicked.
     #[serde(default = "default_afk_timeout")]
     pub afk_timeout: u64,
@@ -357,6 +380,7 @@ mod tests {
         assert_eq!(config.observation.radius, 100.0);
         assert_eq!(config.speech.mode, SpeechMode::Global);
         assert_eq!(config.speech.hearing_radius, 30.0);
+        assert!(config.clawblox.player_object_physics);
         assert!(!config.sandbox.enable_weaker_nested_sandbox);
         assert_eq!(config.sandbox.deps_root, None);
     }
@@ -395,6 +419,9 @@ mod tests {
             deps_root = "/opt/conda"
             add_deps_lib_to_library_path = false
 
+            [clawblox]
+            player_object_physics = false
+
             [run]
             command = ["custom-runner", "--flag"]
         "#;
@@ -412,6 +439,7 @@ mod tests {
         assert_eq!(config.observation.radius, 64.0);
         assert_eq!(config.speech.mode, SpeechMode::Proximity);
         assert_eq!(config.speech.hearing_radius, 24.0);
+        assert!(!config.clawblox.player_object_physics);
         assert!(config.sandbox.enable_weaker_nested_sandbox);
         assert_eq!(
             config.sandbox.deps_root.as_deref(),

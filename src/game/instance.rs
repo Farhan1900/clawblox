@@ -73,6 +73,8 @@ pub struct GameInstance {
     pub max_players: u32,
     /// Maximum distance for player-to-player observation visibility.
     pub observation_radius: f32,
+    /// Whether player character controllers physically couple to dynamic world objects.
+    player_object_physics: bool,
     /// When the instance became empty (for garbage collection)
     /// None if instance has players, Some(Instant) when last player left
     pub empty_since: Option<Instant>,
@@ -164,6 +166,7 @@ impl GameInstance {
             afk_timeout: Duration::from_secs(DEFAULT_AFK_TIMEOUT_SECS),
             max_players,
             observation_radius,
+            player_object_physics: true,
             empty_since: Some(Instant::now()), // Starts empty
             error_mode,
             halted_error: None,
@@ -181,6 +184,14 @@ impl GameInstance {
     /// Returns the number of available slots
     pub fn available_slots(&self) -> usize {
         (self.max_players as usize).saturating_sub(self.players.len())
+    }
+
+    pub fn set_player_object_physics(&mut self, enabled: bool) {
+        self.player_object_physics = enabled;
+    }
+
+    pub fn player_object_physics(&self) -> bool {
+        self.player_object_physics
     }
 
     /// Returns milliseconds since game instance was created

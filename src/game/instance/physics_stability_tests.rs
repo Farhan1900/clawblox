@@ -553,45 +553,37 @@ fn conflicting_dual_grip_tug_of_war_stays_bounded() {
 // Character vs loose parts
 // ---------------------------------------------------------------------------
 
-/// Walking into a light, sleeping loose part must wake it and shove it
-/// aside. The kinematic controller must not treat dynamic bodies as static
-/// walls: a loose part at rest against the capsule sleeps and never moves on
-/// its own, so without push impulses it blocks the character forever (the
-/// "freeze" the manipulation agents kept hitting).
-#[test]
-fn character_pushes_loose_parts_instead_of_freezing() {
-    let mut instance = new_instance(
-        r#"
-        local floor = Instance.new("Part")
-        floor.Name = "Floor"
-        floor.Size = Vector3.new(120, 1, 120)
-        floor.Position = Vector3.new(0, 0, 0)
-        floor.Anchored = true
-        floor.Parent = Workspace
+const LOOSE_WALL_SCRIPT: &str = r#"
+    local floor = Instance.new("Part")
+    floor.Name = "Floor"
+    floor.Size = Vector3.new(120, 1, 120)
+    floor.Position = Vector3.new(0, 0, 0)
+    floor.Anchored = true
+    floor.Parent = Workspace
 
-        -- A light wall lying across the walking path: too tall to autostep,
-        -- too wide to slide around within the test arena.
-        local wall = Instance.new("Part")
-        wall.Name = "LooseWall"
-        wall.Size = Vector3.new(1.4, 2.6, 12)
-        wall.CustomPhysicalProperties = PhysicalProperties.new(0.15, 0.7, 0.05, 1, 1)
-        wall.Position = Vector3.new(3, 1.9, 0)
-        wall.Parent = Workspace
-        _G.wall = wall
+    -- A light wall lying across the walking path: too tall to autostep,
+    -- too wide to slide around within the test arena.
+    local wall = Instance.new("Part")
+    wall.Name = "LooseWall"
+    wall.Size = Vector3.new(1.4, 2.6, 12)
+    wall.CustomPhysicalProperties = PhysicalProperties.new(0.15, 0.7, 0.05, 1, 1)
+    wall.Position = Vector3.new(3, 1.9, 0)
+    wall.Parent = Workspace
+    _G.wall = wall
 
-        local Players = game:GetService("Players")
-        Players.PlayerAdded:Connect(function(player)
-            _G.player = player
-        end)
-    "#,
-    );
+    local Players = game:GetService("Players")
+    Players.PlayerAdded:Connect(function(player)
+        _G.player = player
+    end)
+"#;
 
+fn move_player_into_loose_wall(instance: &mut GameInstance) -> (f64, f64, f64) {
     assert!(instance.add_player(Uuid::new_v4(), "Walker"));
     // Land, then let the wall settle and fall asleep.
     for _ in 0..240 {
         instance.tick();
     }
-    let wall_x0 = eval_f64(&instance, "return _G.wall.Position.X");
+    let wall_x0 = eval_f64(instance, "return _G.wall.Position.X");
 
     instance
         .lua_runtime
@@ -611,11 +603,23 @@ fn character_pushes_loose_parts_instead_of_freezing() {
         instance.tick();
     }
 
-    let wall_x = eval_f64(&instance, "return _G.wall.Position.X");
+    let wall_x = eval_f64(instance, "return _G.wall.Position.X");
     let player_x = eval_f64(
-        &instance,
+        instance,
         "return _G.player.Character.HumanoidRootPart.Position.X",
     );
+    (wall_x0, wall_x, player_x)
+}
+
+/// Walking into a light, sleeping loose part must wake it and shove it
+/// aside. The kinematic controller must not treat dynamic bodies as static
+/// walls: a loose part at rest against the capsule sleeps and never moves on
+/// its own, so without push impulses it blocks the character forever (the
+/// "freeze" the manipulation agents kept hitting).
+#[test]
+fn character_pushes_loose_parts_instead_of_freezing() {
+    let mut instance = new_instance(LOOSE_WALL_SCRIPT);
+    let (wall_x0, wall_x, player_x) = move_player_into_loose_wall(&mut instance);
     assert!(
         wall_x > wall_x0 + 1.0,
         "walking into a light sleeping part should wake and push it; wall moved {:.2} studs",
@@ -624,6 +628,26 @@ fn character_pushes_loose_parts_instead_of_freezing() {
     assert!(
         player_x > wall_x0,
         "character should make progress through the pushed wall, reached x={player_x:.2}"
+    );
+}
+
+/// Compatibility mode keeps the mesa-island-era behavior: loose dynamic parts
+/// still block character movement, but characters do not explicitly push them.
+#[test]
+fn player_object_physics_disabled_keeps_loose_parts_blocking() {
+    let mut instance = new_instance(LOOSE_WALL_SCRIPT);
+    instance.set_player_object_physics(false);
+
+    let (wall_x0, wall_x, player_x) = move_player_into_loose_wall(&mut instance);
+
+    assert!(
+        wall_x < wall_x0 + 0.35,
+        "compatibility mode should not shove the loose wall; moved {:.2} studs",
+        wall_x - wall_x0
+    );
+    assert!(
+        player_x < wall_x0,
+        "loose wall should still block character movement; reached x={player_x:.2}, wall started at x={wall_x0:.2}"
     );
 }
 

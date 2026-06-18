@@ -149,8 +149,13 @@ pub(super) fn update_character_movement(instance: &mut GameInstance, dt: f32) {
             ground_query_distance: consts::CHARACTER_GROUND_QUERY_DISTANCE,
             platform_stick_distance: consts::CHARACTER_PLATFORM_STICK_DISTANCE,
         };
-        let ground_sample =
-            sample_ground_sensor(&instance.physics, hrp_id, grounded, controller_config);
+        let ground_sample = sample_ground_sensor(
+            &instance.physics,
+            hrp_id,
+            grounded,
+            controller_config,
+            instance.player_object_physics(),
+        );
         let ground_decision = evaluate_ground_controller(ground_sample, controller_config);
         instance.physics.tick_character_jump_buffer(hrp_id, dt);
         let near_ground = ground_sample
@@ -243,10 +248,12 @@ pub(super) fn update_character_movement(instance: &mut GameInstance, dt: f32) {
 
         let mut post_move_grounded = grounded;
         let mut applied_horizontal = [motion_plan.desired[0], motion_plan.desired[2]];
-        if let Some(movement) = instance
-            .physics
-            .move_character(hrp_id, motion_plan.desired, dt)
-        {
+        if let Some(movement) = instance.physics.move_character_with_object_physics(
+            hrp_id,
+            motion_plan.desired,
+            dt,
+            instance.player_object_physics(),
+        ) {
             if std::env::var_os("CLAWBLOX_TRACE_VMOVE").is_some() {
                 eprintln!(
                     "[vmove] pos_y={:.4} desired_y={:.5} applied_y={:.5} grounded={} vvel_in={:.3}",

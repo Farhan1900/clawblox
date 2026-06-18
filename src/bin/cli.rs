@@ -1942,6 +1942,7 @@ fn run_game(
             game_handle.async_bridge.clone(),
             ErrorMode::Halt,
         );
+        instance.set_player_object_physics(config.clawblox.player_object_physics);
         instance.instance_id = snapshot.instance.instance_id;
         instance.init_runtime();
         clawblox::snapshot::restore_game_instance(&mut instance, &snapshot.instance)
@@ -1963,6 +1964,11 @@ fn run_game(
             config.observation.radius,
             Some(&script),
         );
+        if let Some(handle) = game_handle.instances.get(&result.instance_id) {
+            handle
+                .write()
+                .set_player_object_physics(config.clawblox.player_object_physics);
+        }
         result.instance_id
     };
 
@@ -2048,6 +2054,7 @@ fn run_game(
             world_script_source: Arc::new(script.clone()),
             max_players: config.max_players,
             observation_radius: config.observation.radius,
+            player_object_physics: config.clawblox.player_object_physics,
             allow_reset: config.agent_api.allow_reset,
             afk_timeout_secs: config.afk_timeout,
             error_mode: ErrorMode::Halt,
@@ -3156,6 +3163,7 @@ struct LocalState {
     world_script_source: Arc<String>,
     max_players: u32,
     observation_radius: f32,
+    player_object_physics: bool,
     allow_reset: bool,
     afk_timeout_secs: u64,
     error_mode: ErrorMode,
@@ -3705,6 +3713,7 @@ fn reset_local_instance(state: &LocalState) -> Result<(), String> {
         state.game_handle.async_bridge.clone(),
         state.error_mode,
     );
+    instance.set_player_object_physics(state.player_object_physics);
     instance.instance_id = state.instance_id;
     instance.init_runtime();
     clawblox::snapshot::restore_game_instance(&mut instance, &state.initial_instance_snapshot)?;
