@@ -28,6 +28,12 @@ pub(super) fn add_fields<F: UserDataFields<Instance>>(fields: &mut F) {
     fields.add_field_method_get("ChildRemoved", |_, this| {
         Ok(this.data.lock().unwrap().child_removed.clone())
     });
+    fields.add_field_method_get("DescendantAdded", |_, this| {
+        Ok(this.data.lock().unwrap().descendant_added.clone())
+    });
+    fields.add_field_method_get("DescendantRemoving", |_, this| {
+        Ok(this.data.lock().unwrap().descendant_removing.clone())
+    });
     fields.add_field_method_get("AncestryChanged", |_, this| {
         Ok(this.data.lock().unwrap().ancestry_changed.clone())
     });

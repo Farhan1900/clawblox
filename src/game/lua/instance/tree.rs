@@ -415,6 +415,9 @@ impl Instance {
 
     pub fn set_parent_with_lua(&self, parent: Option<&Instance>, lua: &Lua) -> Result<()> {
         let old_parent = self.parent();
+        if let Some(old_parent) = &old_parent {
+            self.fire_descendant_removing_from_ancestors(lua, old_parent)?;
+        }
         self.set_parent(parent);
 
         if let Some(old_parent) = old_parent {
@@ -435,10 +438,66 @@ impl Instance {
                 &signal,
                 MultiValue::from_iter([Value::UserData(child_ud)]),
             )?;
+
+            self.fire_descendant_added_from_ancestors(lua, new_parent)?;
         }
 
         self.fire_ancestry_changed_recursive(lua)?;
         self.fire_property_changed_if_listening(lua, "Parent")?;
+        Ok(())
+    }
+
+    fn self_and_descendants(&self) -> Vec<Instance> {
+        let mut instances = vec![self.clone()];
+        instances.extend(self.get_descendants());
+        instances
+    }
+
+    fn ancestor_chain_from(&self, ancestor: &Instance) -> Vec<Instance> {
+        let mut ancestors = vec![ancestor.clone()];
+        let mut current = ancestor.parent();
+        while let Some(parent) = current {
+            current = parent.parent();
+            ancestors.push(parent);
+        }
+        ancestors
+    }
+
+    fn fire_descendant_added_from_ancestors(&self, lua: &Lua, ancestor: &Instance) -> Result<()> {
+        let descendants = self.self_and_descendants();
+        let ancestors = self.ancestor_chain_from(ancestor);
+        for descendant in descendants {
+            for ancestor in &ancestors {
+                let signal = ancestor.data.lock().unwrap().descendant_added.clone();
+                let descendant_ud = lua.create_userdata(descendant.clone())?;
+                Self::fire_signal(
+                    lua,
+                    &signal,
+                    MultiValue::from_iter([Value::UserData(descendant_ud)]),
+                )?;
+            }
+        }
+        Ok(())
+    }
+
+    fn fire_descendant_removing_from_ancestors(
+        &self,
+        lua: &Lua,
+        ancestor: &Instance,
+    ) -> Result<()> {
+        let descendants = self.self_and_descendants();
+        let ancestors = self.ancestor_chain_from(ancestor);
+        for descendant in descendants {
+            for ancestor in &ancestors {
+                let signal = ancestor.data.lock().unwrap().descendant_removing.clone();
+                let descendant_ud = lua.create_userdata(descendant.clone())?;
+                Self::fire_signal(
+                    lua,
+                    &signal,
+                    MultiValue::from_iter([Value::UserData(descendant_ud)]),
+                )?;
+            }
+        }
         Ok(())
     }
 

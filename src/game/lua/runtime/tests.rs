@@ -3107,6 +3107,80 @@ fn test_ancestry_changed_signal_exists_and_fires() {
 }
 
 #[test]
+fn test_descendant_added_signal_exists_and_fires_for_nested_instances() {
+    let mut runtime = test_runtime();
+    runtime
+        .load_script(
+            r#"
+            local model = Instance.new("Model")
+            local child = Instance.new("Part")
+            local nested = Instance.new("Part")
+            nested.Name = "Nested"
+            child.Name = "Child"
+            model.Name = "Model"
+
+            _G.modelAdded = {}
+            _G.workspaceAdded = {}
+            model.DescendantAdded:Connect(function(inst)
+                table.insert(_G.modelAdded, inst.Name)
+            end)
+            Workspace.DescendantAdded:Connect(function(inst)
+                table.insert(_G.workspaceAdded, inst.Name)
+            end)
+
+            child.Parent = model
+            nested.Parent = child
+            model.Parent = Workspace
+        "#,
+        )
+        .expect("Failed to run script");
+
+    let globals = runtime.lua().globals().get::<mlua::Table>("_G").unwrap();
+    let model_added: mlua::Table = globals.get("modelAdded").unwrap();
+    let workspace_added: mlua::Table = globals.get("workspaceAdded").unwrap();
+
+    assert_eq!(model_added.get::<String>(1).unwrap(), "Child");
+    assert_eq!(model_added.get::<String>(2).unwrap(), "Nested");
+    assert_eq!(workspace_added.get::<String>(1).unwrap(), "Model");
+    assert_eq!(workspace_added.get::<String>(2).unwrap(), "Child");
+    assert_eq!(workspace_added.get::<String>(3).unwrap(), "Nested");
+}
+
+#[test]
+fn test_descendant_removing_signal_fires_before_parent_is_cleared() {
+    let mut runtime = test_runtime();
+    runtime
+        .load_script(
+            r#"
+            local model = Instance.new("Model")
+            model.Name = "Model"
+            model.Parent = Workspace
+
+            local child = Instance.new("Part")
+            child.Name = "Child"
+            child.Parent = model
+
+            _G.removingName = nil
+            _G.parentAtRemoving = nil
+            model.DescendantRemoving:Connect(function(inst)
+                _G.removingName = inst.Name
+                _G.parentAtRemoving = inst.Parent and inst.Parent.Name or "nil"
+            end)
+
+            child.Parent = nil
+        "#,
+        )
+        .expect("Failed to run script");
+
+    let globals = runtime.lua().globals().get::<mlua::Table>("_G").unwrap();
+    let removing_name: String = globals.get("removingName").unwrap();
+    let parent_at_removing: String = globals.get("parentAtRemoving").unwrap();
+
+    assert_eq!(removing_name, "Child");
+    assert_eq!(parent_at_removing, "Model");
+}
+
+#[test]
 fn test_legacy_ray_api_find_part_on_ray_with_ignore_list() {
     let mut runtime = test_runtime();
     runtime

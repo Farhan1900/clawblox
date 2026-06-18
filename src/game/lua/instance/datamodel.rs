@@ -39,6 +39,8 @@ pub struct InstanceData {
 
     pub child_added: RBXScriptSignal,
     pub child_removed: RBXScriptSignal,
+    pub descendant_added: RBXScriptSignal,
+    pub descendant_removing: RBXScriptSignal,
     pub ancestry_changed: RBXScriptSignal,
     pub destroying: RBXScriptSignal,
     pub attribute_changed: RBXScriptSignal,
@@ -127,6 +129,8 @@ impl InstanceData {
             tags: HashSet::new(),
             child_added: create_signal("ChildAdded"),
             child_removed: create_signal("ChildRemoved"),
+            descendant_added: create_signal("DescendantAdded"),
+            descendant_removing: create_signal("DescendantRemoving"),
             ancestry_changed: create_signal("AncestryChanged"),
             destroying: create_signal("Destroying"),
             attribute_changed: create_signal("AttributeChanged"),

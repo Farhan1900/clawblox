@@ -374,6 +374,27 @@ impl UserData for WorkspaceService {
 
         fields.add_field_method_get("Name", |_, _| Ok("Workspace".to_string()));
         fields.add_field_method_get("ClassName", |_, _| Ok("Workspace".to_string()));
+        fields.add_field_method_get("ChildAdded", |_, this| {
+            Ok(this.instance.data.lock().unwrap().child_added.clone())
+        });
+        fields.add_field_method_get("ChildRemoved", |_, this| {
+            Ok(this.instance.data.lock().unwrap().child_removed.clone())
+        });
+        fields.add_field_method_get("DescendantAdded", |_, this| {
+            Ok(this.instance.data.lock().unwrap().descendant_added.clone())
+        });
+        fields.add_field_method_get("DescendantRemoving", |_, this| {
+            Ok(this
+                .instance
+                .data
+                .lock()
+                .unwrap()
+                .descendant_removing
+                .clone())
+        });
+        fields.add_field_method_get("AncestryChanged", |_, this| {
+            Ok(this.instance.data.lock().unwrap().ancestry_changed.clone())
+        });
     }
 
     fn add_methods<M: UserDataMethods<Self>>(methods: &mut M) {
