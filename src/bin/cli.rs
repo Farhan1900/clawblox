@@ -2419,6 +2419,7 @@ fn run_replay(
             .route("/", get(replay_ui_index))
             .route("/ui", get(replay_ui_index))
             .route("/ui/{*path}", get(local_ui_file))
+            .route("/replay/view", get(replay_view_index))
             .route("/spectate/ws", get(replay_spectate_ws))
             .route("/renderer/manifest", get(replay_renderer_manifest))
             .route("/replay/info", get(replay_info))
@@ -3637,12 +3638,85 @@ fn embedded_ui_index_response(base_path: &str) -> axum::response::Response {
     embedded_index_response("index.html", base_path)
 }
 
+fn replay_view_response(base_path: &str) -> axum::response::Response {
+    let base_href = format!("{}/", normalize_base_path(base_path).trim_end_matches('/'));
+    let base_href = if base_href == "/" {
+        "/".to_string()
+    } else {
+        base_href
+    };
+    let html = format!(
+        r#"<!doctype html>
+<html lang="en">
+  <head>
+    <base href="{base_href}" />
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Clawblox Replay View</title>
+    <link rel="stylesheet" href="ui/styles.css" />
+    <script type="importmap">
+      {{
+        "imports": {{
+          "three": "https://esm.sh/three@0.160.0",
+          "three/": "https://esm.sh/three@0.160.0/",
+          "lucide": "https://esm.sh/lucide@0.468.0"
+        }}
+      }}
+    </script>
+    <style>
+      html, body, #app, .stage-wrap {{
+        width: 100%;
+        height: 100%;
+        margin: 0;
+        overflow: hidden;
+        background: #05070f;
+      }}
+      .hud-layer {{
+        pointer-events: none;
+      }}
+      .runtime-meta-sr {{
+        position: absolute;
+        width: 1px;
+        height: 1px;
+        overflow: hidden;
+        clip: rect(0, 0, 0, 0);
+      }}
+    </style>
+  </head>
+  <body>
+    <div id="app">
+      <main class="stage-wrap" aria-label="Replay viewport">
+        <canvas id="stage" aria-label="Replay renderer canvas"></canvas>
+        <div class="hud-layer" aria-hidden="true">
+          <div class="runtime-meta-sr">
+            <p id="status">Connecting...</p>
+            <div id="meta"></div>
+          </div>
+        </div>
+      </main>
+    </div>
+    <script type="module" src="ui/main.js"></script>
+  </body>
+</html>"#
+    );
+    (
+        axum::http::StatusCode::OK,
+        [("content-type", "text/html; charset=utf-8")],
+        html,
+    )
+        .into_response()
+}
+
 async fn local_ui_index(State(state): State<LocalState>) -> impl IntoResponse {
     embedded_ui_index_response(&state.base_path)
 }
 
 async fn replay_ui_index(State(state): State<ReplayState>) -> impl IntoResponse {
     embedded_ui_index_response(&state.base_path)
+}
+
+async fn replay_view_index(State(state): State<ReplayState>) -> impl IntoResponse {
+    replay_view_response(&state.base_path)
 }
 
 async fn external_ui_index(State(state): State<ExternalLocalState>) -> impl IntoResponse {
