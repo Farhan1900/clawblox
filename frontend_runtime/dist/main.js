@@ -2091,17 +2091,19 @@ async function bootstrap() {
       }
     }
     startReplayPolling()
-    const externalView = await fetchExternalReplayView().catch((err) => {
-      console.error(err)
-      return null
-    })
-    if (externalView?.enabled && externalView?.url) {
-      mountExternalReplayView(externalView.url)
-      setStatus('Connected | Replay | External viewport', 'ok')
-      window.addEventListener('beforeunload', () => {
-        if (replayState.pollTimer) clearInterval(replayState.pollTimer)
+    if (replayChromeAvailable) {
+      const externalView = await fetchExternalReplayView().catch((err) => {
+        console.error(err)
+        return null
       })
-      return
+      if (externalView?.enabled && externalView?.url) {
+        mountExternalReplayView(externalView.url)
+        setStatus('Connected | Replay | External viewport', 'ok')
+        window.addEventListener('beforeunload', () => {
+          if (replayState.pollTimer) clearInterval(replayState.pollTimer)
+        })
+        return
+      }
     }
   }
 

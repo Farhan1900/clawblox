@@ -3722,8 +3722,6 @@ fn replay_view_response(base_path: &str) -> axum::response::Response {
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Clawblox Replay View</title>
     <link rel="stylesheet" href="ui/styles.css" />
-    <link rel="modulepreload" crossorigin href="https://esm.sh/three@0.160.0/examples/jsm/loaders/GLTFLoader.js" />
-    <link rel="modulepreload" crossorigin href="https://esm.sh/three@0.160.0/examples/jsm/utils/SkeletonUtils.js" />
     <script type="importmap">
       {{
         "imports": {{
@@ -3733,6 +3731,8 @@ fn replay_view_response(base_path: &str) -> axum::response::Response {
         }}
       }}
     </script>
+    <link rel="modulepreload" crossorigin href="https://esm.sh/three@0.160.0/examples/jsm/loaders/GLTFLoader.js" />
+    <link rel="modulepreload" crossorigin href="https://esm.sh/three@0.160.0/examples/jsm/utils/SkeletonUtils.js" />
     <style>
       html, body, #app, .stage-wrap {{
         width: 100%;
