@@ -246,6 +246,7 @@ async fn build_replay_state(
         agent_timeline,
         replay_metadata,
         world_dir,
+        camera: Arc::new(Mutex::new(ReplayCameraBridge::default())),
     })
 }
 

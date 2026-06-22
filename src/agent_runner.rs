@@ -396,7 +396,10 @@ pub fn start_agent(options: AgentStartOptions) -> Result<StartedAgent, String> {
         )
     })?;
 
-    if let Err(err) = start_workspace_recording_for_agent(&ctx, &options.name, &options.name) {
+    let agent_name = agent_display_name_from_env(&ctx.settings.env).unwrap_or(&options.name);
+    if let Err(err) =
+        start_workspace_recording_for_agent(&ctx, &options.name, agent_name, &options.name)
+    {
         let message = format!("failed to start workspace recorder: {err}");
         let _ = append_operation_report(&events_file, failure_report(&ctx, &options, &message));
         return Err(message);
@@ -713,7 +716,10 @@ pub fn send_agent(options: AgentSendOptions) -> Result<StartedAgent, String> {
         )
     })?;
 
-    if let Err(err) = start_workspace_recording_for_agent(&ctx, &options.name, &options.name) {
+    let agent_name = agent_display_name_from_env(&ctx.settings.env).unwrap_or(&options.name);
+    if let Err(err) =
+        start_workspace_recording_for_agent(&ctx, &options.name, agent_name, &options.name)
+    {
         let message = format!("failed to start workspace recorder: {err}");
         let _ =
             append_operation_report(&events_file, send_failure_report(&ctx, &options, &message));
@@ -1033,6 +1039,7 @@ fn start_workspace_recording_for_agent(
     ctx: &AgentContext,
     agent_id: &str,
     agent_name: &str,
+    run_name: &str,
 ) -> Result<(), String> {
     let agent_dir = agent_dir_from_context(ctx);
     let config = WorkspaceRecorderConfig::for_agent(agent_id, agent_name, &agent_dir);
@@ -1042,6 +1049,7 @@ fn start_workspace_recording_for_agent(
             &agent_dir,
             agent_id,
             agent_name,
+            run_name,
             &config.events_file,
             &config.blobs_dir,
         )?;
@@ -1057,6 +1065,12 @@ fn start_workspace_recording_for_agent(
     let handle = start_workspace_recorder(config)?;
     recorders.insert(agent_dir, handle);
     Ok(())
+}
+
+fn agent_display_name_from_env(env: &[(String, String)]) -> Option<&str> {
+    env.iter()
+        .find(|(key, value)| key == "WORLD_AGENT_NAME" && !value.trim().is_empty())
+        .map(|(_, value)| value.as_str())
 }
 
 fn stop_workspace_recording_for_agent(agent_dir: &Path) {

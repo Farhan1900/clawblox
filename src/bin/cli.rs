@@ -2003,6 +2003,7 @@ fn run_game(
     let rt = tokio::runtime::Runtime::new().unwrap();
     let resume_snapshot_for_server = resume_snapshot.clone();
     rt.block_on(async {
+        let mut recording_manifest_target: Option<(PathBuf, PathBuf)> = None;
         let recording_writer = if record {
             let rec_dir = if let Some(dir) = record_dir.as_ref() {
                 if dir.is_absolute() {
@@ -2028,6 +2029,7 @@ fn run_game(
                     if let Some(state_root) = rec_dir.parent() {
                         let manifest_path = manifest::manifest_path_for_state_root(state_root);
                         let _ = manifest::record_recording(&manifest_path, &rec_path, "clawrec");
+                        recording_manifest_target = Some((manifest_path, rec_path.clone()));
                     }
                     Some(Arc::new(tokio::sync::Mutex::new(writer)))
                 }
@@ -2289,7 +2291,21 @@ fn run_game(
         }
         if let Some(writer) = recording_writer {
             let mut w = writer.lock().await;
-            w.close(0, 0).await;
+            let info = w.close(0, 0).await;
+            if let Some((manifest_path, rec_path)) = recording_manifest_target {
+                if let Err(err) = manifest::record_recording_info(
+                    &manifest_path,
+                    &rec_path,
+                    manifest::ManifestRecordingInfo {
+                        first_tick: info.first_tick,
+                        total_ticks: info.total_ticks,
+                        tick_rate: info.tick_rate,
+                        duration_ms: info.duration_ms,
+                    },
+                ) {
+                    eprintln!("Warning: failed to update recording manifest info: {}", err);
+                }
+            }
             eprintln!("Recording saved.");
         }
 
@@ -2408,6 +2424,7 @@ fn run_replay(
             agent_timeline,
             replay_metadata,
             world_dir: world_dir.clone(),
+            camera: Arc::new(Mutex::new(ReplayCameraBridge::default())),
         };
 
         let cors = CorsLayer::new()
@@ -2426,6 +2443,7 @@ fn run_replay(
             .route("/replay/state", get(replay_state_at))
             .route("/replay/agent", get(replay_agent_messages))
             .route("/replay/metadata", get(replay_metadata_route))
+            .route("/replay/camera", get(replay_camera_get).put(replay_camera_put))
             .route("/replay/seek", post(replay_seek))
             .route("/replay/speed", post(replay_speed))
             .route("/replay/skip-idle", post(replay_skip_idle))
@@ -2468,6 +2486,7 @@ struct ReplayState {
     agent_timeline: Option<Arc<ReplayAgentTimeline>>,
     replay_metadata: Option<Arc<ReplayMetadata>>,
     world_dir: PathBuf,
+    camera: Arc<Mutex<ReplayCameraBridge>>,
 }
 
 #[derive(Serialize)]
@@ -2475,6 +2494,19 @@ struct ReplayMetadataResponse {
     enabled: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     metadata: Option<ReplayMetadata>,
+}
+
+#[derive(Default)]
+struct ReplayCameraBridge {
+    current: Option<serde_json::Value>,
+    pending: Option<serde_json::Value>,
+}
+
+#[derive(Serialize)]
+struct ReplayCameraResponse {
+    enabled: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    state: Option<serde_json::Value>,
 }
 
 async fn replay_spectate_ws(
@@ -2497,10 +2529,30 @@ async fn handle_replay_ws(socket: WebSocket, state: ReplayState) {
                     Some(Ok(Message::Ping(data))) => {
                         if sender.send(Message::Pong(data)).await.is_err() { break; }
                     }
+                    Some(Ok(Message::Text(text))) => {
+                        if let Ok(value) = serde_json::from_str::<serde_json::Value>(&text) {
+                            if value.get("type").and_then(|v| v.as_str()) == Some("replay_camera_state") {
+                                if let Some(camera_state) = value.get("state").cloned() {
+                                    state.camera.lock().unwrap().current = Some(camera_state);
+                                }
+                            }
+                        }
+                    }
                     _ => {}
                 }
             }
             _ = tick_interval.tick() => {
+                let pending_camera = state.camera.lock().unwrap().pending.take();
+                if let Some(camera_state) = pending_camera {
+                    let payload = serde_json::json!({
+                        "type": "replay_camera_set",
+                        "state": camera_state,
+                    });
+                    if sender.send(Message::Text(payload.to_string().into())).await.is_err() {
+                        break;
+                    }
+                }
+
                 let tick = {
                     let mut pb = state.playback.lock().await;
                     let tick = pb.current_tick();
@@ -2649,6 +2701,22 @@ async fn replay_metadata_route(State(state): State<ReplayState>) -> Json<ReplayM
             .as_ref()
             .map(|metadata| (**metadata).clone()),
     })
+}
+
+async fn replay_camera_get(State(state): State<ReplayState>) -> Json<ReplayCameraResponse> {
+    let camera = state.camera.lock().unwrap();
+    Json(ReplayCameraResponse {
+        enabled: camera.current.is_some(),
+        state: camera.current.clone(),
+    })
+}
+
+async fn replay_camera_put(
+    State(state): State<ReplayState>,
+    Json(camera_state): Json<serde_json::Value>,
+) -> axum::http::StatusCode {
+    state.camera.lock().unwrap().pending = Some(camera_state);
+    axum::http::StatusCode::OK
 }
 
 #[derive(Deserialize)]
@@ -3654,6 +3722,8 @@ fn replay_view_response(base_path: &str) -> axum::response::Response {
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Clawblox Replay View</title>
     <link rel="stylesheet" href="ui/styles.css" />
+    <link rel="modulepreload" crossorigin href="https://esm.sh/three@0.160.0/examples/jsm/loaders/GLTFLoader.js" />
+    <link rel="modulepreload" crossorigin href="https://esm.sh/three@0.160.0/examples/jsm/utils/SkeletonUtils.js" />
     <script type="importmap">
       {{
         "imports": {{

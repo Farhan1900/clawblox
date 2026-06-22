@@ -5,7 +5,7 @@ import {
   Wrench,
   CircleAlert,
   User,
-} from "lucide"
+} from "https://esm.sh/lucide@0.468.0"
 
 function icon(iconNode, size = 14) {
   const el = createLucideElement(iconNode)
@@ -80,6 +80,10 @@ const agentLogStatusEl = document.getElementById('agent-log-status')
 const agentLogToggleEl = document.getElementById('agent-log-toggle')
 const agentLogTabMessagesEl = document.getElementById('agent-log-tab-messages')
 const agentLogTabWorkspaceEl = document.getElementById('agent-log-tab-workspace')
+const replayChromeAvailable = !!replayPanelEl
+const agentPanelAvailable = !!agentLogPanelEl
+const workspacePanelAvailable = !!workspaceFeedEl
+const behaviorPanelAvailable = !!behaviorPanelEl
 
 const chatState = {
   open: false,
@@ -120,6 +124,8 @@ const replayState = {
   behaviorViewEndTick: null,
   behaviorPanState: null,
 }
+let pendingReplayCameraState = null
+let lastCameraReportMs = 0
 const internalApiRegistry = new Map()
 
 function normalizeInternalApiName(name) {
@@ -156,6 +162,7 @@ function setInternalApi(name, api) {
     return null
   }
   internalApiRegistry.set(key, api)
+  if (key === 'camera') applyPendingReplayCameraState()
   return api
 }
 
@@ -1146,17 +1153,17 @@ async function refreshReplayInfo() {
   try {
     const info = await fetchReplayInfo()
     renderReplayInfo(info)
-    if (!replayState.metadataLoaded) {
+    if (behaviorPanelAvailable && !replayState.metadataLoaded) {
       const metadata = await fetchReplayMetadata()
       applyReplayMetadata(metadata)
     }
-    if (!replayState.agentLoaded) {
+    if (agentPanelAvailable && !replayState.agentLoaded) {
       const logs = await fetchReplayAgentMessages()
       if (logs) renderAgentLogMessages(info?.current_tick || 0, logs)
-    } else {
+    } else if (agentPanelAvailable) {
       renderAgentLogMessages(info?.current_tick || 0)
     }
-    if (!replayState.workspaceLoaded) {
+    if (workspacePanelAvailable && !replayState.workspaceLoaded) {
       const workspace = await fetchReplayWorkspaceEvents()
       if (workspace) {
         applyWorkspaceEvents(workspace)
@@ -1270,6 +1277,50 @@ function renderInjectedSpectatorState(state, info = null, options = null) {
   renderPlayerList(state?.players)
   rerenderSpectatorState(options)
   return true
+}
+
+function replayCameraApi() {
+  return internalApiRegistry.get('camera') || null
+}
+
+function applyReplayCameraState(state) {
+  const api = replayCameraApi()
+  if (!api || !state || typeof state !== 'object') {
+    pendingReplayCameraState = state || null
+    return false
+  }
+  try {
+    if (state.modeOverride && typeof api.setMode === 'function') api.setMode(state.modeOverride)
+    else if (typeof api.clearModeOverride === 'function') api.clearModeOverride()
+    if (state.spectator && typeof api.setSpectatorPose === 'function') {
+      api.setSpectatorPose(state.spectator)
+    }
+    pendingReplayCameraState = null
+    return true
+  } catch (err) {
+    console.error('[replay camera] restore failed', err)
+    return false
+  }
+}
+
+function applyPendingReplayCameraState() {
+  if (!pendingReplayCameraState) return false
+  return applyReplayCameraState(pendingReplayCameraState)
+}
+
+function reportReplayCameraState(ws) {
+  if (!replayState.enabled || !ws || ws.readyState !== WebSocket.OPEN) return
+  const now = Date.now()
+  if (now - lastCameraReportMs < 250) return
+  const api = replayCameraApi()
+  if (!api || typeof api.getState !== 'function') return
+  try {
+    const state = api.getState()
+    ws.send(JSON.stringify({ type: 'replay_camera_state', state }))
+    lastCameraReportMs = now
+  } catch (err) {
+    console.error('[replay camera] report failed', err)
+  }
 }
 
 function resolveSpectatorPlayerId(target) {
@@ -2015,23 +2066,29 @@ async function bootstrap() {
   if (replayInfo) {
     setReplayMode(true)
     renderReplayInfo(replayInfo)
-    const metadata = await fetchReplayMetadata().catch((err) => {
-      console.error(err)
-      return null
-    })
-    if (metadata) applyReplayMetadata(metadata)
-    const logs = await fetchReplayAgentMessages().catch((err) => {
-      console.error(err)
-      return null
-    })
-    if (logs) renderAgentLogMessages(replayInfo?.current_tick || 0, logs)
-    const workspace = await fetchReplayWorkspaceEvents().catch((err) => {
-      console.error(err)
-      return null
-    })
-    if (workspace) {
-      applyWorkspaceEvents(workspace)
-      renderSidePanel(replayInfo?.current_tick || 0)
+    if (behaviorPanelAvailable) {
+      const metadata = await fetchReplayMetadata().catch((err) => {
+        console.error(err)
+        return null
+      })
+      if (metadata) applyReplayMetadata(metadata)
+    }
+    if (agentPanelAvailable) {
+      const logs = await fetchReplayAgentMessages().catch((err) => {
+        console.error(err)
+        return null
+      })
+      if (logs) renderAgentLogMessages(replayInfo?.current_tick || 0, logs)
+    }
+    if (workspacePanelAvailable) {
+      const workspace = await fetchReplayWorkspaceEvents().catch((err) => {
+        console.error(err)
+        return null
+      })
+      if (workspace) {
+        applyWorkspaceEvents(workspace)
+        renderSidePanel(replayInfo?.current_tick || 0)
+      }
     }
     startReplayPolling()
     const externalView = await fetchExternalReplayView().catch((err) => {
@@ -2160,6 +2217,8 @@ async function bootstrap() {
         if (data.type === 'replay_error') {
           setStatus(data.message || 'Replay error', 'error')
           console.error('[replay]', data.message || 'Replay error', data)
+        } else if (data.type === 'replay_camera_set') {
+          applyReplayCameraState(data.state)
         }
         return
       }
@@ -2177,6 +2236,8 @@ async function bootstrap() {
       }
       const rendererState = prioritizeSelectedPlayer(state)
       if (renderer.onState) renderer.onState(rendererState)
+      applyPendingReplayCameraState()
+      reportReplayCameraState(ws)
     } catch (error) {
       console.error(error)
       setStatus('Failed to parse spectator state', 'error')

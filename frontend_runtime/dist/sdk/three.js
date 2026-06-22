@@ -981,6 +981,12 @@ export function createModelEntityController(THREE, options = {}) {
     }))
   }
 
+  if (options.preloadModules !== false) {
+    void ensureModelModules().catch((err) => {
+      if (options.onError) options.onError(err, { phase: 'preload-modules' })
+    })
+  }
+
   function chooseClip(animations, pattern, fallbackIndex = -1) {
     const found = animations.find((c) => pattern.test(c.name))
     if (found) return found
@@ -1096,6 +1102,12 @@ export function createModelEntityController(THREE, options = {}) {
   }
 
   return {
+    preload(modelUrl) {
+      if (!modelUrl) return
+      void loadTemplate(modelUrl).catch((err) => {
+        if (options.onError) options.onError(err, { modelUrl, phase: 'preload' })
+      })
+    },
     upsert,
     update,
     remove,

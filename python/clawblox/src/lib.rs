@@ -32,6 +32,7 @@ use pyo3::types::{PyDict, PyList};
 struct PyAgent {
     agent: String,
     name: String,
+    run_name: String,
     binary: Option<PathBuf>,
     version: Option<String>,
     dir: PathBuf,
@@ -117,6 +118,14 @@ struct PyWorldStartResult {
 }
 
 impl PyAgent {
+    fn effective_run_name(&self) -> &str {
+        if self.run_name.is_empty() {
+            &self.name
+        } else {
+            &self.run_name
+        }
+    }
+
     fn hidden_run_tmux(&self) -> PyResult<Option<AgentRunTmux>> {
         self.run_tmux
             .lock()
@@ -208,13 +217,14 @@ impl PyAgent {
 #[pymethods]
 impl PyAgent {
     #[new]
-    #[pyo3(signature = (*, agent, name, dir, model, binary = None, version = None, permission_mode = "bypassPermissions".to_string(), auto_continue_prompt = "Please don't stop. Just continue doing whatever you want to do.".to_string(), tmux = None, bare = false, extra_args = Vec::new(), sandbox = false, claude_native_sandbox = true))]
+    #[pyo3(signature = (*, agent, name, dir, model, run_name = None, binary = None, version = None, permission_mode = "bypassPermissions".to_string(), auto_continue_prompt = "Please don't stop. Just continue doing whatever you want to do.".to_string(), tmux = None, bare = false, extra_args = Vec::new(), sandbox = false, claude_native_sandbox = true))]
     #[allow(clippy::too_many_arguments)]
     fn new(
         agent: String,
         name: String,
         dir: PathBuf,
         model: String,
+        run_name: Option<String>,
         binary: Option<PathBuf>,
         version: Option<String>,
         permission_mode: String,
@@ -228,6 +238,7 @@ impl PyAgent {
         Self {
             agent,
             name,
+            run_name: run_name.unwrap_or_default(),
             binary,
             version,
             dir,
@@ -253,6 +264,11 @@ impl PyAgent {
     #[getter]
     fn name(&self) -> &str {
         &self.name
+    }
+
+    #[getter]
+    fn run_name(&self) -> &str {
+        self.effective_run_name()
     }
 
     #[getter]
@@ -308,7 +324,7 @@ impl PyAgent {
         let tmux_window = run_tmux.as_ref().map(|value| value.window.clone());
         let started = start_agent(AgentStartOptions {
             kind: self.agent.clone(),
-            name: self.name.clone(),
+            name: self.effective_run_name().to_string(),
             binary: self.binary.clone(),
             version: self.version.clone(),
             agent_dir: self.dir.clone(),
@@ -330,8 +346,9 @@ impl PyAgent {
             refresh_agent_from_dir(
                 &manifest_path,
                 &self.dir,
+                self.effective_run_name(),
                 &self.name,
-                &self.name,
+                self.effective_run_name(),
                 &self.agent,
                 &self.model,
             )
@@ -366,7 +383,7 @@ impl PyAgent {
         let tmux_window = run_tmux.as_ref().map(|value| value.window.clone());
         let started = send_agent(AgentSendOptions {
             kind: self.agent.clone(),
-            name: self.name.clone(),
+            name: self.effective_run_name().to_string(),
             binary: self.binary.clone(),
             version: self.version.clone(),
             agent_dir: self.dir.clone(),
@@ -387,8 +404,9 @@ impl PyAgent {
             refresh_agent_from_dir(
                 &manifest_path,
                 &self.dir,
+                self.effective_run_name(),
                 &self.name,
-                &self.name,
+                self.effective_run_name(),
                 &self.agent,
                 &self.model,
             )
@@ -423,7 +441,7 @@ impl PyAgent {
         let tmux_window = run_tmux.as_ref().map(|value| value.window.clone());
         let stopped = stop_agent(AgentStopOptions {
             kind: self.agent.clone(),
-            name: self.name.clone(),
+            name: self.effective_run_name().to_string(),
             binary: self.binary.clone(),
             agent_dir: self.dir.clone(),
             model: self.model.clone(),
@@ -443,8 +461,9 @@ impl PyAgent {
             refresh_agent_from_dir(
                 &manifest_path,
                 &self.dir,
+                self.effective_run_name(),
                 &self.name,
-                &self.name,
+                self.effective_run_name(),
                 &self.agent,
                 &self.model,
             )
@@ -1150,11 +1169,12 @@ impl PyWorld {
                 manifest_path,
                 AgentConnected {
                     id: if agent_id.is_empty() {
-                        agent.name()
+                        agent.effective_run_name()
                     } else {
                         agent_id
                     },
                     name: agent.name(),
+                    run_name: agent.effective_run_name(),
                     backend: &agent.agent,
                     model: &agent.model,
                     agent_dir: &agent.dir,

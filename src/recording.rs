@@ -81,7 +81,14 @@ pub struct RecordingWriter {
     last_wal_checkpoint: Instant,
     latest_tick: u64,
     latest_time_ms: u64,
-    _tick_rate: u32,
+    tick_rate: u32,
+}
+
+pub struct RecordingFinalInfo {
+    pub first_tick: u64,
+    pub total_ticks: u64,
+    pub tick_rate: u32,
+    pub duration_ms: u64,
 }
 
 impl RecordingWriter {
@@ -202,7 +209,7 @@ impl RecordingWriter {
             last_wal_checkpoint: Instant::now(),
             latest_tick: 0,
             latest_time_ms: 0,
-            _tick_rate: tick_rate,
+            tick_rate,
         })
     }
 
@@ -312,7 +319,7 @@ impl RecordingWriter {
         }
     }
 
-    pub async fn close(&mut self, total_ticks: u64, duration_ms: u64) {
+    pub async fn close(&mut self, total_ticks: u64, duration_ms: u64) -> RecordingFinalInfo {
         let final_ticks = total_ticks.max(self.latest_tick);
         let final_duration_ms = duration_ms.max(self.latest_time_ms);
         let _ = self
@@ -325,6 +332,12 @@ impl RecordingWriter {
             .execute(&self.pool)
             .await;
         self.pool.close().await;
+        RecordingFinalInfo {
+            first_tick: 0,
+            total_ticks: final_ticks,
+            tick_rate: self.tick_rate,
+            duration_ms: final_duration_ms,
+        }
     }
 
     async fn upsert_progress_meta(
