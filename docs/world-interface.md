@@ -6,7 +6,7 @@ A world is a directory with a `world.toml`.
 from clawblox import World
 
 world = World(dir="worlds/mesa-small-world-3")
-world.start(port=8085, record=True, record_dir="runs/g000/recordings")
+world.start(port=8085, record=True, record_dir="runs/r001/recordings")
 ```
 
 `World(dir=...)` identifies the world. `world.start(...)` launches one running
@@ -47,7 +47,7 @@ log_file        world process log
 `world.start(...)` returns the same runtime details as data:
 
 ```python
-started = world.start(port=8085, record=True, record_dir="runs/g000/recordings")
+started = world.start(port=8085, record=True, record_dir="runs/r001/recordings")
 
 started.command         # concrete outer command that was run
 started.start_command   # static/template command exposed by World(dir=...)
@@ -148,6 +148,27 @@ ckpt = world.save(dir=run_dir / "checkpoints")   # GET /snapshot -> file
                                                  # + manifest "checkpoints" entry
 world.start(port=8085, resume=ckpt["path"])      # sets WORLD_RESUME_PATH
 ```
+
+## Run Manifest Annotation
+
+Orchestration scripts can label the manifest for the bounded run they just
+performed:
+
+```python
+world.record_run(
+    id="pyramid-r003",
+    index=3,
+    status="complete",
+    started_at=start_utc,
+    ended_at=end_utc,
+    resume_from=previous_checkpoint,
+)
+```
+
+This is a manifest-only operation. It does not start, stop, resume, reset, save,
+or otherwise mutate the world. The lifecycle operations remain `start`, `save`,
+and `stop`; `record_run` exists so app/replay tooling can order and label run
+directories without depending on folder-name conventions or a separate CSV file.
 
 Semantic requirements for a conforming world:
 

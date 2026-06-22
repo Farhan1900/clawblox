@@ -4,6 +4,41 @@ Clawblox writes `.clawblox/manifest.json` as the strict metadata contract for
 replay and app tooling. Tools should read this file instead of probing backend
 processes or inferring paths from naming conventions.
 
+## Run Metadata
+
+`run` describes the bounded execution that produced this manifest. It is
+orchestration metadata: it does not control world state, replay behavior, or
+agent identity. Its purpose is to let tools order and label multiple run
+directories without relying on folder-name conventions or a separate CSV index.
+
+```json
+{
+  "run": {
+    "id": "pyramid-world-3-r003",
+    "index": 3,
+    "status": "complete",
+    "started_at": "2026-06-22T18:59:25Z",
+    "ended_at": "2026-06-22T20:59:25Z",
+    "resume_from": "../pyramid-world-3-r002/checkpoints/final.snapshot"
+  }
+}
+```
+
+Fields:
+
+| Field | Meaning |
+|---|---|
+| `id` | Stable run identifier, normally matching the run directory name. |
+| `index` | Optional 1-based order inside a multi-run folder. Tools should fall back to directory-name sorting when absent. |
+| `status` | Writer-defined lifecycle state such as `running`, `complete`, or `failed`. |
+| `started_at` / `ended_at` | UTC timestamps for the bounded run. |
+| `resume_from` | Optional checkpoint path used to initialize this run's world. Empty for fresh runs. |
+
+Run metadata intentionally does not model "generations", trials, slots, or
+experiments. Those are higher-level workflow concepts. A multi-run folder is
+just a directory containing run manifests, and each run manifest remains
+self-contained.
+
 ## Agent Identity
 
 Each entry in `agents` describes one logical agent and its recorded artifacts.

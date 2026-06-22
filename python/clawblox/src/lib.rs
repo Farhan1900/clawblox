@@ -16,7 +16,8 @@ use clawblox::agent_runner::{
 use clawblox::config::{SandboxConfig, WorldConfig};
 use clawblox::manifest::{
     manifest_path_for_state_root, record_agent_connected, record_checkpoint, record_world_started,
-    refresh_agent_from_dir, AgentConnected, WorldStarted,
+    refresh_agent_from_dir, record_run as record_manifest_run, AgentConnected, RunRecorded,
+    WorldStarted,
 };
 use clawblox::world_capability_proxy::{
     start_world_capability_proxy, WorldCapabilityProxy, WorldCapabilityProxyConfig,
@@ -1264,6 +1265,37 @@ impl PyWorld {
         result.set_item("format", format)?;
         result.set_item("sim_time", sim_time)?;
         Ok(result)
+    }
+
+    // Manifest annotation for orchestration tools. World lifecycle remains
+    // expressed through start/save/stop; this only records the run metadata
+    // those tools want replay/app consumers to see.
+    #[pyo3(signature = (*, id, index = None, status = "complete".to_string(), started_at = "".to_string(), ended_at = "".to_string(), resume_from = None))]
+    #[allow(clippy::too_many_arguments)]
+    fn record_run(
+        &mut self,
+        id: String,
+        index: Option<u32>,
+        status: String,
+        started_at: String,
+        ended_at: String,
+        resume_from: Option<PathBuf>,
+    ) -> PyResult<()> {
+        let Some(manifest_path) = &self.manifest_path else {
+            return Ok(());
+        };
+        record_manifest_run(
+            manifest_path,
+            RunRecorded {
+                id: &id,
+                index,
+                status: &status,
+                started_at: &started_at,
+                ended_at: &ended_at,
+                resume_from: resume_from.as_deref(),
+            },
+        )
+        .map_err(PyAgentError::new_err)
     }
 
     #[pyo3(signature = (*, grace_seconds = 10))]

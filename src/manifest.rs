@@ -10,6 +10,8 @@ use crate::workspace_recording::WorkspaceRecordingManifest;
 pub struct ClawbloxManifest {
     pub schema_version: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run: Option<ManifestRun>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub world: Option<ManifestWorld>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub recordings: Vec<ManifestRecording>,
@@ -17,6 +19,22 @@ pub struct ClawbloxManifest {
     pub checkpoints: Vec<ManifestCheckpoint>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub agents: Vec<ManifestAgent>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ManifestRun {
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub index: Option<u32>,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub status: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub started_at: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub ended_at: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub resume_from: String,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -131,6 +149,15 @@ pub struct AgentConnected<'a> {
     pub internal_base_url: &'a str,
 }
 
+pub struct RunRecorded<'a> {
+    pub id: &'a str,
+    pub index: Option<u32>,
+    pub status: &'a str,
+    pub started_at: &'a str,
+    pub ended_at: &'a str,
+    pub resume_from: Option<&'a Path>,
+}
+
 pub fn manifest_path_for_state_root(state_root: &Path) -> PathBuf {
     state_root.join(".clawblox").join("manifest.json")
 }
@@ -188,6 +215,27 @@ pub fn write(path: &Path, manifest: &ClawbloxManifest) -> Result<(), String> {
         .map_err(|err| format!("failed to write manifest '{}': {err}", tmp.display()))?;
     fs::rename(&tmp, path)
         .map_err(|err| format!("failed to replace manifest '{}': {err}", path.display()))
+}
+
+/// Annotate the current manifest with metadata about the bounded run that
+/// produced it. This is intentionally a pure manifest operation: it does not
+/// start, stop, resume, or mutate a world.
+pub fn record_run(path: &Path, run: RunRecorded<'_>) -> Result<(), String> {
+    update(path, |manifest| {
+        let state_root = manifest_state_root(path);
+        manifest.run = Some(ManifestRun {
+            id: run.id.to_string(),
+            index: run.index,
+            status: run.status.to_string(),
+            started_at: run.started_at.to_string(),
+            ended_at: run.ended_at.to_string(),
+            resume_from: run
+                .resume_from
+                .map(|path| path_value(&state_root, path))
+                .unwrap_or_default(),
+        });
+        Ok(())
+    })
 }
 
 pub fn record_world_started(path: &Path, started: WorldStarted<'_>) -> Result<(), String> {
