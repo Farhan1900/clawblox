@@ -3,12 +3,15 @@ use mlua::{
     UserDataMethods, Value,
 };
 use std::fmt;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Instant;
 
 use crate::game::instance::ErrorMode;
+use crate::game::profiling::{enabled as profiling_enabled, record_values};
 
 static CONNECTION_ID: AtomicU64 = AtomicU64::new(1);
+static TOUCH_SIGNAL_CONNECTIONS: AtomicUsize = AtomicUsize::new(0);
 
 #[derive(Clone)]
 pub struct RBXScriptConnection {
@@ -61,17 +64,32 @@ struct ConnectionEntry {
 
 pub struct SignalInner {
     connections: Vec<ConnectionEntry>,
+    touch_interest: bool,
 }
 
 impl SignalInner {
-    fn new() -> Self {
+    fn new(touch_interest: bool) -> Self {
         Self {
             connections: Vec::new(),
+            touch_interest,
         }
     }
 
     fn remove_connection(&mut self, id: u64) {
+        let before = self.connections.len();
         self.connections.retain(|c| c.id != id);
+        let removed = before.saturating_sub(self.connections.len());
+        if self.touch_interest && removed > 0 {
+            TOUCH_SIGNAL_CONNECTIONS.fetch_sub(removed, Ordering::SeqCst);
+        }
+    }
+}
+
+impl Drop for SignalInner {
+    fn drop(&mut self) {
+        if self.touch_interest && !self.connections.is_empty() {
+            TOUCH_SIGNAL_CONNECTIONS.fetch_sub(self.connections.len(), Ordering::SeqCst);
+        }
     }
 }
 
@@ -103,6 +121,10 @@ pub fn track_yielded_threads(lua: &Lua, threads: Vec<Thread>) -> Result<()> {
     Ok(())
 }
 
+pub fn has_touch_signal_connections() -> bool {
+    TOUCH_SIGNAL_CONNECTIONS.load(Ordering::SeqCst) > 0
+}
+
 impl fmt::Debug for RBXScriptSignal {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("RBXScriptSignal")
@@ -113,8 +135,9 @@ impl fmt::Debug for RBXScriptSignal {
 
 impl RBXScriptSignal {
     pub fn new(name: &str) -> Self {
+        let touch_interest = matches!(name, "Touched" | "TouchEnded");
         Self {
-            inner: Arc::new(Mutex::new(SignalInner::new())),
+            inner: Arc::new(Mutex::new(SignalInner::new(touch_interest))),
             name: name.to_string(),
         }
     }
@@ -128,15 +151,15 @@ impl RBXScriptSignal {
         let connection = RBXScriptConnection::new(Arc::clone(&self.inner));
         let id = connection.id();
 
-        self.inner
-            .lock()
-            .unwrap()
-            .connections
-            .push(ConnectionEntry {
-                id,
-                callback: key,
-                once: false,
-            });
+        let mut inner = self.inner.lock().unwrap();
+        if inner.touch_interest {
+            TOUCH_SIGNAL_CONNECTIONS.fetch_add(1, Ordering::SeqCst);
+        }
+        inner.connections.push(ConnectionEntry {
+            id,
+            callback: key,
+            once: false,
+        });
 
         Ok(connection)
     }
@@ -146,15 +169,15 @@ impl RBXScriptSignal {
         let connection = RBXScriptConnection::new(Arc::clone(&self.inner));
         let id = connection.id();
 
-        self.inner
-            .lock()
-            .unwrap()
-            .connections
-            .push(ConnectionEntry {
-                id,
-                callback: key,
-                once: true,
-            });
+        let mut inner = self.inner.lock().unwrap();
+        if inner.touch_interest {
+            TOUCH_SIGNAL_CONNECTIONS.fetch_add(1, Ordering::SeqCst);
+        }
+        inner.connections.push(ConnectionEntry {
+            id,
+            callback: key,
+            once: true,
+        });
 
         Ok(connection)
     }
@@ -214,6 +237,10 @@ impl RBXScriptSignal {
     pub fn fire_as_coroutines(&self, lua: &Lua, args: MultiValue) -> Result<Vec<Thread>> {
         let mut to_remove = Vec::new();
         let mut threads = Vec::new();
+        let profiling = profiling_enabled();
+        let mut registry_lookup_ms = 0.0f64;
+        let mut create_thread_ms = 0.0f64;
+        let mut resume_ms = 0.0f64;
 
         let connections: Vec<_> = {
             let inner = self.inner.lock().unwrap();
@@ -221,6 +248,7 @@ impl RBXScriptSignal {
         };
 
         for (id, once) in connections {
+            let started = profiling.then(Instant::now);
             let callback_key = {
                 let inner = self.inner.lock().unwrap();
                 inner
@@ -230,12 +258,20 @@ impl RBXScriptSignal {
                     .map(|c| &c.callback)
                     .and_then(|k| lua.registry_value::<Function>(k).ok())
             };
+            if let Some(started) = started {
+                registry_lookup_ms += started.elapsed().as_secs_f64() * 1000.0;
+            }
 
             if let Some(callback) = callback_key {
                 // Create a new coroutine for this callback
+                let started = profiling.then(Instant::now);
                 let thread = lua.create_thread(callback)?;
+                if let Some(started) = started {
+                    create_thread_ms += started.elapsed().as_secs_f64() * 1000.0;
+                }
 
                 // Resume the coroutine with the arguments
+                let started = profiling.then(Instant::now);
                 match thread.resume::<()>(args.clone()) {
                     Ok(()) => {
                         // Callback completed without yielding
@@ -265,6 +301,9 @@ impl RBXScriptSignal {
                         }
                     }
                 }
+                if let Some(started) = started {
+                    resume_ms += started.elapsed().as_secs_f64() * 1000.0;
+                }
 
                 if once {
                     to_remove.push(id);
@@ -274,6 +313,19 @@ impl RBXScriptSignal {
 
         for id in to_remove {
             self.inner.lock().unwrap().remove_connection(id);
+        }
+
+        if profiling {
+            record_values(
+                "signal.fire_as_coroutines",
+                &[
+                    ("connections", self.connection_count() as f64),
+                    ("yielded_threads", threads.len() as f64),
+                    ("registry_lookup_ms", registry_lookup_ms),
+                    ("create_thread_ms", create_thread_ms),
+                    ("resume_ms", resume_ms),
+                ],
+            );
         }
 
         Ok(threads)

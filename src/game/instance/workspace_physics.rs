@@ -1,13 +1,16 @@
 use std::collections::{HashMap, HashSet};
 
-use crate::game::lua::events::{track_yielded_threads, RBXScriptSignal};
+use crate::game::lua::events::{
+    has_touch_signal_connections, track_yielded_threads, RBXScriptSignal,
+};
 use crate::game::lua::instance::{Instance, WeakInstanceRef};
 use crate::game::physics::{
     rotation_matrix_to_quaternion, AlignKind, AlignMotorSpec, AlignTarget, PhysicsAssemblyPart,
     PhysicsAssemblySpec,
 };
+use crate::game::profiling::{record_values, ProfileFrame};
 
-use super::GameInstance;
+use super::{GameInstance, WorkspaceFeatureCounts};
 
 type PhysIsometry = rapier3d::prelude::Isometry<rapier3d::prelude::Real>;
 
@@ -134,6 +137,10 @@ impl GameInstance {
         // Align constraints represented by a live motor joint this tick;
         // joints for everything else are swept afterward.
         let mut live_motors: HashSet<u64> = HashSet::new();
+        if self.workspace_feature_counts.align_constraints == 0 {
+            self.physics.retain_align_motors(&live_motors);
+            return;
+        }
 
         for inst in runtime.workspace().get_descendants() {
             let (align_position, align_orientation) = {
@@ -347,79 +354,233 @@ impl GameInstance {
     /// per-part query/touch identity while matching Roblox's "assembly is one
     /// rigid body" physics model.
     pub(super) fn sync_lua_to_physics(&mut self, dt: f32) {
+        let mut profile = ProfileFrame::new("sync_lua_to_physics.detail");
         let Some(runtime) = &self.lua_runtime else {
             return;
         };
 
         let physics_service = runtime.game().physics_service();
         let descendants = runtime.workspace().get_descendants();
-        let mut part_instances: HashMap<u64, Instance> = HashMap::new();
+        if let Some(profile) = profile.as_mut() {
+            profile.mark("get_descendants");
+        }
+        let mut part_instances: HashMap<u64, Instance> = HashMap::with_capacity(descendants.len());
         let mut adjacency: HashMap<u64, Vec<u64>> = HashMap::new();
+        let mut dirty_positions = 0usize;
+        let mut dirty_cframes = 0usize;
+        let mut dirty_sizes = 0usize;
+        let mut dirty_anchored = 0usize;
+        let mut dirty_interactions = 0usize;
+        let mut dirty_velocities = 0usize;
+        let mut dirty_angular_velocities = 0usize;
+        let mut dirty_shapes = 0usize;
+        let mut dirty_custom_physical_properties = 0usize;
+        let mut anchored_parts = 0usize;
+        let mut character_parts = 0usize;
+        let mut weld_edges = 0usize;
+        let mut candidate_weld_edges = Vec::new();
+        let mut feature_counts = WorkspaceFeatureCounts::default();
 
         for part in &descendants {
             let data = part.data.lock().unwrap();
             let lua_id = data.id.0;
-            if data.part_data.is_some() {
+            if let Some(part_data) = data.part_data.as_ref() {
                 part_instances.insert(lua_id, part.clone());
-                adjacency.entry(lua_id).or_default();
+                if part_data.position_dirty {
+                    dirty_positions += 1;
+                }
+                if part_data.cframe_dirty {
+                    dirty_cframes += 1;
+                }
+                if part_data.size_dirty {
+                    dirty_sizes += 1;
+                }
+                if part_data.anchored_dirty {
+                    dirty_anchored += 1;
+                }
+                if part_data.interaction_dirty {
+                    dirty_interactions += 1;
+                }
+                if part_data.velocity_dirty {
+                    dirty_velocities += 1;
+                }
+                if part_data.angular_velocity_dirty {
+                    dirty_angular_velocities += 1;
+                }
+                if part_data.shape_dirty {
+                    dirty_shapes += 1;
+                }
+                if part_data.custom_physical_properties_dirty {
+                    dirty_custom_physical_properties += 1;
+                }
+                if part_data.anchored {
+                    anchored_parts += 1;
+                }
+                if self.physics.has_character(lua_id) {
+                    character_parts += 1;
+                }
             }
-        }
 
-        for instance in &descendants {
-            let data = instance.data.lock().unwrap();
+            if data.body_velocity_data.is_some()
+                || data.body_force_data.is_some()
+                || data.body_angular_velocity_data.is_some()
+            {
+                feature_counts.body_movers += 1;
+            }
+            if data.vector_force_data.is_some() {
+                feature_counts.vector_forces += 1;
+            }
+            if data.align_position_data.is_some() || data.align_orientation_data.is_some() {
+                feature_counts.align_constraints += 1;
+            }
+            if data
+                .terrain_data
+                .as_ref()
+                .is_some_and(|terrain| terrain.water_voxels().next().is_some())
+            {
+                feature_counts.terrain_with_water += 1;
+            }
+
             let part_id = |part_ref: &Option<WeakInstanceRef>| {
                 part_ref
                     .as_ref()
                     .and_then(|w| w.upgrade())
                     .map(|p| p.lock().unwrap().id.0)
             };
-            let mut maybe_edge = |part0: Option<u64>, part1: Option<u64>| {
-                let (Some(a), Some(b)) = (part0, part1) else {
-                    return;
-                };
-                if a == b || !part_instances.contains_key(&a) || !part_instances.contains_key(&b) {
-                    return;
-                }
-                adjacency.entry(a).or_default().push(b);
-                adjacency.entry(b).or_default().push(a);
-            };
 
             if let Some(weld) = &data.weld_data {
                 if weld.enabled {
-                    maybe_edge(part_id(&weld.part0), part_id(&weld.part1));
+                    feature_counts.weld_constraints += 1;
+                    if let (Some(a), Some(b)) = (part_id(&weld.part0), part_id(&weld.part1)) {
+                        candidate_weld_edges.push((a, b));
+                    }
                 }
             }
 
             if let Some(weld) = &data.weld_constraint_data {
                 if weld.enabled {
-                    maybe_edge(part_id(&weld.part0), part_id(&weld.part1));
-                }
-            }
-        }
-
-        let mut visited = HashSet::new();
-        let mut assembly_specs = Vec::new();
-        let mut ids: Vec<u64> = part_instances.keys().copied().collect();
-        ids.sort_unstable();
-
-        for start_id in ids {
-            if !visited.insert(start_id) {
-                continue;
-            }
-
-            let mut component = Vec::new();
-            let mut stack = vec![start_id];
-            while let Some(id) = stack.pop() {
-                component.push(id);
-                if let Some(neighbors) = adjacency.get(&id) {
-                    for &neighbor in neighbors {
-                        if visited.insert(neighbor) {
-                            stack.push(neighbor);
-                        }
+                    feature_counts.weld_constraints += 1;
+                    if let (Some(a), Some(b)) = (part_id(&weld.part0), part_id(&weld.part1)) {
+                        candidate_weld_edges.push((a, b));
                     }
                 }
             }
-            component.sort_unstable();
+        }
+        self.workspace_feature_counts = feature_counts;
+        if let Some(profile) = profile.as_mut() {
+            profile.mark("collect_parts_and_welds");
+        }
+
+        for (a, b) in candidate_weld_edges {
+            if a == b || !part_instances.contains_key(&a) || !part_instances.contains_key(&b) {
+                continue;
+            }
+            adjacency.entry(a).or_default().push(b);
+            adjacency.entry(b).or_default().push(a);
+            weld_edges += 1;
+        }
+        if let Some(profile) = profile.as_mut() {
+            profile.mark("build_adjacency");
+        }
+
+        let dirty_parts = dirty_positions
+            + dirty_cframes
+            + dirty_sizes
+            + dirty_anchored
+            + dirty_interactions
+            + dirty_velocities
+            + dirty_angular_velocities
+            + dirty_shapes
+            + dirty_custom_physical_properties;
+        let physics_part_count = part_instances.len().saturating_sub(character_parts);
+        let can_skip_unchanged_single_part_sync = weld_edges == 0
+            && dirty_parts == 0
+            && self.physics.all_assemblies_are_single_part()
+            && self
+                .physics
+                .has_exact_part_ids(part_instances.keys().copied(), part_instances.len());
+        if can_skip_unchanged_single_part_sync {
+            record_values(
+                "sync_lua_to_physics",
+                &[
+                    ("workspace_descendants", descendants.len() as f64),
+                    ("part_instances", part_instances.len() as f64),
+                    ("physics_part_instances", physics_part_count as f64),
+                    ("character_parts", character_parts as f64),
+                    ("anchored_parts", anchored_parts as f64),
+                    ("weld_edges", weld_edges as f64),
+                    ("assembly_specs", 0.0),
+                    ("assembly_spec_parts", 0.0),
+                    ("fast_path_unchanged_single_parts", 1.0),
+                    ("feature_body_movers", feature_counts.body_movers as f64),
+                    ("feature_vector_forces", feature_counts.vector_forces as f64),
+                    (
+                        "feature_align_constraints",
+                        feature_counts.align_constraints as f64,
+                    ),
+                    (
+                        "feature_weld_constraints",
+                        feature_counts.weld_constraints as f64,
+                    ),
+                    (
+                        "feature_terrain_with_water",
+                        feature_counts.terrain_with_water as f64,
+                    ),
+                    ("dirty_positions", dirty_positions as f64),
+                    ("dirty_cframes", dirty_cframes as f64),
+                    ("dirty_sizes", dirty_sizes as f64),
+                    ("dirty_anchored", dirty_anchored as f64),
+                    ("dirty_interactions", dirty_interactions as f64),
+                    ("dirty_velocities", dirty_velocities as f64),
+                    ("dirty_angular_velocities", dirty_angular_velocities as f64),
+                    ("dirty_shapes", dirty_shapes as f64),
+                    (
+                        "dirty_custom_physical_properties",
+                        dirty_custom_physical_properties as f64,
+                    ),
+                ],
+            );
+            if let Some(profile) = profile.as_mut() {
+                profile.mark("record_counters");
+            }
+            if let Some(profile) = profile {
+                profile.finish();
+            }
+            return;
+        }
+
+        let mut visited = HashSet::with_capacity(part_instances.len());
+        let mut assembly_specs = Vec::with_capacity(part_instances.len());
+        let mut ids: Vec<u64> = part_instances.keys().copied().collect();
+        ids.sort_unstable();
+        let has_weld_edges = weld_edges > 0;
+        if let Some(profile) = profile.as_mut() {
+            profile.mark("sort_ids");
+        }
+
+        for start_id in ids {
+            let component = if has_weld_edges {
+                if !visited.insert(start_id) {
+                    continue;
+                }
+
+                let mut component = Vec::new();
+                let mut stack = vec![start_id];
+                while let Some(id) = stack.pop() {
+                    component.push(id);
+                    if let Some(neighbors) = adjacency.get(&id) {
+                        for &neighbor in neighbors {
+                            if visited.insert(neighbor) {
+                                stack.push(neighbor);
+                            }
+                        }
+                    }
+                }
+                component.sort_unstable();
+                component
+            } else {
+                vec![start_id]
+            };
 
             if component.len() > 1 {
                 let cframe_write = component
@@ -489,6 +650,8 @@ impl GameInstance {
                         *lua_id,
                         physics_service.collision_group_mask_by_id(part_data.collision_group_id),
                     );
+                    part_data.can_collide_dirty = false;
+                    part_data.interaction_dirty = false;
                     if part_data.position_dirty {
                         self.physics.set_character_position(
                             *lua_id,
@@ -541,8 +704,13 @@ impl GameInstance {
                     ],
                     position_dirty: part_data.position_dirty,
                     cframe_dirty: part_data.cframe_dirty,
+                    size_dirty: part_data.size_dirty,
+                    anchored_dirty: part_data.anchored_dirty,
+                    interaction_dirty: part_data.interaction_dirty,
                     velocity_dirty: part_data.velocity_dirty,
                     angular_velocity_dirty: part_data.angular_velocity_dirty,
+                    shape_dirty: part_data.shape_dirty,
+                    custom_physical_properties_dirty: part_data.custom_physical_properties_dirty,
                 });
             }
 
@@ -561,8 +729,64 @@ impl GameInstance {
                 parts: specs,
             });
         }
+        if let Some(profile) = profile.as_mut() {
+            profile.mark("build_specs");
+        }
+
+        record_values(
+            "sync_lua_to_physics",
+            &[
+                ("workspace_descendants", descendants.len() as f64),
+                ("part_instances", part_instances.len() as f64),
+                ("physics_part_instances", physics_part_count as f64),
+                ("character_parts", character_parts as f64),
+                ("anchored_parts", anchored_parts as f64),
+                ("weld_edges", weld_edges as f64),
+                ("assembly_specs", assembly_specs.len() as f64),
+                (
+                    "assembly_spec_parts",
+                    assembly_specs
+                        .iter()
+                        .map(|spec| spec.parts.len())
+                        .sum::<usize>() as f64,
+                ),
+                ("fast_path_unchanged_single_parts", 0.0),
+                ("feature_body_movers", feature_counts.body_movers as f64),
+                ("feature_vector_forces", feature_counts.vector_forces as f64),
+                (
+                    "feature_align_constraints",
+                    feature_counts.align_constraints as f64,
+                ),
+                (
+                    "feature_weld_constraints",
+                    feature_counts.weld_constraints as f64,
+                ),
+                (
+                    "feature_terrain_with_water",
+                    feature_counts.terrain_with_water as f64,
+                ),
+                ("dirty_positions", dirty_positions as f64),
+                ("dirty_cframes", dirty_cframes as f64),
+                ("dirty_sizes", dirty_sizes as f64),
+                ("dirty_anchored", dirty_anchored as f64),
+                ("dirty_interactions", dirty_interactions as f64),
+                ("dirty_velocities", dirty_velocities as f64),
+                ("dirty_angular_velocities", dirty_angular_velocities as f64),
+                ("dirty_shapes", dirty_shapes as f64),
+                (
+                    "dirty_custom_physical_properties",
+                    dirty_custom_physical_properties as f64,
+                ),
+            ],
+        );
+        if let Some(profile) = profile.as_mut() {
+            profile.mark("record_counters");
+        }
 
         self.physics.sync_assemblies(assembly_specs, dt);
+        if let Some(profile) = profile.as_mut() {
+            profile.mark("physics_sync_assemblies");
+        }
 
         for part in part_instances.values() {
             let mut data = part.data.lock().unwrap();
@@ -583,6 +807,12 @@ impl GameInstance {
                 part_data.cframe_dirty = false;
             }
         }
+        if let Some(profile) = profile.as_mut() {
+            profile.mark("clear_dirty_flags");
+        }
+        if let Some(profile) = profile {
+            profile.finish();
+        }
     }
 
     /// Syncs physics positions back to Lua for non-anchored parts and character controllers
@@ -591,27 +821,59 @@ impl GameInstance {
             return;
         };
 
+        let fallen_parts_destroy_height = runtime
+            .workspace()
+            .data
+            .lock()
+            .unwrap()
+            .fallen_parts_destroy_height;
+        let destroy_fallen_parts = fallen_parts_destroy_height.is_finite();
         let descendants = runtime.workspace().get_descendants();
+        let mut part_instances = 0usize;
+        let mut character_parts = 0usize;
+        let mut dynamic_parts = 0usize;
+        let mut skipped_sleep_synced = 0usize;
+        let mut synced_sleeping_parts = 0usize;
+        let mut synced_awake_parts = 0usize;
+        let mut skipped_dirty_positions = 0usize;
+        let mut fallen_parts = Vec::new();
+        let mut destroy_errors = Vec::new();
+        let mut replication_dirty_parts = Vec::new();
 
         for part in descendants {
+            let mut fell_below_destroy_height = false;
             let mut data = part.data.lock().unwrap();
             let lua_id = data.id.0;
+            let mut replication_dirty = false;
 
             if let Some(part_data) = &mut data.part_data {
+                part_instances += 1;
                 // Check if this is a character-controlled part
                 if self.physics.has_character(lua_id) {
+                    character_parts += 1;
                     if part_data.position_dirty {
+                        skipped_dirty_positions += 1;
                         continue;
                     }
+                    self.physics_sleep_synced_parts.remove(&lua_id);
                     if let Some(pos) = self.physics.get_character_position(lua_id) {
-                        part_data.position.x = pos[0];
-                        part_data.position.y = pos[1];
-                        part_data.position.z = pos[2];
-                        part_data.cframe.position = part_data.position;
+                        if part_data.position.x != pos[0]
+                            || part_data.position.y != pos[1]
+                            || part_data.position.z != pos[2]
+                        {
+                            part_data.position.x = pos[0];
+                            part_data.position.y = pos[1];
+                            part_data.position.z = pos[2];
+                            part_data.cframe.position = part_data.position;
+                            replication_dirty = true;
+                        }
                     }
                     if let Some(handle) = self.physics.get_handle(lua_id) {
                         if let Some(rot) = self.physics.get_rotation_matrix(handle) {
-                            part_data.cframe.rotation = rot;
+                            if part_data.cframe.rotation != rot {
+                                part_data.cframe.rotation = rot;
+                                replication_dirty = true;
+                            }
                         }
                     }
                     if let Some(vel) = self.physics.get_character_velocity(lua_id) {
@@ -623,20 +885,46 @@ impl GameInstance {
                     part_data.angular_velocity.y = 0.0;
                     part_data.angular_velocity.z = 0.0;
                 } else if !part_data.anchored {
+                    dynamic_parts += 1;
                     // If Lua wrote Position/CFrame this frame, keep that authoritative value
                     // until sync_lua_to_physics consumes it.
                     if part_data.position_dirty {
+                        skipped_dirty_positions += 1;
+                        self.physics_sleep_synced_parts.remove(&lua_id);
                         continue;
                     }
+                    let sleeping = self.physics.is_part_sleeping(lua_id);
+                    if sleeping && self.physics_sleep_synced_parts.contains(&lua_id) {
+                        skipped_sleep_synced += 1;
+                        continue;
+                    }
+                    if sleeping {
+                        synced_sleeping_parts += 1;
+                    } else {
+                        synced_awake_parts += 1;
+                        self.physics_sleep_synced_parts.remove(&lua_id);
+                    }
                     if let Some(pos) = self.physics.get_part_position(lua_id) {
-                        part_data.position.x = pos[0];
-                        part_data.position.y = pos[1];
-                        part_data.position.z = pos[2];
-                        part_data.cframe.position = part_data.position;
+                        if part_data.position.x != pos[0]
+                            || part_data.position.y != pos[1]
+                            || part_data.position.z != pos[2]
+                        {
+                            part_data.position.x = pos[0];
+                            part_data.position.y = pos[1];
+                            part_data.position.z = pos[2];
+                            part_data.cframe.position = part_data.position;
+                            replication_dirty = true;
+                        }
+                        if destroy_fallen_parts && pos[1] < fallen_parts_destroy_height {
+                            fell_below_destroy_height = true;
+                        }
                     }
 
                     if let Some(rot) = self.physics.get_part_rotation_matrix(lua_id) {
-                        part_data.cframe.rotation = rot;
+                        if part_data.cframe.rotation != rot {
+                            part_data.cframe.rotation = rot;
+                            replication_dirty = true;
+                        }
                     }
 
                     if let Some(vel) = self.physics.get_part_velocity(lua_id) {
@@ -652,8 +940,57 @@ impl GameInstance {
                             part_data.angular_velocity.z = ang_vel[2];
                         }
                     }
+                    if sleeping {
+                        self.physics_sleep_synced_parts.insert(lua_id);
+                    }
                 }
             }
+            if replication_dirty {
+                replication_dirty_parts.push(std::sync::Arc::clone(&part.data));
+            }
+            drop(data);
+            if fell_below_destroy_height {
+                fallen_parts.push((lua_id, part));
+            }
+        }
+
+        let fallen_parts_destroyed = fallen_parts.len();
+        let lua = runtime.lua();
+        for (lua_id, part) in fallen_parts {
+            self.physics_sleep_synced_parts.remove(&lua_id);
+            replication_dirty_parts.push(std::sync::Arc::clone(&part.data));
+            if let Err(err) = part.destroy(lua) {
+                destroy_errors.push(err);
+            }
+        }
+
+        if let Some(shared) = runtime
+            .lua()
+            .app_data_ref::<crate::game::replication::SharedWorldReplicationState>()
+        {
+            shared.lock().unwrap().mark_many(replication_dirty_parts);
+        }
+
+        record_values(
+            "sync_physics_to_lua",
+            &[
+                ("part_instances", part_instances as f64),
+                ("character_parts", character_parts as f64),
+                ("dynamic_parts", dynamic_parts as f64),
+                ("synced_awake_parts", synced_awake_parts as f64),
+                ("synced_sleeping_parts", synced_sleeping_parts as f64),
+                ("skipped_sleep_synced", skipped_sleep_synced as f64),
+                ("skipped_dirty_positions", skipped_dirty_positions as f64),
+                (
+                    "sleep_synced_cache_size",
+                    self.physics_sleep_synced_parts.len() as f64,
+                ),
+                ("fallen_parts_destroyed", fallen_parts_destroyed as f64),
+            ],
+        );
+
+        for err in destroy_errors {
+            self.handle_lua_error("Failed to destroy fallen part", &err);
         }
     }
 
@@ -672,16 +1009,40 @@ impl GameInstance {
         let mut errors: Vec<(&str, mlua::Error)> = Vec::new();
         let mut current = HashSet::new();
 
+        if !has_touch_signal_connections() && self.prev_touches.is_empty() {
+            record_values(
+                "touch_events",
+                &[
+                    ("workspace_descendants", 0.0),
+                    ("part_instances", 0.0),
+                    ("touch_interest_parts", 0.0),
+                    ("narrow_phase_touches", 0.0),
+                    ("listener_filtered_touches", 0.0),
+                    ("prev_touches", 0.0),
+                    ("current_touches", 0.0),
+                    ("touch_began", 0.0),
+                    ("touch_ended", 0.0),
+                ],
+            );
+            return;
+        }
+
         if let Some(runtime) = &self.lua_runtime {
             let lua = runtime.lua();
 
             // Build lua_id -> Instance lookup from workspace descendants
             let descendants = runtime.workspace().get_descendants();
             let mut id_to_instance: HashMap<u64, Instance> = HashMap::new();
+            let mut touch_interest_parts = 0usize;
             for inst in &descendants {
                 let data = inst.data.lock().unwrap();
                 let lua_id = data.id.0;
-                if data.part_data.is_some() {
+                if let Some(part) = data.part_data.as_ref() {
+                    if part.touched.connection_count() > 0
+                        || part.touch_ended.connection_count() > 0
+                    {
+                        touch_interest_parts += 1;
+                    }
                     id_to_instance.insert(lua_id, inst.clone());
                 }
             }
@@ -732,6 +1093,27 @@ impl GameInstance {
                     || b.touch_ended.connection_count() > 0
             };
 
+            let mut narrow_phase_touches = 0usize;
+            let mut listener_filtered_touches = 0usize;
+
+            if touch_interest_parts == 0 && self.prev_touches.is_empty() {
+                record_values(
+                    "touch_events",
+                    &[
+                        ("workspace_descendants", descendants.len() as f64),
+                        ("part_instances", id_to_instance.len() as f64),
+                        ("touch_interest_parts", touch_interest_parts as f64),
+                        ("narrow_phase_touches", 0.0),
+                        ("listener_filtered_touches", 0.0),
+                        ("prev_touches", 0.0),
+                        ("current_touches", 0.0),
+                        ("touch_began", 0.0),
+                        ("touch_ended", 0.0),
+                    ],
+                );
+                return;
+            }
+
             // Helper: check if a lua_id is an anchored non-character part
             let is_anchored_non_character = |lua_id: u64| -> bool {
                 if self.physics.has_character(lua_id) {
@@ -747,14 +1129,33 @@ impl GameInstance {
             };
 
             for (a, b) in self.physics.detect_narrow_phase_touches() {
+                narrow_phase_touches += 1;
                 let (Some(info_a), Some(info_b)) = (part_info(a), part_info(b)) else {
                     continue;
                 };
                 if pair_can_touch(&info_a, &info_b) {
+                    listener_filtered_touches += 1;
                     current.insert((a, b));
                 }
             }
             let transitions = compute_touch_transitions(&current, &self.prev_touches);
+            record_values(
+                "touch_events",
+                &[
+                    ("workspace_descendants", descendants.len() as f64),
+                    ("part_instances", id_to_instance.len() as f64),
+                    ("touch_interest_parts", touch_interest_parts as f64),
+                    ("narrow_phase_touches", narrow_phase_touches as f64),
+                    (
+                        "listener_filtered_touches",
+                        listener_filtered_touches as f64,
+                    ),
+                    ("prev_touches", self.prev_touches.len() as f64),
+                    ("current_touches", current.len() as f64),
+                    ("touch_began", transitions.began.len() as f64),
+                    ("touch_ended", transitions.ended.len() as f64),
+                ],
+            );
 
             // Helper: fire a signal on one part with the other as argument
             let mut fire_signal = |signal: &RBXScriptSignal, other: &Instance| match lua
@@ -878,8 +1279,12 @@ impl GameInstance {
             return;
         };
 
-        let descendants = runtime.workspace().get_descendants();
         self.physics.clear_weld_joints();
+        if self.workspace_feature_counts.weld_constraints == 0 {
+            return;
+        }
+
+        let descendants = runtime.workspace().get_descendants();
 
         let cframe_to_isometry = |cframe: crate::game::lua::types::CFrame| {
             rapier3d::prelude::Isometry::from_parts(

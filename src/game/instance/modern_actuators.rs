@@ -17,6 +17,10 @@ fn rotate_vector(cframe: CFrame, vector: Vector3) -> Vector3 {
 
 impl GameInstance {
     pub(super) fn apply_modern_actuators(&mut self) {
+        if self.workspace_feature_counts.vector_forces == 0 {
+            return;
+        }
+
         let Some(runtime) = &self.lua_runtime else {
             return;
         };

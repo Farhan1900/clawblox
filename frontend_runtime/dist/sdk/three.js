@@ -983,6 +983,26 @@ function entityMatrixFromState(THREE, entity) {
   )
 }
 
+function writeEntityMatrixFromState(THREE, entity, target, position, quaternion, scale, rotationMatrix) {
+  const pos = entity?.position || [0, 0, 0]
+  position.set(pos[0] || 0, pos[1] || 0, pos[2] || 0)
+  scale.set(1, 1, 1)
+  if (entity?.rotation && Array.isArray(entity.rotation) && entity.rotation.length === 3) {
+    const rot = entity.rotation
+    rotationMatrix.set(
+      rot[0][0], rot[0][1], rot[0][2], 0,
+      rot[1][0], rot[1][1], rot[1][2], 0,
+      rot[2][0], rot[2][1], rot[2][2], 0,
+      0, 0, 0, 1,
+    )
+    quaternion.setFromRotationMatrix(rotationMatrix)
+  } else {
+    quaternion.identity()
+  }
+  target.compose(position, quaternion, scale)
+  return target
+}
+
 function nextCapacity(required) {
   let capacity = 1
   while (capacity < required) capacity *= 2
@@ -1002,6 +1022,10 @@ export function createSharedModelRenderer(THREE, scene, options = {}) {
   const tmpFitMatrix = new THREE.Matrix4()
   const tmpMeshMatrix = new THREE.Matrix4()
   const tmpMatrix = new THREE.Matrix4()
+  const tmpEntityPosition = new THREE.Vector3()
+  const tmpEntityQuaternion = new THREE.Quaternion()
+  const tmpEntityScale = new THREE.Vector3(1, 1, 1)
+  const tmpEntityRotationMatrix = new THREE.Matrix4()
 
   async function ensureModelModules() {
     if (moduleCache.loader) return moduleCache
@@ -1068,6 +1092,10 @@ export function createSharedModelRenderer(THREE, scene, options = {}) {
         modelUrl,
         entities: new Map(),
         frameIds: new Set(),
+        dirtyIds: new Set(),
+        indexById: new Map(),
+        structureDirty: true,
+        lastCount: 0,
         status: 'pending',
         template: null,
         staticTemplate: null,
@@ -1156,17 +1184,66 @@ export function createSharedModelRenderer(THREE, scene, options = {}) {
     scene.add(fallback)
   }
 
+  function writeFallbackMatrix(group, entity, index) {
+    if (!group.fallback) return
+    const size = entity.size || [1, 1, 1]
+    writeEntityMatrixFromState(
+      THREE,
+      entity,
+      tmpEntityMatrix,
+      tmpEntityPosition,
+      tmpEntityQuaternion,
+      tmpEntityScale,
+      tmpEntityRotationMatrix,
+    )
+    tmpFitMatrix.makeScale(size[0] || 1, size[1] || 1, size[2] || 1)
+    tmpMatrix.multiplyMatrices(tmpEntityMatrix, tmpFitMatrix)
+    group.fallback.setMatrixAt(index, tmpMatrix)
+  }
+
   function updateFallback(group, entities) {
     if (!group.fallback) return
     group.fallback.count = entities.length
     entities.forEach((entity, index) => {
-      const size = entity.size || [1, 1, 1]
-      tmpEntityMatrix.copy(entityMatrixFromState(THREE, entity))
-      tmpFitMatrix.makeScale(size[0] || 1, size[1] || 1, size[2] || 1)
-      tmpMatrix.multiplyMatrices(tmpEntityMatrix, tmpFitMatrix)
-      group.fallback.setMatrixAt(index, tmpMatrix)
+      writeFallbackMatrix(group, entity, index)
     })
     group.fallback.instanceMatrix.needsUpdate = true
+  }
+
+  function updateFallbackPartial(group) {
+    if (!group.fallback || group.dirtyIds.size === 0) return
+    for (const id of group.dirtyIds) {
+      const entity = group.entities.get(id)
+      const index = group.indexById.get(id)
+      if (!entity || index == null) continue
+      writeFallbackMatrix(group, entity, index)
+    }
+    group.fallback.instanceMatrix.needsUpdate = true
+  }
+
+  function writeInstancedMatrix(group, source, sourceCenter, sourceHeight, entity, index, instancedMesh) {
+    const size = entity.size || [1, 1, 1]
+    const scale = (size[1] ?? 1) / sourceHeight
+    writeEntityMatrixFromState(
+      THREE,
+      entity,
+      tmpEntityMatrix,
+      tmpEntityPosition,
+      tmpEntityQuaternion,
+      tmpEntityScale,
+      tmpEntityRotationMatrix,
+    )
+    tmpYawMatrix.identity()
+    if (entity.model_yaw_offset_deg) {
+      tmpYawMatrix.makeRotationY(THREE.MathUtils.degToRad(entity.model_yaw_offset_deg))
+    }
+    tmpFitMatrix.makeScale(scale, scale, scale)
+    tmpFitMatrix.setPosition(-sourceCenter.x * scale, -sourceCenter.y * scale, -sourceCenter.z * scale)
+    tmpMeshMatrix.copy(source.matrixWorld)
+    tmpMatrix.multiplyMatrices(tmpFitMatrix, tmpMeshMatrix)
+    tmpMatrix.premultiply(tmpYawMatrix)
+    tmpMatrix.premultiply(tmpEntityMatrix)
+    instancedMesh.setMatrixAt(index, tmpMatrix)
   }
 
   function updateInstanced(group, entities) {
@@ -1186,21 +1263,26 @@ export function createSharedModelRenderer(THREE, scene, options = {}) {
       const source = group.staticTemplate.meshes[meshIndex]
       instancedMesh.count = entities.length
       entities.forEach((entity, index) => {
-        const size = entity.size || [1, 1, 1]
-        const scale = (size[1] ?? 1) / sourceHeight
-        tmpEntityMatrix.copy(entityMatrixFromState(THREE, entity))
-        tmpYawMatrix.identity()
-        if (entity.model_yaw_offset_deg) {
-          tmpYawMatrix.makeRotationY(THREE.MathUtils.degToRad(entity.model_yaw_offset_deg))
-        }
-        tmpFitMatrix.makeScale(scale, scale, scale)
-        tmpFitMatrix.setPosition(-sourceCenter.x * scale, -sourceCenter.y * scale, -sourceCenter.z * scale)
-        tmpMeshMatrix.copy(source.matrixWorld)
-        tmpMatrix.multiplyMatrices(tmpFitMatrix, tmpMeshMatrix)
-        tmpMatrix.premultiply(tmpYawMatrix)
-        tmpMatrix.premultiply(tmpEntityMatrix)
-        instancedMesh.setMatrixAt(index, tmpMatrix)
+        writeInstancedMatrix(group, source, sourceCenter, sourceHeight, entity, index, instancedMesh)
       })
+      instancedMesh.instanceMatrix.needsUpdate = true
+    }
+  }
+
+  function updateInstancedPartial(group) {
+    if (!group.staticTemplate || group.dirtyIds.size === 0) return
+    const sourceCenter = group.staticTemplate.sourceCenter
+    const sourceHeight = group.staticTemplate.sourceHeight
+
+    for (let meshIndex = 0; meshIndex < group.staticTemplate.meshes.length; meshIndex += 1) {
+      const instancedMesh = group.instancedMeshes[meshIndex]
+      const source = group.staticTemplate.meshes[meshIndex]
+      for (const id of group.dirtyIds) {
+        const entity = group.entities.get(id)
+        const index = group.indexById.get(id)
+        if (!entity || index == null) continue
+        writeInstancedMatrix(group, source, sourceCenter, sourceHeight, entity, index, instancedMesh)
+      }
       instancedMesh.instanceMatrix.needsUpdate = true
     }
   }
@@ -1211,10 +1293,20 @@ export function createSharedModelRenderer(THREE, scene, options = {}) {
   }
 
   let frameCounts = new Map()
+  let frameChangedIds = null
 
-  function beginFrame(entities = []) {
+  function beginFrame(entities = [], frameOptions = null) {
     frameCounts = new Map()
-    for (const group of groups.values()) group.frameIds.clear()
+    frameChangedIds = frameOptions?.changedEntityIds instanceof Set
+      ? frameOptions.changedEntityIds
+      : Array.isArray(frameOptions?.changedEntityIds)
+        ? new Set(frameOptions.changedEntityIds)
+        : null
+    for (const group of groups.values()) {
+      group.frameIds.clear()
+      group.dirtyIds.clear()
+      group.structureDirty = false
+    }
     for (const entity of entities || []) {
       const modelUrl = modelUrlForEntity(entity)
       if (!modelUrl) continue
@@ -1230,17 +1322,26 @@ export function createSharedModelRenderer(THREE, scene, options = {}) {
     if ((frameCounts.get(modelUrl) || 0) < minInstances) return false
     const group = getGroup(modelUrl)
     if (group.status === 'unsupported' || group.status === 'error') return false
+    const previous = group.entities.get(entity.id)
     group.entities.set(entity.id, entity)
     group.frameIds.add(entity.id)
+    if (!previous) group.structureDirty = true
+    if (!previous || previous !== entity || frameChangedIds?.has(entity.id)) {
+      group.dirtyIds.add(entity.id)
+    }
     return true
   }
 
   function endFrame() {
     for (const group of groups.values()) {
       for (const id of [...group.entities.keys()]) {
-        if (!group.frameIds.has(id)) group.entities.delete(id)
+        if (!group.frameIds.has(id)) {
+          group.entities.delete(id)
+          group.structureDirty = true
+        }
       }
       const entities = [...group.entities.values()]
+      if (entities.length !== group.lastCount) group.structureDirty = true
       if (entities.length === 0) {
         removeInstancedMeshes(group)
         if (group.fallback) {
@@ -1249,18 +1350,36 @@ export function createSharedModelRenderer(THREE, scene, options = {}) {
           group.fallback.material?.dispose?.()
           group.fallback = null
         }
+        group.indexById.clear()
+        group.lastCount = 0
         continue
       }
-      if (group.status === 'ready') updateInstanced(group, entities)
-      else {
-        ensureFallback(group, entities.length)
-        updateFallback(group, entities)
+      if (group.structureDirty || group.indexById.size !== entities.length) {
+        group.indexById.clear()
+        entities.forEach((entity, index) => group.indexById.set(entity.id, index))
       }
+      if (group.status === 'ready') {
+        const needsFullInstancedUpdate =
+          group.structureDirty ||
+          group.instancedMeshes.length !== (group.staticTemplate?.meshes.length || 0)
+        if (needsFullInstancedUpdate) updateInstanced(group, entities)
+        else updateInstancedPartial(group)
+      } else {
+        ensureFallback(group, entities.length)
+        if (group.structureDirty) updateFallback(group, entities)
+        else updateFallbackPartial(group)
+      }
+      group.lastCount = entities.length
     }
   }
 
   function remove(entityId) {
-    for (const group of groups.values()) group.entities.delete(entityId)
+    for (const group of groups.values()) {
+      if (group.entities.delete(entityId)) {
+        group.indexById.delete(entityId)
+        group.structureDirty = true
+      }
+    }
   }
 
   function clear() {

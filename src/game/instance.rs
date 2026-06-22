@@ -9,6 +9,7 @@ use super::lua::instance::{
 };
 use super::lua::LuaRuntime;
 use super::physics::PhysicsWorld;
+use super::profiling::ProfileFrame;
 
 mod body_movers;
 mod character_controller;
@@ -25,9 +26,9 @@ mod workspace_physics;
 
 pub use observation::{
     BillboardGuiJson, BillboardLabelJson, EntityAabb, EntityObb, GameEvent, GuiElement, MapInfo,
-    OtherPlayerInfo, PlayerInfo, PlayerObservation, SpectatorEntity, SpectatorObservation,
-    SpectatorPlayerAnimation, SpectatorPlayerInfo, SpectatorRender, SpectatorReplicatedEvent,
-    SpectatorSound, UDim2Json, VisibleEntity, WorldEntity, WorldInfo,
+    OtherPlayerInfo, PlayerInfo, PlayerObservation, ReplicationObservationUpdate, SpectatorEntity,
+    SpectatorObservation, SpectatorPlayerAnimation, SpectatorPlayerInfo, SpectatorRender,
+    SpectatorReplicatedEvent, SpectatorSound, UDim2Json, VisibleEntity, WorldEntity, WorldInfo,
 };
 
 /// Default AFK timeout in seconds (5 minutes)
@@ -42,6 +43,15 @@ const DEFAULT_MAX_PLAYERS: u32 = 8;
 const DEFAULT_OBSERVATION_RADIUS: f32 = 100.0;
 const MAX_REPLICATED_EVENTS_BUFFER: usize = 512;
 const MAX_RECENT_EVENTS_PER_OBSERVATION: usize = 128;
+
+#[derive(Clone, Copy, Debug, Default)]
+pub(super) struct WorkspaceFeatureCounts {
+    pub body_movers: usize,
+    pub vector_forces: usize,
+    pub align_constraints: usize,
+    pub weld_constraints: usize,
+    pub terrain_with_water: usize,
+}
 
 /// A game instance that runs Lua scripts with Rapier physics.
 /// This is the Roblox-like architecture where:
@@ -84,6 +94,13 @@ pub struct GameInstance {
     pub halted_error: Option<String>,
     /// Previous frame's touch pairs for Touched/TouchEnded event detection
     prev_touches: HashSet<(u64, u64)>,
+    /// Dynamic physics parts whose final sleeping state has already been
+    /// reflected back into Lua part fields.
+    physics_sleep_synced_parts: HashSet<u64>,
+    /// Feature counts gathered during the current tick's Workspace scan.
+    /// These let later physics phases skip full-tree scans when no matching
+    /// class exists while preserving exact behavior when any feature is present.
+    workspace_feature_counts: WorkspaceFeatureCounts,
     /// Ring buffer of recent replicated transient events (shots, impacts, etc.)
     replicated_events: VecDeque<SpectatorReplicatedEvent>,
     /// Monotonic event id assigned by server for dedupe/order.
@@ -171,6 +188,8 @@ impl GameInstance {
             error_mode,
             halted_error: None,
             prev_touches: HashSet::new(),
+            physics_sleep_synced_parts: HashSet::new(),
+            workspace_feature_counts: WorkspaceFeatureCounts::default(),
             replicated_events: VecDeque::new(),
             next_replicated_event_id: 1,
         }
@@ -284,6 +303,7 @@ impl GameInstance {
 
     /// Main game loop tick - called at 60 Hz
     pub fn tick(&mut self) {
+        let mut profile = ProfileFrame::new("instance.tick");
         // In Halt mode, stop ticking once an error has occurred
         if self.halted_error.is_some() {
             return;
@@ -292,13 +312,22 @@ impl GameInstance {
         let dt = 1.0 / 60.0;
         // Process kick requests from Lua scripts (e.g., Player:Kick())
         self.process_kick_requests();
+        if let Some(profile) = profile.as_mut() {
+            profile.mark("kick_requests");
+        }
 
         // Check for AFK players periodically (every second)
         if self.tick % AFK_CHECK_INTERVAL_TICKS == 0 {
             self.check_afk_players();
         }
+        if let Some(profile) = profile.as_mut() {
+            profile.mark("afk");
+        }
 
         self.process_pending_bot_requests();
+        if let Some(profile) = profile.as_mut() {
+            profile.mark("bot_requests");
+        }
 
         // Run start-of-frame Lua work before physics (resume yields + Stepped).
         if let Some(runtime) = &self.lua_runtime {
@@ -309,8 +338,14 @@ impl GameInstance {
                 }
             }
         }
+        if let Some(profile) = profile.as_mut() {
+            profile.mark("begin_frame");
+        }
 
         tick_pipeline::run_tick_phases(self, dt);
+        if let Some(profile) = profile.as_mut() {
+            profile.mark("tick_phases");
+        }
         if self.halted_error.is_some() {
             return;
         }
@@ -324,10 +359,19 @@ impl GameInstance {
                 }
             }
         }
+        if let Some(profile) = profile.as_mut() {
+            profile.mark("end_frame");
+        }
 
         self.process_replicated_events();
+        if let Some(profile) = profile.as_mut() {
+            profile.mark("replicated_events");
+        }
 
         self.tick += 1;
+        if let Some(profile) = profile {
+            profile.finish();
+        }
     }
 
     fn process_replicated_events(&mut self) {

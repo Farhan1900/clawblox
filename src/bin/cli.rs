@@ -15,7 +15,7 @@ use dashmap::DashMap;
 use flate2::{write::GzEncoder, Compression};
 use futures_util::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs::OpenOptions;
 use std::io::Write;
 use std::net::SocketAddr;
@@ -50,7 +50,10 @@ use clawblox::{
             SERVER_PREDICTED_END_REASON, STREAM_TTL_SECS,
         },
         find_or_create_instance,
-        instance::{ErrorMode, GameInstance, PlayerObservation, SpectatorObservation},
+        instance::{
+            ErrorMode, GameInstance, PlayerObservation, SpectatorEntity, SpectatorObservation,
+            SpectatorPlayerInfo, SpectatorRender,
+        },
         script_bundle::load_world_and_entry_script,
         GameManager, GameManagerHandle,
     },
@@ -3310,6 +3313,177 @@ impl RecordingTimeline {
     }
 }
 
+#[derive(Debug, Serialize)]
+#[serde(untagged)]
+enum LiveSpectatorEntityDelta {
+    Add {
+        id: u32,
+        add: SpectatorEntity,
+    },
+    Remove {
+        id: u32,
+        rm: bool,
+    },
+    Update {
+        id: u32,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        p: Option<[f32; 3]>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        r: Option<[[f32; 3]; 3]>,
+    },
+}
+
+#[derive(Debug, Serialize)]
+struct LiveSpectatorDelta {
+    #[serde(rename = "type")]
+    message_type: &'static str,
+    tick: u64,
+    server_time_ms: u64,
+    game_status: String,
+    entities: Vec<LiveSpectatorEntityDelta>,
+    players: Vec<SpectatorPlayerInfo>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    sounds: Vec<serde_json::Value>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    recent_events: Vec<serde_json::Value>,
+}
+
+fn spectator_render_matches(a: &SpectatorRender, b: &SpectatorRender) -> bool {
+    a.kind == b.kind
+        && a.role == b.role
+        && a.preset_id == b.preset_id
+        && a.primitive == b.primitive
+        && a.material == b.material
+        && a.color == b.color
+        && a.is_static == b.is_static
+        && a.casts_shadow == b.casts_shadow
+        && a.receives_shadow == b.receives_shadow
+        && a.visible == b.visible
+        && a.double_sided == b.double_sided
+        && a.transparency == b.transparency
+}
+
+fn spectator_entity_schema_matches(a: &SpectatorEntity, b: &SpectatorEntity) -> bool {
+    let billboard_matches =
+        serde_json::to_value(&a.billboard_gui).ok() == serde_json::to_value(&b.billboard_gui).ok();
+
+    a.entity_type == b.entity_type
+        && a.size == b.size
+        && a.shape == b.shape
+        && spectator_render_matches(&a.render, &b.render)
+        && a.health == b.health
+        && a.pickup_type == b.pickup_type
+        && a.model_url == b.model_url
+        && a.model_yaw_offset_deg == b.model_yaw_offset_deg
+        && a.attributes == b.attributes
+        && billboard_matches
+}
+
+fn compute_live_replication_delta(
+    base: &SpectatorObservation,
+    current: &SpectatorObservation,
+    removed_entity_ids: &[u32],
+) -> LiveSpectatorDelta {
+    let base_entities: HashMap<u32, &SpectatorEntity> = base
+        .entities
+        .iter()
+        .map(|entity| (entity.id, entity))
+        .collect();
+    let mut entities = Vec::new();
+
+    for entity in &current.entities {
+        match base_entities.get(&entity.id) {
+            None => entities.push(LiveSpectatorEntityDelta::Add {
+                id: entity.id,
+                add: entity.clone(),
+            }),
+            Some(base_entity) => {
+                if !spectator_entity_schema_matches(base_entity, entity) {
+                    entities.push(LiveSpectatorEntityDelta::Add {
+                        id: entity.id,
+                        add: entity.clone(),
+                    });
+                    continue;
+                }
+
+                let position_changed = base_entity.position != entity.position;
+                let rotation_changed = base_entity.rotation != entity.rotation;
+                if position_changed || rotation_changed {
+                    entities.push(LiveSpectatorEntityDelta::Update {
+                        id: entity.id,
+                        p: position_changed.then_some(entity.position),
+                        r: if rotation_changed {
+                            entity.rotation
+                        } else {
+                            None
+                        },
+                    });
+                }
+            }
+        }
+    }
+
+    for id in removed_entity_ids {
+        entities.push(LiveSpectatorEntityDelta::Remove { id: *id, rm: true });
+    }
+
+    LiveSpectatorDelta {
+        message_type: "spectator_delta",
+        tick: current.tick,
+        server_time_ms: current.server_time_ms,
+        game_status: current.game_status.clone(),
+        entities,
+        players: current.players.clone(),
+        sounds: current
+            .sounds
+            .iter()
+            .filter_map(|sound| serde_json::to_value(sound).ok())
+            .collect(),
+        recent_events: current
+            .recent_events
+            .iter()
+            .filter_map(|event| serde_json::to_value(event).ok())
+            .collect(),
+    }
+}
+
+fn apply_replication_update_to_observation(
+    base: &mut SpectatorObservation,
+    current: SpectatorObservation,
+    removed_entity_ids: &[u32],
+) {
+    base.tick = current.tick;
+    base.server_time_ms = current.server_time_ms;
+    base.game_status = current.game_status;
+    base.players = current.players;
+    base.sounds = current.sounds;
+    base.recent_events = current.recent_events;
+
+    if !removed_entity_ids.is_empty() {
+        let removed: HashSet<u32> = removed_entity_ids.iter().copied().collect();
+        base.entities.retain(|entity| !removed.contains(&entity.id));
+    }
+
+    if current.entities.is_empty() {
+        return;
+    }
+
+    let mut index_by_id: HashMap<u32, usize> = base
+        .entities
+        .iter()
+        .enumerate()
+        .map(|(index, entity)| (entity.id, index))
+        .collect();
+    for entity in current.entities {
+        if let Some(index) = index_by_id.get(&entity.id).copied() {
+            base.entities[index] = entity;
+        } else {
+            index_by_id.insert(entity.id, base.entities.len());
+            base.entities.push(entity);
+        }
+    }
+}
+
 fn base64_decoded_len(data: &str) -> Option<usize> {
     let len = data.len();
     if len == 0 {
@@ -4913,6 +5087,9 @@ async fn handle_spectate_ws(socket: WebSocket, state: LocalState, role: Spectate
     let mut tick_interval = interval(Duration::from_millis(33));
     let mut last_tick: u64 = 0;
     let mut same_tick_count: u32 = 0;
+    let mut last_observation: Option<SpectatorObservation> = None;
+    let mut known_entity_ids: HashSet<u32> = HashSet::new();
+    let mut replication_revision: u64 = 0;
 
     loop {
         tokio::select! {
@@ -5013,38 +5190,86 @@ async fn handle_spectate_ws(socket: WebSocket, state: LocalState, role: Spectate
             }
 
             _ = tick_interval.tick() => {
-                let observation =
-                    game::get_spectator_observation_for_instance(&state.game_handle, state.instance_id);
-
-                match observation {
-                    Ok(obs) => {
-                        let mut obs = obs;
-                        resolve_local_spectator_assets(&mut obs, &state.base_path);
-                        maybe_publish_authoritative_speech_events(&state, &obs.recent_events);
-
-                        if obs.tick != last_tick {
+                if last_observation.is_none() {
+                    match game::get_spectator_observation_for_instance(&state.game_handle, state.instance_id) {
+                        Ok(mut obs) => {
+                            resolve_local_spectator_assets(&mut obs, &state.base_path);
+                            maybe_publish_authoritative_speech_events(&state, &obs.recent_events);
+                            known_entity_ids = obs.entities.iter().map(|entity| entity.id).collect();
+                            replication_revision = game::replication_revision_for_instance(&state.game_handle, state.instance_id)
+                                .unwrap_or(replication_revision);
                             last_tick = obs.tick;
                             same_tick_count = 0;
                             if let Ok(json) = serde_json::to_vec(&obs) {
-                                let msg =
-                                    Message::Text(String::from_utf8_lossy(&json).into_owned().into());
+                                let msg = Message::Text(String::from_utf8_lossy(&json).into_owned().into());
                                 if sender.send(msg).await.is_err() {
                                     break;
                                 }
                             }
+                            last_observation = Some(obs);
+                        }
+                        Err(_) => {
+                            let _ = sender
+                                .send(Message::Text(r#"{"error":"Game ended"}"#.to_string().into()))
+                                .await;
+                            break;
+                        }
+                    };
+                    continue;
+                }
+
+                match game::get_replication_observation_update_for_instance(
+                    &state.game_handle,
+                    state.instance_id,
+                    &known_entity_ids,
+                    replication_revision,
+                ) {
+                    Ok(mut update) => {
+                        resolve_local_spectator_assets(&mut update.observation, &state.base_path);
+                        maybe_publish_authoritative_speech_events(&state, &update.observation.recent_events);
+
+                        let should_send = if update.observation.tick != last_tick {
+                            last_tick = update.observation.tick;
+                            same_tick_count = 0;
+                            true
                         } else {
                             same_tick_count += 1;
                             if same_tick_count >= 5 {
                                 same_tick_count = 0;
-                                if let Ok(json) = serde_json::to_vec(&obs) {
-                                    let msg = Message::Text(
-                                        String::from_utf8_lossy(&json).into_owned().into(),
-                                    );
-                                    if sender.send(msg).await.is_err() {
-                                        break;
-                                    }
+                                true
+                            } else {
+                                false
+                            }
+                        };
+
+                        if should_send {
+                            let Some(base) = last_observation.as_mut() else {
+                                continue;
+                            };
+                            let delta = compute_live_replication_delta(
+                                base,
+                                &update.observation,
+                                &update.removed_entity_ids,
+                            );
+                            if let Ok(json) = serde_json::to_vec(&delta) {
+                                let msg = Message::Text(String::from_utf8_lossy(&json).into_owned().into());
+                                if sender.send(msg).await.is_err() {
+                                    break;
                                 }
                             }
+
+                            for entity in &update.observation.entities {
+                                known_entity_ids.insert(entity.id);
+                            }
+                            for id in &update.removed_entity_ids {
+                                known_entity_ids.remove(id);
+                            }
+                            replication_revision = update.latest_revision;
+                            apply_replication_update_to_observation(
+                                base,
+                                update.observation,
+                                &update.removed_entity_ids,
+                            );
                         }
                     }
                     Err(_) => {

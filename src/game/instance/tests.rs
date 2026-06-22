@@ -2,6 +2,65 @@ use super::*;
 use crate::game::lua::instance::AttributeValue;
 
 #[test]
+fn test_fallen_parts_destroy_height_defaults_disabled() {
+    let mut instance = GameInstance::new(Uuid::new_v4(), None);
+    instance.load_script(
+        r#"
+            local p = Instance.new("Part")
+            p.Name = "BelowDefaultFallenHeight"
+            p.Position = Vector3.new(0, -1000, 0)
+            p.Parent = Workspace
+            _G.p = p
+        "#,
+    );
+
+    instance.tick();
+
+    let parent_exists: bool = instance
+        .lua_runtime
+        .as_ref()
+        .unwrap()
+        .lua()
+        .load("return _G.p.Parent ~= nil")
+        .eval()
+        .unwrap();
+    assert!(parent_exists);
+}
+
+#[test]
+fn test_fallen_parts_destroy_height_destroys_dynamic_parts() {
+    let mut instance = GameInstance::new(Uuid::new_v4(), None);
+    instance.load_script(
+        r#"
+            Workspace.FallenPartsDestroyHeight = -10
+            _G.destroyed = false
+
+            local p = Instance.new("Part")
+            p.Name = "FallenPart"
+            p.Position = Vector3.new(0, -20, 0)
+            p.Parent = Workspace
+            p.Destroying:Connect(function()
+                _G.destroyed = true
+            end)
+            _G.p = p
+        "#,
+    );
+
+    instance.tick();
+
+    let (parent_exists, destroyed): (bool, bool) = instance
+        .lua_runtime
+        .as_ref()
+        .unwrap()
+        .lua()
+        .load("return _G.p.Parent ~= nil, _G.destroyed")
+        .eval()
+        .unwrap();
+    assert!(!parent_exists);
+    assert!(destroyed);
+}
+
+#[test]
 fn test_player_goto_action() {
     let mut instance = GameInstance::new(Uuid::new_v4(), None);
 

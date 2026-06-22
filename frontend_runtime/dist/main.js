@@ -98,6 +98,80 @@ const chatState = {
 }
 let selectedSpectatorPlayerId = null
 let latestSpectatorState = null
+
+function applySpectatorDelta(baseState, delta) {
+  if (!baseState || !delta || delta.type !== 'spectator_delta') return null
+  const changedEntityIds = []
+  const removedEntityIds = []
+  const addedEntityIds = []
+
+  const next = {
+    ...baseState,
+    tick: typeof delta.tick === 'number' ? delta.tick : baseState.tick,
+    server_time_ms: typeof delta.server_time_ms === 'number' ? delta.server_time_ms : baseState.server_time_ms,
+    game_status: typeof delta.game_status === 'string' ? delta.game_status : baseState.game_status,
+    players: Array.isArray(delta.players) ? delta.players : (baseState.players || []),
+    entities: Array.isArray(baseState.entities) ? baseState.entities.slice() : [],
+    sounds: Array.isArray(delta.sounds) ? delta.sounds : (baseState.sounds || []),
+    recent_events: Array.isArray(delta.recent_events) ? delta.recent_events : [],
+  }
+
+  if (!Array.isArray(delta.entities) || delta.entities.length === 0) {
+    next.__spectatorDelta = { changedEntityIds, removedEntityIds, addedEntityIds }
+    return next
+  }
+
+  const entityIndex = new Map()
+  for (let i = 0; i < next.entities.length; i += 1) {
+    const id = next.entities[i]?.id
+    if (typeof id === 'number') entityIndex.set(id, i)
+  }
+
+  const removedIds = new Set()
+
+  for (const entry of delta.entities) {
+    const id = entry?.id
+    if (typeof id !== 'number') continue
+
+    if (entry.rm) {
+      removedIds.add(id)
+      removedEntityIds.push(id)
+      continue
+    }
+
+    if (entry.add && typeof entry.add === 'object') {
+      const index = entityIndex.get(id)
+      if (index == null) {
+        entityIndex.set(id, next.entities.length)
+        next.entities.push(entry.add)
+      } else {
+        next.entities[index] = entry.add
+      }
+      removedIds.delete(id)
+      addedEntityIds.push(id)
+      changedEntityIds.push(id)
+      continue
+    }
+
+    const index = entityIndex.get(id)
+    if (index == null) continue
+    const current = next.entities[index]
+    next.entities[index] = {
+      ...current,
+      position: Array.isArray(entry.p) ? entry.p : current.position,
+      rotation: Array.isArray(entry.r) ? entry.r : current.rotation,
+    }
+    changedEntityIds.push(id)
+  }
+
+  if (removedIds.size > 0) {
+    next.entities = next.entities.filter((entity) => !removedIds.has(entity?.id))
+  }
+
+  next.__spectatorDelta = { changedEntityIds, removedEntityIds, addedEntityIds }
+  return next
+}
+
 const replayState = {
   enabled: false,
   info: null,
@@ -2213,6 +2287,26 @@ async function bootstrap() {
       }
       if (data && data.type === 'chat_message') {
         appendChatMessage(data)
+        return
+      }
+      if (data && data.type === 'spectator_delta') {
+        const state = applySpectatorDelta(latestSpectatorState, data)
+        if (!state) {
+          setStatus('Missing base spectator state; reconnecting', 'warn')
+          ws.close()
+          return
+        }
+        latestSpectatorState = state
+        wsStats.frames += 1
+        if (typeof state?.tick === 'number') wsStats.lastTick = state.tick
+        renderPlayerList(state?.players)
+        if (replayState.enabled && (replayState.agentLoaded || replayState.workspaceLoaded) && typeof state?.tick === 'number') {
+          renderSidePanel(state.tick)
+        }
+        const rendererState = prioritizeSelectedPlayer(state)
+        if (renderer.onState) renderer.onState(rendererState)
+        applyPendingReplayCameraState()
+        reportReplayCameraState(ws)
         return
       }
       if (data && typeof data.type === 'string') {

@@ -483,6 +483,7 @@ impl LuaRuntime {
         let loading_modules = Arc::new(Mutex::new(HashSet::new()));
         lua.set_app_data(AnimationScheduler::default());
         lua.set_app_data(BindToCloseCallbacks::default());
+        lua.set_app_data(crate::game::replication::SharedWorldReplicationState::default());
 
         Self::register_require(
             &lua,

@@ -11,10 +11,12 @@ pub(super) fn add_fields<F: UserDataFields<Instance>>(fields: &mut F) {
         let data = this.data.lock().unwrap();
         Ok(data.billboard_gui_data.as_ref().map(|b| b.studs_offset))
     });
-    fields.add_field_method_set("StudsOffset", |_, this, offset: Vector3| {
+    fields.add_field_method_set("StudsOffset", |lua, this, offset: Vector3| {
         let mut data = this.data.lock().unwrap();
         if let Some(billboard) = &mut data.billboard_gui_data {
             billboard.studs_offset = offset;
+            drop(data);
+            this.mark_replication_dirty(lua);
         }
         Ok(())
     });
@@ -23,10 +25,12 @@ pub(super) fn add_fields<F: UserDataFields<Instance>>(fields: &mut F) {
         let data = this.data.lock().unwrap();
         Ok(data.billboard_gui_data.as_ref().map(|b| b.always_on_top))
     });
-    fields.add_field_method_set("AlwaysOnTop", |_, this, value: bool| {
+    fields.add_field_method_set("AlwaysOnTop", |lua, this, value: bool| {
         let mut data = this.data.lock().unwrap();
         if let Some(billboard) = &mut data.billboard_gui_data {
             billboard.always_on_top = value;
+            drop(data);
+            this.mark_replication_dirty(lua);
         }
         Ok(())
     });
@@ -40,10 +44,12 @@ pub(super) fn add_fields<F: UserDataFields<Instance>>(fields: &mut F) {
             .and_then(|w| w.upgrade())
             .map(Instance::from_ref))
     });
-    fields.add_field_method_set("Adornee", |_, this, part: Option<Instance>| {
+    fields.add_field_method_set("Adornee", |lua, this, part: Option<Instance>| {
         let mut data = this.data.lock().unwrap();
         if let Some(billboard) = &mut data.billboard_gui_data {
             billboard.adornee = part.map(|p| Arc::downgrade(&p.data));
+            drop(data);
+            this.mark_replication_dirty(lua);
         }
         Ok(())
     });

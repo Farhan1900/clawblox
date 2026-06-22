@@ -244,6 +244,7 @@ pub fn register_overlap_params(lua: &Lua) -> Result<()> {
 pub struct WorkspaceServiceData {
     pub gravity: f32,
     pub fluid_forces: FluidForces,
+    pub fallen_parts_destroy_height: f32,
     pub current_camera: Option<Instance>,
     pub children: Vec<Instance>,
 }
@@ -253,6 +254,7 @@ impl WorkspaceServiceData {
         Self {
             gravity: consts::DEFAULT_GRAVITY,
             fluid_forces: FluidForces::Default,
+            fallen_parts_destroy_height: f32::NEG_INFINITY,
             current_camera: None,
             children: Vec::new(),
         }
@@ -365,6 +367,13 @@ impl UserData for WorkspaceService {
         });
         fields.add_field_method_set("FluidForces", |_, this, fluid_forces: FluidForces| {
             this.data.lock().unwrap().fluid_forces = fluid_forces;
+            Ok(())
+        });
+        fields.add_field_method_get("FallenPartsDestroyHeight", |_, this| {
+            Ok(this.data.lock().unwrap().fallen_parts_destroy_height)
+        });
+        fields.add_field_method_set("FallenPartsDestroyHeight", |_, this, height: f32| {
+            this.data.lock().unwrap().fallen_parts_destroy_height = height;
             Ok(())
         });
 

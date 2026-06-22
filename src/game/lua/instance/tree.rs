@@ -270,6 +270,27 @@ impl Instance {
         self.data.lock().unwrap().name = name.to_string();
     }
 
+    pub fn mark_replication_dirty(&self, lua: &Lua) {
+        if let Some(shared) =
+            lua.app_data_ref::<crate::game::replication::SharedWorldReplicationState>()
+        {
+            shared.lock().unwrap().mark(&self.data);
+        }
+    }
+
+    pub fn mark_replication_dirty_recursive(&self, lua: &Lua) {
+        let mut instances = Vec::new();
+        instances.push(Arc::clone(&self.data));
+        for descendant in self.get_descendants() {
+            instances.push(Arc::clone(&descendant.data));
+        }
+        if let Some(shared) =
+            lua.app_data_ref::<crate::game::replication::SharedWorldReplicationState>()
+        {
+            shared.lock().unwrap().mark_many(instances);
+        }
+    }
+
     pub fn fire_remote_on_server_event(
         &self,
         lua: &Lua,
@@ -416,6 +437,8 @@ impl Instance {
     pub fn set_parent_with_lua(&self, parent: Option<&Instance>, lua: &Lua) -> Result<()> {
         let old_parent = self.parent();
         if let Some(old_parent) = &old_parent {
+            old_parent.mark_replication_dirty(lua);
+            self.mark_replication_dirty_recursive(lua);
             self.fire_descendant_removing_from_ancestors(lua, old_parent)?;
         }
         self.set_parent(parent);
@@ -431,6 +454,8 @@ impl Instance {
         }
 
         if let Some(new_parent) = parent {
+            new_parent.mark_replication_dirty(lua);
+            self.mark_replication_dirty_recursive(lua);
             let signal = new_parent.data.lock().unwrap().child_added.clone();
             let child_ud = lua.create_userdata(self.clone())?;
             Self::fire_signal(
@@ -692,6 +717,7 @@ impl Instance {
         value: AttributeValue,
     ) -> Result<()> {
         self.set_attribute(name, value);
+        self.mark_replication_dirty(lua);
 
         let (attribute_changed, specific_signal) = {
             let mut data = self.data.lock().unwrap();

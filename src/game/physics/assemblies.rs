@@ -1,4 +1,5 @@
 use std::collections::HashSet;
+use std::time::Instant;
 
 use rapier3d::prelude::*;
 
@@ -8,6 +9,7 @@ use super::{
     PhysicsAssemblyPart, PhysicsAssemblySpec, PhysicsWorld,
 };
 use crate::game::constants::physics as consts;
+use crate::game::profiling::record_values;
 
 fn finite_force(values: [f32; 3]) -> bool {
     values.iter().all(|v| v.is_finite())
@@ -20,6 +22,18 @@ fn part_within_physics_envelope(part: &PhysicsAssemblyPart) -> bool {
         && rotation_matrix_is_finite(&part.rotation)
         && velocity_within_physics_envelope(part.velocity)
         && velocity_within_physics_envelope(part.angular_velocity)
+}
+
+fn part_has_sync_dirty(part: &PhysicsAssemblyPart) -> bool {
+    part.position_dirty
+        || part.cframe_dirty
+        || part.size_dirty
+        || part.anchored_dirty
+        || part.interaction_dirty
+        || part.velocity_dirty
+        || part.angular_velocity_dirty
+        || part.shape_dirty
+        || part.custom_physical_properties_dirty
 }
 
 fn q5(value: f32) -> i64 {
@@ -327,8 +341,17 @@ impl PhysicsWorld {
     /// model and avoids per-frame internal fixed-joint solves, wakeups, and sleep
     /// timer resets. The body is preserved while the assembly signature is stable.
     pub fn sync_assemblies(&mut self, specs: Vec<PhysicsAssemblySpec>, dt: f32) {
+        let spec_count = specs.len();
+        let spec_part_count = specs.iter().map(|spec| spec.parts.len()).sum::<usize>();
         let mut active_lua_ids = HashSet::new();
         let mut active_roots = HashSet::new();
+        let mut removed_for_envelope = 0usize;
+        let mut rebuilt = 0usize;
+        let mut updated = 0usize;
+        let mut skipped_unchanged = 0usize;
+        let mut signature_ms = 0.0f64;
+        let mut rebuild_ms = 0.0f64;
+        let mut update_ms = 0.0f64;
 
         for spec in specs {
             if spec.parts.is_empty() {
@@ -342,6 +365,21 @@ impl PhysicsWorld {
 
             if !spec.parts.iter().all(part_within_physics_envelope) {
                 self.remove_assembly_by_root(spec.root_id);
+                removed_for_envelope += 1;
+                continue;
+            }
+
+            let existing_signature = self.assembly_signatures.get(&spec.root_id);
+            if existing_signature.is_some()
+                && !spec.parts.iter().any(part_has_sync_dirty)
+                && spec.parts.iter().all(|part| {
+                    self.lua_to_body
+                        .get(&part.lua_id)
+                        .and_then(|body| self.body_to_lua.get(body))
+                        == Some(&spec.root_id)
+                })
+            {
+                skipped_unchanged += 1;
                 continue;
             }
 
@@ -352,16 +390,23 @@ impl PhysicsWorld {
                 .unwrap_or(&spec.parts[0]);
             let root_iso = part_isometry(root_part.position, &root_part.rotation);
             let anchored = spec.parts.iter().any(|part| part.anchored);
+            let signature_start = Instant::now();
             let local_frames = self.resolve_local_frames(&spec, &root_iso);
             let signature = assembly_signature(anchored, &spec.parts, &local_frames);
-            let existing_signature = self.assembly_signatures.get(&spec.root_id);
+            signature_ms += signature_start.elapsed().as_secs_f64() * 1000.0;
 
             if existing_signature != Some(&signature) {
+                let rebuild_start = Instant::now();
                 self.rebuild_assembly(&spec, root_iso, anchored, signature, &local_frames);
+                rebuild_ms += rebuild_start.elapsed().as_secs_f64() * 1000.0;
+                rebuilt += 1;
                 continue;
             }
 
+            let update_start = Instant::now();
             self.update_existing_assembly(&spec, dt);
+            update_ms += update_start.elapsed().as_secs_f64() * 1000.0;
+            updated += 1;
         }
 
         let orphaned_roots: Vec<u64> = self
@@ -370,6 +415,7 @@ impl PhysicsWorld {
             .copied()
             .filter(|root_id| !active_roots.contains(root_id))
             .collect();
+        let orphaned_root_count = orphaned_roots.len();
         for root_id in orphaned_roots {
             self.remove_assembly_by_root(root_id);
         }
@@ -382,9 +428,27 @@ impl PhysicsWorld {
                 !active_lua_ids.contains(lua_id) && !self.character_controllers.contains_key(lua_id)
             })
             .collect();
+        let orphaned_part_count = orphaned_parts.len();
         for lua_id in orphaned_parts {
             self.remove_part(lua_id);
         }
+
+        record_values(
+            "physics.sync_assemblies",
+            &[
+                ("specs", spec_count as f64),
+                ("spec_parts", spec_part_count as f64),
+                ("removed_for_envelope", removed_for_envelope as f64),
+                ("rebuilt", rebuilt as f64),
+                ("updated", updated as f64),
+                ("skipped_unchanged", skipped_unchanged as f64),
+                ("orphaned_roots", orphaned_root_count as f64),
+                ("orphaned_parts", orphaned_part_count as f64),
+                ("signature_ms", signature_ms),
+                ("rebuild_ms", rebuild_ms),
+                ("update_ms", update_ms),
+            ],
+        );
     }
 
     fn rebuild_assembly(

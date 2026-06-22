@@ -5,6 +5,8 @@ pub mod instance;
 pub mod lua;
 mod manager;
 pub mod physics;
+pub mod profiling;
+pub mod replication;
 pub mod script_bundle;
 pub mod world_root;
 
@@ -16,7 +18,10 @@ use std::time::Duration;
 use uuid::Uuid;
 
 use async_bridge::AsyncBridge;
-use instance::{ErrorMode, GameInstance, MapInfo, PlayerObservation, SpectatorObservation};
+use instance::{
+    ErrorMode, GameInstance, MapInfo, PlayerObservation, ReplicationObservationUpdate,
+    SpectatorObservation,
+};
 
 /// Handle to the game manager state
 pub type GameManagerHandle = Arc<GameManagerState>;
@@ -214,6 +219,34 @@ pub fn get_spectator_observation_for_instance(
     instance_id: Uuid,
 ) -> Result<SpectatorObservation, String> {
     manager::observations::get_spectator_observation_for_instance(state, instance_id)
+}
+
+pub fn replication_revision_for_instance(
+    state: &GameManagerHandle,
+    instance_id: Uuid,
+) -> Result<u64, String> {
+    manager::observations::replication_revision_for_instance(state, instance_id)
+}
+
+pub fn get_replication_observation_update_for_instance(
+    state: &GameManagerHandle,
+    instance_id: Uuid,
+    known_entity_ids: &std::collections::HashSet<u32>,
+    since_revision: u64,
+) -> Result<ReplicationObservationUpdate, String> {
+    manager::observations::get_replication_observation_update_for_instance(
+        state,
+        instance_id,
+        known_entity_ids,
+        since_revision,
+    )
+}
+
+pub fn get_spectator_player_observation_for_instance(
+    state: &GameManagerHandle,
+    instance_id: Uuid,
+) -> Result<SpectatorObservation, String> {
+    manager::observations::get_spectator_player_observation_for_instance(state, instance_id)
 }
 
 /// Get static map geometry for a game (cached per game_id)

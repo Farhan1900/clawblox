@@ -22,28 +22,37 @@ pub(super) fn add_fields<F: UserDataFields<Instance>>(fields: &mut F) {
             Ok(Value::Nil)
         }
     });
-    fields.add_field_method_set("Position", |_, this, value: Value| {
+    fields.add_field_method_set("Position", |lua, this, value: Value| {
+        let mut changed = false;
         let mut data = this.data.lock().unwrap();
         match value {
             Value::UserData(ud) => {
                 if let Ok(pos) = ud.borrow::<Vector3>() {
                     if let Some(align) = &mut data.align_position_data {
                         align.position = *pos;
+                        changed = true;
                     } else if let Some(part) = &mut data.part_data {
                         part.position = *pos;
                         part.cframe.position = *pos;
                         part.position_dirty = true;
                         part.cframe_dirty = false;
+                        changed = true;
                     } else if let Some(attachment) = &mut data.attachment_data {
                         attachment.cframe.position = *pos;
+                        changed = true;
                     }
                 } else if let Ok(pos) = ud.borrow::<UDim2>() {
                     if let Some(gui) = &mut data.gui_data {
                         gui.position = *pos;
+                        changed = true;
                     }
                 }
             }
             _ => {}
+        }
+        drop(data);
+        if changed {
+            this.mark_replication_dirty(lua);
         }
         Ok(())
     });
@@ -59,16 +68,23 @@ pub(super) fn add_fields<F: UserDataFields<Instance>>(fields: &mut F) {
                 .map(|attachment| attachment.cframe))
         }
     });
-    fields.add_field_method_set("CFrame", |_, this, cf: CFrame| {
+    fields.add_field_method_set("CFrame", |lua, this, cf: CFrame| {
         let cf = cf.orthonormalized();
+        let mut changed = false;
         let mut data = this.data.lock().unwrap();
         if let Some(part) = &mut data.part_data {
             part.cframe = cf;
             part.position = cf.position;
             part.position_dirty = true;
             part.cframe_dirty = true;
+            changed = true;
         } else if let Some(attachment) = &mut data.attachment_data {
             attachment.cframe = cf;
+            changed = true;
+        }
+        drop(data);
+        if changed {
+            this.mark_replication_dirty(lua);
         }
         Ok(())
     });
@@ -89,7 +105,8 @@ pub(super) fn add_fields<F: UserDataFields<Instance>>(fields: &mut F) {
             Ok(Value::Nil)
         }
     });
-    fields.add_field_method_set("Size", |_, this, value: Value| {
+    fields.add_field_method_set("Size", |lua, this, value: Value| {
+        let mut changed = false;
         let mut data = this.data.lock().unwrap();
         match value {
             Value::UserData(ud) => {
@@ -97,14 +114,20 @@ pub(super) fn add_fields<F: UserDataFields<Instance>>(fields: &mut F) {
                     if let Some(part) = &mut data.part_data {
                         part.size = *size;
                         part.size_dirty = true;
+                        changed = true;
                     }
                 } else if let Ok(size) = ud.borrow::<UDim2>() {
                     if let Some(gui) = &mut data.gui_data {
                         gui.size = *size;
+                        changed = true;
                     }
                 }
             }
             _ => {}
+        }
+        drop(data);
+        if changed {
+            this.mark_replication_dirty(lua);
         }
         Ok(())
     });

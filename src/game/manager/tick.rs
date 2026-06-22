@@ -4,7 +4,7 @@ use uuid::Uuid;
 use rayon::prelude::*;
 
 use crate::game::instance::GameStatus;
-use crate::game::{GameInstanceHandle, GameManagerHandle};
+use crate::game::{profiling::ProfileFrame, GameInstanceHandle, GameManagerHandle};
 
 use super::runtime;
 
@@ -13,8 +13,12 @@ fn process_instance(
     instance_id: Uuid,
     instance_handle: &GameInstanceHandle,
 ) {
+    let mut profile = ProfileFrame::new("manager.process_instance");
     let tick_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let mut instance = instance_handle.write();
+        if let Some(profile) = profile.as_mut() {
+            profile.mark("lock");
+        }
         let game_id = instance.game_id;
 
         if instance.status != GameStatus::Playing {
@@ -24,6 +28,9 @@ fn process_instance(
         let players_before: HashSet<Uuid> = instance.players.keys().copied().collect();
 
         instance.tick();
+        if let Some(profile) = profile.as_mut() {
+            profile.mark("instance_tick");
+        }
 
         let players_after: HashSet<Uuid> = instance.players.keys().copied().collect();
 
@@ -33,17 +40,17 @@ fn process_instance(
             state.player_instances.remove(&(*agent_id, game_id));
         }
 
-        // Update observation cache for active players.
-        for &agent_id in instance.players.keys() {
-            if let Some(obs) = instance.get_player_observation(agent_id) {
-                state.observation_cache.insert((instance_id, agent_id), obs);
-            }
+        if let Some(profile) = profile.as_mut() {
+            profile.mark("player_observations");
         }
 
-        // Update spectator cache.
-        let spectator_obs = instance.get_spectator_observation();
-        state.spectator_cache.insert(instance_id, spectator_obs);
+        if let Some(profile) = profile.as_mut() {
+            profile.mark("spectator_observation");
+        }
     }));
+    if let Some(profile) = profile {
+        profile.finish();
+    }
 
     if let Err(payload) = tick_result {
         let (game_id, tick) = {

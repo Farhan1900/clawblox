@@ -15,9 +15,9 @@ use clawblox::agent_runner::{
 };
 use clawblox::config::{SandboxConfig, WorldConfig};
 use clawblox::manifest::{
-    manifest_path_for_state_root, record_agent_connected, record_checkpoint, record_world_started,
-    refresh_agent_from_dir, record_run as record_manifest_run, AgentConnected, RunRecorded,
-    WorldStarted,
+    manifest_path_for_state_root, record_agent_connected, record_checkpoint,
+    record_run as record_manifest_run, record_world_started, refresh_agent_from_dir,
+    AgentConnected, RunRecorded, WorldStarted,
 };
 use clawblox::world_capability_proxy::{
     start_world_capability_proxy, WorldCapabilityProxy, WorldCapabilityProxyConfig,

@@ -36,6 +36,10 @@ fn limited_pd_output(target: Vector3, current: [f32; 3], p: f32, limit: Vector3)
 
 impl GameInstance {
     pub(super) fn apply_body_movers(&mut self) {
+        if self.workspace_feature_counts.body_movers == 0 {
+            return;
+        }
+
         let Some(runtime) = &self.lua_runtime else {
             return;
         };

@@ -1,6 +1,10 @@
 use uuid::Uuid;
 
-use crate::game::instance::{MapInfo, PlayerObservation, SpectatorObservation};
+use std::collections::HashSet;
+
+use crate::game::instance::{
+    MapInfo, PlayerObservation, ReplicationObservationUpdate, SpectatorObservation,
+};
 use crate::game::GameManagerHandle;
 
 use super::instances::get_player_instance;
@@ -23,10 +27,9 @@ pub fn get_observation(
         }
     }
 
-    state
-        .observation_cache
-        .get(&(instance_id, agent_id))
-        .map(|r| r.clone())
+    let instance = instance_handle.read();
+    instance
+        .get_player_observation(agent_id)
         .ok_or_else(|| "Not in instance".to_string())
 }
 
@@ -60,11 +63,12 @@ pub fn get_spectator_observation(
     let instance_id = best_instance_id
         .ok_or_else(|| "No valid non-halted instances found for this game".to_string())?;
 
-    state
-        .spectator_cache
+    let instance_handle = state
+        .instances
         .get(&instance_id)
-        .map(|r| r.clone())
-        .ok_or_else(|| "Instance not found in cache".to_string())
+        .ok_or_else(|| "Instance not found".to_string())?;
+    let instance = instance_handle.read();
+    Ok(instance.get_spectator_observation())
 }
 
 pub fn get_spectator_observation_for_instance(
@@ -81,11 +85,58 @@ pub fn get_spectator_observation_for_instance(
         }
     }
 
-    state
-        .spectator_cache
+    let instance = instance_handle.read();
+    Ok(instance.get_spectator_observation())
+}
+
+pub fn replication_revision_for_instance(
+    state: &GameManagerHandle,
+    instance_id: Uuid,
+) -> Result<u64, String> {
+    let instance_handle = state
+        .instances
         .get(&instance_id)
-        .map(|r| r.clone())
-        .ok_or_else(|| "Instance not found".to_string())
+        .ok_or_else(|| "Instance not found".to_string())?;
+    let instance = instance_handle.read();
+    Ok(instance.replication_revision())
+}
+
+pub fn get_replication_observation_update_for_instance(
+    state: &GameManagerHandle,
+    instance_id: Uuid,
+    known_entity_ids: &HashSet<u32>,
+    since_revision: u64,
+) -> Result<ReplicationObservationUpdate, String> {
+    let instance_handle = state
+        .instances
+        .get(&instance_id)
+        .ok_or_else(|| "Instance not found".to_string())?;
+    if let Some(instance) = instance_handle.try_read() {
+        if let Some(err) = instance.halted_error.clone() {
+            return Err(format!("Game halted: {}", err));
+        }
+    }
+
+    let instance = instance_handle.read();
+    Ok(instance.get_replication_observation_update(known_entity_ids, since_revision))
+}
+
+pub fn get_spectator_player_observation_for_instance(
+    state: &GameManagerHandle,
+    instance_id: Uuid,
+) -> Result<SpectatorObservation, String> {
+    let instance_handle = state
+        .instances
+        .get(&instance_id)
+        .ok_or_else(|| "Instance not found".to_string())?;
+    if let Some(instance) = instance_handle.try_read() {
+        if let Some(err) = instance.halted_error.clone() {
+            return Err(format!("Game halted: {}", err));
+        }
+    }
+
+    let instance = instance_handle.read();
+    Ok(instance.get_spectator_player_observation())
 }
 
 /// Get static map geometry for a game (cached per game_id)
