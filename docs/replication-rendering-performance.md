@@ -178,6 +178,11 @@ For large physics worlds, also watch `physics.world` and
   Rapier's sleep timer.
 - `sync_lua_to_physics dirty_character_parts` and `dirty_physics_parts`
   distinguish character/controller writes from ordinary physics object writes.
+- `sync_lua_to_physics partial_dirty_single_part_sync` shows when the engine is
+  using the incremental single-part assembly path instead of rebuilding specs
+  for every Workspace part.
+- `physics.sync_assemblies partial_sync` shows when omitted specs are being
+  preserved rather than treated as deleted assemblies.
 
 Decision note from `pyramid-world-3`: the initial lag spike was not caused by
 all thousands of bodies moving. At startup all dynamic bodies are awake, but
@@ -186,8 +191,14 @@ Once Rapier's sleep timers mature, the largest 2646-body contact component
 sleeps and idle ticks return to real-time. Pickup of a single block does not
 need to wake the entire pile if the block is already separated from that
 component; it keeps one dynamic body awake but can still force the current
-Lua-to-physics path to rebuild all single-part assembly specs. Optimize the
-general dirty-object sync path before changing physics semantics.
+Lua-to-physics path to rebuild all single-part assembly specs.
+
+Decision: optimize the general dirty-object sync path before changing physics
+semantics. When Workspace and physics already have the same part IDs, there are
+no weld edges, and every assembly is one part, dirty ordinary parts can be
+synced independently. Omitted one-part assemblies are preserved; they are not
+treated as deletes. Welded assemblies, structural changes, missing/extra
+physics parts, and merged/split bodies continue through the full sync path.
 
 A simple WebSocket byte probe:
 

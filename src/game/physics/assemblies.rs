@@ -36,6 +36,17 @@ fn part_has_sync_dirty(part: &PhysicsAssemblyPart) -> bool {
         || part.custom_physical_properties_dirty
 }
 
+#[derive(Default)]
+struct AssemblySyncStats {
+    removed_for_envelope: usize,
+    rebuilt: usize,
+    updated: usize,
+    skipped_unchanged: usize,
+    signature_ms: f64,
+    rebuild_ms: f64,
+    update_ms: f64,
+}
+
 fn q5(value: f32) -> i64 {
     let quantized = (value * 100_000.0).round() as i64;
     if quantized == 0 {
@@ -97,6 +108,62 @@ fn assembly_signature(
 }
 
 impl PhysicsWorld {
+    fn sync_assembly_spec(
+        &mut self,
+        spec: PhysicsAssemblySpec,
+        dt: f32,
+        stats: &mut AssemblySyncStats,
+    ) {
+        if spec.parts.is_empty() {
+            return;
+        }
+
+        if !spec.parts.iter().all(part_within_physics_envelope) {
+            self.remove_assembly_by_root(spec.root_id);
+            stats.removed_for_envelope += 1;
+            return;
+        }
+
+        let existing_signature = self.assembly_signatures.get(&spec.root_id);
+        if existing_signature.is_some()
+            && !spec.parts.iter().any(part_has_sync_dirty)
+            && spec.parts.iter().all(|part| {
+                self.lua_to_body
+                    .get(&part.lua_id)
+                    .and_then(|body| self.body_to_lua.get(body))
+                    == Some(&spec.root_id)
+            })
+        {
+            stats.skipped_unchanged += 1;
+            return;
+        }
+
+        let root_part = spec
+            .parts
+            .iter()
+            .find(|part| part.lua_id == spec.root_id)
+            .unwrap_or(&spec.parts[0]);
+        let root_iso = part_isometry(root_part.position, &root_part.rotation);
+        let anchored = spec.parts.iter().any(|part| part.anchored);
+        let signature_start = Instant::now();
+        let local_frames = self.resolve_local_frames(&spec, &root_iso);
+        let signature = assembly_signature(anchored, &spec.parts, &local_frames);
+        stats.signature_ms += signature_start.elapsed().as_secs_f64() * 1000.0;
+
+        if existing_signature != Some(&signature) {
+            let rebuild_start = Instant::now();
+            self.rebuild_assembly(&spec, root_iso, anchored, signature, &local_frames);
+            stats.rebuild_ms += rebuild_start.elapsed().as_secs_f64() * 1000.0;
+            stats.rebuilt += 1;
+            return;
+        }
+
+        let update_start = Instant::now();
+        self.update_existing_assembly(&spec, dt);
+        stats.update_ms += update_start.elapsed().as_secs_f64() * 1000.0;
+        stats.updated += 1;
+    }
+
     /// True when `spec`'s parts are exactly the parts of one existing body.
     fn component_composition_unchanged(&self, spec: &PhysicsAssemblySpec) -> bool {
         let Some(&body) = self.lua_to_body.get(&spec.root_id) else {
@@ -345,13 +412,7 @@ impl PhysicsWorld {
         let spec_part_count = specs.iter().map(|spec| spec.parts.len()).sum::<usize>();
         let mut active_lua_ids = HashSet::new();
         let mut active_roots = HashSet::new();
-        let mut removed_for_envelope = 0usize;
-        let mut rebuilt = 0usize;
-        let mut updated = 0usize;
-        let mut skipped_unchanged = 0usize;
-        let mut signature_ms = 0.0f64;
-        let mut rebuild_ms = 0.0f64;
-        let mut update_ms = 0.0f64;
+        let mut stats = AssemblySyncStats::default();
 
         for spec in specs {
             if spec.parts.is_empty() {
@@ -363,50 +424,7 @@ impl PhysicsWorld {
                 active_lua_ids.insert(part.lua_id);
             }
 
-            if !spec.parts.iter().all(part_within_physics_envelope) {
-                self.remove_assembly_by_root(spec.root_id);
-                removed_for_envelope += 1;
-                continue;
-            }
-
-            let existing_signature = self.assembly_signatures.get(&spec.root_id);
-            if existing_signature.is_some()
-                && !spec.parts.iter().any(part_has_sync_dirty)
-                && spec.parts.iter().all(|part| {
-                    self.lua_to_body
-                        .get(&part.lua_id)
-                        .and_then(|body| self.body_to_lua.get(body))
-                        == Some(&spec.root_id)
-                })
-            {
-                skipped_unchanged += 1;
-                continue;
-            }
-
-            let root_part = spec
-                .parts
-                .iter()
-                .find(|part| part.lua_id == spec.root_id)
-                .unwrap_or(&spec.parts[0]);
-            let root_iso = part_isometry(root_part.position, &root_part.rotation);
-            let anchored = spec.parts.iter().any(|part| part.anchored);
-            let signature_start = Instant::now();
-            let local_frames = self.resolve_local_frames(&spec, &root_iso);
-            let signature = assembly_signature(anchored, &spec.parts, &local_frames);
-            signature_ms += signature_start.elapsed().as_secs_f64() * 1000.0;
-
-            if existing_signature != Some(&signature) {
-                let rebuild_start = Instant::now();
-                self.rebuild_assembly(&spec, root_iso, anchored, signature, &local_frames);
-                rebuild_ms += rebuild_start.elapsed().as_secs_f64() * 1000.0;
-                rebuilt += 1;
-                continue;
-            }
-
-            let update_start = Instant::now();
-            self.update_existing_assembly(&spec, dt);
-            update_ms += update_start.elapsed().as_secs_f64() * 1000.0;
-            updated += 1;
+            self.sync_assembly_spec(spec, dt, &mut stats);
         }
 
         let orphaned_roots: Vec<u64> = self
@@ -438,15 +456,55 @@ impl PhysicsWorld {
             &[
                 ("specs", spec_count as f64),
                 ("spec_parts", spec_part_count as f64),
-                ("removed_for_envelope", removed_for_envelope as f64),
-                ("rebuilt", rebuilt as f64),
-                ("updated", updated as f64),
-                ("skipped_unchanged", skipped_unchanged as f64),
+                ("partial_sync", 0.0),
+                ("removed_for_envelope", stats.removed_for_envelope as f64),
+                ("rebuilt", stats.rebuilt as f64),
+                ("updated", stats.updated as f64),
+                ("skipped_unchanged", stats.skipped_unchanged as f64),
                 ("orphaned_roots", orphaned_root_count as f64),
                 ("orphaned_parts", orphaned_part_count as f64),
-                ("signature_ms", signature_ms),
-                ("rebuild_ms", rebuild_ms),
-                ("update_ms", update_ms),
+                ("signature_ms", stats.signature_ms),
+                ("rebuild_ms", stats.rebuild_ms),
+                ("update_ms", stats.update_ms),
+            ],
+        );
+    }
+
+    /// Updates selected single-part assemblies without treating omitted
+    /// assemblies as deleted. Callers must only use this after proving the
+    /// Workspace part set and the physics part set already match, there are no
+    /// weld edges, and every assembly is represented by exactly one part.
+    pub fn sync_single_part_assemblies_partial(
+        &mut self,
+        specs: Vec<PhysicsAssemblySpec>,
+        dt: f32,
+    ) {
+        let spec_count = specs.len();
+        let spec_part_count = specs.iter().map(|spec| spec.parts.len()).sum::<usize>();
+        let mut stats = AssemblySyncStats::default();
+
+        for spec in specs {
+            if spec.parts.len() != 1 {
+                continue;
+            }
+            self.sync_assembly_spec(spec, dt, &mut stats);
+        }
+
+        record_values(
+            "physics.sync_assemblies",
+            &[
+                ("specs", spec_count as f64),
+                ("spec_parts", spec_part_count as f64),
+                ("partial_sync", 1.0),
+                ("removed_for_envelope", stats.removed_for_envelope as f64),
+                ("rebuilt", stats.rebuilt as f64),
+                ("updated", stats.updated as f64),
+                ("skipped_unchanged", stats.skipped_unchanged as f64),
+                ("orphaned_roots", 0.0),
+                ("orphaned_parts", 0.0),
+                ("signature_ms", stats.signature_ms),
+                ("rebuild_ms", stats.rebuild_ms),
+                ("update_ms", stats.update_ms),
             ],
         );
     }

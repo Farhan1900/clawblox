@@ -952,6 +952,54 @@ fn test_invalid_velocity_write_removes_dynamic_part() {
 }
 
 #[test]
+fn test_partial_single_part_sync_preserves_omitted_assemblies() {
+    let mut world = PhysicsWorld::new();
+    let identity = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]];
+
+    let part_spec = |lua_id, position, position_dirty| PhysicsAssemblySpec {
+        root_id: lua_id,
+        parts: vec![PhysicsAssemblyPart {
+            lua_id,
+            position,
+            rotation: identity,
+            size: [1.0, 1.0, 1.0],
+            anchored: false,
+            can_collide: true,
+            can_touch: true,
+            can_query: true,
+            collision_group: CollisionGroupMask::default(),
+            shape: PartType::Block,
+            physical_properties: None,
+            velocity: [0.0, 0.0, 0.0],
+            angular_velocity: [0.0, 0.0, 0.0],
+            position_dirty,
+            cframe_dirty: false,
+            size_dirty: false,
+            anchored_dirty: false,
+            interaction_dirty: false,
+            velocity_dirty: false,
+            angular_velocity_dirty: false,
+            shape_dirty: false,
+            custom_physical_properties_dirty: false,
+        }],
+    };
+
+    world.sync_assemblies(
+        vec![
+            part_spec(1, [0.0, 1.0, 0.0], true),
+            part_spec(2, [10.0, 1.0, 0.0], true),
+        ],
+        1.0 / 60.0,
+    );
+
+    world
+        .sync_single_part_assemblies_partial(vec![part_spec(1, [2.0, 1.0, 0.0], true)], 1.0 / 60.0);
+
+    assert_eq!(world.get_part_position(1), Some([2.0, 1.0, 0.0]));
+    assert_eq!(world.get_part_position(2), Some([10.0, 1.0, 0.0]));
+}
+
+#[test]
 fn test_inert_part_disables_collider_participation() {
     let mut world = PhysicsWorld::new();
 
