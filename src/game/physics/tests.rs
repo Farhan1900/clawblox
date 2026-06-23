@@ -58,6 +58,137 @@ fn test_dynamic_part_falls() {
     assert!(final_pos[1] < initial_pos[1]);
 }
 
+fn assembly_part(
+    lua_id: u64,
+    position: [f32; 3],
+    size: [f32; 3],
+    anchored: bool,
+) -> PhysicsAssemblyPart {
+    PhysicsAssemblyPart {
+        lua_id,
+        position,
+        rotation: [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
+        size,
+        anchored,
+        can_collide: true,
+        can_touch: true,
+        can_query: true,
+        collision_group: CollisionGroupMask::default(),
+        shape: PartType::Block,
+        physical_properties: None,
+        velocity: [0.0, 0.0, 0.0],
+        angular_velocity: [0.0, 0.0, 0.0],
+        position_dirty: true,
+        cframe_dirty: false,
+        size_dirty: true,
+        anchored_dirty: true,
+        interaction_dirty: true,
+        velocity_dirty: false,
+        angular_velocity_dirty: false,
+        shape_dirty: true,
+        custom_physical_properties_dirty: true,
+    }
+}
+
+fn single_part_spec(part: PhysicsAssemblyPart) -> PhysicsAssemblySpec {
+    PhysicsAssemblySpec {
+        root_id: part.lua_id,
+        parts: vec![part],
+    }
+}
+
+fn floor_spec() -> PhysicsAssemblySpec {
+    single_part_spec(assembly_part(1, [0.0, 0.0, 0.0], [20.0, 1.0, 20.0], true))
+}
+
+#[test]
+fn test_supported_zero_velocity_unanchor_starts_sleeping() {
+    let mut world = PhysicsWorld::new();
+
+    world.sync_assemblies(vec![floor_spec()], 1.0 / 60.0);
+    world.query_pipeline.update(&world.collider_set);
+
+    world.sync_assemblies(
+        vec![
+            floor_spec(),
+            single_part_spec(assembly_part(2, [0.0, 1.0, 0.0], [1.0, 1.0, 1.0], true)),
+        ],
+        1.0 / 60.0,
+    );
+    world.query_pipeline.update(&world.collider_set);
+
+    world.sync_assemblies(
+        vec![
+            floor_spec(),
+            single_part_spec(assembly_part(2, [0.0, 1.0, 0.0], [1.0, 1.0, 1.0], false)),
+        ],
+        1.0 / 60.0,
+    );
+
+    assert!(world.is_part_sleeping(2));
+    let before = world.get_part_position(2).unwrap();
+    world.step(1.0 / 60.0);
+    assert_eq!(world.get_part_position(2).unwrap(), before);
+}
+
+#[test]
+fn test_unsupported_zero_velocity_unanchor_falls() {
+    let mut world = PhysicsWorld::new();
+
+    world.sync_assemblies(
+        vec![single_part_spec(assembly_part(
+            2,
+            [0.0, 10.0, 0.0],
+            [1.0, 1.0, 1.0],
+            true,
+        ))],
+        1.0 / 60.0,
+    );
+    world.query_pipeline.update(&world.collider_set);
+
+    world.sync_assemblies(
+        vec![single_part_spec(assembly_part(
+            2,
+            [0.0, 10.0, 0.0],
+            [1.0, 1.0, 1.0],
+            false,
+        ))],
+        1.0 / 60.0,
+    );
+
+    assert!(!world.is_part_sleeping(2));
+    let before = world.get_part_position(2).unwrap();
+    for _ in 0..10 {
+        world.step(1.0 / 60.0);
+    }
+    assert!(world.get_part_position(2).unwrap()[1] < before[1]);
+}
+
+#[test]
+fn test_velocity_unanchor_wakes_even_when_supported() {
+    let mut world = PhysicsWorld::new();
+
+    world.sync_assemblies(vec![floor_spec()], 1.0 / 60.0);
+    world.query_pipeline.update(&world.collider_set);
+
+    world.sync_assemblies(
+        vec![
+            floor_spec(),
+            single_part_spec(assembly_part(2, [0.0, 1.0, 0.0], [1.0, 1.0, 1.0], true)),
+        ],
+        1.0 / 60.0,
+    );
+    world.query_pipeline.update(&world.collider_set);
+
+    let mut moving = assembly_part(2, [0.0, 1.0, 0.0], [1.0, 1.0, 1.0], false);
+    moving.velocity = [3.0, 0.0, 0.0];
+    moving.velocity_dirty = true;
+    world.sync_assemblies(vec![floor_spec(), single_part_spec(moving)], 1.0 / 60.0);
+
+    assert!(!world.is_part_sleeping(2));
+    assert_eq!(world.get_part_velocity(2), Some([3.0, 0.0, 0.0]));
+}
+
 #[test]
 fn test_character_raycast_and_move() {
     let mut world = PhysicsWorld::new();

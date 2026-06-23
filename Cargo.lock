@@ -2309,6 +2309,7 @@ dependencies = [
  "rustc-hash",
  "simba",
  "thiserror 2.0.18",
+ "web-time",
 ]
 
 [[package]]

@@ -10,6 +10,7 @@ use super::lua::instance::{
 use super::lua::LuaRuntime;
 use super::physics::PhysicsWorld;
 use super::profiling::ProfileFrame;
+use crate::config::PhysicsConfig;
 
 mod body_movers;
 mod character_controller;
@@ -211,6 +212,10 @@ impl GameInstance {
 
     pub fn player_object_physics(&self) -> bool {
         self.player_object_physics
+    }
+
+    pub fn set_physics_config(&mut self, config: &PhysicsConfig) {
+        self.physics.set_solver_iterations(config.solver_iterations);
     }
 
     /// Returns milliseconds since game instance was created

@@ -1,6 +1,7 @@
 use nalgebra::{Translation3, UnitQuaternion};
 use rapier3d::prelude::*;
 use std::collections::{HashMap, HashSet};
+use std::num::NonZeroUsize;
 
 use super::constants::physics as consts;
 use super::lua::services::physics_service::CollisionGroupMask;
@@ -285,6 +286,10 @@ impl PhysicsWorld {
         let dynamic_components = component_sizes.len();
         let largest_dynamic_component = component_sizes.values().copied().max().unwrap_or(0);
         let awake_dynamic_bodies = dynamic_bodies.saturating_sub(sleeping_dynamic_bodies);
+        let largest_component_root = component_sizes
+            .iter()
+            .max_by_key(|(_, component_size)| **component_size)
+            .map(|(root, _)| *root);
         let counters = &self.physics_pipeline.counters;
         let length_unit = self.integration_parameters.length_unit;
         let mut above_linear_sleep_threshold = 0usize;
@@ -357,6 +362,68 @@ impl PhysicsWorld {
             .max_by_key(|profile| profile.bodies)
             .copied()
             .unwrap_or_default();
+        let mut active_kinematic_bodies = 0usize;
+        let mut moving_active_kinematic_bodies = 0usize;
+        let mut moving_kinematic_largest_component_contacts = 0usize;
+        let mut moving_character_largest_component_contacts = 0usize;
+        let mut moving_non_character_largest_component_contacts = 0usize;
+        let mut max_moving_kinematic_linear_speed = 0.0f32;
+        for handle in self
+            .island_manager
+            .active_kinematic_bodies()
+            .iter()
+            .copied()
+        {
+            let Some(body) = self.rigid_body_set.get(handle) else {
+                continue;
+            };
+            active_kinematic_bodies += 1;
+            let moving = body.linvel().norm_squared() > f32::EPSILON
+                || body.angvel().norm_squared() > f32::EPSILON;
+            if moving {
+                moving_active_kinematic_bodies += 1;
+                max_moving_kinematic_linear_speed =
+                    max_moving_kinematic_linear_speed.max(body.linvel().norm());
+            }
+            if !moving {
+                continue;
+            }
+            let is_character = self
+                .character_controllers
+                .values()
+                .any(|state| state.body_handle == handle);
+            for collider_handle in body.colliders() {
+                for pair in self.narrow_phase.contact_pairs_with(*collider_handle) {
+                    if !pair.has_any_active_contact {
+                        continue;
+                    }
+                    let other_collider = if pair.collider1 == *collider_handle {
+                        pair.collider2
+                    } else {
+                        pair.collider1
+                    };
+                    let Some(other_body) = self
+                        .collider_set
+                        .get(other_collider)
+                        .and_then(|collider| collider.parent())
+                    else {
+                        continue;
+                    };
+                    let Some(other_index) = body_index.get(&other_body).copied() else {
+                        continue;
+                    };
+                    let other_root = find(&mut parent, other_index);
+                    if Some(other_root) == largest_component_root {
+                        moving_kinematic_largest_component_contacts += 1;
+                        if is_character {
+                            moving_character_largest_component_contacts += 1;
+                        } else {
+                            moving_non_character_largest_component_contacts += 1;
+                        }
+                    }
+                }
+            }
+        }
 
         record_values(
             "physics.world",
@@ -403,6 +470,27 @@ impl PhysicsWorld {
                 (
                     "largest_component_sleep_timer_ready",
                     largest_component_profile.sleep_timer_ready as f64,
+                ),
+                ("active_kinematic_bodies", active_kinematic_bodies as f64),
+                (
+                    "moving_active_kinematic_bodies",
+                    moving_active_kinematic_bodies as f64,
+                ),
+                (
+                    "moving_kinematic_largest_component_contacts",
+                    moving_kinematic_largest_component_contacts as f64,
+                ),
+                (
+                    "moving_character_largest_component_contacts",
+                    moving_character_largest_component_contacts as f64,
+                ),
+                (
+                    "moving_non_character_largest_component_contacts",
+                    moving_non_character_largest_component_contacts as f64,
+                ),
+                (
+                    "max_moving_kinematic_linear_speed",
+                    max_moving_kinematic_linear_speed as f64,
                 ),
                 (
                     "above_linear_sleep_threshold",
@@ -562,6 +650,16 @@ impl PhysicsWorld {
     /// Sets the gravity for the physics world
     pub fn set_gravity(&mut self, gravity_y: f32) {
         self.gravity = vector![0.0, -gravity_y, 0.0];
+    }
+
+    /// Sets the number of outer contact-solver iterations per physics step.
+    ///
+    /// This is a global Rapier integration parameter. Lower values reduce CPU
+    /// on large awake islands; higher values improve contact convergence.
+    pub fn set_solver_iterations(&mut self, iterations: usize) {
+        let iterations = iterations.max(1);
+        self.integration_parameters.num_solver_iterations =
+            NonZeroUsize::new(iterations).expect("iterations is clamped to at least one");
     }
 
     /// Steps the physics simulation forward by dt seconds

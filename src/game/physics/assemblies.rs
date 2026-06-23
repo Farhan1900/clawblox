@@ -1,6 +1,7 @@
 use std::collections::HashSet;
 use std::time::Instant;
 
+use rapier3d::parry::query::ShapeCastOptions;
 use rapier3d::prelude::*;
 
 use super::{
@@ -10,6 +11,8 @@ use super::{
 };
 use crate::game::constants::physics as consts;
 use crate::game::profiling::record_values;
+
+const SUPPORTED_UNANCHOR_CAST_DISTANCE: f32 = 0.1;
 
 fn finite_force(values: [f32; 3]) -> bool {
     values.iter().all(|v| v.is_finite())
@@ -530,6 +533,23 @@ impl PhysicsWorld {
             .and_then(|&handle| self.rigid_body_set.get(handle))
             .filter(|body| body.is_dynamic())
             .map(|body| (*body.linvel(), *body.angvel(), *body.center_of_mass()));
+        let old_body_handles: HashSet<RigidBodyHandle> = spec
+            .parts
+            .iter()
+            .filter_map(|part| self.lua_to_body.get(&part.lua_id).copied())
+            .collect();
+        let stationary_kinematic_entry = !anchored
+            && !old_body_handles.is_empty()
+            && old_body_handles.iter().any(|handle| {
+                self.rigid_body_set
+                    .get(*handle)
+                    .map(|body| body.is_kinematic())
+                    .unwrap_or(false)
+            })
+            && !spec
+                .parts
+                .iter()
+                .any(|part| part.velocity_dirty || part.angular_velocity_dirty);
 
         let mut old_roots: Vec<u64> = spec
             .parts
@@ -621,10 +641,67 @@ impl PhysicsWorld {
             }
             self.set_velocity(body_handle, linvel);
             self.set_angular_velocity(body_handle, angvel);
+            if stationary_kinematic_entry {
+                let mut excluded_bodies = old_body_handles;
+                excluded_bodies.insert(body_handle);
+                if self.body_has_support_below(body_handle, &excluded_bodies) {
+                    if let Some(body) = self.rigid_body_set.get_mut(body_handle) {
+                        body.sleep();
+                    }
+                }
+            }
         } else {
             self.kinematic_linear_velocities
                 .insert(body_handle, [0.0, 0.0, 0.0]);
         }
+    }
+
+    fn body_has_support_below(
+        &self,
+        body_handle: RigidBodyHandle,
+        excluded_bodies: &HashSet<RigidBodyHandle>,
+    ) -> bool {
+        let Some(body) = self.rigid_body_set.get(body_handle) else {
+            return false;
+        };
+        let supported_collider = |_: ColliderHandle, collider: &Collider| {
+            collider.is_enabled()
+                && !collider.is_sensor()
+                && collider
+                    .parent()
+                    .map(|parent| !excluded_bodies.contains(&parent))
+                    .unwrap_or(true)
+        };
+        let filter = QueryFilter::default()
+            .exclude_sensors()
+            .predicate(&supported_collider);
+        let options = ShapeCastOptions {
+            max_time_of_impact: SUPPORTED_UNANCHOR_CAST_DISTANCE,
+            target_distance: 0.0,
+            stop_at_penetration: true,
+            compute_impact_geometry_on_penetration: true,
+        };
+        let down = vector![0.0, -1.0, 0.0];
+
+        body.colliders().iter().any(|collider_handle| {
+            let Some(collider) = self.collider_set.get(*collider_handle) else {
+                return false;
+            };
+            if collider.is_sensor() || !collider.is_enabled() {
+                return false;
+            }
+            self.query_pipeline
+                .cast_shape(
+                    &self.rigid_body_set,
+                    &self.collider_set,
+                    collider.position(),
+                    &down,
+                    collider.shape(),
+                    options,
+                    filter,
+                )
+                .is_some()
+        })
     }
 
     fn update_existing_assembly(&mut self, spec: &PhysicsAssemblySpec, dt: f32) {

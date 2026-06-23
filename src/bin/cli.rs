@@ -39,7 +39,7 @@ use tower_http::services::ServeDir;
 
 use clawblox::{
     agent_runner::{start_agent_tmux_for_local_world, AgentRunnerOptions},
-    config::{SpeechConfig, SpeechMode},
+    config::{PhysicsConfig, SpeechConfig, SpeechMode},
     db,
     game::{
         self,
@@ -1946,6 +1946,7 @@ fn run_game(
             ErrorMode::Halt,
         );
         instance.set_player_object_physics(config.clawblox.player_object_physics);
+        instance.set_physics_config(&config.clawblox.physics);
         instance.instance_id = snapshot.instance.instance_id;
         instance.init_runtime();
         clawblox::snapshot::restore_game_instance(&mut instance, &snapshot.instance)
@@ -1968,9 +1969,9 @@ fn run_game(
             Some(&script),
         );
         if let Some(handle) = game_handle.instances.get(&result.instance_id) {
-            handle
-                .write()
-                .set_player_object_physics(config.clawblox.player_object_physics);
+            let mut instance = handle.write();
+            instance.set_player_object_physics(config.clawblox.player_object_physics);
+            instance.set_physics_config(&config.clawblox.physics);
         }
         result.instance_id
     };
@@ -2060,6 +2061,7 @@ fn run_game(
             max_players: config.max_players,
             observation_radius: config.observation.radius,
             player_object_physics: config.clawblox.player_object_physics,
+            physics_config: config.clawblox.physics.clone(),
             allow_reset: config.agent_api.allow_reset,
             afk_timeout_secs: config.afk_timeout,
             error_mode: ErrorMode::Halt,
@@ -3236,6 +3238,7 @@ struct LocalState {
     max_players: u32,
     observation_radius: f32,
     player_object_physics: bool,
+    physics_config: PhysicsConfig,
     allow_reset: bool,
     afk_timeout_secs: u64,
     error_mode: ErrorMode,
@@ -4032,6 +4035,7 @@ fn reset_local_instance(state: &LocalState) -> Result<(), String> {
         state.error_mode,
     );
     instance.set_player_object_physics(state.player_object_physics);
+    instance.set_physics_config(&state.physics_config);
     instance.instance_id = state.instance_id;
     instance.init_runtime();
     clawblox::snapshot::restore_game_instance(&mut instance, &state.initial_instance_snapshot)?;
