@@ -4102,6 +4102,46 @@ fn build_local_player_observation(
     Ok(observation)
 }
 
+fn local_instance_tick(state: &LocalState) -> Result<u64, (axum::http::StatusCode, String)> {
+    let handle = state
+        .game_handle
+        .instances
+        .get(&state.instance_id)
+        .ok_or_else(|| {
+            (
+                axum::http::StatusCode::NOT_FOUND,
+                format!("missing instance {}", state.instance_id),
+            )
+        })?;
+    let instance = handle.read();
+    if let Some(err) = &instance.halted_error {
+        return Err((
+            axum::http::StatusCode::SERVICE_UNAVAILABLE,
+            format!("Game halted: {}", err),
+        ));
+    }
+    Ok(instance.tick)
+}
+
+async fn build_local_player_observation_after_tick(
+    state: &LocalState,
+    agent_id: Uuid,
+    queued_before_tick: u64,
+) -> Result<PlayerObservation, (axum::http::StatusCode, String)> {
+    let timeout = Duration::from_millis(2_000);
+    let poll_interval = Duration::from_millis(2);
+    let deadline = Instant::now() + timeout;
+    let target_tick = queued_before_tick.saturating_add(2);
+
+    loop {
+        let observation = build_local_player_observation(state, agent_id)?;
+        if observation.tick >= target_tick || Instant::now() >= deadline {
+            return Ok(observation);
+        }
+        tokio::time::sleep(poll_interval).await;
+    }
+}
+
 fn perform_engine_reset_for_session(
     state: &LocalState,
     agent_id: Uuid,
@@ -4790,6 +4830,7 @@ async fn local_input(
     let speech_progress = extract_speech_progress_event(&input.input_type, &input.data);
     let input_type = input.input_type.clone();
     let input_data = input.data.clone();
+    let queued_before_tick = local_instance_tick(&state)?;
 
     game::queue_input(
         &state.game_handle,
@@ -4800,8 +4841,11 @@ async fn local_input(
     )
     .map_err(|e| (axum::http::StatusCode::BAD_REQUEST, e))?;
 
-    // Return observation
-    let observation = build_local_player_observation(&state, agent_id)?;
+    // Return an observation after the next full input-processing tick. The
+    // manager may receive the HTTP request after the current frame's
+    // agent-input phase, so one tick boundary can still be stale.
+    let observation =
+        build_local_player_observation_after_tick(&state, agent_id, queued_before_tick).await?;
     record_local_input(&state, agent_id, input_type, input_data, observation.tick);
 
     if let Some(progress) = speech_progress {

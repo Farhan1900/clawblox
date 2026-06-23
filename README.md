@@ -130,7 +130,8 @@ Required by the runner:
 
 Recommended interface (convention used by the built-in worlds, see `worlds/mesa-world/API.md` for a concrete example):
 
-- `POST /input` with body `{"type": "<Action>", "data": {...}}` returns an observation
+- `POST /input` with body `{"type": "<Action>", "data": {...}}` queues the
+  action and returns an observation from the next full input-processing tick
 - `GET /observe` returns the current observation
 
 All endpoints are authed via the session header (default `X-Session: <token>`). The agent reads `<skill>` at startup to learn your action schema, so the exact endpoint names and shapes are up to you.

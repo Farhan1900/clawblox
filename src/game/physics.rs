@@ -186,10 +186,13 @@ impl PhysicsWorld {
         let mut kinematic_bodies = 0usize;
         let mut fixed_bodies = 0usize;
         let mut body_index = HashMap::new();
+        let mut dynamic_handles = Vec::new();
+        let mut active_dynamic_handles = HashSet::new();
 
         for (handle, body) in self.rigid_body_set.iter() {
             if body.is_dynamic() {
                 body_index.insert(handle, dynamic_bodies);
+                dynamic_handles.push(handle);
                 dynamic_bodies += 1;
                 if body.is_sleeping() {
                     sleeping_dynamic_bodies += 1;
@@ -200,6 +203,7 @@ impl PhysicsWorld {
                 fixed_bodies += 1;
             }
         }
+        active_dynamic_handles.extend(self.island_manager.active_dynamic_bodies().iter().copied());
 
         let mut parent: Vec<usize> = (0..dynamic_bodies).collect();
         let mut size = vec![1usize; dynamic_bodies];
@@ -282,6 +286,77 @@ impl PhysicsWorld {
         let largest_dynamic_component = component_sizes.values().copied().max().unwrap_or(0);
         let awake_dynamic_bodies = dynamic_bodies.saturating_sub(sleeping_dynamic_bodies);
         let counters = &self.physics_pipeline.counters;
+        let length_unit = self.integration_parameters.length_unit;
+        let mut above_linear_sleep_threshold = 0usize;
+        let mut above_angular_sleep_threshold = 0usize;
+        let mut above_any_sleep_threshold = 0usize;
+        let mut below_sleep_threshold = 0usize;
+        let mut sleep_timer_ready = 0usize;
+        let mut max_linear_speed = 0.0f32;
+        let mut max_angular_speed = 0.0f32;
+
+        #[derive(Clone, Copy, Default)]
+        struct ComponentProfile {
+            bodies: usize,
+            awake: usize,
+            active: usize,
+            above_any_sleep_threshold: usize,
+            sleep_timer_ready: usize,
+        }
+
+        let mut component_profiles = HashMap::<usize, ComponentProfile>::new();
+        for (index, handle) in dynamic_handles.iter().copied().enumerate() {
+            let root = find(&mut parent, index);
+            let Some(body) = self.rigid_body_set.get(handle) else {
+                continue;
+            };
+            let lin_speed = body.linvel().norm();
+            let ang_speed = body.angvel().norm();
+            max_linear_speed = max_linear_speed.max(lin_speed);
+            max_angular_speed = max_angular_speed.max(ang_speed);
+
+            let activation = body.activation();
+            let linear_threshold = activation.normalized_linear_threshold * length_unit;
+            let above_linear = lin_speed * lin_speed >= linear_threshold * linear_threshold.abs();
+            let above_angular = ang_speed * ang_speed
+                >= activation.angular_threshold * activation.angular_threshold.abs();
+            let above_any = above_linear || above_angular;
+            if above_linear {
+                above_linear_sleep_threshold += 1;
+            }
+            if above_angular {
+                above_angular_sleep_threshold += 1;
+            }
+            if above_any {
+                above_any_sleep_threshold += 1;
+            } else {
+                below_sleep_threshold += 1;
+            }
+            if activation.time_since_can_sleep >= activation.time_until_sleep {
+                sleep_timer_ready += 1;
+            }
+
+            let profile = component_profiles.entry(root).or_default();
+            profile.bodies += 1;
+            if !body.is_sleeping() {
+                profile.awake += 1;
+            }
+            if active_dynamic_handles.contains(&handle) {
+                profile.active += 1;
+            }
+            if above_any {
+                profile.above_any_sleep_threshold += 1;
+            }
+            if activation.time_since_can_sleep >= activation.time_until_sleep {
+                profile.sleep_timer_ready += 1;
+            }
+        }
+
+        let largest_component_profile = component_profiles
+            .values()
+            .max_by_key(|profile| profile.bodies)
+            .copied()
+            .unwrap_or_default();
 
         record_values(
             "physics.world",
@@ -313,6 +388,38 @@ impl PhysicsWorld {
                     "largest_dynamic_contact_component",
                     largest_dynamic_component as f64,
                 ),
+                (
+                    "largest_component_awake_bodies",
+                    largest_component_profile.awake as f64,
+                ),
+                (
+                    "largest_component_active_bodies",
+                    largest_component_profile.active as f64,
+                ),
+                (
+                    "largest_component_above_sleep_threshold",
+                    largest_component_profile.above_any_sleep_threshold as f64,
+                ),
+                (
+                    "largest_component_sleep_timer_ready",
+                    largest_component_profile.sleep_timer_ready as f64,
+                ),
+                (
+                    "above_linear_sleep_threshold",
+                    above_linear_sleep_threshold as f64,
+                ),
+                (
+                    "above_angular_sleep_threshold",
+                    above_angular_sleep_threshold as f64,
+                ),
+                (
+                    "above_any_sleep_threshold",
+                    above_any_sleep_threshold as f64,
+                ),
+                ("below_sleep_threshold", below_sleep_threshold as f64),
+                ("sleep_timer_ready", sleep_timer_ready as f64),
+                ("max_linear_speed", max_linear_speed as f64),
+                ("max_angular_speed", max_angular_speed as f64),
                 ("rapier_step_ms", counters.step_time_ms()),
                 (
                     "rapier_collision_detection_ms",

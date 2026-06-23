@@ -375,6 +375,8 @@ impl GameInstance {
         let mut dirty_angular_velocities = 0usize;
         let mut dirty_shapes = 0usize;
         let mut dirty_custom_physical_properties = 0usize;
+        let mut dirty_character_parts = 0usize;
+        let mut dirty_physics_parts = 0usize;
         let mut anchored_parts = 0usize;
         let mut character_parts = 0usize;
         let mut weld_edges = 0usize;
@@ -386,6 +388,15 @@ impl GameInstance {
             let lua_id = data.id.0;
             if let Some(part_data) = data.part_data.as_ref() {
                 part_instances.insert(lua_id, part.clone());
+                let is_dirty_part = part_data.position_dirty
+                    || part_data.cframe_dirty
+                    || part_data.size_dirty
+                    || part_data.anchored_dirty
+                    || part_data.interaction_dirty
+                    || part_data.velocity_dirty
+                    || part_data.angular_velocity_dirty
+                    || part_data.shape_dirty
+                    || part_data.custom_physical_properties_dirty;
                 if part_data.position_dirty {
                     dirty_positions += 1;
                 }
@@ -413,10 +424,18 @@ impl GameInstance {
                 if part_data.custom_physical_properties_dirty {
                     dirty_custom_physical_properties += 1;
                 }
+                let is_character_part = self.physics.has_character(lua_id);
+                if is_dirty_part {
+                    if is_character_part {
+                        dirty_character_parts += 1;
+                    } else {
+                        dirty_physics_parts += 1;
+                    }
+                }
                 if part_data.anchored {
                     anchored_parts += 1;
                 }
-                if self.physics.has_character(lua_id) {
+                if is_character_part {
                     character_parts += 1;
                 }
             }
@@ -538,6 +557,8 @@ impl GameInstance {
                         "dirty_custom_physical_properties",
                         dirty_custom_physical_properties as f64,
                     ),
+                    ("dirty_character_parts", dirty_character_parts as f64),
+                    ("dirty_physics_parts", dirty_physics_parts as f64),
                 ],
             );
             if let Some(profile) = profile.as_mut() {
@@ -777,6 +798,8 @@ impl GameInstance {
                     "dirty_custom_physical_properties",
                     dirty_custom_physical_properties as f64,
                 ),
+                ("dirty_character_parts", dirty_character_parts as f64),
+                ("dirty_physics_parts", dirty_physics_parts as f64),
             ],
         );
         if let Some(profile) = profile.as_mut() {

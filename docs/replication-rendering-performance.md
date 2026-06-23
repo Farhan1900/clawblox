@@ -163,6 +163,32 @@ For spectator performance, watch:
 - WebSocket message count and byte size
 - Browser frame time while the spectator view is open
 
+For large physics worlds, also watch `physics.world` and
+`instance.tick_pipeline`:
+
+- `awake_dynamic_bodies` / `active_dynamic_bodies` show how many dynamic
+  bodies Rapier is solving this frame.
+- `largest_dynamic_contact_component` shows the size of the largest
+  solver-contact-connected dynamic component.
+- `largest_component_awake_bodies` shows whether that largest component is
+  actually awake.
+- `largest_component_above_sleep_threshold` shows how many bodies in that
+  component are above Rapier's sleep velocity thresholds.
+- `largest_component_sleep_timer_ready` shows how many bodies have satisfied
+  Rapier's sleep timer.
+- `sync_lua_to_physics dirty_character_parts` and `dirty_physics_parts`
+  distinguish character/controller writes from ordinary physics object writes.
+
+Decision note from `pyramid-world-3`: the initial lag spike was not caused by
+all thousands of bodies moving. At startup all dynamic bodies are awake, but
+after settling only a small number are above Rapier's sleep velocity thresholds.
+Once Rapier's sleep timers mature, the largest 2646-body contact component
+sleeps and idle ticks return to real-time. Pickup of a single block does not
+need to wake the entire pile if the block is already separated from that
+component; it keeps one dynamic body awake but can still force the current
+Lua-to-physics path to rebuild all single-part assembly specs. Optimize the
+general dirty-object sync path before changing physics semantics.
+
 A simple WebSocket byte probe:
 
 ```sh
