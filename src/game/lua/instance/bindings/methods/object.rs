@@ -3,7 +3,10 @@ use mlua::{UserDataMethods, Value};
 use super::super::super::*;
 
 pub(super) fn add_methods<M: UserDataMethods<Instance>>(methods: &mut M) {
-    methods.add_method("Clone", |_, this, ()| Ok(this.clone_instance()));
+    methods.add_method("Clone", |lua, this, ()| {
+        let clone = this.clone_instance();
+        Instance::cached_userdata_value(lua, &clone)
+    });
 
     methods.add_method("Destroy", |lua, this, ()| this.destroy(lua));
 
@@ -16,8 +19,8 @@ pub(super) fn add_methods<M: UserDataMethods<Instance>>(methods: &mut M) {
         Ok(())
     });
 
-    methods.add_meta_method(mlua::MetaMethod::Index, |_, this, key: String| {
-        Ok(this.find_first_child(&key, false))
+    methods.add_meta_method(mlua::MetaMethod::Index, |lua, this, key: String| {
+        Instance::optional_cached_userdata_value(lua, this.find_first_child(&key, false))
     });
 
     methods.add_meta_method(mlua::MetaMethod::ToString, |_, this, ()| Ok(this.name()));
@@ -28,35 +31,46 @@ pub(super) fn add_methods<M: UserDataMethods<Instance>>(methods: &mut M) {
 
     methods.add_method(
         "FindFirstChild",
-        |_, this, (name, recursive): (String, Option<bool>)| {
-            Ok(this.find_first_child(&name, recursive.unwrap_or(false)))
+        |lua, this, (name, recursive): (String, Option<bool>)| {
+            Instance::optional_cached_userdata_value(
+                lua,
+                this.find_first_child(&name, recursive.unwrap_or(false)),
+            )
         },
     );
 
-    methods.add_method("FindFirstChildOfClass", |_, this, class_name: String| {
-        Ok(this.find_first_child_of_class(&class_name))
+    methods.add_method("FindFirstChildOfClass", |lua, this, class_name: String| {
+        Instance::optional_cached_userdata_value(lua, this.find_first_child_of_class(&class_name))
     });
 
     methods.add_method(
         "FindFirstChildWhichIsA",
-        |_, this, (class_name, recursive): (String, Option<bool>)| {
+        |lua, this, (class_name, recursive): (String, Option<bool>)| {
             if recursive.unwrap_or(false) {
-                Ok(this
-                    .get_descendants()
-                    .into_iter()
-                    .find(|child| child.is_a(&class_name)))
+                Instance::optional_cached_userdata_value(
+                    lua,
+                    this.get_descendants()
+                        .into_iter()
+                        .find(|child| child.is_a(&class_name)),
+                )
             } else {
-                Ok(this
-                    .get_children()
-                    .into_iter()
-                    .find(|child| child.is_a(&class_name)))
+                Instance::optional_cached_userdata_value(
+                    lua,
+                    this.get_children()
+                        .into_iter()
+                        .find(|child| child.is_a(&class_name)),
+                )
             }
         },
     );
 
-    methods.add_method("GetChildren", |_, this, ()| Ok(this.get_children()));
+    methods.add_method("GetChildren", |lua, this, ()| {
+        Instance::cached_userdata_sequence(lua, this.get_children())
+    });
 
-    methods.add_method("GetDescendants", |_, this, ()| Ok(this.get_descendants()));
+    methods.add_method("GetDescendants", |lua, this, ()| {
+        Instance::cached_userdata_sequence(lua, this.get_descendants())
+    });
 
     methods.add_method("GetDebugId", |_, this, _scope_length: Option<u32>| {
         Ok(format!("RBX{:016x}", this.id().0))
@@ -102,7 +116,7 @@ pub(super) fn add_methods<M: UserDataMethods<Instance>>(methods: &mut M) {
                 .await;
 
                 match child {
-                    Some(child) => Ok(Value::UserData(lua.create_userdata(child)?)),
+                    Some(child) => Instance::cached_userdata_value(&lua, &child),
                     None => Ok(Value::Nil),
                 }
             }

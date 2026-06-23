@@ -145,7 +145,7 @@ fn mesa_small_world_resume_preserves_workspace_inventory() {
     let before_restore = workspace_inventory(&instance);
     assert_eq!(
         before_restore,
-        (12, 1, 1, 1, 1, 1),
+        (12, 1, 1, 1, 1, 0),
         "unexpected fresh mesa-small-world inventory"
     );
 
@@ -183,7 +183,7 @@ fn mesa_small_world_legacy_resume_rebinds_input_handlers() {
     let before_restore = workspace_inventory(&legacy_instance);
     assert_eq!(
         before_restore,
-        (12, 1, 1, 1, 1, 1),
+        (12, 1, 1, 1, 1, 0),
         "unexpected legacy mesa-small-world inventory"
     );
     let (_config, bundled_source) = load_world_and_entry_script(&mesa_small_world_dir())

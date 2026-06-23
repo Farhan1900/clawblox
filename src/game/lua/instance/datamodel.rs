@@ -391,4 +391,8 @@ impl InstanceData {
     pub fn is_destroyed(&self) -> bool {
         self.destroyed
     }
+
+    pub(crate) fn set_destroyed_for_restore(&mut self, destroyed: bool) {
+        self.destroyed = destroyed;
+    }
 }

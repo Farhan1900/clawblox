@@ -521,22 +521,22 @@ pub fn register_enums(lua: &Lua) -> Result<()> {
     enum_table.set("RaycastFilterType", filter_type_table)?;
 
     let text_x_alignment_table = lua.create_table()?;
-    text_x_alignment_table.set("Left", "Left")?;
-    text_x_alignment_table.set("Center", "Center")?;
-    text_x_alignment_table.set("Right", "Right")?;
+    text_x_alignment_table.set("Left", TextXAlignmentEnum::Left)?;
+    text_x_alignment_table.set("Center", TextXAlignmentEnum::Center)?;
+    text_x_alignment_table.set("Right", TextXAlignmentEnum::Right)?;
     enum_table.set("TextXAlignment", text_x_alignment_table)?;
 
     let text_y_alignment_table = lua.create_table()?;
-    text_y_alignment_table.set("Top", "Top")?;
-    text_y_alignment_table.set("Center", "Center")?;
-    text_y_alignment_table.set("Bottom", "Bottom")?;
+    text_y_alignment_table.set("Top", TextYAlignmentEnum::Top)?;
+    text_y_alignment_table.set("Center", TextYAlignmentEnum::Center)?;
+    text_y_alignment_table.set("Bottom", TextYAlignmentEnum::Bottom)?;
     enum_table.set("TextYAlignment", text_y_alignment_table)?;
 
     let font_table = lua.create_table()?;
-    font_table.set("GothamBold", "GothamBold")?;
-    font_table.set("Gotham", "Gotham")?;
-    font_table.set("SourceSans", "SourceSans")?;
-    font_table.set("SourceSansBold", "SourceSansBold")?;
+    font_table.set("GothamBold", FontEnum::GothamBold)?;
+    font_table.set("Gotham", FontEnum::Gotham)?;
+    font_table.set("SourceSans", FontEnum::SourceSans)?;
+    font_table.set("SourceSansBold", FontEnum::SourceSansBold)?;
     enum_table.set("Font", font_table)?;
 
     let surface_type_table = lua.create_table()?;

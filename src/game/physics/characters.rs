@@ -4,7 +4,7 @@ use rapier3d::control::{
 };
 use rapier3d::prelude::*;
 
-use super::PhysicsWorld;
+use super::{rotation_matrix_to_quaternion, PhysicsWorld};
 use crate::game::constants::humanoid as humanoid_consts;
 use crate::game::constants::physics as consts;
 use crate::game::lua::services::physics_service::CollisionGroupMask;
@@ -233,6 +233,20 @@ impl PhysicsWorld {
             return false;
         };
         let rot = UnitQuaternion::from_euler_angles(0.0, yaw, 0.0);
+        body.set_next_kinematic_rotation(rot);
+        true
+    }
+
+    /// Sets the full orientation for a character controller body.
+    pub fn set_character_rotation(&mut self, lua_id: u64, rotation: &[[f32; 3]; 3]) -> bool {
+        let Some(state) = self.character_controllers.get(&lua_id) else {
+            return false;
+        };
+        let Some(body) = self.rigid_body_set.get_mut(state.body_handle) else {
+            return false;
+        };
+        let rot = rotation_matrix_to_quaternion(rotation);
+        body.set_rotation(rot, true);
         body.set_next_kinematic_rotation(rot);
         true
     }

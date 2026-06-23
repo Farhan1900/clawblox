@@ -29,6 +29,15 @@ impl RBXScriptConnection {
         }
     }
 
+    pub fn restored(id: u64, signal: &RBXScriptSignal, connected: bool) -> Self {
+        ensure_connection_id_above(id);
+        Self {
+            id,
+            connected: Arc::new(Mutex::new(connected)),
+            signal: Arc::clone(&signal.inner),
+        }
+    }
+
     pub fn disconnect(&self) {
         *self.connected.lock().unwrap() = false;
         self.signal.lock().unwrap().remove_connection(self.id);
@@ -40,6 +49,10 @@ impl RBXScriptConnection {
 
     pub fn id(&self) -> u64 {
         self.id
+    }
+
+    pub fn is_for_signal(&self, signal: &RBXScriptSignal) -> bool {
+        Arc::ptr_eq(&self.signal, &signal.inner)
     }
 }
 
@@ -62,8 +75,19 @@ struct ConnectionEntry {
     once: bool,
 }
 
+pub struct SignalConnectionSnapshot {
+    pub id: u64,
+    pub callback: Function,
+    pub once: bool,
+}
+
+pub struct SignalWaiterSnapshot {
+    pub thread: Thread,
+}
+
 pub struct SignalInner {
     connections: Vec<ConnectionEntry>,
+    waiters: Vec<RegistryKey>,
     touch_interest: bool,
 }
 
@@ -71,6 +95,7 @@ impl SignalInner {
     fn new(touch_interest: bool) -> Self {
         Self {
             connections: Vec::new(),
+            waiters: Vec::new(),
             touch_interest,
         }
     }
@@ -81,6 +106,19 @@ impl SignalInner {
         let removed = before.saturating_sub(self.connections.len());
         if self.touch_interest && removed > 0 {
             TOUCH_SIGNAL_CONNECTIONS.fetch_sub(removed, Ordering::SeqCst);
+        }
+    }
+
+    fn clear_connections(&mut self) {
+        if self.touch_interest && !self.connections.is_empty() {
+            TOUCH_SIGNAL_CONNECTIONS.fetch_sub(self.connections.len(), Ordering::SeqCst);
+        }
+        self.connections.clear();
+    }
+
+    fn clear_waiters(&mut self, lua: &Lua) {
+        for key in self.waiters.drain(..) {
+            let _ = lua.remove_registry_value(key);
         }
     }
 }
@@ -146,6 +184,75 @@ impl RBXScriptSignal {
         self.inner.lock().unwrap().connections.len()
     }
 
+    pub fn snapshot_connections(&self, lua: &Lua) -> Result<Vec<SignalConnectionSnapshot>> {
+        let inner = self.inner.lock().unwrap();
+        let mut connections = Vec::with_capacity(inner.connections.len());
+        for connection in &inner.connections {
+            let callback = lua.registry_value::<Function>(&connection.callback)?;
+            connections.push(SignalConnectionSnapshot {
+                id: connection.id,
+                callback,
+                once: connection.once,
+            });
+        }
+        Ok(connections)
+    }
+
+    pub fn snapshot_waiters(&self, lua: &Lua) -> Result<Vec<SignalWaiterSnapshot>> {
+        let inner = self.inner.lock().unwrap();
+        let mut waiters = Vec::with_capacity(inner.waiters.len());
+        for waiter in &inner.waiters {
+            waiters.push(SignalWaiterSnapshot {
+                thread: lua.registry_value::<Thread>(waiter)?,
+            });
+        }
+        Ok(waiters)
+    }
+
+    pub fn restore_connections(
+        &self,
+        lua: &Lua,
+        connections: Vec<SignalConnectionSnapshot>,
+    ) -> Result<()> {
+        let mut restored = Vec::with_capacity(connections.len());
+        let mut max_id = 0;
+        for connection in connections {
+            max_id = max_id.max(connection.id);
+            restored.push(ConnectionEntry {
+                id: connection.id,
+                callback: lua.create_registry_value(connection.callback)?,
+                once: connection.once,
+            });
+        }
+        ensure_connection_id_above(max_id);
+
+        let mut inner = self.inner.lock().unwrap();
+        inner.clear_connections();
+        if inner.touch_interest && !restored.is_empty() {
+            TOUCH_SIGNAL_CONNECTIONS.fetch_add(restored.len(), Ordering::SeqCst);
+        }
+        inner.connections = restored;
+        Ok(())
+    }
+
+    pub fn restore_waiters(&self, lua: &Lua, waiters: Vec<SignalWaiterSnapshot>) -> Result<()> {
+        let mut restored = Vec::with_capacity(waiters.len());
+        for waiter in waiters {
+            restored.push(lua.create_registry_value(waiter.thread)?);
+        }
+
+        let mut inner = self.inner.lock().unwrap();
+        inner.clear_waiters(lua);
+        inner.waiters = restored;
+        Ok(())
+    }
+
+    pub fn wait(&self, lua: &Lua, thread: Thread) -> Result<()> {
+        let key = lua.create_registry_value(thread)?;
+        self.inner.lock().unwrap().waiters.push(key);
+        Ok(())
+    }
+
     pub fn connect(&self, lua: &Lua, callback: Function) -> Result<RBXScriptConnection> {
         let key = lua.create_registry_value(callback)?;
         let connection = RBXScriptConnection::new(Arc::clone(&self.inner));
@@ -183,6 +290,7 @@ impl RBXScriptSignal {
     }
 
     pub fn fire(&self, lua: &Lua, args: MultiValue) -> Result<()> {
+        self.drain_waiters(lua, args.clone())?;
         let mut to_remove = Vec::new();
 
         let connections: Vec<_> = {
@@ -235,6 +343,7 @@ impl RBXScriptSignal {
     ///
     /// Yielded threads should be tracked by the CoroutineManager if they call async functions.
     pub fn fire_as_coroutines(&self, lua: &Lua, args: MultiValue) -> Result<Vec<Thread>> {
+        self.drain_waiters(lua, args.clone())?;
         let mut to_remove = Vec::new();
         let mut threads = Vec::new();
         let profiling = profiling_enabled();
@@ -331,12 +440,60 @@ impl RBXScriptSignal {
         Ok(threads)
     }
 
+    fn drain_waiters(&self, lua: &Lua, args: MultiValue) -> Result<()> {
+        let waiters = {
+            let mut inner = self.inner.lock().unwrap();
+            inner.waiters.drain(..).collect::<Vec<_>>()
+        };
+        if waiters.is_empty() {
+            return Ok(());
+        }
+
+        let args_table: mlua::Table = lua.globals().get("__clawblox_thread_args")?;
+        let signal_waiting: mlua::Table = lua.globals().get("__clawblox_signal_waiting_threads")?;
+        let args_vec = args.into_vec();
+        for key in waiters {
+            if let Ok(thread) = lua.registry_value::<Thread>(&key) {
+                let packed = lua.create_table()?;
+                packed.set("n", args_vec.len())?;
+                for (idx, value) in args_vec.iter().cloned().enumerate() {
+                    packed.set(idx + 1, value)?;
+                }
+                signal_waiting.set(thread.clone(), Value::Nil)?;
+                args_table.set(thread.clone(), packed)?;
+            }
+            let _ = lua.remove_registry_value(key);
+        }
+        Ok(())
+    }
+
     pub fn name(&self) -> &str {
         &self.name
+    }
+
+    pub fn is_same_signal(&self, other: &RBXScriptSignal) -> bool {
+        Arc::ptr_eq(&self.inner, &other.inner)
+    }
+}
+
+fn ensure_connection_id_above(id: u64) {
+    let next = id.saturating_add(1);
+    let mut current = CONNECTION_ID.load(Ordering::SeqCst);
+    while current < next {
+        match CONNECTION_ID.compare_exchange(current, next, Ordering::SeqCst, Ordering::SeqCst) {
+            Ok(_) => break,
+            Err(observed) => current = observed,
+        }
     }
 }
 
 impl UserData for RBXScriptSignal {
+    fn add_fields<F: UserDataFields<Self>>(fields: &mut F) {
+        fields.add_field_method_get("Wait", |lua, _this| {
+            lua.globals().get::<Function>("__clawblox_signal_wait_impl")
+        });
+    }
+
     fn add_methods<M: UserDataMethods<Self>>(methods: &mut M) {
         methods.add_method("Connect", |lua, this, callback: Function| {
             this.connect(lua, callback)
@@ -344,32 +501,6 @@ impl UserData for RBXScriptSignal {
 
         methods.add_method("Once", |lua, this, callback: Function| {
             this.once(lua, callback)
-        });
-
-        // Wait() yields until the signal fires, then returns event args.
-        // Implemented as an async method so mlua can yield across userdata method boundaries.
-        methods.add_async_method("Wait", |lua, this, ()| {
-            let signal = this.clone();
-            let (tx, rx) = tokio::sync::oneshot::channel::<Vec<Value>>();
-            let tx = Arc::new(Mutex::new(Some(tx)));
-
-            let callback = {
-                let tx = tx.clone();
-                lua.create_function(move |_, args: MultiValue| {
-                    if let Some(tx) = tx.lock().unwrap().take() {
-                        let _ = tx.send(args.into_vec());
-                    }
-                    Ok(())
-                })
-            };
-
-            async move {
-                signal.once(&lua, callback?)?;
-                let args = rx.await.map_err(|_| {
-                    mlua::Error::RuntimeError("Signal:Wait cancelled before firing".to_string())
-                })?;
-                Ok(MultiValue::from_vec(args))
-            }
         });
     }
 }

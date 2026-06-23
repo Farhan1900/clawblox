@@ -137,8 +137,11 @@ impl PlayersService {
 
 impl UserData for PlayersService {
     fn add_fields<F: UserDataFields<Self>>(fields: &mut F) {
-        fields.add_field_method_get("LocalPlayer", |_, this| {
-            Ok(this.data.lock().unwrap().local_player.clone())
+        fields.add_field_method_get("LocalPlayer", |lua, this| {
+            Instance::optional_cached_userdata_value(
+                lua,
+                this.data.lock().unwrap().local_player.clone(),
+            )
         });
 
         fields.add_field_method_get("MaxPlayers", |_, this| {
@@ -165,7 +168,9 @@ impl UserData for PlayersService {
     }
 
     fn add_methods<M: UserDataMethods<Self>>(methods: &mut M) {
-        methods.add_method("GetPlayers", |_, this, ()| Ok(this.get_players()));
+        methods.add_method("GetPlayers", |lua, this, ()| {
+            Instance::cached_userdata_sequence(lua, this.get_players())
+        });
 
         methods.add_method("GetPlayerByUserId", |lua, this, user_id: u64| {
             if let Some(player) = this.get_player_by_user_id(user_id) {
@@ -175,16 +180,27 @@ impl UserData for PlayersService {
             }
         });
 
-        methods.add_method("GetPlayerFromCharacter", |_, this, character: Instance| {
-            Ok(this.get_player_from_character(&character))
-        });
+        methods.add_method(
+            "GetPlayerFromCharacter",
+            |lua, this, character: Instance| {
+                Instance::optional_cached_userdata_value(
+                    lua,
+                    this.get_player_from_character(&character),
+                )
+            },
+        );
 
-        methods.add_method("GetChildren", |_, this, ()| Ok(this.get_players()));
+        methods.add_method("GetChildren", |lua, this, ()| {
+            Instance::cached_userdata_sequence(lua, this.get_players())
+        });
 
         methods.add_method(
             "FindFirstChild",
-            |_, this, (name, _recursive): (String, Option<bool>)| {
-                Ok(this.get_players().into_iter().find(|p| p.name() == name))
+            |lua, this, (name, _recursive): (String, Option<bool>)| {
+                Instance::optional_cached_userdata_value(
+                    lua,
+                    this.get_players().into_iter().find(|p| p.name() == name),
+                )
             },
         );
 

@@ -28,9 +28,7 @@ pub(super) fn add_methods<M: UserDataMethods<Instance>>(methods: &mut M) {
         if let Some(old_char) = old_character {
             let threads = character_removing.fire_as_coroutines(
                 lua,
-                mlua::MultiValue::from_iter([Value::UserData(
-                    lua.create_userdata(old_char.clone())?,
-                )]),
+                mlua::MultiValue::from_iter([Instance::cached_userdata_value(lua, &old_char)?]),
             )?;
             crate::game::lua::events::track_yielded_threads(lua, threads)?;
             old_char.set_parent(None);
@@ -76,7 +74,7 @@ pub(super) fn add_methods<M: UserDataMethods<Instance>>(methods: &mut M) {
 
         let threads = character_added.fire_as_coroutines(
             lua,
-            mlua::MultiValue::from_iter([Value::UserData(lua.create_userdata(character.clone())?)]),
+            mlua::MultiValue::from_iter([Instance::cached_userdata_value(lua, &character)?]),
         )?;
         crate::game::lua::events::track_yielded_threads(lua, threads)?;
 

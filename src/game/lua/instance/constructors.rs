@@ -32,7 +32,7 @@ pub fn register_instance(lua: &Lua) -> Result<()> {
     instance_table.set(
         "new",
         lua.create_function(
-            |lua, (class_name, parent): (String, Value)| -> Result<Instance> {
+            |lua, (class_name, parent): (String, Value)| -> Result<mlua::AnyUserData> {
                 let instance = match class_name.as_str() {
                     "Part" => Instance::from_data(InstanceData::new_part("Part")),
                     "Model" => Instance::from_data(InstanceData::new_model("Model")),
@@ -119,7 +119,7 @@ pub fn register_instance(lua: &Lua) -> Result<()> {
                 let parent = parent_instance_from_lua_value(parent)?;
                 instance.set_parent_with_lua(parent.as_ref(), lua)?;
 
-                Ok(instance)
+                Instance::cached_userdata(lua, &instance)
             },
         )?,
     )?;

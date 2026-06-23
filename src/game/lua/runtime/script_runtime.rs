@@ -4,8 +4,6 @@ use crate::game::lua::instance::{ClassName, Instance};
 impl LuaRuntime {
     pub(crate) fn register_require(
         lua: &Lua,
-        module_cache: Arc<Mutex<HashMap<u64, RegistryKey>>>,
-        loading_modules: Arc<Mutex<HashSet<u64>>>,
         pending_coroutines: Arc<Mutex<Vec<RegistryKey>>>,
     ) -> Result<()> {
         let require_fn = lua.create_function(move |lua, module: Instance| -> Result<Value> {
@@ -16,17 +14,17 @@ impl LuaRuntime {
                 }
             }
 
-            let module_id = module.id().0;
-            if let Some(key) = module_cache.lock().unwrap().get(&module_id) {
-                return lua.registry_value::<Value>(key);
+            let module_key = module.id().0 as i64;
+            let module_cache: mlua::Table = lua.globals().get("__clawblox_module_cache")?;
+            if let Some(entry) = module_cache.get::<Option<mlua::Table>>(module_key)? {
+                return entry.get("value");
             }
 
-            {
-                let mut loading = loading_modules.lock().unwrap();
-                if !loading.insert(module_id) {
-                    return Err(mlua::Error::runtime("cyclic module dependency detected"));
-                }
+            let loading_modules: mlua::Table = lua.globals().get("__clawblox_loading_modules")?;
+            if loading_modules.get::<bool>(module_key).unwrap_or(false) {
+                return Err(mlua::Error::runtime("cyclic module dependency detected"));
             }
+            loading_modules.set(module_key, true)?;
 
             let result = (|| -> Result<Value> {
                 let source = {
@@ -69,12 +67,13 @@ impl LuaRuntime {
                 Ok(out)
             })();
 
-            loading_modules.lock().unwrap().remove(&module_id);
+            loading_modules.set(module_key, Value::Nil)?;
 
             match result {
                 Ok(value) => {
-                    let key = lua.create_registry_value(value.clone())?;
-                    module_cache.lock().unwrap().insert(module_id, key);
+                    let entry = lua.create_table()?;
+                    entry.set("value", value.clone())?;
+                    module_cache.set(module_key, entry)?;
                     Ok(value)
                 }
                 Err(e) => Err(e),

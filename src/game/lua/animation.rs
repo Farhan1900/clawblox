@@ -75,6 +75,59 @@ impl AnimationTrack {
         }
     }
 
+    pub fn restored(snapshot: AnimationTrackStateSnapshot) -> Self {
+        ensure_track_id_above(snapshot.track_id);
+        Self {
+            data: Arc::new(Mutex::new(AnimationTrackData {
+                track_id: snapshot.track_id,
+                animation_id: snapshot.animation_id,
+                owner_animator_id: snapshot.owner_animator_id,
+                length: snapshot.length.max(0.01),
+                priority: snapshot.priority,
+                looped: snapshot.looped,
+                speed: snapshot.speed.max(0.0),
+                time_position: snapshot.time_position.clamp(0.0, snapshot.length.max(0.01)),
+                is_playing: snapshot.is_playing,
+                is_stopping: snapshot.is_stopping,
+                weight_current: snapshot.weight_current.max(0.0),
+                weight_target: snapshot.weight_target.max(0.0),
+                effective_weight: snapshot.effective_weight.max(0.0),
+                fade_from: snapshot.fade_from.max(0.0),
+                fade_to: snapshot.fade_to.max(0.0),
+                fade_duration: snapshot.fade_duration.max(0.0),
+                fade_elapsed: snapshot
+                    .fade_elapsed
+                    .max(0.0)
+                    .min(snapshot.fade_duration.max(0.0)),
+                stopped: create_signal("Stopped"),
+                ended: create_signal("Ended"),
+            })),
+        }
+    }
+
+    pub fn snapshot_state(&self) -> AnimationTrackStateSnapshot {
+        let data = self.data.lock().unwrap();
+        AnimationTrackStateSnapshot {
+            track_id: data.track_id,
+            animation_id: data.animation_id.clone(),
+            owner_animator_id: data.owner_animator_id,
+            length: data.length,
+            priority: data.priority,
+            looped: data.looped,
+            speed: data.speed,
+            time_position: data.time_position,
+            is_playing: data.is_playing,
+            is_stopping: data.is_stopping,
+            weight_current: data.weight_current,
+            weight_target: data.weight_target,
+            effective_weight: data.effective_weight,
+            fade_from: data.fade_from,
+            fade_to: data.fade_to,
+            fade_duration: data.fade_duration,
+            fade_elapsed: data.fade_elapsed,
+        }
+    }
+
     pub fn tick(&self, lua: &Lua, delta_time: f32) -> Result<()> {
         let mut fire_stopped = None;
         let mut fire_ended = None;
@@ -142,6 +195,18 @@ impl AnimationTrack {
             crate::game::lua::events::track_yielded_threads(lua, threads)?;
         }
         Ok(())
+    }
+}
+
+fn ensure_track_id_above(id: u64) {
+    let next = id.saturating_add(1);
+    let mut current = ANIMATION_TRACK_ID.load(Ordering::SeqCst);
+    while current < next {
+        match ANIMATION_TRACK_ID.compare_exchange(current, next, Ordering::SeqCst, Ordering::SeqCst)
+        {
+            Ok(_) => break,
+            Err(observed) => current = observed,
+        }
     }
 }
 
@@ -333,6 +398,27 @@ pub struct AnimationTrackSnapshot {
     pub effective_weight: f32,
 }
 
+#[derive(Debug, Clone)]
+pub struct AnimationTrackStateSnapshot {
+    pub track_id: u64,
+    pub animation_id: String,
+    pub owner_animator_id: u64,
+    pub length: f32,
+    pub priority: i32,
+    pub looped: bool,
+    pub speed: f32,
+    pub time_position: f32,
+    pub is_playing: bool,
+    pub is_stopping: bool,
+    pub weight_current: f32,
+    pub weight_target: f32,
+    pub effective_weight: f32,
+    pub fade_from: f32,
+    pub fade_to: f32,
+    pub fade_duration: f32,
+    pub fade_elapsed: f32,
+}
+
 impl AnimationScheduler {
     fn apply_priority_mask_for_animator(tracks: Vec<AnimationTrack>) {
         let mut ranked = Vec::new();
@@ -359,6 +445,30 @@ impl AnimationScheduler {
 
     pub fn register(&self, track: AnimationTrack) {
         self.tracks.lock().unwrap().push(track);
+    }
+
+    pub fn snapshot_tracks(&self) -> Vec<AnimationTrackStateSnapshot> {
+        self.tracks
+            .lock()
+            .unwrap()
+            .iter()
+            .map(AnimationTrack::snapshot_state)
+            .collect()
+    }
+
+    pub fn restore_tracks(&self, tracks: Vec<AnimationTrack>) {
+        let mut guard = self.tracks.lock().unwrap();
+        guard.clear();
+        guard.extend(tracks);
+    }
+
+    pub fn find_track_by_id(&self, track_id: u64) -> Option<AnimationTrack> {
+        self.tracks
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|track| track.data.lock().unwrap().track_id == track_id)
+            .cloned()
     }
 
     pub fn tick(&self, lua: &Lua, delta_time: f32) -> Result<()> {

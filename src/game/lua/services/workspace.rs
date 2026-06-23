@@ -23,9 +23,42 @@ pub struct RaycastResult {
     pub material: Material,
 }
 
+#[derive(Debug, Clone)]
+pub struct RaycastResultSnapshot {
+    pub instance_id: u64,
+    pub position: Vector3,
+    pub normal: Vector3,
+    pub distance: f32,
+    pub material: Material,
+}
+
+impl RaycastResult {
+    pub fn snapshot_state(&self) -> RaycastResultSnapshot {
+        RaycastResultSnapshot {
+            instance_id: self.instance.id().0,
+            position: self.position,
+            normal: self.normal,
+            distance: self.distance,
+            material: self.material,
+        }
+    }
+
+    pub fn restored(snapshot: RaycastResultSnapshot, instance: Instance) -> Self {
+        Self {
+            instance,
+            position: snapshot.position,
+            normal: snapshot.normal,
+            distance: snapshot.distance,
+            material: snapshot.material,
+        }
+    }
+}
+
 impl UserData for RaycastResult {
     fn add_fields<F: UserDataFields<Self>>(fields: &mut F) {
-        fields.add_field_method_get("Instance", |_, this| Ok(this.instance.clone()));
+        fields.add_field_method_get("Instance", |lua, this| {
+            Instance::cached_userdata_value(lua, &this.instance)
+        });
         fields.add_field_method_get("Position", |_, this| Ok(this.position));
         fields.add_field_method_get("Normal", |_, this| Ok(this.normal));
         fields.add_field_method_get("Distance", |_, this| Ok(this.distance));
@@ -54,6 +87,15 @@ pub struct RaycastParams {
     pub respect_can_collide: bool,
 }
 
+#[derive(Debug, Clone)]
+pub struct RaycastParamsSnapshot {
+    pub filter_type: RaycastFilterType,
+    pub filter_instance_ids: Vec<u64>,
+    pub ignore_water: bool,
+    pub collision_group: String,
+    pub respect_can_collide: bool,
+}
+
 impl Default for RaycastParams {
     fn default() -> Self {
         Self {
@@ -67,6 +109,30 @@ impl Default for RaycastParams {
 }
 
 impl RaycastParams {
+    pub fn snapshot_state(&self) -> RaycastParamsSnapshot {
+        RaycastParamsSnapshot {
+            filter_type: self.filter_type,
+            filter_instance_ids: self
+                .filter_instances
+                .iter()
+                .map(|instance| instance.id().0)
+                .collect(),
+            ignore_water: self.ignore_water,
+            collision_group: self.collision_group.clone(),
+            respect_can_collide: self.respect_can_collide,
+        }
+    }
+
+    pub fn restored(snapshot: RaycastParamsSnapshot, filter_instances: Vec<Instance>) -> Self {
+        Self {
+            filter_type: snapshot.filter_type,
+            filter_instances,
+            ignore_water: snapshot.ignore_water,
+            collision_group: snapshot.collision_group,
+            respect_can_collide: snapshot.respect_can_collide,
+        }
+    }
+
     fn into_query_params(self) -> RaycastQueryParams {
         RaycastQueryParams {
             filter_type: self.filter_type,
@@ -99,8 +165,8 @@ impl UserData for RaycastParams {
             Ok(())
         });
 
-        fields.add_field_method_get("FilterDescendantsInstances", |_, this| {
-            Ok(this.filter_instances.clone())
+        fields.add_field_method_get("FilterDescendantsInstances", |lua, this| {
+            Instance::cached_userdata_sequence(lua, this.filter_instances.clone())
         });
         fields.add_field_method_set(
             "FilterDescendantsInstances",
@@ -139,6 +205,15 @@ pub struct OverlapParams {
     pub respect_can_collide: bool,
 }
 
+#[derive(Debug, Clone)]
+pub struct OverlapParamsSnapshot {
+    pub filter_type: RaycastFilterType,
+    pub filter_instance_ids: Vec<u64>,
+    pub max_parts: usize,
+    pub collision_group: String,
+    pub respect_can_collide: bool,
+}
+
 impl Default for OverlapParams {
     fn default() -> Self {
         Self {
@@ -152,6 +227,30 @@ impl Default for OverlapParams {
 }
 
 impl OverlapParams {
+    pub fn snapshot_state(&self) -> OverlapParamsSnapshot {
+        OverlapParamsSnapshot {
+            filter_type: self.filter_type,
+            filter_instance_ids: self
+                .filter_instances
+                .iter()
+                .map(|instance| instance.id().0)
+                .collect(),
+            max_parts: self.max_parts,
+            collision_group: self.collision_group.clone(),
+            respect_can_collide: self.respect_can_collide,
+        }
+    }
+
+    pub fn restored(snapshot: OverlapParamsSnapshot, filter_instances: Vec<Instance>) -> Self {
+        Self {
+            filter_type: snapshot.filter_type,
+            filter_instances,
+            max_parts: snapshot.max_parts,
+            collision_group: snapshot.collision_group,
+            respect_can_collide: snapshot.respect_can_collide,
+        }
+    }
+
     fn into_query_params(self) -> OverlapQueryParams {
         OverlapQueryParams {
             filter_type: self.filter_type,
@@ -184,8 +283,8 @@ impl UserData for OverlapParams {
             Ok(())
         });
 
-        fields.add_field_method_get("FilterDescendantsInstances", |_, this| {
-            Ok(this.filter_instances.clone())
+        fields.add_field_method_get("FilterDescendantsInstances", |lua, this| {
+            Instance::cached_userdata_sequence(lua, this.filter_instances.clone())
         });
         fields.add_field_method_set(
             "FilterDescendantsInstances",
@@ -377,8 +476,11 @@ impl UserData for WorkspaceService {
             Ok(())
         });
 
-        fields.add_field_method_get("CurrentCamera", |_, this| {
-            Ok(this.data.lock().unwrap().current_camera.clone())
+        fields.add_field_method_get("CurrentCamera", |lua, this| {
+            Instance::optional_cached_userdata_value(
+                lua,
+                this.data.lock().unwrap().current_camera.clone(),
+            )
         });
 
         fields.add_field_method_get("Name", |_, _| Ok("Workspace".to_string()));
@@ -434,10 +536,10 @@ impl UserData for WorkspaceService {
 
                 match this.raycast(ray.origin, ray.direction, Some(params), &physics_service)? {
                     Some(hit) => Ok((
-                        Some(hit.instance),
+                        Instance::cached_userdata_value(lua, &hit.instance)?,
                         Some(Value::UserData(lua.create_userdata(hit.position)?)),
                     )),
-                    None => Ok((None::<Instance>, None::<Value>)),
+                    None => Ok((Value::Nil, None::<Value>)),
                 }
             },
         );
@@ -446,10 +548,10 @@ impl UserData for WorkspaceService {
             let physics_service = physics_service_from_lua(lua)?;
             match this.raycast(ray.origin, ray.direction, None, &physics_service)? {
                 Some(hit) => Ok((
-                    Some(hit.instance),
+                    Instance::cached_userdata_value(lua, &hit.instance)?,
                     Some(Value::UserData(lua.create_userdata(hit.position)?)),
                 )),
-                None => Ok((None::<Instance>, None::<Value>)),
+                None => Ok((Value::Nil, None::<Value>)),
             }
         });
 
@@ -457,7 +559,10 @@ impl UserData for WorkspaceService {
             "GetPartBoundsInBox",
             |lua, this, (cframe, size, params): (CFrame, Vector3, Option<OverlapParams>)| {
                 let physics_service = physics_service_from_lua(lua)?;
-                this.get_part_bounds_in_box(cframe, size, params, &physics_service)
+                Instance::cached_userdata_sequence(
+                    lua,
+                    this.get_part_bounds_in_box(cframe, size, params, &physics_service)?,
+                )
             },
         );
 
@@ -465,7 +570,10 @@ impl UserData for WorkspaceService {
             "GetPartBoundsInRadius",
             |lua, this, (position, radius, params): (Vector3, f32, Option<OverlapParams>)| {
                 let physics_service = physics_service_from_lua(lua)?;
-                this.get_part_bounds_in_radius(position, radius, params, &physics_service)
+                Instance::cached_userdata_sequence(
+                    lua,
+                    this.get_part_bounds_in_radius(position, radius, params, &physics_service)?,
+                )
             },
         );
 
@@ -473,20 +581,29 @@ impl UserData for WorkspaceService {
             "GetPartsInPart",
             |lua, this, (part, params): (Instance, Option<OverlapParams>)| {
                 let physics_service = physics_service_from_lua(lua)?;
-                this.get_parts_in_part(part, params, &physics_service)
+                Instance::cached_userdata_sequence(
+                    lua,
+                    this.get_parts_in_part(part, params, &physics_service)?,
+                )
             },
         );
 
-        methods.add_method("GetChildren", |_, this, ()| Ok(this.get_children()));
+        methods.add_method("GetChildren", |lua, this, ()| {
+            Instance::cached_userdata_sequence(lua, this.get_children())
+        });
 
-        methods.add_method("GetDescendants", |_, this, ()| Ok(this.get_descendants()));
+        methods.add_method("GetDescendants", |lua, this, ()| {
+            Instance::cached_userdata_sequence(lua, this.get_descendants())
+        });
 
         methods.add_method(
             "FindFirstChild",
-            |_, this, (name, recursive): (String, Option<bool>)| {
-                Ok(this
-                    .instance
-                    .find_first_child(&name, recursive.unwrap_or(false)))
+            |lua, this, (name, recursive): (String, Option<bool>)| {
+                Instance::optional_cached_userdata_value(
+                    lua,
+                    this.instance
+                        .find_first_child(&name, recursive.unwrap_or(false)),
+                )
             },
         );
 
@@ -515,19 +632,25 @@ impl UserData for WorkspaceService {
                     .await;
 
                     match child {
-                        Some(child) => Ok(Value::UserData(lua.create_userdata(child)?)),
+                        Some(child) => Instance::cached_userdata_value(&lua, &child),
                         None => Ok(Value::Nil),
                     }
                 }
             },
         );
 
-        methods.add_method("FindFirstChildOfClass", |_, this, class_name: String| {
-            Ok(this.instance.find_first_child_of_class(&class_name))
+        methods.add_method("FindFirstChildOfClass", |lua, this, class_name: String| {
+            Instance::optional_cached_userdata_value(
+                lua,
+                this.instance.find_first_child_of_class(&class_name),
+            )
         });
 
-        methods.add_meta_method(mlua::MetaMethod::Index, |_, this, key: String| {
-            Ok(this.instance.find_first_child(&key, false))
+        methods.add_meta_method(mlua::MetaMethod::Index, |lua, this, key: String| {
+            Instance::optional_cached_userdata_value(
+                lua,
+                this.instance.find_first_child(&key, false),
+            )
         });
     }
 }

@@ -27,11 +27,36 @@ pub struct DataStoreService {
     async_bridge: Option<Arc<AsyncBridge>>,
 }
 
+#[derive(Debug, Clone)]
+pub struct DataStoreHandleSnapshot {
+    pub game_id: Uuid,
+    pub store_name: String,
+}
+
 impl DataStoreService {
     pub fn new(game_id: Uuid, async_bridge: Option<Arc<AsyncBridge>>) -> Self {
         Self {
             game_id,
             async_bridge,
+        }
+    }
+
+    pub fn restore_data_store(&self, snapshot: DataStoreHandleSnapshot) -> DataStore {
+        DataStore {
+            game_id: snapshot.game_id,
+            store_name: snapshot.store_name,
+            async_bridge: self.async_bridge.clone(),
+        }
+    }
+
+    pub fn restore_ordered_data_store(
+        &self,
+        snapshot: DataStoreHandleSnapshot,
+    ) -> OrderedDataStore {
+        OrderedDataStore {
+            game_id: snapshot.game_id,
+            store_name: snapshot.store_name,
+            async_bridge: self.async_bridge.clone(),
         }
     }
 }
@@ -64,6 +89,15 @@ pub struct DataStore {
     game_id: Uuid,
     store_name: String,
     async_bridge: Option<Arc<AsyncBridge>>,
+}
+
+impl DataStore {
+    pub fn snapshot_handle(&self) -> DataStoreHandleSnapshot {
+        DataStoreHandleSnapshot {
+            game_id: self.game_id,
+            store_name: self.store_name.clone(),
+        }
+    }
 }
 
 impl UserData for DataStore {
@@ -286,6 +320,15 @@ pub struct OrderedDataStore {
     game_id: Uuid,
     store_name: String,
     async_bridge: Option<Arc<AsyncBridge>>,
+}
+
+impl OrderedDataStore {
+    pub fn snapshot_handle(&self) -> DataStoreHandleSnapshot {
+        DataStoreHandleSnapshot {
+            game_id: self.game_id,
+            store_name: self.store_name.clone(),
+        }
+    }
 }
 
 impl UserData for OrderedDataStore {

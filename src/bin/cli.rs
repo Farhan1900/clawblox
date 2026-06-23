@@ -1954,11 +1954,6 @@ fn run_game(
                 eprintln!("Error: failed to restore snapshot state: {}", e);
                 std::process::exit(1);
             });
-        // Re-run the script bundle on resume so legacy snapshots captured before
-        // script-instance materialization still regain their runtime handlers.
-        // The bundle is now idempotent and only ensures Script/ModuleScript
-        // instances exist in the restored DataModel.
-        instance.load_script(&script);
         game::insert_instance(&game_handle, instance)
     } else {
         let result = find_or_create_instance(

@@ -242,6 +242,28 @@ impl Instance {
         Ok(created)
     }
 
+    pub(crate) fn cached_userdata_value(lua: &Lua, instance: &Instance) -> Result<Value> {
+        Ok(Value::UserData(Self::cached_userdata(lua, instance)?))
+    }
+
+    pub(crate) fn optional_cached_userdata_value(
+        lua: &Lua,
+        instance: Option<Instance>,
+    ) -> Result<Value> {
+        match instance {
+            Some(instance) => Self::cached_userdata_value(lua, &instance),
+            None => Ok(Value::Nil),
+        }
+    }
+
+    pub(crate) fn cached_userdata_sequence(lua: &Lua, instances: Vec<Instance>) -> Result<Table> {
+        let table = lua.create_table()?;
+        for (idx, instance) in instances.into_iter().enumerate() {
+            table.set(idx + 1, Self::cached_userdata(lua, &instance)?)?;
+        }
+        Ok(table)
+    }
+
     pub fn new(class_name: ClassName, name: &str) -> Self {
         Self {
             data: Arc::new(Mutex::new(InstanceData::new(class_name, name))),

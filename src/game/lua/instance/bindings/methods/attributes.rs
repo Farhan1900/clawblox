@@ -73,7 +73,7 @@ pub(super) fn add_methods<M: UserDataMethods<Instance>>(methods: &mut M) {
                 .await;
 
                 match child {
-                    Some(child) => Ok(Value::UserData(lua.create_userdata(child)?)),
+                    Some(child) => Instance::cached_userdata_value(&lua, &child),
                     None => Ok(Value::Nil),
                 }
             }

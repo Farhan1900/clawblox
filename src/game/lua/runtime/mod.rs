@@ -1,13 +1,14 @@
 use mlua::{
     Function, Lua, MultiValue, ObjectLike, RegistryKey, Result, Thread, ThreadStatus, Value,
 };
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
 use uuid::Uuid;
 
 use crate::game::instance::ErrorMode;
 
 use super::animation::AnimationScheduler;
+use super::events::RBXScriptSignal;
 use super::instance::{AttributeValue, Instance, InstanceData};
 use super::services::{
     register_overlap_params, register_raycast_params, AgentInput, AgentInputService,
@@ -20,9 +21,11 @@ mod coroutines;
 mod data_model;
 mod frame_events;
 mod script_runtime;
+mod vm_snapshot;
 
 use data_model::BindToCloseCallbacks;
 pub use data_model::{Game, GameDataModel, KickRequest, PhysicsCommand};
+pub use vm_snapshot::LuaVmSnapshot;
 
 const DEFAULT_PLAYER_MODEL_URL: &str = "asset://player.glb";
 
@@ -52,6 +55,10 @@ impl RuntimeClock {
         let mut now = self.now_secs.lock().unwrap();
         *now += dt_secs.max(0.0);
         *now
+    }
+
+    fn set(&self, now_secs: f64) {
+        *self.now_secs.lock().unwrap() = now_secs.max(0.0);
     }
 }
 
@@ -190,14 +197,23 @@ impl LuaRuntime {
         lua.globals().set("RunService", game.run_service())?;
         lua.globals()
             .set("PhysicsService", game.physics_service())?;
-        lua.globals()
-            .set("ReplicatedStorage", game.replicated_storage())?;
+        lua.globals().set(
+            "ReplicatedStorage",
+            Value::UserData(Instance::cached_userdata(&lua, &game.replicated_storage())?),
+        )?;
         lua.globals()
             .set("RemoteEventService", game.remote_event_service())?;
-        lua.globals()
-            .set("ServerScriptService", game.server_script_service())?;
-        lua.globals().set("ServerStorage", game.server_storage())?;
-        lua.globals().set("serverStorage", game.server_storage())?;
+        lua.globals().set(
+            "ServerScriptService",
+            Value::UserData(Instance::cached_userdata(
+                &lua,
+                &game.server_script_service(),
+            )?),
+        )?;
+        let server_storage =
+            Value::UserData(Instance::cached_userdata(&lua, &game.server_storage())?);
+        lua.globals().set("ServerStorage", server_storage.clone())?;
+        lua.globals().set("serverStorage", server_storage)?;
 
         let print_fn = lua.create_function(|_, args: MultiValue| {
             let msg: Vec<String> = args
@@ -315,6 +331,9 @@ impl LuaRuntime {
         let cancelled_table = lua.create_table()?;
         lua.globals()
             .set("__clawblox_cancelled_threads", cancelled_table)?;
+        let signal_waiting_table = lua.create_table()?;
+        lua.globals()
+            .set("__clawblox_signal_waiting_threads", signal_waiting_table)?;
 
         // --- task library ---
         // Rust helper: __clawblox_schedule_wait(seconds) — schedules current thread to resume after delay
@@ -419,6 +438,7 @@ impl LuaRuntime {
                 __clawblox_cancelled_threads[thread] = true
                 __clawblox_thread_schedule[thread] = nil
                 __clawblox_thread_args[thread] = nil
+                __clawblox_signal_waiting_threads[thread] = nil
             end
 
             -- Fix global wait() to use task.wait()
@@ -478,19 +498,36 @@ impl LuaRuntime {
         })?;
         lua.globals().set("__clawblox_track_thread", track_fn)?;
 
+        let signal_wait_register =
+            lua.create_function(|lua, (signal, thread): (mlua::AnyUserData, Thread)| {
+                let signal = signal.borrow::<RBXScriptSignal>()?;
+                signal.wait(lua, thread)
+            })?;
+        lua.globals()
+            .set("__clawblox_signal_wait_register", signal_wait_register)?;
+        lua.load(
+            r#"
+            function __clawblox_signal_wait_impl(signal)
+                local thread = coroutine.running()
+                __clawblox_signal_waiting_threads[thread] = true
+                __clawblox_signal_wait_register(signal, thread)
+                return coroutine.yield()
+            end
+        "#,
+        )
+        .exec()?;
+
         let executed_scripts = Arc::new(Mutex::new(HashSet::new()));
-        let module_cache = Arc::new(Mutex::new(HashMap::new()));
-        let loading_modules = Arc::new(Mutex::new(HashSet::new()));
+        lua.globals()
+            .set("__clawblox_module_cache", lua.create_table()?)?;
+        lua.globals()
+            .set("__clawblox_loading_modules", lua.create_table()?)?;
         lua.set_app_data(AnimationScheduler::default());
         lua.set_app_data(BindToCloseCallbacks::default());
         lua.set_app_data(crate::game::replication::SharedWorldReplicationState::default());
 
-        Self::register_require(
-            &lua,
-            module_cache.clone(),
-            loading_modules.clone(),
-            pending_coroutines.clone(),
-        )?;
+        Self::register_require(&lua, pending_coroutines.clone())?;
+        vm_snapshot::initialize_global_baseline(&lua)?;
 
         Ok(Self {
             lua,
