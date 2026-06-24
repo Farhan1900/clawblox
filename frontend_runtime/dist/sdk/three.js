@@ -35,6 +35,35 @@ function defaultMetalness(material) {
   }
 }
 
+const trackedAssetLoads = {
+  pending: 0,
+  listeners: new Set(),
+}
+
+function notifyTrackedAssetLoadsSettled() {
+  if (trackedAssetLoads.pending !== 0) return
+  const listeners = [...trackedAssetLoads.listeners]
+  trackedAssetLoads.listeners.clear()
+  for (const listener of listeners) listener()
+}
+
+function trackAssetLoad(promise) {
+  trackedAssetLoads.pending += 1
+  return Promise.resolve(promise).finally(() => {
+    trackedAssetLoads.pending = Math.max(0, trackedAssetLoads.pending - 1)
+    notifyTrackedAssetLoadsSettled()
+  })
+}
+
+export function getTrackedAssetLoadState() {
+  return { pending: trackedAssetLoads.pending }
+}
+
+export function whenTrackedAssetsSettled() {
+  if (trackedAssetLoads.pending === 0) return Promise.resolve()
+  return new Promise((resolve) => trackedAssetLoads.listeners.add(resolve))
+}
+
 export function createPresetMaterialLibrary(initial = {}) {
   const presets = new Map(Object.entries(initial))
 
@@ -1041,14 +1070,14 @@ export function createSharedModelRenderer(THREE, scene, options = {}) {
 
   async function loadTemplate(modelUrl) {
     const mods = await ensureModelModules()
-    return templateCache.get(modelUrl, () => new Promise((resolve, reject) => {
+    return templateCache.get(modelUrl, () => trackAssetLoad(new Promise((resolve, reject) => {
       mods.loader.load(
         modelUrl,
         (gltf) => resolve({ scene: gltf.scene, animations: gltf.animations || [] }),
         undefined,
         reject,
       )
-    }))
+    })))
   }
 
   function isEligibleTemplate(template) {
@@ -1294,19 +1323,24 @@ export function createSharedModelRenderer(THREE, scene, options = {}) {
 
   let frameCounts = new Map()
   let frameChangedIds = null
+  let framePartial = false
 
   function beginFrame(entities = [], frameOptions = null) {
-    frameCounts = new Map()
+    framePartial = Array.isArray(frameOptions?.changedEntityIds) ||
+      Array.isArray(frameOptions?.addedEntityIds) ||
+      Array.isArray(frameOptions?.removedEntityIds)
+    if (!framePartial) frameCounts = new Map()
     frameChangedIds = frameOptions?.changedEntityIds instanceof Set
       ? frameOptions.changedEntityIds
       : Array.isArray(frameOptions?.changedEntityIds)
         ? new Set(frameOptions.changedEntityIds)
         : null
     for (const group of groups.values()) {
-      group.frameIds.clear()
+      if (!framePartial) group.frameIds.clear()
       group.dirtyIds.clear()
       group.structureDirty = false
     }
+    if (framePartial) return
     for (const entity of entities || []) {
       const modelUrl = modelUrlForEntity(entity)
       if (!modelUrl) continue
@@ -1326,7 +1360,10 @@ export function createSharedModelRenderer(THREE, scene, options = {}) {
     group.entities.set(entity.id, entity)
     group.frameIds.add(entity.id)
     if (!previous) group.structureDirty = true
-    if (!previous || previous !== entity || frameChangedIds?.has(entity.id)) {
+    if (
+      !previous ||
+      (frameChangedIds ? frameChangedIds.has(entity.id) : previous !== entity)
+    ) {
       group.dirtyIds.add(entity.id)
     }
     return true
@@ -1334,15 +1371,20 @@ export function createSharedModelRenderer(THREE, scene, options = {}) {
 
   function endFrame() {
     for (const group of groups.values()) {
-      for (const id of [...group.entities.keys()]) {
-        if (!group.frameIds.has(id)) {
-          group.entities.delete(id)
-          group.structureDirty = true
+      if (!framePartial) {
+        for (const id of [...group.entities.keys()]) {
+          if (!group.frameIds.has(id)) {
+            group.entities.delete(id)
+            group.structureDirty = true
+          }
         }
+      } else if (!group.structureDirty && group.dirtyIds.size === 0) {
+        continue
       }
-      const entities = [...group.entities.values()]
-      if (entities.length !== group.lastCount) group.structureDirty = true
-      if (entities.length === 0) {
+      const entities = group.structureDirty ? [...group.entities.values()] : null
+      const entityCount = group.structureDirty ? entities.length : group.lastCount
+      if (group.structureDirty && entityCount !== group.lastCount) group.structureDirty = true
+      if (entityCount === 0) {
         removeInstancedMeshes(group)
         if (group.fallback) {
           scene.remove(group.fallback)
@@ -1354,7 +1396,7 @@ export function createSharedModelRenderer(THREE, scene, options = {}) {
         group.lastCount = 0
         continue
       }
-      if (group.structureDirty || group.indexById.size !== entities.length) {
+      if (group.structureDirty) {
         group.indexById.clear()
         entities.forEach((entity, index) => group.indexById.set(entity.id, index))
       }
@@ -1362,14 +1404,14 @@ export function createSharedModelRenderer(THREE, scene, options = {}) {
         const needsFullInstancedUpdate =
           group.structureDirty ||
           group.instancedMeshes.length !== (group.staticTemplate?.meshes.length || 0)
-        if (needsFullInstancedUpdate) updateInstanced(group, entities)
+        if (needsFullInstancedUpdate) updateInstanced(group, entities ?? [...group.entities.values()])
         else updateInstancedPartial(group)
       } else {
-        ensureFallback(group, entities.length)
+        ensureFallback(group, entityCount)
         if (group.structureDirty) updateFallback(group, entities)
         else updateFallbackPartial(group)
       }
-      group.lastCount = entities.length
+      group.lastCount = entityCount
     }
   }
 
@@ -1426,14 +1468,14 @@ export function createModelEntityController(THREE, options = {}) {
 
   async function loadTemplate(modelUrl) {
     const mods = await ensureModelModules()
-    return templateCache.get(modelUrl, () => new Promise((resolve, reject) => {
+    return templateCache.get(modelUrl, () => trackAssetLoad(new Promise((resolve, reject) => {
       mods.loader.load(
         modelUrl,
         (gltf) => resolve({ scene: gltf.scene, animations: gltf.animations || [] }),
         undefined,
         reject,
       )
-    }))
+    })))
   }
 
   if (options.preloadModules !== false) {

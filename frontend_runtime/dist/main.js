@@ -39,6 +39,8 @@ const SPECTATOR_TOKEN = (() => {
   return token ? token.trim() : ''
 })()
 
+const RUNTIME_VIEWPORT_ONLY = new URLSearchParams(window.location.search).get('viewport') === '1'
+
 function withSpectatorToken(path) {
   const url = new URL(withBasePath(path), window.location.origin)
   if (SPECTATOR_TOKEN) url.searchParams.set('spectator_token', SPECTATOR_TOKEN)
@@ -48,38 +50,38 @@ function withSpectatorToken(path) {
 const statusEl = document.getElementById('status')
 const metaEl = document.getElementById('meta')
 const canvas = document.getElementById('stage')
-const chatToggleEl = document.getElementById('chat-toggle')
-const chatPanelEl = document.getElementById('chat-panel')
-const chatFeedEl = document.getElementById('chat-feed')
-const chatFormEl = document.getElementById('chat-form')
-const chatInputEl = document.getElementById('chat-input')
-const chatSendEl = document.getElementById('chat-send')
-const chatConnectionEl = document.getElementById('chat-connection')
-const chatLocalStatusEl = document.getElementById('chat-local-status')
-const playerListCountEl = document.getElementById('player-list-count')
-const playerListBodyEl = document.getElementById('player-list-body')
-const behaviorPanelEl = document.getElementById('behavior-panel')
-const behaviorPanelToggleEl = document.getElementById('behavior-panel-toggle')
-const behaviorTimelineShellEl = document.getElementById('behavior-timeline-shell')
-const behaviorRulerEl = document.getElementById('behavior-ruler')
-const behaviorTracksEl = document.getElementById('behavior-tracks')
-const behaviorGlobalPlayheadEl = document.getElementById('behavior-global-playhead')
-const behaviorDetailsEl = document.getElementById('behavior-details')
-const replayPanelEl = document.getElementById('replay-panel')
-const replayPlayToggleEl = document.getElementById('replay-play-toggle')
-const replayPlayIconEl = document.getElementById('replay-play-icon')
-const replaySliderEl = document.getElementById('replay-slider')
-const replayTimeCurrentEl = document.getElementById('replay-time-current')
-const replayTimeTotalEl = document.getElementById('replay-time-total')
-const replaySpeedEl = document.getElementById('replay-speed')
-const replaySkipIdleEl = document.getElementById('replay-skip-idle')
-const agentLogPanelEl = document.getElementById('agent-log-panel')
-const agentLogFeedEl = document.getElementById('agent-log-feed')
-const workspaceFeedEl = document.getElementById('workspace-feed')
-const agentLogStatusEl = document.getElementById('agent-log-status')
-const agentLogToggleEl = document.getElementById('agent-log-toggle')
-const agentLogTabMessagesEl = document.getElementById('agent-log-tab-messages')
-const agentLogTabWorkspaceEl = document.getElementById('agent-log-tab-workspace')
+const chatToggleEl = RUNTIME_VIEWPORT_ONLY ? null : document.getElementById('chat-toggle')
+const chatPanelEl = RUNTIME_VIEWPORT_ONLY ? null : document.getElementById('chat-panel')
+const chatFeedEl = RUNTIME_VIEWPORT_ONLY ? null : document.getElementById('chat-feed')
+const chatFormEl = RUNTIME_VIEWPORT_ONLY ? null : document.getElementById('chat-form')
+const chatInputEl = RUNTIME_VIEWPORT_ONLY ? null : document.getElementById('chat-input')
+const chatSendEl = RUNTIME_VIEWPORT_ONLY ? null : document.getElementById('chat-send')
+const chatConnectionEl = RUNTIME_VIEWPORT_ONLY ? null : document.getElementById('chat-connection')
+const chatLocalStatusEl = RUNTIME_VIEWPORT_ONLY ? null : document.getElementById('chat-local-status')
+const playerListCountEl = RUNTIME_VIEWPORT_ONLY ? null : document.getElementById('player-list-count')
+const playerListBodyEl = RUNTIME_VIEWPORT_ONLY ? null : document.getElementById('player-list-body')
+const behaviorPanelEl = RUNTIME_VIEWPORT_ONLY ? null : document.getElementById('behavior-panel')
+const behaviorPanelToggleEl = RUNTIME_VIEWPORT_ONLY ? null : document.getElementById('behavior-panel-toggle')
+const behaviorTimelineShellEl = RUNTIME_VIEWPORT_ONLY ? null : document.getElementById('behavior-timeline-shell')
+const behaviorRulerEl = RUNTIME_VIEWPORT_ONLY ? null : document.getElementById('behavior-ruler')
+const behaviorTracksEl = RUNTIME_VIEWPORT_ONLY ? null : document.getElementById('behavior-tracks')
+const behaviorGlobalPlayheadEl = RUNTIME_VIEWPORT_ONLY ? null : document.getElementById('behavior-global-playhead')
+const behaviorDetailsEl = RUNTIME_VIEWPORT_ONLY ? null : document.getElementById('behavior-details')
+const replayPanelEl = RUNTIME_VIEWPORT_ONLY ? null : document.getElementById('replay-panel')
+const replayPlayToggleEl = RUNTIME_VIEWPORT_ONLY ? null : document.getElementById('replay-play-toggle')
+const replayPlayIconEl = RUNTIME_VIEWPORT_ONLY ? null : document.getElementById('replay-play-icon')
+const replaySliderEl = RUNTIME_VIEWPORT_ONLY ? null : document.getElementById('replay-slider')
+const replayTimeCurrentEl = RUNTIME_VIEWPORT_ONLY ? null : document.getElementById('replay-time-current')
+const replayTimeTotalEl = RUNTIME_VIEWPORT_ONLY ? null : document.getElementById('replay-time-total')
+const replaySpeedEl = RUNTIME_VIEWPORT_ONLY ? null : document.getElementById('replay-speed')
+const replaySkipIdleEl = RUNTIME_VIEWPORT_ONLY ? null : document.getElementById('replay-skip-idle')
+const agentLogPanelEl = RUNTIME_VIEWPORT_ONLY ? null : document.getElementById('agent-log-panel')
+const agentLogFeedEl = RUNTIME_VIEWPORT_ONLY ? null : document.getElementById('agent-log-feed')
+const workspaceFeedEl = RUNTIME_VIEWPORT_ONLY ? null : document.getElementById('workspace-feed')
+const agentLogStatusEl = RUNTIME_VIEWPORT_ONLY ? null : document.getElementById('agent-log-status')
+const agentLogToggleEl = RUNTIME_VIEWPORT_ONLY ? null : document.getElementById('agent-log-toggle')
+const agentLogTabMessagesEl = RUNTIME_VIEWPORT_ONLY ? null : document.getElementById('agent-log-tab-messages')
+const agentLogTabWorkspaceEl = RUNTIME_VIEWPORT_ONLY ? null : document.getElementById('agent-log-tab-workspace')
 const replayChromeAvailable = !!replayPanelEl
 const agentPanelAvailable = !!agentLogPanelEl
 const workspacePanelAvailable = !!workspaceFeedEl
@@ -1397,6 +1399,36 @@ function reportReplayCameraState(ws) {
   }
 }
 
+function afterNextPaint() {
+  return new Promise((resolve) => {
+    requestAnimationFrame(() => requestAnimationFrame(resolve))
+  })
+}
+
+let replayViewportReadySeq = 0
+
+async function reportReplayViewportReady(state) {
+  if (!replayState.enabled) return
+  const seq = ++replayViewportReadySeq
+  try {
+    await afterNextPaint()
+    if (seq !== replayViewportReadySeq || !replayState.enabled) return
+    window.parent?.postMessage({
+      type: 'replay:viewport-ready',
+      version: 1,
+      href: window.location.href,
+      tick: Number.isFinite(Number(state?.tick)) ? Number(state.tick) : null,
+      assets: threeSdk.getTrackedAssetLoadState(),
+    }, window.location.origin)
+  } catch (err) {
+    console.error('[replay] viewport readiness failed', err)
+  }
+}
+
+function notifyRendererStateReady(state) {
+  if (replayState.enabled) void reportReplayViewportReady(state)
+}
+
 function resolveSpectatorPlayerId(target) {
   if (target == null || target === '') return null
   const players = Array.isArray(latestSpectatorState?.players) ? latestSpectatorState.players : []
@@ -1773,7 +1805,10 @@ function createSnapshotBuffer(options = {}) {
     const fromState = from.state
     const toState = to.state
     const fromPlayers = indexById(fromState?.players)
-    const fromEntities = indexById(fromState?.entities)
+    const changedEntityIds = Array.isArray(toState?.__spectatorDelta?.changedEntityIds)
+      ? new Set(toState.__spectatorDelta.changedEntityIds)
+      : null
+    const fromEntities = changedEntityIds?.size === 0 ? null : indexById(fromState?.entities)
 
     const players = Array.isArray(toState?.players)
       ? toState.players.map((p) => {
@@ -1784,7 +1819,10 @@ function createSnapshotBuffer(options = {}) {
       : []
 
     const entities = Array.isArray(toState?.entities)
-      ? toState.entities.map((e) => {
+      ? changedEntityIds?.size === 0
+        ? toState.entities
+        : toState.entities.map((e) => {
+        if (changedEntityIds && !changedEntityIds.has(e.id)) return e
         const fe = fromEntities.get(e.id)
         if (!fe || !Array.isArray(fe.position) || !Array.isArray(e.position)) return e
         return { ...e, position: lerpVec3(fe.position, e.position, t) }
@@ -2251,6 +2289,48 @@ async function bootstrap() {
   const ws = new WebSocket(`${protocol}//${window.location.host}${withSpectatorToken('/spectate/ws')}`)
   ws.binaryType = 'arraybuffer'
   spectateWs = ws
+  let pendingRendererState = null
+  let rendererFrameScheduled = false
+  let hasRenderedReplayState = false
+
+  function reportReplayViewportError(message, data = {}) {
+    if (!replayState.enabled || hasRenderedReplayState) return
+    try {
+      window.parent?.postMessage({
+        type: 'replay:viewport-error',
+        version: 1,
+        href: window.location.href,
+        message,
+        ...data,
+      }, window.location.origin)
+    } catch (err) {
+      console.error('[replay] viewport error report failed', err)
+    }
+  }
+
+  function scheduleRendererState(state) {
+    pendingRendererState = state
+    if (rendererFrameScheduled) return
+    rendererFrameScheduled = true
+    requestAnimationFrame(() => {
+      rendererFrameScheduled = false
+      const state = pendingRendererState
+      pendingRendererState = null
+      if (!state) return
+      const rendererState = prioritizeSelectedPlayer(state)
+      if (renderer.onState) renderer.onState(rendererState)
+      if (replayState.enabled) hasRenderedReplayState = true
+      applyPendingReplayCameraState()
+      reportReplayCameraState(ws)
+      if (replayState.enabled && ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({
+          type: 'replay_render_ready',
+          tick: Number.isFinite(Number(state?.tick)) ? Number(state.tick) : null,
+        }))
+      }
+      notifyRendererStateReady(state)
+    })
+  }
 
   ws.onopen = () => {
     chatState.wsConnected = true
@@ -2264,12 +2344,14 @@ async function bootstrap() {
   ws.onerror = () => {
     setChatConnection('WS error')
     setStatus('WebSocket error', 'error')
+    reportReplayViewportError('Replay connection failed before the first frame')
   }
-  ws.onclose = () => {
+  ws.onclose = (event) => {
     chatState.wsConnected = false
     setChatConnection('Offline')
     setStatus('Disconnected', 'warn')
     renderPlayerList([])
+    reportReplayViewportError('Replay connection closed before the first frame', { code: event?.code ?? null })
   }
 
   ws.onmessage = (event) => {
@@ -2303,10 +2385,7 @@ async function bootstrap() {
         if (replayState.enabled && (replayState.agentLoaded || replayState.workspaceLoaded) && typeof state?.tick === 'number') {
           renderSidePanel(state.tick)
         }
-        const rendererState = prioritizeSelectedPlayer(state)
-        if (renderer.onState) renderer.onState(rendererState)
-        applyPendingReplayCameraState()
-        reportReplayCameraState(ws)
+        scheduleRendererState(state)
         return
       }
       if (data && typeof data.type === 'string') {
@@ -2330,10 +2409,7 @@ async function bootstrap() {
       if (replayState.enabled && (replayState.agentLoaded || replayState.workspaceLoaded) && typeof state?.tick === 'number') {
         renderSidePanel(state.tick)
       }
-      const rendererState = prioritizeSelectedPlayer(state)
-      if (renderer.onState) renderer.onState(rendererState)
-      applyPendingReplayCameraState()
-      reportReplayCameraState(ws)
+      scheduleRendererState(state)
     } catch (error) {
       console.error(error)
       setStatus('Failed to parse spectator state', 'error')
