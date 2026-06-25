@@ -64,18 +64,18 @@ struct FrameDelta {
     entities: Vec<DeltaEntry>,
     #[serde(skip_serializing_if = "Vec::is_empty", default)]
     players: Vec<PlayerDelta>,
-    #[serde(skip_serializing_if = "Vec::is_empty", default)]
-    sounds: Vec<serde_json::Value>,
-    #[serde(skip_serializing_if = "Vec::is_empty", default)]
-    recent_events: Vec<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    sounds: Option<Vec<serde_json::Value>>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    recent_events: Option<Vec<serde_json::Value>>,
 }
 
 impl FrameDelta {
     fn is_empty(&self) -> bool {
         self.entities.is_empty()
             && self.players.is_empty()
-            && self.sounds.is_empty()
-            && self.recent_events.is_empty()
+            && self.sounds.is_none()
+            && self.recent_events.is_none()
     }
 }
 
@@ -388,7 +388,7 @@ impl RecordingWriter {
     ) -> Result<(), Box<dyn std::error::Error>> {
         let json = serde_json::to_vec(obs)?;
         let compressed = zstd::encode_all(json.as_slice(), 3)?;
-        sqlx::query("INSERT INTO checkpoints (tick, time_ms, data) VALUES (?, ?, ?)")
+        sqlx::query("INSERT OR REPLACE INTO checkpoints (tick, time_ms, data) VALUES (?, ?, ?)")
             .bind(tick as i64)
             .bind(time_ms as i64)
             .bind(&compressed)
@@ -468,26 +468,32 @@ fn compute_delta(base: &SpectatorObservation, current: &SpectatorObservation) ->
 
     let player_deltas = compute_player_delta(base, current);
 
-    // Sounds and events: include full arrays if non-empty (they're small and stateful)
-    let sounds: Vec<serde_json::Value> = if current.sounds != base.sounds {
-        current
-            .sounds
-            .iter()
-            .filter_map(|s| serde_json::to_value(s).ok())
-            .collect()
+    // Sounds and events are replacement snapshots. `None` means unchanged;
+    // `Some([])` means explicitly clear the previous snapshot.
+    let sounds: Option<Vec<serde_json::Value>> = if current.sounds != base.sounds {
+        Some(
+            current
+                .sounds
+                .iter()
+                .filter_map(|s| serde_json::to_value(s).ok())
+                .collect(),
+        )
     } else {
-        Vec::new()
+        None
     };
 
-    let recent_events: Vec<serde_json::Value> = if !current.recent_events.is_empty() {
-        current
-            .recent_events
-            .iter()
-            .filter_map(|e| serde_json::to_value(e).ok())
-            .collect()
-    } else {
-        Vec::new()
-    };
+    let recent_events: Option<Vec<serde_json::Value>> =
+        if current.recent_events != base.recent_events {
+            Some(
+                current
+                    .recent_events
+                    .iter()
+                    .filter_map(|e| serde_json::to_value(e).ok())
+                    .collect(),
+            )
+        } else {
+            None
+        };
 
     FrameDelta {
         entities: entries,
@@ -861,12 +867,13 @@ impl RecordingReader {
         from_tick: u64,
         to_tick: u64,
     ) -> Result<serde_json::Value, Box<dyn std::error::Error + Send + Sync>> {
-        let delta_rows =
-            sqlx::query("SELECT tick, time_ms, data FROM deltas WHERE tick > ? AND tick <= ? ORDER BY tick")
-                .bind(from_tick as i64)
-                .bind(to_tick as i64)
-                .fetch_all(&self.pool)
-                .await?;
+        let delta_rows = sqlx::query(
+            "SELECT tick, time_ms, data FROM deltas WHERE tick > ? AND tick <= ? ORDER BY tick",
+        )
+        .bind(from_tick as i64)
+        .bind(to_tick as i64)
+        .fetch_all(&self.pool)
+        .await?;
 
         let mut entities_by_id = HashMap::<u32, DeltaEntry>::new();
         let mut players = Vec::<PlayerDelta>::new();
@@ -883,8 +890,12 @@ impl RecordingReader {
                 coalesce_entity_delta(&mut entities_by_id, entity);
             }
             players.extend(delta.players);
-            sounds.extend(delta.sounds);
-            recent_events.extend(delta.recent_events);
+            if let Some(delta_sounds) = delta.sounds {
+                sounds.extend(delta_sounds);
+            }
+            if let Some(delta_recent_events) = delta.recent_events {
+                recent_events.extend(delta_recent_events);
+            }
         }
         let mut entities = Vec::with_capacity(entities_by_id.len());
         for entry in entities_by_id.into_values() {
@@ -995,22 +1006,20 @@ fn apply_delta(obs: &mut SpectatorObservation, delta: &FrameDelta) {
         }
     }
 
-    // Replace sounds if delta has any
-    if !delta.sounds.is_empty() {
-        if let Ok(sounds) = serde_json::from_value(serde_json::Value::Array(delta.sounds.clone())) {
+    // Replace sounds only when the delta carries a replacement snapshot.
+    if let Some(delta_sounds) = &delta.sounds {
+        if let Ok(sounds) = serde_json::from_value(serde_json::Value::Array(delta_sounds.clone())) {
             obs.sounds = sounds;
         }
     }
 
-    // Replace recent_events
-    if !delta.recent_events.is_empty() {
+    // Replace recent_events only when the delta carries a replacement snapshot.
+    if let Some(delta_recent_events) = &delta.recent_events {
         if let Ok(events) =
-            serde_json::from_value(serde_json::Value::Array(delta.recent_events.clone()))
+            serde_json::from_value(serde_json::Value::Array(delta_recent_events.clone()))
         {
             obs.recent_events = events;
         }
-    } else {
-        obs.recent_events.clear();
     }
 }
 
@@ -1129,6 +1138,18 @@ mod tests {
         }
     }
 
+    fn test_replicated_event(id: u64) -> SpectatorReplicatedEvent {
+        SpectatorReplicatedEvent {
+            id,
+            tick: id,
+            server_time_ms: id * 16,
+            name: "TestEvent".to_string(),
+            reliable: false,
+            payload: serde_json::json!({ "id": id }),
+            target_user_id: None,
+        }
+    }
+
     fn temp_recording_path(name: &str) -> PathBuf {
         std::env::temp_dir().join(format!(
             "clawblox-recording-test-{}-{}.clawrec",
@@ -1147,8 +1168,8 @@ mod tests {
                 add: replacement,
             }],
             players: Vec::new(),
-            sounds: Vec::new(),
-            recent_events: Vec::new(),
+            sounds: None,
+            recent_events: None,
         };
 
         apply_delta(&mut obs, &delta);
@@ -1192,6 +1213,25 @@ mod tests {
         assert_eq!(reconstructed.players.len(), 2);
         assert_eq!(reconstructed.players[0].position, [1.0, 0.0, 0.0]);
         assert_eq!(reconstructed.players[1].name, "B");
+    }
+
+    #[test]
+    fn unchanged_recent_events_are_not_rewritten_or_cleared() {
+        let mut base = test_observation(0, Vec::new());
+        base.recent_events = vec![test_replicated_event(1)];
+        let mut current = test_observation(1, Vec::new());
+        current.recent_events = base.recent_events.clone();
+
+        let delta = compute_delta(&base, &current);
+        assert!(
+            delta.recent_events.is_none(),
+            "unchanged recent_events should not be rewritten into every delta"
+        );
+
+        let mut reconstructed = base.clone();
+        apply_delta(&mut reconstructed, &delta);
+        assert_eq!(reconstructed.recent_events.len(), 1);
+        assert_eq!(reconstructed.recent_events[0].id, 1);
     }
 
     #[tokio::test]

@@ -2055,6 +2055,72 @@ function createSnapshotBuffer(options = {}) {
   }
 }
 
+function createRecentEventCursor(options = {}) {
+  const maxSeen = Number.isFinite(options.maxSeen) ? Math.max(1, options.maxSeen) : 512
+  const seen = new Set()
+  const order = []
+
+  function fallbackKey(event) {
+    let payload = ''
+    try {
+      payload = JSON.stringify(event?.payload ?? null)
+    } catch (_err) {
+      payload = String(event?.payload ?? '')
+    }
+    return [
+      'event',
+      event?.name ?? '',
+      event?.tick ?? '',
+      event?.server_time_ms ?? '',
+      payload,
+    ].join(':')
+  }
+
+  function eventKey(event) {
+    if (!event || typeof event !== 'object') return null
+    if (event.id !== undefined && event.id !== null) return `id:${event.id}`
+    return fallbackKey(event)
+  }
+
+  function remember(key) {
+    seen.add(key)
+    order.push(key)
+    while (order.length > maxSeen) {
+      const old = order.shift()
+      seen.delete(old)
+    }
+  }
+
+  function eventsFrom(input) {
+    if (Array.isArray(input)) return input
+    return Array.isArray(input?.recent_events) ? input.recent_events : []
+  }
+
+  function drain(input) {
+    const out = []
+    for (const event of eventsFrom(input)) {
+      const key = eventKey(event)
+      if (!key || seen.has(key)) continue
+      remember(key)
+      out.push(event)
+    }
+    return out
+  }
+
+  function clear() {
+    seen.clear()
+    order.length = 0
+  }
+
+  return {
+    drain,
+    clear,
+    size() {
+      return order.length
+    },
+  }
+}
+
 function createAnimationInspector() {
   function tracksForPlayer(player) {
     return Array.isArray(player?.active_animations) ? player.active_animations : []
@@ -2141,6 +2207,7 @@ function createRuntimeKit() {
     state: {
       indexById,
       createSnapshotBuffer,
+      createRecentEventCursor,
     },
     animation: createAnimationInspector(),
     presets: {

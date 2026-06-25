@@ -2363,6 +2363,7 @@ fn run_game(
             .route("/spectate/ws", get(local_spectate_ws))
             .route("/spectate/chat/messages", get(local_spectate_chat_messages))
             .route("/renderer/manifest", get(local_renderer_manifest))
+            .route("/replay/info", get(live_replay_info_probe))
             .route("/join", post(local_join))
             .route("/input", post(local_input))
             .route("/observe", get(local_observe))
@@ -3214,6 +3215,10 @@ async fn replay_info(State(state): State<ReplayState>) -> Json<replay::ReplayInf
     Json(pb.info())
 }
 
+async fn live_replay_info_probe() -> Json<serde_json::Value> {
+    Json(serde_json::Value::Null)
+}
+
 #[derive(Deserialize)]
 struct ReplayStateQuery {
     tick: Option<u64>,
@@ -3427,6 +3432,7 @@ fn run_external_runtime(
                 .route("/ui", get(external_ui_index))
                 .route("/ui/{*path}", get(local_ui_file))
                 .route("/renderer/manifest", get(external_renderer_manifest))
+                .route("/replay/info", get(live_replay_info_probe))
                 .route("/spectate", get(external_spectate))
                 .route("/spectate/ws", get(external_spectate_ws))
                 .route("/api.md", get(external_skill))

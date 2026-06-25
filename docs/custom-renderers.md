@@ -171,6 +171,7 @@ export function createRenderer(ctx) {
 ### Core
 
 - `runtime.state.createSnapshotBuffer({ maxSnapshots, interpolationDelayMs })`
+- `runtime.state.createRecentEventCursor({ maxSeen? })`
 - `runtime.state.indexById(items)`
 - `runtime.animation.findTrack(player, predicate)`
 - `runtime.animation.hasTrackMatching(player, /regex/)`
@@ -278,6 +279,11 @@ type SpectatorObservation = {
   recent_events: SpectatorReplicatedEvent[]
 }
 ```
+
+`recent_events` is a recent-event snapshot, not a drained queue. Events can
+appear in more than one observation; transient renderers should consume them
+through `runtime.state.createRecentEventCursor()` or otherwise dedupe by the
+engine-provided `event.id` before spawning one-shot effects.
 
 ### `players[*]` fields
 

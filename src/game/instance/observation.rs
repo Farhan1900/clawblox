@@ -1189,6 +1189,75 @@ impl GameInstance {
         105.0
     }
 
+    fn player_can_see_target_in_fov(
+        &self,
+        observer_agent_id: Uuid,
+        observer_eye: [f32; 3],
+        target_eye: [f32; 3],
+    ) -> bool {
+        let Some(forward) = self.get_player_view_forward(observer_agent_id) else {
+            return true;
+        };
+
+        let to_target = [
+            target_eye[0] - observer_eye[0],
+            0.0,
+            target_eye[2] - observer_eye[2],
+        ];
+        let target_mag = (to_target[0] * to_target[0] + to_target[2] * to_target[2]).sqrt();
+        let forward_mag = (forward[0] * forward[0] + forward[2] * forward[2]).sqrt();
+        if target_mag <= 1e-4 || forward_mag <= 1e-4 {
+            return true;
+        }
+
+        let dot =
+            (forward[0] * to_target[0] + forward[2] * to_target[2]) / (forward_mag * target_mag);
+        let half_fov_rad = (self.player_view_fov_deg().clamp(1.0, 179.0) * 0.5).to_radians();
+        dot >= half_fov_rad.cos()
+    }
+
+    fn other_player_attributes_for_observer(
+        &self,
+        observer_agent_id: Uuid,
+        target_user_id: u64,
+    ) -> std::collections::HashMap<String, serde_json::Value> {
+        let Some(runtime) = &self.lua_runtime else {
+            return std::collections::HashMap::new();
+        };
+
+        let policy = self
+            .players
+            .get(&observer_agent_id)
+            .and_then(|user_id| runtime.players().get_player_by_user_id(*user_id))
+            .and_then(|player| {
+                let data = player.data.lock().unwrap();
+                match data.attributes.get("OtherPlayerAttributePolicy") {
+                    Some(AttributeValue::String(value)) => Some(value.to_ascii_lowercase()),
+                    _ => None,
+                }
+            })
+            .unwrap_or_else(|| "all".to_string());
+
+        if policy == "none" {
+            return std::collections::HashMap::new();
+        }
+
+        let Some(target_player) = runtime.players().get_player_by_user_id(target_user_id) else {
+            return std::collections::HashMap::new();
+        };
+
+        let data = target_player.data.lock().unwrap();
+        let attrs = attributes_to_json(&data.attributes);
+        if policy == "public" {
+            attrs
+                .into_iter()
+                .filter(|(key, _)| key.starts_with("Public"))
+                .collect()
+        } else {
+            attrs
+        }
+    }
+
     /// Get info about other players with distance, line-of-sight and view-cone filtering.
     fn get_other_players(
         &self,
@@ -1229,6 +1298,10 @@ impl GameInstance {
             }
 
             let target_eye = [position[0], position[1] + 2.0, position[2]];
+            if !self.player_can_see_target_in_fov(exclude_agent_id, observer_eye, target_eye) {
+                continue;
+            }
+
             let target_body = self
                 .player_hrp_ids
                 .get(&agent_id)
@@ -1242,17 +1315,7 @@ impl GameInstance {
             }
 
             let health = self.get_player_health(agent_id).unwrap_or(100);
-
-            let attributes = if let Some(runtime) = &self.lua_runtime {
-                if let Some(player) = runtime.players().get_player_by_user_id(user_id) {
-                    let data = player.data.lock().unwrap();
-                    attributes_to_json(&data.attributes)
-                } else {
-                    std::collections::HashMap::new()
-                }
-            } else {
-                std::collections::HashMap::new()
-            };
+            let attributes = self.other_player_attributes_for_observer(exclude_agent_id, user_id);
 
             others.push(OtherPlayerInfo {
                 id: agent_id,
@@ -1561,7 +1624,7 @@ pub struct SpectatorSound {
     pub is_playing: bool,
 }
 
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct SpectatorReplicatedEvent {
     pub id: u64,
     pub tick: u64,

@@ -49,7 +49,9 @@ After that, the server may send:
 entities".
 
 Player data, sounds, and recent events are small enough to remain full
-replacement fields in each delta.
+replacement fields in each delta. `recent_events` is a snapshot of recent
+events, not a drained queue; effect renderers should dedupe by the event `id`
+or use `runtime.state.createRecentEventCursor()`.
 
 ## Entity Delta Format
 

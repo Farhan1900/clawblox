@@ -1021,20 +1021,17 @@ fn test_los_clear() {
         instance.tick();
     }
 
-    // Position players at same height on the floor with clear LOS
+    // Position players at same height on the floor with clear LOS and inside
+    // Player A's default forward view cone (local -Z).
     let hrp_a = *instance.player_hrp_ids.get(&agent_a).unwrap();
     let hrp_b = *instance.player_hrp_ids.get(&agent_b).unwrap();
 
-    if let Some(state) = instance.physics.get_character_state(hrp_a) {
-        if let Some(body) = instance.physics.rigid_body_set.get_mut(state.body_handle) {
-            body.set_translation(rapier3d::prelude::vector![-10.0, 2.0, 0.0], true);
-        }
-    }
-    if let Some(state) = instance.physics.get_character_state(hrp_b) {
-        if let Some(body) = instance.physics.rigid_body_set.get_mut(state.body_handle) {
-            body.set_translation(rapier3d::prelude::vector![10.0, 2.0, 0.0], true);
-        }
-    }
+    instance
+        .physics
+        .set_character_position(hrp_a, [0.0, 2.0, 10.0]);
+    instance
+        .physics
+        .set_character_position(hrp_b, [0.0, 2.0, -10.0]);
 
     // Update query pipeline
     instance
@@ -1051,6 +1048,114 @@ fn test_los_clear() {
         "Should see other player with clear LOS"
     );
     assert_eq!(obs.other_players[0].id, agent_b);
+}
+
+#[test]
+fn test_other_players_filtered_by_view_cone() {
+    let mut instance = GameInstance::new(Uuid::new_v4(), None);
+
+    instance.load_script(
+        r#"
+            local floor = Instance.new("Part")
+            floor.Name = "Floor"
+            floor.Size = Vector3.new(100, 1, 100)
+            floor.Position = Vector3.new(0, 0, 0)
+            floor.Anchored = true
+            floor.Parent = Workspace
+        "#,
+    );
+
+    let agent_a = Uuid::new_v4();
+    let agent_b = Uuid::new_v4();
+    instance.add_player(agent_a, "PlayerA");
+    instance.add_player(agent_b, "PlayerB");
+
+    for _ in 0..5 {
+        instance.tick();
+    }
+
+    let hrp_a = *instance.player_hrp_ids.get(&agent_a).unwrap();
+    let hrp_b = *instance.player_hrp_ids.get(&agent_b).unwrap();
+    instance
+        .physics
+        .set_character_position(hrp_a, [0.0, 2.0, 0.0]);
+    instance
+        .physics
+        .set_character_position(hrp_b, [10.0, 2.0, 0.0]);
+
+    instance
+        .physics
+        .query_pipeline
+        .update(&instance.physics.collider_set);
+
+    let obs = instance.get_player_observation(agent_a).unwrap();
+    assert!(
+        obs.other_players.is_empty(),
+        "Player outside the observer's FOV should be filtered out"
+    );
+}
+
+#[test]
+fn test_other_player_attribute_policy_none_hides_target_attributes() {
+    let mut instance = GameInstance::new(Uuid::new_v4(), None);
+
+    instance.load_script(
+        r#"
+            local floor = Instance.new("Part")
+            floor.Name = "Floor"
+            floor.Size = Vector3.new(100, 1, 100)
+            floor.Position = Vector3.new(0, 0, 0)
+            floor.Anchored = true
+            floor.Parent = Workspace
+        "#,
+    );
+
+    let agent_a = Uuid::new_v4();
+    let agent_b = Uuid::new_v4();
+    instance.add_player(agent_a, "PlayerA");
+    instance.add_player(agent_b, "PlayerB");
+
+    instance
+        .lua_runtime
+        .as_ref()
+        .unwrap()
+        .lua()
+        .load(
+            r#"
+            local players = game:GetService("Players"):GetPlayers()
+            players[1]:SetAttribute("OtherPlayerAttributePolicy", "none")
+            players[2]:SetAttribute("Ammo", 8)
+            players[2]:SetAttribute("Reloading", true)
+            players[2]:SetAttribute("PublicTeam", "red")
+        "#,
+        )
+        .exec()
+        .unwrap();
+
+    for _ in 0..5 {
+        instance.tick();
+    }
+
+    let hrp_a = *instance.player_hrp_ids.get(&agent_a).unwrap();
+    let hrp_b = *instance.player_hrp_ids.get(&agent_b).unwrap();
+    instance
+        .physics
+        .set_character_position(hrp_a, [0.0, 2.0, 10.0]);
+    instance
+        .physics
+        .set_character_position(hrp_b, [0.0, 2.0, -10.0]);
+
+    instance
+        .physics
+        .query_pipeline
+        .update(&instance.physics.collider_set);
+
+    let obs = instance.get_player_observation(agent_a).unwrap();
+    assert_eq!(obs.other_players.len(), 1);
+    assert!(
+        obs.other_players[0].attributes.is_empty(),
+        "OtherPlayerAttributePolicy=none should hide target script attributes"
+    );
 }
 
 #[test]
