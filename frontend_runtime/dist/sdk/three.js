@@ -1069,15 +1069,17 @@ export function createSharedModelRenderer(THREE, scene, options = {}) {
   }
 
   async function loadTemplate(modelUrl) {
-    const mods = await ensureModelModules()
-    return templateCache.get(modelUrl, () => trackAssetLoad(new Promise((resolve, reject) => {
-      mods.loader.load(
-        modelUrl,
-        (gltf) => resolve({ scene: gltf.scene, animations: gltf.animations || [] }),
-        undefined,
-        reject,
-      )
-    })))
+    return templateCache.get(modelUrl, () => trackAssetLoad((async () => {
+      const mods = await ensureModelModules()
+      return new Promise((resolve, reject) => {
+        mods.loader.load(
+          modelUrl,
+          (gltf) => resolve({ scene: gltf.scene, animations: gltf.animations || [] }),
+          undefined,
+          reject,
+        )
+      })
+    })()))
   }
 
   function isEligibleTemplate(template) {
@@ -1132,7 +1134,7 @@ export function createSharedModelRenderer(THREE, scene, options = {}) {
         fallback: null,
       }
       groups.set(modelUrl, group)
-      void loadTemplate(modelUrl)
+      void trackAssetLoad(loadTemplate(modelUrl)
         .then((template) => {
           group.template = template
           if (isEligibleTemplate(template)) {
@@ -1146,7 +1148,7 @@ export function createSharedModelRenderer(THREE, scene, options = {}) {
         .catch((err) => {
           group.status = 'error'
           if (options.onError) options.onError(err, { modelUrl, phase: 'load-shared-model' })
-        })
+        }))
     }
     return group
   }
@@ -1467,15 +1469,17 @@ export function createModelEntityController(THREE, options = {}) {
   }
 
   async function loadTemplate(modelUrl) {
-    const mods = await ensureModelModules()
-    return templateCache.get(modelUrl, () => trackAssetLoad(new Promise((resolve, reject) => {
-      mods.loader.load(
-        modelUrl,
-        (gltf) => resolve({ scene: gltf.scene, animations: gltf.animations || [] }),
-        undefined,
-        reject,
-      )
-    })))
+    return templateCache.get(modelUrl, () => trackAssetLoad((async () => {
+      const mods = await ensureModelModules()
+      return new Promise((resolve, reject) => {
+        mods.loader.load(
+          modelUrl,
+          (gltf) => resolve({ scene: gltf.scene, animations: gltf.animations || [] }),
+          undefined,
+          reject,
+        )
+      })
+    })()))
   }
 
   if (options.preloadModules !== false) {
@@ -1514,7 +1518,8 @@ export function createModelEntityController(THREE, options = {}) {
     if (state.loading) return
     state.loading = true
 
-    try {
+    const work = trackAssetLoad((async () => {
+      try {
       const template = await loadTemplate(modelUrl)
       const mods = await ensureModelModules()
       const current = modelStates.get(entityId)
@@ -1558,12 +1563,14 @@ export function createModelEntityController(THREE, options = {}) {
         current.idleAction = idleAction
       }
       current.ready = true
-    } catch (err) {
-      if (options.onError) options.onError(err, { entityId, modelUrl })
-    } finally {
-      const cur = modelStates.get(entityId)
-      if (cur) cur.loading = false
-    }
+      } catch (err) {
+        if (options.onError) options.onError(err, { entityId, modelUrl })
+      } finally {
+        const cur = modelStates.get(entityId)
+        if (cur) cur.loading = false
+      }
+    })())
+    await work
   }
 
   function update(entityId, { dt = 1 / 60, speed = 0, humanoidState = null } = {}) {
