@@ -902,6 +902,37 @@ fn test_observation_radius_filters_world_entities_by_bounds() {
         names.contains(&"GameState"),
         "Non-spatial folder metadata should remain visible"
     );
+
+    instance
+        .lua_runtime
+        .as_ref()
+        .unwrap()
+        .lua()
+        .load(
+            r#"
+            local player = game:GetService("Players"):GetPlayers()[1]
+            player:SetAttribute("ObservationRadius", 1)
+        "#,
+        )
+        .exec()
+        .unwrap();
+
+    let obs = instance.get_player_observation(agent_id).unwrap();
+    let names: Vec<&str> = obs
+        .world
+        .entities
+        .iter()
+        .map(|entity| entity.name.as_str())
+        .collect();
+
+    assert!(
+        !names.contains(&"EdgePlatform"),
+        "Player ObservationRadius attribute should shrink world entity visibility"
+    );
+    assert!(
+        names.contains(&"GameState"),
+        "Dynamic radius should not hide non-spatial folder metadata"
+    );
 }
 
 #[test]
@@ -1070,6 +1101,26 @@ fn test_observation_radius_filters_other_players() {
     assert!(
         obs.other_players.is_empty(),
         "Player beyond configured observation radius should be filtered out"
+    );
+
+    instance
+        .lua_runtime
+        .as_ref()
+        .unwrap()
+        .lua()
+        .load(
+            r#"
+            local player = game:GetService("Players"):GetPlayers()[1]
+            player:SetAttribute("ObservationRadius", 100)
+        "#,
+        )
+        .exec()
+        .unwrap();
+
+    let obs = instance.get_player_observation(agent_a).unwrap();
+    assert!(
+        obs.other_players.is_empty(),
+        "ObservationRadius attribute should not expand beyond configured observation radius"
     );
 }
 

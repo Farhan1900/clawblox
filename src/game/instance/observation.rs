@@ -337,14 +337,16 @@ pub(super) fn build_player_observation(
         profile.mark("player_attributes");
     }
 
+    let observation_radius = instance.effective_observation_radius(agent_id);
+
     // Get other players (with LOS filtering)
-    let other_players = instance.get_other_players(agent_id);
+    let other_players = instance.get_other_players(agent_id, observation_radius);
     if let Some(profile) = profile.as_mut() {
         profile.mark("other_players");
     }
 
     // Get dynamic world entities only (static entities fetched via /map endpoint)
-    let world = instance.get_dynamic_world_info(position);
+    let world = instance.get_dynamic_world_info(position, observation_radius);
     if let Some(profile) = profile.as_mut() {
         profile.mark("dynamic_world");
     }
@@ -970,8 +972,29 @@ impl GameInstance {
         }
     }
 
+    fn effective_observation_radius(&self, agent_id: Uuid) -> f32 {
+        let default_radius = self.observation_radius.max(0.0);
+        let Some(runtime) = &self.lua_runtime else {
+            return default_radius;
+        };
+        let Some(user_id) = self.players.get(&agent_id).copied() else {
+            return default_radius;
+        };
+        let Some(player) = runtime.players().get_player_by_user_id(user_id) else {
+            return default_radius;
+        };
+
+        let player_data = player.data.lock().unwrap();
+        match player_data.attributes.get("ObservationRadius") {
+            Some(AttributeValue::Number(radius)) if radius.is_finite() => {
+                (*radius as f32).clamp(0.0, default_radius)
+            }
+            _ => default_radius,
+        }
+    }
+
     /// Get dynamic world info (entities WITHOUT "Static" tag + folders with attributes).
-    fn get_dynamic_world_info(&self, observer_pos: [f32; 3]) -> WorldInfo {
+    fn get_dynamic_world_info(&self, observer_pos: [f32; 3], observation_radius: f32) -> WorldInfo {
         let mut profile = ProfileFrame::new("observation.dynamic_world");
         let mut entities = Vec::new();
         let mut workspace_descendants = 0usize;
@@ -1003,7 +1026,7 @@ impl GameInstance {
                             raw_position,
                             raw_size,
                             part_data.cframe.rotation,
-                            self.observation_radius,
+                            observation_radius,
                         ) {
                             continue;
                         }
@@ -1166,7 +1189,11 @@ impl GameInstance {
     }
 
     /// Get info about other players with distance, line-of-sight and view-cone filtering.
-    fn get_other_players(&self, exclude_agent_id: Uuid) -> Vec<OtherPlayerInfo> {
+    fn get_other_players(
+        &self,
+        exclude_agent_id: Uuid,
+        observation_radius: f32,
+    ) -> Vec<OtherPlayerInfo> {
         let mut others = Vec::new();
         let observer_pos = self
             .get_player_position(exclude_agent_id)
@@ -1196,7 +1223,7 @@ impl GameInstance {
             let dz = position[2] - observer_pos[2];
             let distance = (dx * dx + dy * dy + dz * dz).sqrt();
 
-            if distance > self.observation_radius {
+            if distance > observation_radius {
                 continue;
             }
 
