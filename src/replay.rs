@@ -1,4 +1,4 @@
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::time::Duration;
 
 #[derive(Debug, Clone, Serialize)]
@@ -15,7 +15,7 @@ pub struct ReplayInfo {
     pub pause_at_tick: Option<u64>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ReplayActiveRange {
     pub start_tick: u64,
     pub end_tick: u64,

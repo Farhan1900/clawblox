@@ -716,6 +716,11 @@ impl RecordingReader {
     pub async fn active_tick_ranges(
         &self,
     ) -> Result<Vec<ReplayActiveRange>, Box<dyn std::error::Error + Send + Sync>> {
+        if let Some(value) = self.meta_value("active_ranges").await? {
+            let ranges: Vec<ReplayActiveRange> = serde_json::from_str(&value)?;
+            return Ok(ranges);
+        }
+
         let rows = sqlx::query("SELECT tick, data FROM deltas ORDER BY tick")
             .fetch_all(&self.pool)
             .await?;
@@ -754,6 +759,14 @@ impl RecordingReader {
         }
 
         Ok(ranges)
+    }
+
+    async fn meta_value(&self, key: &str) -> Result<Option<String>, sqlx::Error> {
+        let row = sqlx::query("SELECT value FROM meta WHERE key = ?")
+            .bind(key)
+            .fetch_optional(&self.pool)
+            .await?;
+        Ok(row.map(|row| row.get::<String, _>("value")))
     }
 
     /// Get chat messages in a tick range (inclusive on both ends).

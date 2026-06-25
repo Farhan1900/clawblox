@@ -90,6 +90,8 @@ pub struct ManifestCheckpoint {
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub created_at: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tick: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sim_time: Option<f64>,
 }
 
@@ -390,6 +392,7 @@ pub fn record_checkpoint(
     path: &Path,
     checkpoint_path: &Path,
     format: &str,
+    tick: Option<u64>,
     sim_time: Option<f64>,
 ) -> Result<(), String> {
     update(path, |manifest| {
@@ -402,6 +405,7 @@ pub fn record_checkpoint(
             path: rel,
             format: format.to_string(),
             created_at: chrono::Utc::now().to_rfc3339(),
+            tick,
             sim_time,
         });
         Ok(())

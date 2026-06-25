@@ -191,6 +191,7 @@ const replayState = {
   metadataEnabled: false,
   metadataLoaded: false,
   metadata: null,
+  clientDriven: false,
   externalViewEnabled: false,
   externalViewUrl: null,
   behaviorPanelOpen: readStoredBool('clawblox_behavior_panel_open', false),
@@ -218,6 +219,7 @@ const replayViewportWarmup = {
   restored: false,
   postRestoreWarmupComplete: false,
   restoredFrameConsumed: false,
+  renderedFrame: false,
   ready: false,
   listeners: new Set(),
 }
@@ -510,10 +512,14 @@ function renderReplayInfo(info) {
   const previousInfo = replayState.info
   replayState.info = info
   if (!replayState.enabled || !info) return
+  replayState.clientDriven = info.client_driven === true
   const previousSeekVersion = Number.isFinite(Number(previousInfo?.seek_version)) ? Number(previousInfo.seek_version) : null
   const seekVersion = Number.isFinite(Number(info.seek_version)) ? Number(info.seek_version) : null
   const wasPaused = !!previousInfo?.paused
   const paused = !!info.paused
+  if (replayState.clientDriven && previousSeekVersion !== null && seekVersion !== previousSeekVersion) {
+    clearReplayFrameQueue()
+  }
   syncReplayPlaybackClock(info, {
     force: seekVersion !== previousSeekVersion || (wasPaused && !paused),
   })
@@ -538,10 +544,18 @@ function renderReplayInfo(info) {
 
 function notifyReplayViewportWarmup() {
   if (!replayViewportWarmup.assetsSettled) return
+  if (!replayState.clientDriven) {
+    if (!replayViewportWarmup.renderedFrame) return
+    replayViewportWarmup.ready = true
+    const listeners = [...replayViewportWarmup.listeners]
+    replayViewportWarmup.listeners.clear()
+    for (const listener of listeners) listener()
+    return
+  }
   if (replayViewportWarmup.warmupFrames < replayViewportWarmup.minWarmupFrames) return
   if (!replayViewportWarmup.restored) return
   if (!replayViewportWarmup.postRestoreWarmupComplete) return
-  if (replayFrameQueue.length < replayViewportWarmup.minQueueDepth) return
+  if (replayState.clientDriven && replayFrameQueue.length < replayViewportWarmup.minQueueDepth) return
   replayViewportWarmup.ready = true
   const listeners = [...replayViewportWarmup.listeners]
   replayViewportWarmup.listeners.clear()
@@ -1575,9 +1589,11 @@ function scheduleVisualFrame(callback, timeoutMs = 34) {
 
 let replayViewportReadySeq = 0
 let replayViewportReadyReported = false
+let replayViewportReadyPending = false
 
 async function reportReplayViewportReady(state) {
-  if (!replayState.enabled || replayViewportReadyReported) return
+  if (!replayState.enabled || replayViewportReadyReported || replayViewportReadyPending) return
+  replayViewportReadyPending = true
   const seq = ++replayViewportReadySeq
   try {
     await afterNextPaint()
@@ -1600,6 +1616,8 @@ async function reportReplayViewportReady(state) {
     }, window.location.origin)
   } catch (err) {
     console.error('[replay] viewport readiness failed', err)
+  } finally {
+    replayViewportReadyPending = false
   }
 }
 
@@ -2550,6 +2568,7 @@ async function bootstrap() {
       type: 'replay_request_frame',
       tick: step.tick,
       previous_tick: previousTick,
+      seek_version: Number.isFinite(Number(replayState.info?.seek_version)) ? Number(replayState.info.seek_version) : null,
       reason,
       window_size: windowSize,
       step_ticks: stepTicks,
@@ -2574,6 +2593,7 @@ async function bootstrap() {
     replayViewportWarmup.restored = false
     replayViewportWarmup.postRestoreWarmupComplete = false
     replayViewportWarmup.restoredFrameConsumed = false
+    replayViewportWarmup.renderedFrame = false
   }
 
   function maybeRequestReplayFrames(reason = 'buffer-low') {
@@ -2684,7 +2704,10 @@ async function bootstrap() {
       if (renderer.onState) renderer.onState(rendererState)
       const renderEndMs = performance.now()
       const rendererProfile = typeof renderer.getProfile === 'function' ? renderer.getProfile() : null
-      if (replayState.enabled) hasRenderedReplayState = true
+      if (replayState.enabled) {
+        hasRenderedReplayState = true
+        replayViewportWarmup.renderedFrame = true
+      }
       if (replayState.enabled && replayViewportWarmup.assetsSettled && !replayViewportWarmup.ready) {
         const renderMs = renderEndMs - renderStartMs
         if (replayMeta?.replayWarmup === 'prewarm') {
