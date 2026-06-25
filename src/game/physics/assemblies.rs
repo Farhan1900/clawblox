@@ -13,6 +13,7 @@ use crate::game::constants::physics as consts;
 use crate::game::profiling::record_values;
 
 const SUPPORTED_UNANCHOR_CAST_DISTANCE: f32 = 0.1;
+const SUPPORTED_UNANCHOR_CONTACT_EPSILON: f32 = 1.0e-4;
 
 fn finite_force(values: [f32; 3]) -> bool {
     values.iter().all(|v| v.is_finite())
@@ -700,7 +701,7 @@ impl PhysicsWorld {
                     options,
                     filter,
                 )
-                .is_some()
+                .is_some_and(|(_, hit)| hit.time_of_impact <= SUPPORTED_UNANCHOR_CONTACT_EPSILON)
         })
     }
 

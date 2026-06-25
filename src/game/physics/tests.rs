@@ -132,6 +132,41 @@ fn test_supported_zero_velocity_unanchor_starts_sleeping() {
 }
 
 #[test]
+fn test_zero_velocity_unanchor_with_small_air_gap_falls() {
+    let mut world = PhysicsWorld::new();
+
+    world.sync_assemblies(vec![floor_spec()], 1.0 / 60.0);
+    world.query_pipeline.update(&world.collider_set);
+
+    // Floor top is y=0.5. This block's bottom is y=0.55: close enough
+    // for the release support probe, but not actually touching.
+    world.sync_assemblies(
+        vec![
+            floor_spec(),
+            single_part_spec(assembly_part(2, [0.0, 1.05, 0.0], [1.0, 1.0, 1.0], true)),
+        ],
+        1.0 / 60.0,
+    );
+    world.query_pipeline.update(&world.collider_set);
+
+    world.sync_assemblies(
+        vec![
+            floor_spec(),
+            single_part_spec(assembly_part(2, [0.0, 1.05, 0.0], [1.0, 1.0, 1.0], false)),
+        ],
+        1.0 / 60.0,
+    );
+
+    assert!(!world.is_part_sleeping(2));
+    let before = world.get_part_position(2).unwrap();
+    for _ in 0..120 {
+        world.step(1.0 / 60.0);
+    }
+
+    assert!(world.get_part_position(2).unwrap()[1] < before[1]);
+}
+
+#[test]
 fn test_unsupported_zero_velocity_unanchor_falls() {
     let mut world = PhysicsWorld::new();
 
