@@ -118,10 +118,40 @@ export function createRenderer(ctx) {
 - `createEntityStore(scene, options?)` (upsert/prune/dispose)
 - `disposeObject3D(object3d)`
 - `createModelTemplateCache()`
+- `createSharedModelRenderer(THREE, scene, options?)`
 - `createModelEntityController(THREE, options?)`
 - `classifyAnimationTracks(player)`
 - `applyRendererPreset(THREE, renderer, preset)`
 - `applyLightingPreset(THREE, scene, preset)`
+
+### Shared Model Renderer (`createSharedModelRenderer`)
+
+Use `runtime.three.createSharedModelRenderer(...)` for Roblox-like `ModelUrl` rendering when many entities reference the same static mesh asset. World code still creates ordinary individual parts; each part keeps its own physics, transform, observation identity, pickup behavior, and `ModelUrl`. The renderer/runtime may share the loaded mesh resource internally.
+
+The helper:
+
+- counts repeated `model_url` / `ModelUrl` values each frame
+- loads each GLB asset once
+- renders repeated non-skinned, non-animated GLBs with `THREE.InstancedMesh`
+- falls back to temporary primitive boxes while the shared asset is loading
+- rejects skinned, animated, or complex material-array models so they can use `createModelEntityController`
+
+Typical renderer flow:
+
+```js
+const sharedModels = ctx.runtime.three.createSharedModelRenderer(THREE, scene, {
+  minInstances: 20,
+})
+
+function updateScene(obs) {
+  sharedModels.beginFrame(obs.entities || [])
+  for (const entity of obs.entities || []) {
+    if (sharedModels.accepts(entity)) continue
+    // existing primitive or unique animated model path
+  }
+  sharedModels.endFrame()
+}
+```
 
 ### Model Helper (`createModelEntityController`)
 
@@ -239,3 +269,4 @@ For local runtime:
 - Setting `ModelUrl = "asset://foo.glb"` on a part makes spectator payload expose a resolved URL.
 - The CLI rewrites `asset://foo.glb` to `/assets/foo.glb` before sending state.
 - Optional yaw offset is read from either `ModelYawOffsetDeg` or `model_yaw_offset_deg`.
+- `ModelUrl` is a per-entity shared asset reference, similar in spirit to a Roblox `MeshPart` referencing a mesh asset. Individual entities remain separate simulation objects; renderer/runtime helpers may share static visual assets internally.

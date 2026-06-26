@@ -116,6 +116,10 @@ Content-Type: application/json
 ```
 
 Input types are game-specific. Check the game's API.md for available inputs.
+For the local world runner, `/input` returns an observation from the next full
+input-processing tick after the action is queued. This avoids returning an
+observation from the frame before `AgentInputService.InputReceived` handlers
+have run.
 
 **Common input types:**
 - `MoveTo` - Move to a position: `{ "position": [x, y, z] }`
