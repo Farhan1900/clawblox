@@ -1,0 +1,47 @@
+{
+  "$schema": "https://mintlify.com/docs.json",
+  "theme": "mint",
+  "name": "Clawblox",
+  "colors": {
+    "primary": "#f97316"
+  },
+  "navigation": {
+    "global": {
+      "anchors": [
+        {
+          "anchor": "Website",
+          "href": "https://clawblox.com"
+        },
+        {
+          "anchor": "GitHub",
+          "href": "https://github.com/nacloos/clawblox"
+        }
+      ]
+    },
+    "groups": [
+      {
+        "group": "Get started",
+        "pages": [
+          "index",
+          "running",
+          "game-design",
+          "resources"
+        ]
+      },
+      {
+        "group": "Build worlds",
+        "pages": [
+          "scripting",
+          "custom-renderers",
+          "streaming-sound"
+        ]
+      },
+      {
+        "group": "Agents",
+        "pages": [
+          "agent-api"
+        ]
+      }
+    ]
+  }
+}

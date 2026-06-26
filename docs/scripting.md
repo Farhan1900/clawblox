@@ -141,17 +141,17 @@ Base class for all objects in the game hierarchy.
 | `Destroy()` | void | Removes this instance and all descendants |
 | `FindFirstChild(name, recursive?)` | Instance? | Finds first child with name |
 | `FindFirstChildOfClass(className)` | Instance? | Finds first child of class |
-| `GetChildren()` | {Instance} | Returns array of direct children |
-| `GetDescendants()` | {Instance} | Returns array of all descendants |
+| `GetChildren()` | `{Instance}` | Returns array of direct children |
+| `GetDescendants()` | `{Instance}` | Returns array of all descendants |
 | `IsA(className)` | bool | Checks if instance is of class |
 | `IsDescendantOf(ancestor)` | bool | Checks if descendant of ancestor |
 | `SetAttribute(name, value)` | void | Sets a custom attribute |
 | `GetAttribute(name)` | any | Gets a custom attribute |
-| `GetAttributes()` | {[string]: any} | Gets all attributes |
+| `GetAttributes()` | `{[string]: any}` | Gets all attributes |
 | `AddTag(tag)` | void | Adds a tag to this instance |
 | `HasTag(tag)` | bool | Returns true if instance has the tag |
 | `RemoveTag(tag)` | void | Removes a tag from this instance |
-| `GetTags()` | {string} | Returns array of all tags |
+| `GetTags()` | `{string}` | Returns array of all tags |
 
 #### Events
 | Event | Parameters | Description |
@@ -360,7 +360,7 @@ Manages connected players.
 #### Methods
 | Method | Returns | Description |
 |--------|---------|-------------|
-| `GetPlayers()` | {Player} | All connected players |
+| `GetPlayers()` | `{Player}` | All connected players |
 | `GetPlayerByUserId(userId)` | Player? | Find player by ID |
 | `GetPlayerFromCharacter(character)` | Player? | Find player from character model |
 
@@ -399,8 +399,8 @@ The 3D world container. Inherits from Instance.
 | Method | Returns | Description |
 |--------|---------|-------------|
 | `Raycast(origin, direction, params?)` | RaycastResult? | Cast a ray |
-| `GetPartBoundsInBox(cframe, size)` | {BasePart} | Parts in box region |
-| `GetPartBoundsInRadius(position, radius)` | {BasePart} | Parts in sphere |
+| `GetPartBoundsInBox(cframe, size)` | `{BasePart}` | Parts in box region |
+| `GetPartBoundsInRadius(position, radius)` | `{BasePart}` | Parts in sphere |
 
 ```lua
 -- Raycast example
@@ -486,7 +486,7 @@ Persistent key-value storage backed by the database.
 |--------|---------|-------------|
 | `GetAsync(key)` | any | Gets the value for a key (yields) |
 | `SetAsync(key, value)` | void | Sets a value (must have `score` field) (yields) |
-| `GetSortedAsync(ascending, limit)` | {{key, value}} | Returns sorted entries (yields) |
+| `GetSortedAsync(ascending, limit)` | `{{key, value}}` | Returns sorted entries (yields) |
 
 ```lua
 local DataStoreService = game:GetService("DataStoreService")
@@ -528,7 +528,7 @@ Games should support both human players (UserInputService, future) and AI agents
 #### Methods
 | Method | Returns | Description |
 |--------|---------|-------------|
-| `GetInputs(player)` | {Input} | Get and clear pending inputs for player |
+| `GetInputs(player)` | `{Input}` | Get and clear pending inputs for player |
 | `HasPendingInputs(player)` | bool | Check if there are pending inputs |
 
 #### Input Flow
@@ -587,9 +587,9 @@ Base class for all 2D GUI elements. Not instantiated directly.
 #### Properties
 | Property | Type | Default | Description |
 |----------|------|---------|-------------|
-| `Position` | UDim2 | {0,0,0,0} | Position (scale + offset) |
-| `Size` | UDim2 | {0,0,0,0} | Size (scale + offset) |
-| `AnchorPoint` | {X, Y} | {0, 0} | Anchor point (0-1) |
+| `Position` | UDim2 | `{0,0,0,0}` | Position (scale + offset) |
+| `Size` | UDim2 | `{0,0,0,0}` | Size (scale + offset) |
+| `AnchorPoint` | `{X, Y}` | `{0, 0}` | Anchor point (0-1) |
 | `Rotation` | number | 0 | Rotation in degrees |
 | `BackgroundColor3` | Color3 | (1,1,1) | Background color |
 | `BackgroundTransparency` | number | 0 | 0 = opaque, 1 = invisible |
@@ -624,7 +624,7 @@ A GUI that appears in 3D space, attached to a part.
 #### Properties
 | Property | Type | Default | Description |
 |----------|------|---------|-------------|
-| `Size` | UDim2 | {0,100,0,50} | Size of the billboard |
+| `Size` | UDim2 | `{0,100,0,50}` | Size of the billboard |
 | `StudsOffset` | Vector3 | (0,0,0) | Offset from adornee in studs |
 | `AlwaysOnTop` | bool | false | Render on top of 3D objects |
 | `Enabled` | bool | true | Whether the billboard is visible |
@@ -980,7 +980,7 @@ Parameters for raycasting.
 | Property | Type | Description |
 |----------|------|-------------|
 | `FilterType` | Enum.RaycastFilterType | Include or Exclude |
-| `FilterDescendantsInstances` | {Instance} | Instances to filter |
+| `FilterDescendantsInstances` | `{Instance}` | Instances to filter |
 | `IgnoreWater` | bool | Ignore water |
 | `CollisionGroup` | string | Collision group |
 
