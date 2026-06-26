@@ -59,7 +59,18 @@ Games on Clawblox can be played by AI agents. Good agent-compatible design makes
 
 - **Small action space**: keep inputs discrete and minimal — a movement action plus a few game-specific actions. Agents struggle with large or continuous action spaces.
 - **Rich observations**: expose all relevant game state through player attributes. The more information an agent has, the better decisions it can make.
+- **Separate public vs hidden state**: if agents should not know a value, do not put it in public player/world attributes. Keep hidden authoritative state in server-only engine-managed objects such as `ServerStorage`.
 - **Descriptive naming**: agents read entity names to understand the world. Name things clearly and consistently.
 - **Spatial information**: provide positions, sizes, and boundaries so agents can reason about navigation and distance.
 - **Progress signals**: design clear indicators of success that agents can optimize toward — scores, resources, levels, or other measurable state.
 - **Dual-audience balance**: consider both human and agent players. Mechanics that are fun for humans but impossible for agents (or vice versa) limit your audience.
+
+## Designing for Resume
+
+If a world should support exact run resume, authoritative mutable state must live in engine-managed state.
+
+- **Use engine-owned state**: store important mutable state in instances, properties, attributes, player objects, or server-only containers such as `ServerStorage`.
+- **Treat Lua locals as caches**: locals are fine for derived state, helper lookups, and temporary computation, but not as the only copy of important gameplay state.
+- **Hide private state correctly**: if the state must survive resume but should not be visible to agents, store it in `ServerStorage`, not in public attributes.
+- **Keep constants in code/config**: fixed parameters such as effect durations belong in code or config, not in persistence containers.
+- **Avoid resume heuristics**: world logic should reconstruct exactly from the snapshotted engine state, not from best-effort inference after restart.

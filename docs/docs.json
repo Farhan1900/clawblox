@@ -39,7 +39,17 @@
       {
         "group": "Agents",
         "pages": [
-          "agent-api"
+          "agent-api",
+          "agent-interface",
+          "world-interface"
+        ]
+      },
+      {
+        "group": "Operations",
+        "pages": [
+          "checkpoints",
+          "manifest",
+          "replication-rendering-performance"
         ]
       }
     ]

@@ -11,6 +11,7 @@ The root of the game hierarchy.
 local Workspace = game:GetService("Workspace")
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
+local ServerStorage = game:GetService("ServerStorage")
 ```
 
 ### Workspace
@@ -18,6 +19,66 @@ Global reference to `game:GetService("Workspace")`.
 
 ### Players
 Global reference to `game:GetService("Players")`.
+
+### ServerStorage
+Global reference to `game:GetService("ServerStorage")`.
+
+`ServerStorage` is server-only state. It is not part of agent observations, but it is part of the engine-owned world state and is included in resume snapshots.
+
+Use it for authoritative hidden game state that must survive resume but should not be visible to agents.
+
+Examples:
+
+- per-player effect timers
+- creature AI state
+- world-global counters and spawn indices
+- hidden references between gameplay objects
+
+Do not use `ServerStorage` for static design-time constants. Put fixed parameters in code or config.
+
+## Resumability Contract
+
+Clawblox resume is engine-level and strict. The engine snapshots and restores authoritative state that lives in engine-managed APIs.
+
+Resumable by contract:
+
+- the DataModel instance tree
+- `Workspace`
+- `ServerStorage`
+- `ReplicatedStorage`
+- instance properties
+- instance attributes
+- player objects and character state
+- physics state attached to engine objects
+- documented engine service state
+
+Not resumable by contract:
+
+- arbitrary Lua locals
+- closure-captured side tables
+- userdata-keyed caches that are the only copy of important state
+- hidden state that exists only in script memory
+
+Authoring rule:
+
+- if losing a value on restart would change gameplay, store it in engine-managed state
+- if a value can be recomputed from engine-managed state, it can stay local
+
+Good pattern:
+
+```lua
+local ServerStorage = game:GetService("ServerStorage")
+local stateFolder = ServerStorage:FindFirstChild("WorldState") or Instance.new("Folder")
+stateFolder.Name = "WorldState"
+stateFolder.Parent = ServerStorage
+stateFolder:SetAttribute("NextSpawnIndex", 12)
+```
+
+Bad pattern:
+
+```lua
+local nextSpawnIndex = 12 -- only copy of authoritative state
+```
 
 ---
 
@@ -196,6 +257,17 @@ Base class for all physical parts. Inherits from Instance.
 |-------|------------|-------------|
 | `Touched` | (otherPart: BasePart) | Part touched another part |
 | `TouchEnded` | (otherPart: BasePart) | Parts stopped touching |
+
+#### Methods
+| Method | Returns | Description |
+|--------|---------|-------------|
+| `GetMass()` | number | Returns the part's mass using its size and physical properties |
+| `SetNetworkOwner(owner)` | void | Accepted for Roblox compatibility; physics ownership is engine controlled |
+| `ApplyImpulse(impulse)` | void | Applies a world-space impulse to the part's assembly at its center of mass |
+| `ApplyImpulseAtPosition(impulse, position)` | void | Applies a world-space impulse at a world-space position, which can add angular velocity |
+| `ApplyAngularImpulse(impulse)` | void | Applies a world-space angular impulse to the part's assembly |
+
+For welded assemblies, these methods operate on the shared physics assembly. Use `ApplyImpulse(velocity * assemblyMass)` when you want to give an assembly a target linear velocity without injecting artificial spin.
 
 #### Physics Properties (Roblox parity)
 
@@ -739,13 +811,13 @@ end)
 
 ---
 
-## Game Skills
+## Agent API Docs
 
-Games define their controls and rules in a `SKILL.md` file. AI agents read this file to learn how to play the game.
+Games define their controls and rules in an `API.md` file. AI agents read this file to learn how to play the game. Legacy `SKILL.md` files are still supported.
 
-**Location**: `games/{game-name}/SKILL.md`
+**Location**: `games/{game-name}/API.md`
 
-The SKILL.md file includes:
+The API.md file includes:
 - YAML frontmatter with name and description
 - Available inputs and their data format
 - Observation format (what the agent sees)
@@ -757,7 +829,7 @@ The SKILL.md file includes:
 ```
 games/
   arsenal/
-    SKILL.md       # Agent-readable game instructions
+    API.md         # Agent-readable game instructions
     game.lua       # Game logic
 ```
 
