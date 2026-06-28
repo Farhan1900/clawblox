@@ -7,6 +7,7 @@ pub(super) fn add_fields<F: UserDataFields<Instance>>(fields: &mut F) {
     fields.add_field_method_get("Name", |_, this| Ok(this.name()));
     fields.add_field_method_set("Name", |lua, this, name: String| {
         this.set_name(&name);
+        this.mark_replication_dirty(lua);
         this.fire_property_changed_if_listening(lua, "Name")?;
         Ok(())
     });
@@ -27,6 +28,12 @@ pub(super) fn add_fields<F: UserDataFields<Instance>>(fields: &mut F) {
     });
     fields.add_field_method_get("ChildRemoved", |_, this| {
         Ok(this.data.lock().unwrap().child_removed.clone())
+    });
+    fields.add_field_method_get("DescendantAdded", |_, this| {
+        Ok(this.data.lock().unwrap().descendant_added.clone())
+    });
+    fields.add_field_method_get("DescendantRemoving", |_, this| {
+        Ok(this.data.lock().unwrap().descendant_removing.clone())
     });
     fields.add_field_method_get("AncestryChanged", |_, this| {
         Ok(this.data.lock().unwrap().ancestry_changed.clone())
@@ -54,6 +61,7 @@ pub(super) fn add_fields<F: UserDataFields<Instance>>(fields: &mut F) {
         if let Some(script) = &mut data.script_data {
             script.source = source;
             drop(data);
+            this.mark_replication_dirty(lua);
             this.fire_property_changed_if_listening(lua, "Source")?;
         }
         Ok(())
@@ -68,6 +76,7 @@ pub(super) fn add_fields<F: UserDataFields<Instance>>(fields: &mut F) {
         if let Some(script) = &mut data.script_data {
             script.disabled = disabled;
             drop(data);
+            this.mark_replication_dirty(lua);
             this.fire_property_changed_if_listening(lua, "Disabled")?;
         }
         Ok(())

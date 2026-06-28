@@ -11,6 +11,10 @@ use super::super::services::{
 };
 use super::super::types::Vector3;
 
+fn global_service(lua: &mlua::Lua, name: &str) -> mlua::Result<Value> {
+    lua.globals().get(name)
+}
+
 /// A request to kick a player from the game
 #[derive(Debug, Clone)]
 pub struct KickRequest {
@@ -171,6 +175,14 @@ impl Game {
         std::mem::take(&mut self.data_model.lock().unwrap().kick_requests)
     }
 
+    pub fn snapshot_kick_requests(&self) -> Vec<KickRequest> {
+        self.data_model.lock().unwrap().kick_requests.clone()
+    }
+
+    pub fn restore_kick_requests(&self, requests: Vec<KickRequest>) {
+        self.data_model.lock().unwrap().kick_requests = requests;
+    }
+
     pub fn queue_physics_command(&self, command: PhysicsCommand) {
         self.data_model
             .lock()
@@ -182,6 +194,14 @@ impl Game {
     pub fn drain_physics_commands(&self) -> Vec<PhysicsCommand> {
         std::mem::take(&mut self.data_model.lock().unwrap().physics_commands)
     }
+
+    pub fn snapshot_physics_commands(&self) -> Vec<PhysicsCommand> {
+        self.data_model.lock().unwrap().physics_commands.clone()
+    }
+
+    pub fn restore_physics_commands(&self, commands: Vec<PhysicsCommand>) {
+        self.data_model.lock().unwrap().physics_commands = commands;
+    }
 }
 
 impl UserData for Game {
@@ -189,11 +209,9 @@ impl UserData for Game {
         methods.add_method("GetService", |lua, this, name: String| {
             let dm = this.data_model.lock().unwrap();
             match name.as_str() {
-                "Workspace" => Ok(Value::UserData(lua.create_userdata(dm.workspace.clone())?)),
-                "Players" => Ok(Value::UserData(lua.create_userdata(dm.players.clone())?)),
-                "RunService" => Ok(Value::UserData(
-                    lua.create_userdata(dm.run_service.clone())?,
-                )),
+                "Workspace" => global_service(lua, "Workspace"),
+                "Players" => global_service(lua, "Players"),
+                "RunService" => global_service(lua, "RunService"),
                 "AgentInputService" => Ok(Value::UserData(
                     lua.create_userdata(dm.agent_input_service.clone())?,
                 )),
@@ -203,21 +221,11 @@ impl UserData for Game {
                 "Debris" | "DebrisService" => Ok(Value::UserData(
                     lua.create_userdata(dm.debris_service.clone())?,
                 )),
-                "PhysicsService" => Ok(Value::UserData(
-                    lua.create_userdata(dm.physics_service.clone())?,
-                )),
-                "RemoteEventService" => Ok(Value::UserData(
-                    lua.create_userdata(dm.remote_event_service.clone())?,
-                )),
-                "ServerScriptService" => Ok(Value::UserData(
-                    lua.create_userdata(dm.server_script_service.clone())?,
-                )),
-                "ServerStorage" => Ok(Value::UserData(
-                    lua.create_userdata(dm.server_storage.clone())?,
-                )),
-                "ReplicatedStorage" => Ok(Value::UserData(
-                    lua.create_userdata(dm.replicated_storage.clone())?,
-                )),
+                "PhysicsService" => global_service(lua, "PhysicsService"),
+                "RemoteEventService" => global_service(lua, "RemoteEventService"),
+                "ServerScriptService" => global_service(lua, "ServerScriptService"),
+                "ServerStorage" => global_service(lua, "ServerStorage"),
+                "ReplicatedStorage" => global_service(lua, "ReplicatedStorage"),
                 "HttpService" => {
                     drop(dm); // Release lock before creating userdata
                     Ok(Value::UserData(lua.create_userdata(HttpService::new())?))
@@ -229,29 +237,17 @@ impl UserData for Game {
         methods.add_meta_method(mlua::MetaMethod::Index, |lua, this, key: String| {
             let dm = this.data_model.lock().unwrap();
             match key.as_str() {
-                "Workspace" => Ok(Value::UserData(lua.create_userdata(dm.workspace.clone())?)),
-                "Players" => Ok(Value::UserData(lua.create_userdata(dm.players.clone())?)),
-                "RunService" => Ok(Value::UserData(
-                    lua.create_userdata(dm.run_service.clone())?,
-                )),
-                "PhysicsService" => Ok(Value::UserData(
-                    lua.create_userdata(dm.physics_service.clone())?,
-                )),
-                "RemoteEventService" => Ok(Value::UserData(
-                    lua.create_userdata(dm.remote_event_service.clone())?,
-                )),
+                "Workspace" => global_service(lua, "Workspace"),
+                "Players" => global_service(lua, "Players"),
+                "RunService" => global_service(lua, "RunService"),
+                "PhysicsService" => global_service(lua, "PhysicsService"),
+                "RemoteEventService" => global_service(lua, "RemoteEventService"),
                 "Debris" | "DebrisService" => Ok(Value::UserData(
                     lua.create_userdata(dm.debris_service.clone())?,
                 )),
-                "ServerScriptService" => Ok(Value::UserData(
-                    lua.create_userdata(dm.server_script_service.clone())?,
-                )),
-                "ServerStorage" => Ok(Value::UserData(
-                    lua.create_userdata(dm.server_storage.clone())?,
-                )),
-                "ReplicatedStorage" => Ok(Value::UserData(
-                    lua.create_userdata(dm.replicated_storage.clone())?,
-                )),
+                "ServerScriptService" => global_service(lua, "ServerScriptService"),
+                "ServerStorage" => global_service(lua, "ServerStorage"),
+                "ReplicatedStorage" => global_service(lua, "ReplicatedStorage"),
                 _ => Ok(Value::Nil),
             }
         });

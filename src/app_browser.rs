@@ -242,10 +242,12 @@ async fn build_replay_state(
         reader: Arc::new(reader),
         playback: Arc::new(tokio::sync::Mutex::new(playback)),
         base_path: normalize_base_path(base_path),
+        asset_base_path: normalize_base_path(base_path),
         renderer_manifest,
         agent_timeline,
         replay_metadata,
         world_dir,
+        camera: Arc::new(Mutex::new(ReplayCameraBridge::default())),
     })
 }
 

@@ -15,8 +15,9 @@ use clawblox::agent_runner::{
 };
 use clawblox::config::{SandboxConfig, WorldConfig};
 use clawblox::manifest::{
-    manifest_path_for_state_root, record_agent_connected, record_checkpoint, record_world_started,
-    refresh_agent_from_dir, AgentConnected, WorldStarted,
+    manifest_path_for_state_root, record_agent_connected, record_checkpoint,
+    record_run as record_manifest_run, record_world_started, refresh_agent_from_dir,
+    AgentConnected, RunRecorded, WorldStarted,
 };
 use clawblox::world_capability_proxy::{
     start_world_capability_proxy, WorldCapabilityProxy, WorldCapabilityProxyConfig,
@@ -32,6 +33,7 @@ use pyo3::types::{PyDict, PyList};
 struct PyAgent {
     agent: String,
     name: String,
+    run_name: String,
     binary: Option<PathBuf>,
     version: Option<String>,
     dir: PathBuf,
@@ -117,6 +119,14 @@ struct PyWorldStartResult {
 }
 
 impl PyAgent {
+    fn effective_run_name(&self) -> &str {
+        if self.run_name.is_empty() {
+            &self.name
+        } else {
+            &self.run_name
+        }
+    }
+
     fn hidden_run_tmux(&self) -> PyResult<Option<AgentRunTmux>> {
         self.run_tmux
             .lock()
@@ -208,13 +218,14 @@ impl PyAgent {
 #[pymethods]
 impl PyAgent {
     #[new]
-    #[pyo3(signature = (*, agent, name, dir, model, binary = None, version = None, permission_mode = "bypassPermissions".to_string(), auto_continue_prompt = "Please don't stop. Just continue doing whatever you want to do.".to_string(), tmux = None, bare = false, extra_args = Vec::new(), sandbox = false, claude_native_sandbox = true))]
+    #[pyo3(signature = (*, agent, name, dir, model, run_name = None, binary = None, version = None, permission_mode = "bypassPermissions".to_string(), auto_continue_prompt = "Please don't stop. Just continue doing whatever you want to do.".to_string(), tmux = None, bare = false, extra_args = Vec::new(), sandbox = false, claude_native_sandbox = true))]
     #[allow(clippy::too_many_arguments)]
     fn new(
         agent: String,
         name: String,
         dir: PathBuf,
         model: String,
+        run_name: Option<String>,
         binary: Option<PathBuf>,
         version: Option<String>,
         permission_mode: String,
@@ -228,6 +239,7 @@ impl PyAgent {
         Self {
             agent,
             name,
+            run_name: run_name.unwrap_or_default(),
             binary,
             version,
             dir,
@@ -253,6 +265,11 @@ impl PyAgent {
     #[getter]
     fn name(&self) -> &str {
         &self.name
+    }
+
+    #[getter]
+    fn run_name(&self) -> &str {
+        self.effective_run_name()
     }
 
     #[getter]
@@ -308,7 +325,7 @@ impl PyAgent {
         let tmux_window = run_tmux.as_ref().map(|value| value.window.clone());
         let started = start_agent(AgentStartOptions {
             kind: self.agent.clone(),
-            name: self.name.clone(),
+            name: self.effective_run_name().to_string(),
             binary: self.binary.clone(),
             version: self.version.clone(),
             agent_dir: self.dir.clone(),
@@ -330,8 +347,9 @@ impl PyAgent {
             refresh_agent_from_dir(
                 &manifest_path,
                 &self.dir,
+                self.effective_run_name(),
                 &self.name,
-                &self.name,
+                self.effective_run_name(),
                 &self.agent,
                 &self.model,
             )
@@ -366,7 +384,7 @@ impl PyAgent {
         let tmux_window = run_tmux.as_ref().map(|value| value.window.clone());
         let started = send_agent(AgentSendOptions {
             kind: self.agent.clone(),
-            name: self.name.clone(),
+            name: self.effective_run_name().to_string(),
             binary: self.binary.clone(),
             version: self.version.clone(),
             agent_dir: self.dir.clone(),
@@ -387,8 +405,9 @@ impl PyAgent {
             refresh_agent_from_dir(
                 &manifest_path,
                 &self.dir,
+                self.effective_run_name(),
                 &self.name,
-                &self.name,
+                self.effective_run_name(),
                 &self.agent,
                 &self.model,
             )
@@ -423,7 +442,7 @@ impl PyAgent {
         let tmux_window = run_tmux.as_ref().map(|value| value.window.clone());
         let stopped = stop_agent(AgentStopOptions {
             kind: self.agent.clone(),
-            name: self.name.clone(),
+            name: self.effective_run_name().to_string(),
             binary: self.binary.clone(),
             agent_dir: self.dir.clone(),
             model: self.model.clone(),
@@ -443,8 +462,9 @@ impl PyAgent {
             refresh_agent_from_dir(
                 &manifest_path,
                 &self.dir,
+                self.effective_run_name(),
                 &self.name,
-                &self.name,
+                self.effective_run_name(),
                 &self.agent,
                 &self.model,
             )
@@ -1150,11 +1170,12 @@ impl PyWorld {
                 manifest_path,
                 AgentConnected {
                     id: if agent_id.is_empty() {
-                        agent.name()
+                        agent.effective_run_name()
                     } else {
                         agent_id
                     },
                     name: agent.name(),
+                    run_name: agent.effective_run_name(),
                     backend: &agent.agent,
                     model: &agent.model,
                     agent_dir: &agent.dir,
@@ -1215,17 +1236,20 @@ impl PyWorld {
                 response.body.chars().take(400).collect::<String>()
             )));
         }
-        let (format, sim_time) = serde_json::from_str::<serde_json::Value>(&response.body)
+        let (format, checkpoint_tick, sim_time) = serde_json::from_str::<serde_json::Value>(&response.body)
             .map(|doc| {
                 (
                     doc.get("format")
                         .and_then(|value| value.as_str())
                         .unwrap_or("world-snapshot")
                         .to_string(),
+                    doc.get("instance")
+                        .and_then(|value| value.get("tick"))
+                        .and_then(|value| value.as_u64()),
                     doc.get("time").and_then(|value| value.as_f64()),
                 )
             })
-            .unwrap_or_else(|_| ("world-snapshot".to_string(), None));
+            .unwrap_or_else(|_| ("world-snapshot".to_string(), None, None));
         std::fs::create_dir_all(&dir).map_err(io_error)?;
         let file_name = name.unwrap_or_else(|| {
             format!(
@@ -1236,14 +1260,46 @@ impl PyWorld {
         let snapshot_path = dir.join(file_name);
         std::fs::write(&snapshot_path, &response.body).map_err(io_error)?;
         if let Some(manifest_path) = &self.manifest_path {
-            record_checkpoint(manifest_path, &snapshot_path, &format, sim_time)
+            record_checkpoint(manifest_path, &snapshot_path, &format, checkpoint_tick, sim_time)
                 .map_err(PyAgentError::new_err)?;
         }
         let result = PyDict::new_bound(py);
         result.set_item("path", snapshot_path)?;
         result.set_item("format", format)?;
+        result.set_item("tick", checkpoint_tick)?;
         result.set_item("sim_time", sim_time)?;
         Ok(result)
+    }
+
+    // Manifest annotation for orchestration tools. World lifecycle remains
+    // expressed through start/save/stop; this only records the run metadata
+    // those tools want replay/app consumers to see.
+    #[pyo3(signature = (*, id, index = None, status = "complete".to_string(), started_at = "".to_string(), ended_at = "".to_string(), resume_from = None))]
+    #[allow(clippy::too_many_arguments)]
+    fn record_run(
+        &mut self,
+        id: String,
+        index: Option<u32>,
+        status: String,
+        started_at: String,
+        ended_at: String,
+        resume_from: Option<PathBuf>,
+    ) -> PyResult<()> {
+        let Some(manifest_path) = &self.manifest_path else {
+            return Ok(());
+        };
+        record_manifest_run(
+            manifest_path,
+            RunRecorded {
+                id: &id,
+                index,
+                status: &status,
+                started_at: &started_at,
+                ended_at: &ended_at,
+                resume_from: resume_from.as_deref(),
+            },
+        )
+        .map_err(PyAgentError::new_err)
     }
 
     #[pyo3(signature = (*, grace_seconds = 10))]

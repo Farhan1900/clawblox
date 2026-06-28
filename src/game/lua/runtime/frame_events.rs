@@ -1,5 +1,6 @@
 use super::*;
 use crate::game::lua::animation::AnimationScheduler;
+use crate::game::profiling::{record_values, ProfileFrame};
 
 impl LuaRuntime {
     pub fn tick(&self, delta_time: f32) -> Result<()> {
@@ -39,15 +40,37 @@ impl LuaRuntime {
 
     /// Runs end-of-frame Lua work after physics (Heartbeat event).
     pub fn end_frame(&self, delta_time: f32) -> Result<()> {
+        let mut profile = ProfileFrame::new("lua.end_frame");
         // Fire Heartbeat as coroutines (allows callbacks to yield)
         let heartbeat = self.game.run_service().heartbeat();
+        let heartbeat_connections = heartbeat.connection_count();
+        if let Some(profile) = profile.as_mut() {
+            profile.mark("get_heartbeat");
+        }
         let yielded_threads = heartbeat.fire_as_coroutines(
             &self.lua,
             MultiValue::from_iter([Value::Number(delta_time as f64)]),
         )?;
+        let yielded_count = yielded_threads.len();
+        if let Some(profile) = profile.as_mut() {
+            profile.mark("fire_heartbeat");
+        }
 
         // Track any newly yielded coroutines for resumption on next tick
         self.track_yielded_threads(yielded_threads)?;
+        if let Some(profile) = profile.as_mut() {
+            profile.mark("track_yielded");
+        }
+        record_values(
+            "lua.end_frame",
+            &[
+                ("heartbeat_connections", heartbeat_connections as f64),
+                ("yielded_threads", yielded_count as f64),
+            ],
+        );
+        if let Some(profile) = profile {
+            profile.finish();
+        }
 
         Ok(())
     }

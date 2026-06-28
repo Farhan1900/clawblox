@@ -1,4 +1,5 @@
 use super::*;
+use crate::game::profiling::{record_values, ProfileFrame};
 
 /// Round a float to 2 decimal places (reduces JSON payload size)
 #[inline]
@@ -202,10 +203,65 @@ fn build_render(
     }
 }
 
+fn build_spectator_entity_from_data(
+    data: &crate::game::lua::instance::InstanceData,
+) -> Option<SpectatorEntity> {
+    let part_data = data.part_data.as_ref()?;
+    let rot = part_data.cframe.rotation;
+    let is_identity = (rot[0][0] - 1.0).abs() < 0.001
+        && rot[0][1].abs() < 0.001
+        && rot[0][2].abs() < 0.001
+        && rot[1][0].abs() < 0.001
+        && (rot[1][1] - 1.0).abs() < 0.001
+        && rot[1][2].abs() < 0.001
+        && rot[2][0].abs() < 0.001
+        && rot[2][1].abs() < 0.001
+        && (rot[2][2] - 1.0).abs() < 0.001;
+
+    let billboard_gui = GameInstance::collect_billboard_gui(&data.children);
+    let attrs = attributes_to_json(&data.attributes);
+
+    Some(SpectatorEntity {
+        id: data.id.0 as u32,
+        entity_type: "part".to_string(),
+        position: round_position([
+            part_data.position.x,
+            part_data.position.y,
+            part_data.position.z,
+        ]),
+        rotation: if is_identity { None } else { Some(rot) },
+        size: Some(round_position([
+            part_data.size.x,
+            part_data.size.y,
+            part_data.size.z,
+        ])),
+        shape: Some(part_data.shape.name().to_string()),
+        render: build_render(data, part_data),
+        health: None,
+        pickup_type: None,
+        model_url: GameInstance::extract_model_url(&data.attributes),
+        model_yaw_offset_deg: GameInstance::extract_model_yaw_offset_deg(&data.attributes),
+        attributes: if attrs.is_empty() { None } else { Some(attrs) },
+        billboard_gui,
+    })
+}
+
+fn replication_entity_instance(instance: Instance) -> Option<Instance> {
+    let mut current = Some(instance);
+    while let Some(inst) = current {
+        if inst.data.lock().unwrap().part_data.is_some() {
+            return Some(inst);
+        }
+        current = inst.parent();
+    }
+    None
+}
+
 pub(super) fn build_player_observation(
     instance: &GameInstance,
     agent_id: Uuid,
 ) -> Option<PlayerObservation> {
+    let mut profile = ProfileFrame::new("observation.player");
     let user_id = *instance.players.get(&agent_id)?;
 
     let runtime = instance.lua_runtime.as_ref()?;
@@ -237,6 +293,9 @@ pub(super) fn build_player_observation(
 
     // Get health from humanoid
     let health = instance.get_player_health(agent_id).unwrap_or(100);
+    if let Some(profile) = profile.as_mut() {
+        profile.mark("player_state");
+    }
 
     // Read all player attributes generically and convert to JSON
     let player_data = player.data.lock().unwrap();
@@ -274,12 +333,27 @@ pub(super) fn build_player_observation(
         serde_json::Value::from(round_f32(instance.player_view_fov_deg())),
     );
     drop(player_data);
+    if let Some(profile) = profile.as_mut() {
+        profile.mark("player_attributes");
+    }
+
+    let observation_radius = instance.effective_observation_radius(agent_id);
 
     // Get other players (with LOS filtering)
-    let other_players = instance.get_other_players(agent_id);
+    let other_players = instance.get_other_players(agent_id, observation_radius);
+    if let Some(profile) = profile.as_mut() {
+        profile.mark("other_players");
+    }
 
     // Get dynamic world entities only (static entities fetched via /map endpoint)
-    let world = instance.get_dynamic_world_info(position);
+    let world = instance.get_dynamic_world_info(position, observation_radius);
+    if let Some(profile) = profile.as_mut() {
+        profile.mark("dynamic_world");
+    }
+
+    if let Some(profile) = profile {
+        profile.finish();
+    }
 
     Some(PlayerObservation {
         tick: instance.tick,
@@ -343,17 +417,27 @@ pub(super) fn build_map_info(instance: &GameInstance) -> MapInfo {
 }
 
 pub(super) fn build_spectator_observation(instance: &GameInstance) -> SpectatorObservation {
+    let mut profile = ProfileFrame::new("observation.spectator");
     let mut entities = Vec::new();
     let mut players = Vec::new();
     let mut sounds = Vec::new();
+    let mut workspace_descendants = 0usize;
+    let mut part_entities = 0usize;
+    let mut sound_instances = 0usize;
 
     if let Some(runtime) = &instance.lua_runtime {
         // Collect all parts and sounds from Workspace
-        for part in runtime.workspace().get_descendants() {
+        let descendants = runtime.workspace().get_descendants();
+        workspace_descendants = descendants.len();
+        if let Some(profile) = profile.as_mut() {
+            profile.mark("get_descendants");
+        }
+        for part in descendants {
             let data = part.data.lock().unwrap();
 
             // Collect playing Sound instances
             if let Some(sound_data) = &data.sound_data {
+                sound_instances += 1;
                 if sound_data.is_playing {
                     sounds.push(SpectatorSound {
                         id: data.id.0 as u32,
@@ -364,49 +448,15 @@ pub(super) fn build_spectator_observation(instance: &GameInstance) -> SpectatorO
                 }
             }
 
-            if let Some(part_data) = &data.part_data {
-                // Only include rotation if it's not identity
-                let rot = part_data.cframe.rotation;
-                let is_identity = (rot[0][0] - 1.0).abs() < 0.001
-                    && rot[0][1].abs() < 0.001
-                    && rot[0][2].abs() < 0.001
-                    && rot[1][0].abs() < 0.001
-                    && (rot[1][1] - 1.0).abs() < 0.001
-                    && rot[1][2].abs() < 0.001
-                    && rot[2][0].abs() < 0.001
-                    && rot[2][1].abs() < 0.001
-                    && (rot[2][2] - 1.0).abs() < 0.001;
-
-                // Check for BillboardGui children
-                let billboard_gui = GameInstance::collect_billboard_gui(&data.children);
-                let attrs = attributes_to_json(&data.attributes);
-
-                entities.push(SpectatorEntity {
-                    id: data.id.0 as u32,
-                    entity_type: "part".to_string(),
-                    position: round_position([
-                        part_data.position.x,
-                        part_data.position.y,
-                        part_data.position.z,
-                    ]),
-                    rotation: if is_identity { None } else { Some(rot) },
-                    size: Some(round_position([
-                        part_data.size.x,
-                        part_data.size.y,
-                        part_data.size.z,
-                    ])),
-                    shape: Some(part_data.shape.name().to_string()),
-                    render: build_render(&data, part_data),
-                    health: None,
-                    pickup_type: None,
-                    model_url: GameInstance::extract_model_url(&data.attributes),
-                    model_yaw_offset_deg: GameInstance::extract_model_yaw_offset_deg(
-                        &data.attributes,
-                    ),
-                    attributes: if attrs.is_empty() { None } else { Some(attrs) },
-                    billboard_gui,
-                });
+            if data.part_data.is_some() {
+                part_entities += 1;
+                if let Some(entity) = build_spectator_entity_from_data(&data) {
+                    entities.push(entity);
+                }
             }
+        }
+        if let Some(profile) = profile.as_mut() {
+            profile.mark("workspace_entities");
         }
 
         // Collect player info
@@ -574,6 +624,24 @@ pub(super) fn build_spectator_observation(instance: &GameInstance) -> SpectatorO
                 drop(player_data);
             }
         }
+        if let Some(profile) = profile.as_mut() {
+            profile.mark("players");
+        }
+    }
+
+    record_values(
+        "observation.spectator",
+        &[
+            ("workspace_descendants", workspace_descendants as f64),
+            ("part_entities", part_entities as f64),
+            ("players", players.len() as f64),
+            ("sounds", sound_instances as f64),
+            ("playing_sounds", sounds.len() as f64),
+            ("emitted_entities", entities.len() as f64),
+        ],
+    );
+    if let Some(profile) = profile {
+        profile.finish();
     }
 
     SpectatorObservation {
@@ -613,6 +681,285 @@ impl GameInstance {
         build_spectator_observation(self)
     }
 
+    pub fn replication_revision(&self) -> u64 {
+        let Some(runtime) = &self.lua_runtime else {
+            return 0;
+        };
+        runtime
+            .lua()
+            .app_data_ref::<crate::game::replication::SharedWorldReplicationState>()
+            .map(|shared| shared.lock().unwrap().latest_revision())
+            .unwrap_or(0)
+    }
+
+    pub fn get_replication_observation_update(
+        &self,
+        known_entity_ids: &HashSet<u32>,
+        since_revision: u64,
+    ) -> ReplicationObservationUpdate {
+        let mut observation = self.get_spectator_player_observation();
+        let mut entities = Vec::new();
+        let mut removed_entity_ids = Vec::new();
+        let mut emitted_entity_ids = HashSet::new();
+        let mut dirty_instance_count = 0usize;
+        let mut latest_revision = since_revision;
+
+        if let Some(runtime) = &self.lua_runtime {
+            let dirty = runtime
+                .lua()
+                .app_data_ref::<crate::game::replication::SharedWorldReplicationState>()
+                .map(|shared| {
+                    let state = shared.lock().unwrap();
+                    latest_revision = state.latest_revision();
+                    state.changes_since(since_revision)
+                })
+                .unwrap_or_default();
+            dirty_instance_count = dirty.len();
+            let workspace = runtime.workspace().instance;
+
+            for dirty in dirty {
+                let Some(instance_ref) = dirty.instance.upgrade() else {
+                    if let Ok(entity_id) = u32::try_from(dirty.id) {
+                        if known_entity_ids.contains(&entity_id) {
+                            removed_entity_ids.push(entity_id);
+                        }
+                    }
+                    continue;
+                };
+
+                let instance = Instance::from_ref(instance_ref);
+                let Some(entity_instance) = replication_entity_instance(instance) else {
+                    if let Ok(entity_id) = u32::try_from(dirty.id) {
+                        if known_entity_ids.contains(&entity_id) {
+                            removed_entity_ids.push(entity_id);
+                        }
+                    }
+                    continue;
+                };
+
+                let entity_id = entity_instance.id().0 as u32;
+                if !entity_instance.is_descendant_of(&workspace) {
+                    if known_entity_ids.contains(&entity_id) {
+                        removed_entity_ids.push(entity_id);
+                    }
+                    continue;
+                }
+                if !emitted_entity_ids.insert(entity_id) {
+                    continue;
+                }
+
+                let data = entity_instance.data.lock().unwrap();
+                if let Some(entity) = build_spectator_entity_from_data(&data) {
+                    entities.push(entity);
+                } else if known_entity_ids.contains(&entity_id) {
+                    removed_entity_ids.push(entity_id);
+                }
+            }
+        }
+
+        removed_entity_ids.sort_unstable();
+        removed_entity_ids.dedup();
+        observation.entities = entities;
+
+        record_values(
+            "observation.replication_update",
+            &[
+                ("dirty_instances", dirty_instance_count as f64),
+                ("emitted_entities", observation.entities.len() as f64),
+                ("removed_entities", removed_entity_ids.len() as f64),
+            ],
+        );
+
+        ReplicationObservationUpdate {
+            observation,
+            removed_entity_ids,
+            dirty_instance_count,
+            latest_revision,
+        }
+    }
+
+    /// Gets high-rate spectator state that does not scan Workspace entities.
+    pub fn get_spectator_player_observation(&self) -> SpectatorObservation {
+        let mut players = Vec::new();
+
+        if let Some(runtime) = &self.lua_runtime {
+            for (&agent_id, &user_id) in &self.players {
+                if let Some(player) = runtime.players().get_player_by_user_id(user_id) {
+                    let player_data = player.data.lock().unwrap();
+                    let (position, health, humanoid_state, root_part_id, animator_id) = player_data
+                        .player_data
+                        .as_ref()
+                        .and_then(|pd| pd.character.as_ref())
+                        .and_then(|weak| weak.upgrade())
+                        .map(|char_ref| {
+                            let char = char_ref.lock().unwrap();
+                            let primary_part = char
+                                .model_data
+                                .as_ref()
+                                .and_then(|m| m.primary_part.as_ref())
+                                .and_then(|weak| weak.upgrade());
+                            let (pos, root_part_id) = primary_part
+                                .as_ref()
+                                .and_then(|hrp_data| {
+                                    let hrp = hrp_data.lock().unwrap();
+                                    hrp.part_data.as_ref().map(|p| {
+                                        (
+                                            [p.position.x, p.position.y, p.position.z],
+                                            Some(hrp.id.0 as u32),
+                                        )
+                                    })
+                                })
+                                .unwrap_or(([0.0, 3.0, 0.0], None));
+
+                            let mut hp = 100;
+                            let mut animator_id: Option<u64> = None;
+                            let mut humanoid_state: Option<String> = None;
+                            for child in &char.children {
+                                let child_data = child.lock().unwrap();
+                                if child_data.name == "Humanoid" {
+                                    if let Some(humanoid) = &child_data.humanoid_data {
+                                        hp = humanoid.health as i32;
+                                        humanoid_state = Some(humanoid.state.name().to_string());
+                                    }
+                                    animator_id =
+                                        child_data.children.iter().find_map(|anim_child| {
+                                            let anim_data = anim_child.lock().unwrap();
+                                            if anim_data.class_name == ClassName::Animator {
+                                                Some(anim_data.id.0)
+                                            } else {
+                                                None
+                                            }
+                                        });
+                                    break;
+                                }
+                            }
+
+                            (pos, hp, humanoid_state, root_part_id, animator_id)
+                        })
+                        .unwrap_or(([0.0, 3.0, 0.0], 100, None, None, None));
+
+                    let active_animations = animator_id.and_then(|id| {
+                        runtime
+                            .lua()
+                            .app_data_ref::<crate::game::lua::animation::AnimationScheduler>()
+                            .map(|scheduler| {
+                                let tracks = scheduler.active_tracks_for_animator(id);
+                                tracks
+                                    .into_iter()
+                                    .map(|track| SpectatorPlayerAnimation {
+                                        track_id: track.track_id,
+                                        animation_id: track.animation_id,
+                                        length: round_f32(track.length),
+                                        priority: track.priority,
+                                        time_position: round_f32(track.time_position),
+                                        speed: round_f32(track.speed),
+                                        looped: track.looped,
+                                        is_playing: track.is_playing,
+                                        is_stopping: track.is_stopping,
+                                        weight_current: round_f32(track.weight_current),
+                                        weight_target: round_f32(track.weight_target),
+                                        effective_weight: round_f32(track.effective_weight),
+                                    })
+                                    .collect::<Vec<_>>()
+                            })
+                            .filter(|tracks| !tracks.is_empty())
+                    });
+
+                    let name = self
+                        .player_names
+                        .get(&agent_id)
+                        .cloned()
+                        .unwrap_or_else(|| format!("Player_{}", agent_id.as_simple()));
+
+                    let mut attrs = attributes_to_json(&player_data.attributes);
+                    if let Some(origin) = self.get_player_view_origin(agent_id) {
+                        attrs.insert(
+                            "ViewOriginX".to_string(),
+                            serde_json::Value::from(round_f32(origin[0])),
+                        );
+                        attrs.insert(
+                            "ViewOriginY".to_string(),
+                            serde_json::Value::from(round_f32(origin[1])),
+                        );
+                        attrs.insert(
+                            "ViewOriginZ".to_string(),
+                            serde_json::Value::from(round_f32(origin[2])),
+                        );
+                    }
+                    if let Some(forward) = self.get_player_view_forward(agent_id) {
+                        attrs.insert(
+                            "ViewForwardX".to_string(),
+                            serde_json::Value::from(round_f32(forward[0])),
+                        );
+                        attrs.insert(
+                            "ViewForwardY".to_string(),
+                            serde_json::Value::from(round_f32(forward[1])),
+                        );
+                        attrs.insert(
+                            "ViewForwardZ".to_string(),
+                            serde_json::Value::from(round_f32(forward[2])),
+                        );
+                    }
+                    attrs.insert(
+                        "ViewFovDeg".to_string(),
+                        serde_json::Value::from(round_f32(self.player_view_fov_deg())),
+                    );
+                    let attributes = if attrs.is_empty() {
+                        None
+                    } else {
+                        Some(serde_json::to_value(&attrs).unwrap_or(serde_json::Value::Null))
+                    };
+
+                    let gui = player_data
+                        .player_data
+                        .as_ref()
+                        .and_then(|pd| pd.player_gui.as_ref())
+                        .and_then(|weak| weak.upgrade())
+                        .map(|player_gui_ref| {
+                            let player_gui = Instance::from_ref(player_gui_ref);
+                            player_gui
+                                .get_children()
+                                .iter()
+                                .filter_map(|child| GameInstance::serialize_gui_tree(child))
+                                .collect::<Vec<_>>()
+                        })
+                        .filter(|v: &Vec<GuiElement>| !v.is_empty());
+
+                    players.push(SpectatorPlayerInfo {
+                        id: agent_id,
+                        name,
+                        position: round_position(position),
+                        root_part_id,
+                        health,
+                        humanoid_state,
+                        attributes,
+                        gui,
+                        active_animations,
+                    });
+                }
+            }
+        }
+
+        SpectatorObservation {
+            instance_id: self.instance_id,
+            tick: self.tick,
+            server_time_ms: self.elapsed_ms(),
+            game_status: if self.halted_error.is_some() {
+                "failed".to_string()
+            } else {
+                match self.status {
+                    GameStatus::Waiting => "waiting".to_string(),
+                    GameStatus::Playing => "playing".to_string(),
+                    GameStatus::Finished => "finished".to_string(),
+                }
+            },
+            players,
+            entities: Vec::new(),
+            sounds: Vec::new(),
+            recent_events: self.recent_public_replicated_events(),
+        }
+    }
+
     /// Get the game status from Lua if available.
     fn get_game_status_from_lua(&self) -> String {
         if self.halted_error.is_some() {
@@ -625,17 +972,49 @@ impl GameInstance {
         }
     }
 
+    fn effective_observation_radius(&self, agent_id: Uuid) -> f32 {
+        let default_radius = self.observation_radius.max(0.0);
+        let Some(runtime) = &self.lua_runtime else {
+            return default_radius;
+        };
+        let Some(user_id) = self.players.get(&agent_id).copied() else {
+            return default_radius;
+        };
+        let Some(player) = runtime.players().get_player_by_user_id(user_id) else {
+            return default_radius;
+        };
+
+        let player_data = player.data.lock().unwrap();
+        match player_data.attributes.get("ObservationRadius") {
+            Some(AttributeValue::Number(radius)) if radius.is_finite() => {
+                (*radius as f32).clamp(0.0, default_radius)
+            }
+            _ => default_radius,
+        }
+    }
+
     /// Get dynamic world info (entities WITHOUT "Static" tag + folders with attributes).
-    fn get_dynamic_world_info(&self, observer_pos: [f32; 3]) -> WorldInfo {
+    fn get_dynamic_world_info(&self, observer_pos: [f32; 3], observation_radius: f32) -> WorldInfo {
+        let mut profile = ProfileFrame::new("observation.dynamic_world");
         let mut entities = Vec::new();
+        let mut workspace_descendants = 0usize;
+        let mut part_entities = 0usize;
+        let mut in_radius_parts = 0usize;
+        let mut folder_entities = 0usize;
 
         if let Some(runtime) = &self.lua_runtime {
-            for part in runtime.workspace().get_descendants() {
+            let descendants = runtime.workspace().get_descendants();
+            workspace_descendants = descendants.len();
+            if let Some(profile) = profile.as_mut() {
+                profile.mark("get_descendants");
+            }
+            for part in descendants {
                 let data = part.data.lock().unwrap();
                 let is_static = data.tags.contains("Static");
 
                 if let Some(part_data) = &data.part_data {
                     if !is_static {
+                        part_entities += 1;
                         let raw_position = [
                             part_data.position.x,
                             part_data.position.y,
@@ -647,10 +1026,11 @@ impl GameInstance {
                             raw_position,
                             raw_size,
                             part_data.cframe.rotation,
-                            self.observation_radius,
+                            observation_radius,
                         ) {
                             continue;
                         }
+                        in_radius_parts += 1;
                         let (aabb, obb) =
                             compute_part_bounds(raw_position, raw_size, part_data.cframe.rotation);
                         let attrs = attributes_to_json(&data.attributes);
@@ -678,6 +1058,7 @@ impl GameInstance {
                 } else if data.class_name == ClassName::Folder && !is_static {
                     let attrs = attributes_to_json(&data.attributes);
                     if !attrs.is_empty() {
+                        folder_entities += 1;
                         entities.push(WorldEntity {
                             id: data.id.0,
                             name: data.name.clone(),
@@ -697,6 +1078,23 @@ impl GameInstance {
                     }
                 }
             }
+            if let Some(profile) = profile.as_mut() {
+                profile.mark("scan_entities");
+            }
+        }
+
+        record_values(
+            "observation.dynamic_world",
+            &[
+                ("workspace_descendants", workspace_descendants as f64),
+                ("dynamic_part_entities", part_entities as f64),
+                ("in_radius_parts", in_radius_parts as f64),
+                ("folder_entities", folder_entities as f64),
+                ("emitted_entities", entities.len() as f64),
+            ],
+        );
+        if let Some(profile) = profile {
+            profile.finish();
         }
 
         WorldInfo { entities }
@@ -791,7 +1189,11 @@ impl GameInstance {
     }
 
     /// Get info about other players with distance, line-of-sight and view-cone filtering.
-    fn get_other_players(&self, exclude_agent_id: Uuid) -> Vec<OtherPlayerInfo> {
+    fn get_other_players(
+        &self,
+        exclude_agent_id: Uuid,
+        observation_radius: f32,
+    ) -> Vec<OtherPlayerInfo> {
         let mut others = Vec::new();
         let observer_pos = self
             .get_player_position(exclude_agent_id)
@@ -821,7 +1223,7 @@ impl GameInstance {
             let dz = position[2] - observer_pos[2];
             let distance = (dx * dx + dy * dy + dz * dz).sqrt();
 
-            if distance > self.observation_radius {
+            if distance > observation_radius {
                 continue;
             }
 
@@ -1140,6 +1542,14 @@ pub struct SpectatorObservation {
     pub sounds: Vec<SpectatorSound>,
     #[serde(default)]
     pub recent_events: Vec<SpectatorReplicatedEvent>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ReplicationObservationUpdate {
+    pub observation: SpectatorObservation,
+    pub removed_entity_ids: Vec<u32>,
+    pub dirty_instance_count: usize,
+    pub latest_revision: u64,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]

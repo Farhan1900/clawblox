@@ -10,11 +10,13 @@ pub(super) fn add_fields<F: UserDataFields<Instance>>(fields: &mut F) {
         let data = this.data.lock().unwrap();
         Ok(data.part_data.as_ref().map(|p| p.anchored))
     });
-    fields.add_field_method_set("Anchored", |_, this, anchored: bool| {
+    fields.add_field_method_set("Anchored", |lua, this, anchored: bool| {
         let mut data = this.data.lock().unwrap();
         if let Some(part) = &mut data.part_data {
             part.anchored = anchored;
             part.anchored_dirty = true;
+            drop(data);
+            this.mark_replication_dirty(lua);
         }
         Ok(())
     });
@@ -23,12 +25,14 @@ pub(super) fn add_fields<F: UserDataFields<Instance>>(fields: &mut F) {
         let data = this.data.lock().unwrap();
         Ok(data.part_data.as_ref().map(|p| p.can_collide))
     });
-    fields.add_field_method_set("CanCollide", |_, this, can_collide: bool| {
+    fields.add_field_method_set("CanCollide", |lua, this, can_collide: bool| {
         let mut data = this.data.lock().unwrap();
         if let Some(part) = &mut data.part_data {
             part.can_collide = can_collide;
             part.can_collide_dirty = true;
             part.interaction_dirty = true;
+            drop(data);
+            this.mark_replication_dirty(lua);
         }
         Ok(())
     });
@@ -36,11 +40,13 @@ pub(super) fn add_fields<F: UserDataFields<Instance>>(fields: &mut F) {
         let data = this.data.lock().unwrap();
         Ok(data.part_data.as_ref().map(|p| p.massless))
     });
-    fields.add_field_method_set("Massless", |_, this, massless: bool| {
+    fields.add_field_method_set("Massless", |lua, this, massless: bool| {
         let mut data = this.data.lock().unwrap();
         if let Some(part) = &mut data.part_data {
             part.massless = massless;
             part.custom_physical_properties_dirty = true;
+            drop(data);
+            this.mark_replication_dirty(lua);
         }
         Ok(())
     });
@@ -48,23 +54,30 @@ pub(super) fn add_fields<F: UserDataFields<Instance>>(fields: &mut F) {
         let data = this.data.lock().unwrap();
         Ok(data.part_data.as_ref().map(|p| p.enable_fluid_forces))
     });
-    fields.add_field_method_set("EnableFluidForces", |_, this, enable_fluid_forces: bool| {
-        let mut data = this.data.lock().unwrap();
-        if let Some(part) = &mut data.part_data {
-            part.enable_fluid_forces = enable_fluid_forces;
-        }
-        Ok(())
-    });
+    fields.add_field_method_set(
+        "EnableFluidForces",
+        |lua, this, enable_fluid_forces: bool| {
+            let mut data = this.data.lock().unwrap();
+            if let Some(part) = &mut data.part_data {
+                part.enable_fluid_forces = enable_fluid_forces;
+                drop(data);
+                this.mark_replication_dirty(lua);
+            }
+            Ok(())
+        },
+    );
 
     fields.add_field_method_get("CanQuery", |_, this| {
         let data = this.data.lock().unwrap();
         Ok(data.part_data.as_ref().map(|p| p.can_query))
     });
-    fields.add_field_method_set("CanQuery", |_, this, can_query: bool| {
+    fields.add_field_method_set("CanQuery", |lua, this, can_query: bool| {
         let mut data = this.data.lock().unwrap();
         if let Some(part) = &mut data.part_data {
             part.can_query = can_query;
             part.interaction_dirty = true;
+            drop(data);
+            this.mark_replication_dirty(lua);
         }
         Ok(())
     });
@@ -85,6 +98,8 @@ pub(super) fn add_fields<F: UserDataFields<Instance>>(fields: &mut F) {
             part.collision_group = collision_group;
             part.collision_group_id = group_id;
             part.interaction_dirty = true;
+            drop(data);
+            this.mark_replication_dirty(lua);
         }
         Ok(())
     });
@@ -93,11 +108,13 @@ pub(super) fn add_fields<F: UserDataFields<Instance>>(fields: &mut F) {
         let data = this.data.lock().unwrap();
         Ok(data.part_data.as_ref().map(|p| p.can_touch))
     });
-    fields.add_field_method_set("CanTouch", |_, this, can_touch: bool| {
+    fields.add_field_method_set("CanTouch", |lua, this, can_touch: bool| {
         let mut data = this.data.lock().unwrap();
         if let Some(part) = &mut data.part_data {
             part.can_touch = can_touch;
             part.interaction_dirty = true;
+            drop(data);
+            this.mark_replication_dirty(lua);
         }
         Ok(())
     });
@@ -106,10 +123,12 @@ pub(super) fn add_fields<F: UserDataFields<Instance>>(fields: &mut F) {
         let data = this.data.lock().unwrap();
         Ok(data.part_data.as_ref().map(|p| p.transparency))
     });
-    fields.add_field_method_set("Transparency", |_, this, transparency: f32| {
+    fields.add_field_method_set("Transparency", |lua, this, transparency: f32| {
         let mut data = this.data.lock().unwrap();
         if let Some(part) = &mut data.part_data {
             part.transparency = transparency.clamp(0.0, 1.0);
+            drop(data);
+            this.mark_replication_dirty(lua);
         }
         Ok(())
     });
@@ -118,10 +137,12 @@ pub(super) fn add_fields<F: UserDataFields<Instance>>(fields: &mut F) {
         let data = this.data.lock().unwrap();
         Ok(data.part_data.as_ref().map(|p| p.color))
     });
-    fields.add_field_method_set("Color", |_, this, color: Color3| {
+    fields.add_field_method_set("Color", |lua, this, color: Color3| {
         let mut data = this.data.lock().unwrap();
         if let Some(part) = &mut data.part_data {
             part.color = color;
+            drop(data);
+            this.mark_replication_dirty(lua);
         }
         Ok(())
     });
@@ -130,7 +151,7 @@ pub(super) fn add_fields<F: UserDataFields<Instance>>(fields: &mut F) {
         let data = this.data.lock().unwrap();
         Ok(data.part_data.as_ref().map(|p| p.material))
     });
-    fields.add_field_method_set("Material", |_, this, material: Material| {
+    fields.add_field_method_set("Material", |lua, this, material: Material| {
         let mut data = this.data.lock().unwrap();
         if let Some(part) = &mut data.part_data {
             part.material = material;
@@ -138,6 +159,8 @@ pub(super) fn add_fields<F: UserDataFields<Instance>>(fields: &mut F) {
             if part.custom_physical_properties.is_none() {
                 part.custom_physical_properties_dirty = true;
             }
+            drop(data);
+            this.mark_replication_dirty(lua);
         }
         Ok(())
     });
@@ -146,10 +169,12 @@ pub(super) fn add_fields<F: UserDataFields<Instance>>(fields: &mut F) {
         let data = this.data.lock().unwrap();
         Ok(data.part_data.as_ref().map(|p| p.top_surface.clone()))
     });
-    fields.add_field_method_set("TopSurface", |_, this, surface: String| {
+    fields.add_field_method_set("TopSurface", |lua, this, surface: String| {
         let mut data = this.data.lock().unwrap();
         if let Some(part) = &mut data.part_data {
             part.top_surface = surface;
+            drop(data);
+            this.mark_replication_dirty(lua);
         }
         Ok(())
     });
@@ -158,10 +183,12 @@ pub(super) fn add_fields<F: UserDataFields<Instance>>(fields: &mut F) {
         let data = this.data.lock().unwrap();
         Ok(data.part_data.as_ref().map(|p| p.bottom_surface.clone()))
     });
-    fields.add_field_method_set("BottomSurface", |_, this, surface: String| {
+    fields.add_field_method_set("BottomSurface", |lua, this, surface: String| {
         let mut data = this.data.lock().unwrap();
         if let Some(part) = &mut data.part_data {
             part.bottom_surface = surface;
+            drop(data);
+            this.mark_replication_dirty(lua);
         }
         Ok(())
     });
@@ -170,10 +197,12 @@ pub(super) fn add_fields<F: UserDataFields<Instance>>(fields: &mut F) {
         let data = this.data.lock().unwrap();
         Ok(data.part_data.as_ref().map(|p| p.color))
     });
-    fields.add_field_method_set("BrickColor", |_, this, color: Color3| {
+    fields.add_field_method_set("BrickColor", |lua, this, color: Color3| {
         let mut data = this.data.lock().unwrap();
         if let Some(part) = &mut data.part_data {
             part.color = color;
+            drop(data);
+            this.mark_replication_dirty(lua);
         }
         Ok(())
     });
@@ -186,13 +215,17 @@ pub(super) fn add_fields<F: UserDataFields<Instance>>(fields: &mut F) {
             Ok(data.part_data.as_ref().map(|p| p.velocity))
         }
     });
-    fields.add_field_method_set("Velocity", |_, this, velocity: Vector3| {
+    fields.add_field_method_set("Velocity", |lua, this, velocity: Vector3| {
         let mut data = this.data.lock().unwrap();
         if let Some(bv) = &mut data.body_velocity_data {
             bv.velocity = velocity;
+            drop(data);
+            this.mark_replication_dirty(lua);
         } else if let Some(part) = &mut data.part_data {
             part.velocity = velocity;
             part.velocity_dirty = true;
+            drop(data);
+            this.mark_replication_dirty(lua);
         }
         Ok(())
     });
@@ -213,11 +246,13 @@ pub(super) fn add_fields<F: UserDataFields<Instance>>(fields: &mut F) {
     });
     fields.add_field_method_set(
         "CustomPhysicalProperties",
-        |_, this, value: Option<PhysicalProperties>| {
+        |lua, this, value: Option<PhysicalProperties>| {
             let mut data = this.data.lock().unwrap();
             if let Some(part) = &mut data.part_data {
                 part.custom_physical_properties = value;
                 part.custom_physical_properties_dirty = true;
+                drop(data);
+                this.mark_replication_dirty(lua);
             }
             Ok(())
         },
@@ -233,7 +268,7 @@ pub(super) fn add_fields<F: UserDataFields<Instance>>(fields: &mut F) {
         let data = this.data.lock().unwrap();
         Ok(data.part_data.as_ref().map(|p| p.specific_gravity()))
     });
-    fields.add_field_method_set("Density", |_, this, density: f32| {
+    fields.add_field_method_set("Density", |lua, this, density: f32| {
         let mut data = this.data.lock().unwrap();
         if let Some(part) = &mut data.part_data {
             let props = part.current_physical_properties();
@@ -245,6 +280,8 @@ pub(super) fn add_fields<F: UserDataFields<Instance>>(fields: &mut F) {
                 props.elasticity_weight,
             ));
             part.custom_physical_properties_dirty = true;
+            drop(data);
+            this.mark_replication_dirty(lua);
         }
         Ok(())
     });
@@ -255,7 +292,7 @@ pub(super) fn add_fields<F: UserDataFields<Instance>>(fields: &mut F) {
             .as_ref()
             .map(|p| p.current_physical_properties().friction))
     });
-    fields.add_field_method_set("Friction", |_, this, friction: f32| {
+    fields.add_field_method_set("Friction", |lua, this, friction: f32| {
         let mut data = this.data.lock().unwrap();
         if let Some(part) = &mut data.part_data {
             let props = part.current_physical_properties();
@@ -267,6 +304,8 @@ pub(super) fn add_fields<F: UserDataFields<Instance>>(fields: &mut F) {
                 props.elasticity_weight,
             ));
             part.custom_physical_properties_dirty = true;
+            drop(data);
+            this.mark_replication_dirty(lua);
         }
         Ok(())
     });
@@ -277,7 +316,7 @@ pub(super) fn add_fields<F: UserDataFields<Instance>>(fields: &mut F) {
             .as_ref()
             .map(|p| p.current_physical_properties().elasticity))
     });
-    fields.add_field_method_set("Elasticity", |_, this, elasticity: f32| {
+    fields.add_field_method_set("Elasticity", |lua, this, elasticity: f32| {
         let mut data = this.data.lock().unwrap();
         if let Some(part) = &mut data.part_data {
             let props = part.current_physical_properties();
@@ -289,6 +328,8 @@ pub(super) fn add_fields<F: UserDataFields<Instance>>(fields: &mut F) {
                 props.elasticity_weight,
             ));
             part.custom_physical_properties_dirty = true;
+            drop(data);
+            this.mark_replication_dirty(lua);
         }
         Ok(())
     });
@@ -299,7 +340,7 @@ pub(super) fn add_fields<F: UserDataFields<Instance>>(fields: &mut F) {
             .as_ref()
             .map(|p| p.current_physical_properties().friction_weight))
     });
-    fields.add_field_method_set("FrictionWeight", |_, this, friction_weight: f32| {
+    fields.add_field_method_set("FrictionWeight", |lua, this, friction_weight: f32| {
         let mut data = this.data.lock().unwrap();
         if let Some(part) = &mut data.part_data {
             let props = part.current_physical_properties();
@@ -311,6 +352,8 @@ pub(super) fn add_fields<F: UserDataFields<Instance>>(fields: &mut F) {
                 props.elasticity_weight,
             ));
             part.custom_physical_properties_dirty = true;
+            drop(data);
+            this.mark_replication_dirty(lua);
         }
         Ok(())
     });
@@ -321,7 +364,7 @@ pub(super) fn add_fields<F: UserDataFields<Instance>>(fields: &mut F) {
             .as_ref()
             .map(|p| p.current_physical_properties().elasticity_weight))
     });
-    fields.add_field_method_set("ElasticityWeight", |_, this, elasticity_weight: f32| {
+    fields.add_field_method_set("ElasticityWeight", |lua, this, elasticity_weight: f32| {
         let mut data = this.data.lock().unwrap();
         if let Some(part) = &mut data.part_data {
             let props = part.current_physical_properties();
@@ -333,6 +376,8 @@ pub(super) fn add_fields<F: UserDataFields<Instance>>(fields: &mut F) {
                 elasticity_weight,
             ));
             part.custom_physical_properties_dirty = true;
+            drop(data);
+            this.mark_replication_dirty(lua);
         }
         Ok(())
     });
@@ -341,7 +386,7 @@ pub(super) fn add_fields<F: UserDataFields<Instance>>(fields: &mut F) {
         let data = this.data.lock().unwrap();
         Ok(data.part_data.as_ref().map(|p| p.velocity))
     });
-    fields.add_field_method_set("AssemblyLinearVelocity", |_, this, velocity: Vector3| {
+    fields.add_field_method_set("AssemblyLinearVelocity", |lua, this, velocity: Vector3| {
         for assembly_part in this.assembly_parts_from_graph() {
             let mut data = assembly_part.data.lock().unwrap();
             if let Some(part) = &mut data.part_data {
@@ -349,6 +394,7 @@ pub(super) fn add_fields<F: UserDataFields<Instance>>(fields: &mut F) {
                 part.velocity_dirty = true;
             }
         }
+        this.mark_replication_dirty(lua);
         Ok(())
     });
     fields.add_field_method_get("AssemblyAngularVelocity", |_, this| {
@@ -357,7 +403,7 @@ pub(super) fn add_fields<F: UserDataFields<Instance>>(fields: &mut F) {
     });
     fields.add_field_method_set(
         "AssemblyAngularVelocity",
-        |_, this, angular_velocity: Vector3| {
+        |lua, this, angular_velocity: Vector3| {
             for assembly_part in this.assembly_parts_from_graph() {
                 let mut data = assembly_part.data.lock().unwrap();
                 if let Some(part) = &mut data.part_data {
@@ -365,6 +411,7 @@ pub(super) fn add_fields<F: UserDataFields<Instance>>(fields: &mut F) {
                     part.angular_velocity_dirty = true;
                 }
             }
+            this.mark_replication_dirty(lua);
             Ok(())
         },
     );
@@ -373,11 +420,13 @@ pub(super) fn add_fields<F: UserDataFields<Instance>>(fields: &mut F) {
         let data = this.data.lock().unwrap();
         Ok(data.part_data.as_ref().map(|p| p.shape))
     });
-    fields.add_field_method_set("Shape", |_, this, shape: PartType| {
+    fields.add_field_method_set("Shape", |lua, this, shape: PartType| {
         let mut data = this.data.lock().unwrap();
         if let Some(part) = &mut data.part_data {
             part.shape = shape;
             part.shape_dirty = true;
+            drop(data);
+            this.mark_replication_dirty(lua);
         }
         Ok(())
     });

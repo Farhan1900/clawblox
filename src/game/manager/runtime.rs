@@ -3,7 +3,7 @@ use std::backtrace::Backtrace;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use crate::game::{cleanup_empty_instances, GameManager};
+use crate::game::{cleanup_empty_instances, profiling::ProfileFrame, GameManager};
 
 use super::tick;
 
@@ -35,10 +35,14 @@ impl GameManager {
 
         loop {
             let start = Instant::now();
+            let mut profile = ProfileFrame::new("manager.loop");
 
             let tick_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 tick::tick_instances(&self.state);
             }));
+            if let Some(profile) = profile.as_mut() {
+                profile.mark("tick_instances");
+            }
             if let Err(payload) = tick_result {
                 log_panic("manager_loop", "tick_instances", &*payload);
             }
@@ -50,8 +54,14 @@ impl GameManager {
                     eprintln!("[Cleanup] Destroyed {} empty instances", destroyed);
                 }
             }
+            if let Some(profile) = profile.as_mut() {
+                profile.mark("cleanup");
+            }
 
             let elapsed = start.elapsed();
+            if let Some(profile) = profile {
+                profile.finish();
+            }
             if elapsed < tick_duration {
                 thread::sleep(tick_duration - elapsed);
             }

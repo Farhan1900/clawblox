@@ -1,10 +1,12 @@
 use nalgebra::{Translation3, UnitQuaternion};
 use rapier3d::prelude::*;
 use std::collections::{HashMap, HashSet};
+use std::num::NonZeroUsize;
 
 use super::constants::physics as consts;
 use super::lua::services::physics_service::CollisionGroupMask;
 use super::lua::types::{CFrame, PartType, PhysicalProperties, Vector3};
+use super::profiling::record_values;
 
 mod align_motors;
 mod assemblies;
@@ -100,8 +102,13 @@ pub struct PhysicsAssemblyPart {
     pub angular_velocity: [f32; 3],
     pub position_dirty: bool,
     pub cframe_dirty: bool,
+    pub size_dirty: bool,
+    pub anchored_dirty: bool,
+    pub interaction_dirty: bool,
     pub velocity_dirty: bool,
     pub angular_velocity_dirty: bool,
+    pub shape_dirty: bool,
+    pub custom_physical_properties_dirty: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -174,6 +181,359 @@ fn part_isometry(position: [f32; 3], rotation: &[[f32; 3]; 3]) -> Isometry<Real>
 }
 
 impl PhysicsWorld {
+    fn record_profile_metrics(&self) {
+        let mut dynamic_bodies = 0usize;
+        let mut sleeping_dynamic_bodies = 0usize;
+        let mut kinematic_bodies = 0usize;
+        let mut fixed_bodies = 0usize;
+        let mut body_index = HashMap::new();
+        let mut dynamic_handles = Vec::new();
+        let mut active_dynamic_handles = HashSet::new();
+
+        for (handle, body) in self.rigid_body_set.iter() {
+            if body.is_dynamic() {
+                body_index.insert(handle, dynamic_bodies);
+                dynamic_handles.push(handle);
+                dynamic_bodies += 1;
+                if body.is_sleeping() {
+                    sleeping_dynamic_bodies += 1;
+                }
+            } else if body.is_kinematic() {
+                kinematic_bodies += 1;
+            } else {
+                fixed_bodies += 1;
+            }
+        }
+        active_dynamic_handles.extend(self.island_manager.active_dynamic_bodies().iter().copied());
+
+        let mut parent: Vec<usize> = (0..dynamic_bodies).collect();
+        let mut size = vec![1usize; dynamic_bodies];
+
+        fn find(parent: &mut [usize], mut index: usize) -> usize {
+            while parent[index] != index {
+                parent[index] = parent[parent[index]];
+                index = parent[index];
+            }
+            index
+        }
+
+        fn union(parent: &mut [usize], size: &mut [usize], a: usize, b: usize) {
+            let mut root_a = find(parent, a);
+            let mut root_b = find(parent, b);
+            if root_a == root_b {
+                return;
+            }
+            if size[root_a] < size[root_b] {
+                std::mem::swap(&mut root_a, &mut root_b);
+            }
+            parent[root_b] = root_a;
+            size[root_a] += size[root_b];
+        }
+
+        let mut contact_pairs = 0usize;
+        let mut active_contact_pairs = 0usize;
+        let mut active_contact_points = 0usize;
+        let mut active_dynamic_dynamic_pairs = 0usize;
+        let mut active_dynamic_static_pairs = 0usize;
+
+        for pair in self.narrow_phase.contact_pairs() {
+            contact_pairs += 1;
+            if !pair.has_any_active_contact {
+                continue;
+            }
+            active_contact_pairs += 1;
+            active_contact_points += pair
+                .manifolds
+                .iter()
+                .map(|manifold| manifold.data.num_active_contacts())
+                .sum::<usize>();
+
+            let body1 = self
+                .collider_set
+                .get(pair.collider1)
+                .and_then(|collider| collider.parent());
+            let body2 = self
+                .collider_set
+                .get(pair.collider2)
+                .and_then(|collider| collider.parent());
+            let Some(body1) = body1 else {
+                continue;
+            };
+            let Some(body2) = body2 else {
+                continue;
+            };
+
+            match (
+                body_index.get(&body1).copied(),
+                body_index.get(&body2).copied(),
+            ) {
+                (Some(a), Some(b)) => {
+                    active_dynamic_dynamic_pairs += 1;
+                    union(&mut parent, &mut size, a, b);
+                }
+                (Some(_), None) | (None, Some(_)) => {
+                    active_dynamic_static_pairs += 1;
+                }
+                (None, None) => {}
+            }
+        }
+
+        let mut component_sizes = HashMap::<usize, usize>::new();
+        for index in 0..dynamic_bodies {
+            let root = find(&mut parent, index);
+            *component_sizes.entry(root).or_default() += 1;
+        }
+        let dynamic_components = component_sizes.len();
+        let largest_dynamic_component = component_sizes.values().copied().max().unwrap_or(0);
+        let awake_dynamic_bodies = dynamic_bodies.saturating_sub(sleeping_dynamic_bodies);
+        let largest_component_root = component_sizes
+            .iter()
+            .max_by_key(|(_, component_size)| **component_size)
+            .map(|(root, _)| *root);
+        let counters = &self.physics_pipeline.counters;
+        let length_unit = self.integration_parameters.length_unit;
+        let mut above_linear_sleep_threshold = 0usize;
+        let mut above_angular_sleep_threshold = 0usize;
+        let mut above_any_sleep_threshold = 0usize;
+        let mut below_sleep_threshold = 0usize;
+        let mut sleep_timer_ready = 0usize;
+        let mut max_linear_speed = 0.0f32;
+        let mut max_angular_speed = 0.0f32;
+
+        #[derive(Clone, Copy, Default)]
+        struct ComponentProfile {
+            bodies: usize,
+            awake: usize,
+            active: usize,
+            above_any_sleep_threshold: usize,
+            sleep_timer_ready: usize,
+        }
+
+        let mut component_profiles = HashMap::<usize, ComponentProfile>::new();
+        for (index, handle) in dynamic_handles.iter().copied().enumerate() {
+            let root = find(&mut parent, index);
+            let Some(body) = self.rigid_body_set.get(handle) else {
+                continue;
+            };
+            let lin_speed = body.linvel().norm();
+            let ang_speed = body.angvel().norm();
+            max_linear_speed = max_linear_speed.max(lin_speed);
+            max_angular_speed = max_angular_speed.max(ang_speed);
+
+            let activation = body.activation();
+            let linear_threshold = activation.normalized_linear_threshold * length_unit;
+            let above_linear = lin_speed * lin_speed >= linear_threshold * linear_threshold.abs();
+            let above_angular = ang_speed * ang_speed
+                >= activation.angular_threshold * activation.angular_threshold.abs();
+            let above_any = above_linear || above_angular;
+            if above_linear {
+                above_linear_sleep_threshold += 1;
+            }
+            if above_angular {
+                above_angular_sleep_threshold += 1;
+            }
+            if above_any {
+                above_any_sleep_threshold += 1;
+            } else {
+                below_sleep_threshold += 1;
+            }
+            if activation.time_since_can_sleep >= activation.time_until_sleep {
+                sleep_timer_ready += 1;
+            }
+
+            let profile = component_profiles.entry(root).or_default();
+            profile.bodies += 1;
+            if !body.is_sleeping() {
+                profile.awake += 1;
+            }
+            if active_dynamic_handles.contains(&handle) {
+                profile.active += 1;
+            }
+            if above_any {
+                profile.above_any_sleep_threshold += 1;
+            }
+            if activation.time_since_can_sleep >= activation.time_until_sleep {
+                profile.sleep_timer_ready += 1;
+            }
+        }
+
+        let largest_component_profile = component_profiles
+            .values()
+            .max_by_key(|profile| profile.bodies)
+            .copied()
+            .unwrap_or_default();
+        let mut active_kinematic_bodies = 0usize;
+        let mut moving_active_kinematic_bodies = 0usize;
+        let mut moving_kinematic_largest_component_contacts = 0usize;
+        let mut moving_character_largest_component_contacts = 0usize;
+        let mut moving_non_character_largest_component_contacts = 0usize;
+        let mut max_moving_kinematic_linear_speed = 0.0f32;
+        for handle in self
+            .island_manager
+            .active_kinematic_bodies()
+            .iter()
+            .copied()
+        {
+            let Some(body) = self.rigid_body_set.get(handle) else {
+                continue;
+            };
+            active_kinematic_bodies += 1;
+            let moving = body.linvel().norm_squared() > f32::EPSILON
+                || body.angvel().norm_squared() > f32::EPSILON;
+            if moving {
+                moving_active_kinematic_bodies += 1;
+                max_moving_kinematic_linear_speed =
+                    max_moving_kinematic_linear_speed.max(body.linvel().norm());
+            }
+            if !moving {
+                continue;
+            }
+            let is_character = self
+                .character_controllers
+                .values()
+                .any(|state| state.body_handle == handle);
+            for collider_handle in body.colliders() {
+                for pair in self.narrow_phase.contact_pairs_with(*collider_handle) {
+                    if !pair.has_any_active_contact {
+                        continue;
+                    }
+                    let other_collider = if pair.collider1 == *collider_handle {
+                        pair.collider2
+                    } else {
+                        pair.collider1
+                    };
+                    let Some(other_body) = self
+                        .collider_set
+                        .get(other_collider)
+                        .and_then(|collider| collider.parent())
+                    else {
+                        continue;
+                    };
+                    let Some(other_index) = body_index.get(&other_body).copied() else {
+                        continue;
+                    };
+                    let other_root = find(&mut parent, other_index);
+                    if Some(other_root) == largest_component_root {
+                        moving_kinematic_largest_component_contacts += 1;
+                        if is_character {
+                            moving_character_largest_component_contacts += 1;
+                        } else {
+                            moving_non_character_largest_component_contacts += 1;
+                        }
+                    }
+                }
+            }
+        }
+
+        record_values(
+            "physics.world",
+            &[
+                ("rigid_bodies", self.rigid_body_set.len() as f64),
+                ("colliders", self.collider_set.len() as f64),
+                ("dynamic_bodies", dynamic_bodies as f64),
+                ("awake_dynamic_bodies", awake_dynamic_bodies as f64),
+                ("sleeping_dynamic_bodies", sleeping_dynamic_bodies as f64),
+                (
+                    "active_dynamic_bodies",
+                    self.island_manager.active_dynamic_bodies().len() as f64,
+                ),
+                ("kinematic_bodies", kinematic_bodies as f64),
+                ("fixed_bodies", fixed_bodies as f64),
+                ("contact_pairs", contact_pairs as f64),
+                ("active_contact_pairs", active_contact_pairs as f64),
+                ("active_contact_points", active_contact_points as f64),
+                (
+                    "active_dynamic_dynamic_pairs",
+                    active_dynamic_dynamic_pairs as f64,
+                ),
+                (
+                    "active_dynamic_static_pairs",
+                    active_dynamic_static_pairs as f64,
+                ),
+                ("dynamic_contact_components", dynamic_components as f64),
+                (
+                    "largest_dynamic_contact_component",
+                    largest_dynamic_component as f64,
+                ),
+                (
+                    "largest_component_awake_bodies",
+                    largest_component_profile.awake as f64,
+                ),
+                (
+                    "largest_component_active_bodies",
+                    largest_component_profile.active as f64,
+                ),
+                (
+                    "largest_component_above_sleep_threshold",
+                    largest_component_profile.above_any_sleep_threshold as f64,
+                ),
+                (
+                    "largest_component_sleep_timer_ready",
+                    largest_component_profile.sleep_timer_ready as f64,
+                ),
+                ("active_kinematic_bodies", active_kinematic_bodies as f64),
+                (
+                    "moving_active_kinematic_bodies",
+                    moving_active_kinematic_bodies as f64,
+                ),
+                (
+                    "moving_kinematic_largest_component_contacts",
+                    moving_kinematic_largest_component_contacts as f64,
+                ),
+                (
+                    "moving_character_largest_component_contacts",
+                    moving_character_largest_component_contacts as f64,
+                ),
+                (
+                    "moving_non_character_largest_component_contacts",
+                    moving_non_character_largest_component_contacts as f64,
+                ),
+                (
+                    "max_moving_kinematic_linear_speed",
+                    max_moving_kinematic_linear_speed as f64,
+                ),
+                (
+                    "above_linear_sleep_threshold",
+                    above_linear_sleep_threshold as f64,
+                ),
+                (
+                    "above_angular_sleep_threshold",
+                    above_angular_sleep_threshold as f64,
+                ),
+                (
+                    "above_any_sleep_threshold",
+                    above_any_sleep_threshold as f64,
+                ),
+                ("below_sleep_threshold", below_sleep_threshold as f64),
+                ("sleep_timer_ready", sleep_timer_ready as f64),
+                ("max_linear_speed", max_linear_speed as f64),
+                ("max_angular_speed", max_angular_speed as f64),
+                ("rapier_step_ms", counters.step_time_ms()),
+                (
+                    "rapier_collision_detection_ms",
+                    counters.collision_detection_time_ms(),
+                ),
+                ("rapier_broad_phase_ms", counters.broad_phase_time_ms()),
+                ("rapier_narrow_phase_ms", counters.narrow_phase_time_ms()),
+                (
+                    "rapier_island_construction_ms",
+                    counters.island_construction_time_ms(),
+                ),
+                ("rapier_update_ms", counters.update_time_ms()),
+                ("rapier_solver_ms", counters.solver_time_ms()),
+                ("rapier_velocity_assembly_ms", counters.assembly_time_ms()),
+                (
+                    "rapier_velocity_resolution_ms",
+                    counters.velocity_resolution_time_ms(),
+                ),
+                (
+                    "rapier_velocity_update_ms",
+                    counters.velocity_update_time_ms(),
+                ),
+            ],
+        );
+    }
+
     fn body_is_within_physics_envelope(&self, handle: RigidBodyHandle) -> bool {
         let Some(body) = self.rigid_body_set.get(handle) else {
             return true;
@@ -292,6 +652,16 @@ impl PhysicsWorld {
         self.gravity = vector![0.0, -gravity_y, 0.0];
     }
 
+    /// Sets the number of outer contact-solver iterations per physics step.
+    ///
+    /// This is a global Rapier integration parameter. Lower values reduce CPU
+    /// on large awake islands; higher values improve contact convergence.
+    pub fn set_solver_iterations(&mut self, iterations: usize) {
+        let iterations = iterations.max(1);
+        self.integration_parameters.num_solver_iterations =
+            NonZeroUsize::new(iterations).expect("iterations is clamped to at least one");
+    }
+
     /// Steps the physics simulation forward by dt seconds
     pub fn step(&mut self, dt: f32) {
         self.purge_invalid_bodies();
@@ -312,6 +682,7 @@ impl PhysicsWorld {
             &(),
         );
         self.purge_invalid_bodies();
+        self.record_profile_metrics();
     }
 
     /// Removes the weld-mirror joints. Weld constraints are rebuilt from Lua
@@ -718,6 +1089,18 @@ impl PhysicsWorld {
         self.lua_to_body.keys().copied().collect()
     }
 
+    pub fn has_exact_part_ids<I>(&self, ids: I, count: usize) -> bool
+    where
+        I: IntoIterator<Item = u64>,
+    {
+        self.lua_to_body.len() == count
+            && ids.into_iter().all(|id| self.lua_to_body.contains_key(&id))
+    }
+
+    pub fn all_assemblies_are_single_part(&self) -> bool {
+        self.body_to_luas.values().all(|lua_ids| lua_ids.len() == 1)
+    }
+
     /// Gets the handle for a Lua instance
     pub fn get_handle(&self, lua_id: u64) -> Option<RigidBodyHandle> {
         self.lua_to_body.get(&lua_id).copied()
@@ -741,6 +1124,16 @@ impl PhysicsWorld {
         self.rigid_body_set
             .get(handle)
             .map(|body| body.is_dynamic())
+            .unwrap_or(false)
+    }
+
+    pub fn is_part_sleeping(&self, lua_id: u64) -> bool {
+        let Some(&handle) = self.lua_to_body.get(&lua_id) else {
+            return false;
+        };
+        self.rigid_body_set
+            .get(handle)
+            .map(|body| body.is_dynamic() && body.is_sleeping())
             .unwrap_or(false)
     }
 

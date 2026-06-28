@@ -1,4 +1,4 @@
-use mlua::{UserDataFields, Value};
+use mlua::UserDataFields;
 use std::sync::Arc;
 
 use crate::game::lua::events::track_yielded_threads;
@@ -67,7 +67,7 @@ pub(super) fn add_fields<F: UserDataFields<Instance>>(fields: &mut F) {
         if let Some(old_char) = old_character {
             let threads = character_removing.fire_as_coroutines(
                 lua,
-                mlua::MultiValue::from_iter([Value::UserData(lua.create_userdata(old_char)?)]),
+                mlua::MultiValue::from_iter([Instance::cached_userdata_value(lua, &old_char)?]),
             )?;
             track_yielded_threads(lua, threads)?;
         }
@@ -75,7 +75,7 @@ pub(super) fn add_fields<F: UserDataFields<Instance>>(fields: &mut F) {
         if let Some(new_char) = new_character {
             let threads = character_added.fire_as_coroutines(
                 lua,
-                mlua::MultiValue::from_iter([Value::UserData(lua.create_userdata(new_char)?)]),
+                mlua::MultiValue::from_iter([Instance::cached_userdata_value(lua, &new_char)?]),
             )?;
             track_yielded_threads(lua, threads)?;
         }

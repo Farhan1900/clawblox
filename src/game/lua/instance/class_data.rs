@@ -91,6 +91,31 @@ impl Default for PartData {
 }
 
 impl PartData {
+    pub fn has_physics_sync_dirty(&self) -> bool {
+        self.position_dirty
+            || self.cframe_dirty
+            || self.size_dirty
+            || self.anchored_dirty
+            || self.interaction_dirty
+            || self.velocity_dirty
+            || self.angular_velocity_dirty
+            || self.shape_dirty
+            || self.custom_physical_properties_dirty
+    }
+
+    pub fn clear_physics_sync_dirty(&mut self) {
+        self.size_dirty = false;
+        self.anchored_dirty = false;
+        self.can_collide_dirty = false;
+        self.interaction_dirty = false;
+        self.velocity_dirty = false;
+        self.angular_velocity_dirty = false;
+        self.shape_dirty = false;
+        self.custom_physical_properties_dirty = false;
+        self.position_dirty = false;
+        self.cframe_dirty = false;
+    }
+
     fn default_density_for_material(material: Material) -> f32 {
         match material {
             Material::Air => 0.0,

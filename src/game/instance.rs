@@ -9,6 +9,8 @@ use super::lua::instance::{
 };
 use super::lua::LuaRuntime;
 use super::physics::PhysicsWorld;
+use super::profiling::ProfileFrame;
+use crate::config::PhysicsConfig;
 
 mod body_movers;
 mod character_controller;
@@ -25,9 +27,9 @@ mod workspace_physics;
 
 pub use observation::{
     BillboardGuiJson, BillboardLabelJson, EntityAabb, EntityObb, GameEvent, GuiElement, MapInfo,
-    OtherPlayerInfo, PlayerInfo, PlayerObservation, SpectatorEntity, SpectatorObservation,
-    SpectatorPlayerAnimation, SpectatorPlayerInfo, SpectatorRender, SpectatorReplicatedEvent,
-    SpectatorSound, UDim2Json, VisibleEntity, WorldEntity, WorldInfo,
+    OtherPlayerInfo, PlayerInfo, PlayerObservation, ReplicationObservationUpdate, SpectatorEntity,
+    SpectatorObservation, SpectatorPlayerAnimation, SpectatorPlayerInfo, SpectatorRender,
+    SpectatorReplicatedEvent, SpectatorSound, UDim2Json, VisibleEntity, WorldEntity, WorldInfo,
 };
 
 /// Default AFK timeout in seconds (5 minutes)
@@ -37,11 +39,20 @@ const DEFAULT_AFK_TIMEOUT_SECS: u64 = 300;
 const AFK_CHECK_INTERVAL_TICKS: u64 = 60;
 
 /// Default max players when not specified
-const DEFAULT_MAX_PLAYERS: u32 = 8;
+pub(crate) const DEFAULT_MAX_PLAYERS: u32 = 8;
 /// Default visibility radius for other players in observations.
-const DEFAULT_OBSERVATION_RADIUS: f32 = 100.0;
+pub(crate) const DEFAULT_OBSERVATION_RADIUS: f32 = 100.0;
 const MAX_REPLICATED_EVENTS_BUFFER: usize = 512;
 const MAX_RECENT_EVENTS_PER_OBSERVATION: usize = 128;
+
+#[derive(Clone, Copy, Debug, Default)]
+pub(super) struct WorkspaceFeatureCounts {
+    pub body_movers: usize,
+    pub vector_forces: usize,
+    pub align_constraints: usize,
+    pub weld_constraints: usize,
+    pub terrain_with_water: usize,
+}
 
 /// A game instance that runs Lua scripts with Rapier physics.
 /// This is the Roblox-like architecture where:
@@ -73,6 +84,8 @@ pub struct GameInstance {
     pub max_players: u32,
     /// Maximum distance for player-to-player observation visibility.
     pub observation_radius: f32,
+    /// Whether player character controllers physically couple to dynamic world objects.
+    player_object_physics: bool,
     /// When the instance became empty (for garbage collection)
     /// None if instance has players, Some(Instant) when last player left
     pub empty_since: Option<Instant>,
@@ -82,13 +95,20 @@ pub struct GameInstance {
     pub halted_error: Option<String>,
     /// Previous frame's touch pairs for Touched/TouchEnded event detection
     prev_touches: HashSet<(u64, u64)>,
+    /// Dynamic physics parts whose final sleeping state has already been
+    /// reflected back into Lua part fields.
+    physics_sleep_synced_parts: HashSet<u64>,
+    /// Feature counts gathered during the current tick's Workspace scan.
+    /// These let later physics phases skip full-tree scans when no matching
+    /// class exists while preserving exact behavior when any feature is present.
+    workspace_feature_counts: WorkspaceFeatureCounts,
     /// Ring buffer of recent replicated transient events (shots, impacts, etc.)
     replicated_events: VecDeque<SpectatorReplicatedEvent>,
     /// Monotonic event id assigned by server for dedupe/order.
     next_replicated_event_id: u64,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum GameStatus {
     Waiting,
     Playing,
@@ -96,7 +116,7 @@ pub enum GameStatus {
 }
 
 /// Controls how Lua errors are handled by a GameInstance.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum ErrorMode {
     /// Log errors and continue (production server behavior)
     Continue,
@@ -164,10 +184,13 @@ impl GameInstance {
             afk_timeout: Duration::from_secs(DEFAULT_AFK_TIMEOUT_SECS),
             max_players,
             observation_radius,
+            player_object_physics: true,
             empty_since: Some(Instant::now()), // Starts empty
             error_mode,
             halted_error: None,
             prev_touches: HashSet::new(),
+            physics_sleep_synced_parts: HashSet::new(),
+            workspace_feature_counts: WorkspaceFeatureCounts::default(),
             replicated_events: VecDeque::new(),
             next_replicated_event_id: 1,
         }
@@ -183,9 +206,98 @@ impl GameInstance {
         (self.max_players as usize).saturating_sub(self.players.len())
     }
 
+    pub fn set_player_object_physics(&mut self, enabled: bool) {
+        self.player_object_physics = enabled;
+    }
+
+    pub fn player_object_physics(&self) -> bool {
+        self.player_object_physics
+    }
+
+    pub fn set_physics_config(&mut self, config: &PhysicsConfig) {
+        self.physics.set_solver_iterations(config.solver_iterations);
+    }
+
     /// Returns milliseconds since game instance was created
     pub fn elapsed_ms(&self) -> u64 {
         self.start_time.elapsed().as_millis() as u64
+    }
+
+    pub(crate) fn restore_elapsed_ms(&mut self, elapsed_ms: u64) {
+        let now = Instant::now();
+        self.start_time = now
+            .checked_sub(Duration::from_millis(elapsed_ms))
+            .unwrap_or(now);
+    }
+
+    pub(crate) fn snapshot_afk_timeout_ms(&self) -> u64 {
+        self.afk_timeout.as_millis() as u64
+    }
+
+    pub(crate) fn restore_afk_timeout_ms(&mut self, timeout_ms: u64) {
+        self.afk_timeout = Duration::from_millis(timeout_ms);
+    }
+
+    pub(crate) fn snapshot_empty_since_elapsed_ms(&self) -> Option<u64> {
+        self.empty_since
+            .and_then(|empty_since| Instant::now().checked_duration_since(empty_since))
+            .map(|elapsed| elapsed.as_millis() as u64)
+    }
+
+    pub(crate) fn restore_empty_since_elapsed_ms(&mut self, elapsed_ms: Option<u64>) {
+        let now = Instant::now();
+        self.empty_since = elapsed_ms.map(|elapsed_ms| {
+            now.checked_sub(Duration::from_millis(elapsed_ms))
+                .unwrap_or(now)
+        });
+    }
+
+    pub(crate) fn snapshot_player_idle_ms(&self, agent_id: Uuid) -> Option<u64> {
+        self.player_last_activity
+            .get(&agent_id)
+            .and_then(|last_active| Instant::now().checked_duration_since(*last_active))
+            .map(|elapsed| elapsed.as_millis() as u64)
+    }
+
+    pub(crate) fn restore_player_idle_ms(&mut self, agent_id: Uuid, idle_ms: u64) {
+        let now = Instant::now();
+        let last_active = now
+            .checked_sub(Duration::from_millis(idle_ms))
+            .unwrap_or(now);
+        self.player_last_activity.insert(agent_id, last_active);
+    }
+
+    pub(crate) fn snapshot_replicated_events(&self) -> (u64, Vec<SpectatorReplicatedEvent>) {
+        (
+            self.next_replicated_event_id,
+            self.replicated_events.iter().cloned().collect(),
+        )
+    }
+
+    pub(crate) fn restore_replicated_events(
+        &mut self,
+        next_id: u64,
+        events: Vec<SpectatorReplicatedEvent>,
+    ) {
+        self.next_replicated_event_id = next_id.max(1);
+        self.replicated_events = events
+            .into_iter()
+            .rev()
+            .take(MAX_REPLICATED_EVENTS_BUFFER)
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .collect();
+    }
+
+    pub(crate) fn snapshot_prev_touches(&self) -> Vec<(u64, u64)> {
+        let mut touches = self.prev_touches.iter().copied().collect::<Vec<_>>();
+        touches.sort_unstable();
+        touches
+    }
+
+    pub(crate) fn restore_prev_touches(&mut self, touches: Vec<(u64, u64)>) {
+        self.prev_touches = touches.into_iter().collect();
     }
 
     /// Creates a new game instance with a Lua script
@@ -273,6 +385,7 @@ impl GameInstance {
 
     /// Main game loop tick - called at 60 Hz
     pub fn tick(&mut self) {
+        let mut profile = ProfileFrame::new("instance.tick");
         // In Halt mode, stop ticking once an error has occurred
         if self.halted_error.is_some() {
             return;
@@ -281,13 +394,22 @@ impl GameInstance {
         let dt = 1.0 / 60.0;
         // Process kick requests from Lua scripts (e.g., Player:Kick())
         self.process_kick_requests();
+        if let Some(profile) = profile.as_mut() {
+            profile.mark("kick_requests");
+        }
 
         // Check for AFK players periodically (every second)
         if self.tick % AFK_CHECK_INTERVAL_TICKS == 0 {
             self.check_afk_players();
         }
+        if let Some(profile) = profile.as_mut() {
+            profile.mark("afk");
+        }
 
         self.process_pending_bot_requests();
+        if let Some(profile) = profile.as_mut() {
+            profile.mark("bot_requests");
+        }
 
         // Run start-of-frame Lua work before physics (resume yields + Stepped).
         if let Some(runtime) = &self.lua_runtime {
@@ -298,8 +420,14 @@ impl GameInstance {
                 }
             }
         }
+        if let Some(profile) = profile.as_mut() {
+            profile.mark("begin_frame");
+        }
 
         tick_pipeline::run_tick_phases(self, dt);
+        if let Some(profile) = profile.as_mut() {
+            profile.mark("tick_phases");
+        }
         if self.halted_error.is_some() {
             return;
         }
@@ -313,10 +441,19 @@ impl GameInstance {
                 }
             }
         }
+        if let Some(profile) = profile.as_mut() {
+            profile.mark("end_frame");
+        }
 
         self.process_replicated_events();
+        if let Some(profile) = profile.as_mut() {
+            profile.mark("replicated_events");
+        }
 
         self.tick += 1;
+        if let Some(profile) = profile {
+            profile.finish();
+        }
     }
 
     fn process_replicated_events(&mut self) {

@@ -15,9 +15,9 @@ use dashmap::DashMap;
 use flate2::{write::GzEncoder, Compression};
 use futures_util::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs::OpenOptions;
-use std::io::Write;
+use std::io::{BufRead, Write};
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -39,7 +39,7 @@ use tower_http::services::ServeDir;
 
 use clawblox::{
     agent_runner::{start_agent_tmux_for_local_world, AgentRunnerOptions},
-    config::{SpeechConfig, SpeechMode},
+    config::{PhysicsConfig, SpeechConfig, SpeechMode},
     db,
     game::{
         self,
@@ -50,7 +50,10 @@ use clawblox::{
             SERVER_PREDICTED_END_REASON, STREAM_TTL_SECS,
         },
         find_or_create_instance,
-        instance::{ErrorMode, GameInstance, PlayerObservation, SpectatorObservation},
+        instance::{
+            ErrorMode, GameInstance, PlayerObservation, SpectatorEntity, SpectatorObservation,
+            SpectatorPlayerInfo, SpectatorRender,
+        },
         script_bundle::load_world_and_entry_script,
         GameManager, GameManagerHandle,
     },
@@ -185,6 +188,9 @@ enum Commands {
         /// URL base path to mount the replay runtime under
         #[arg(long, default_value = "/")]
         base_path: String,
+        /// URL base path to use when resolving replay assets
+        #[arg(long, hide = true)]
+        asset_base_path: Option<String>,
         /// Override the world directory (for serving assets)
         #[arg(long)]
         world_dir: Option<PathBuf>,
@@ -192,6 +198,8 @@ enum Commands {
         #[arg(long)]
         agent: Option<PathBuf>,
     },
+    /// Serve .clawrec data through the backend-agnostic replay adapter protocol
+    ReplayAdapter,
     /// Browse project recordings and open them in the replay UI
     App {
         /// Path to project directory
@@ -310,9 +318,11 @@ fn main() {
             speed,
             port,
             base_path,
+            asset_base_path,
             world_dir,
             agent,
-        } => run_replay(file, speed, port, &base_path, world_dir, agent),
+        } => run_replay(file, speed, port, &base_path, asset_base_path.as_deref(), world_dir, agent),
+        Commands::ReplayAdapter => run_replay_adapter(),
         Commands::App {
             path,
             port,
@@ -1942,6 +1952,8 @@ fn run_game(
             game_handle.async_bridge.clone(),
             ErrorMode::Halt,
         );
+        instance.set_player_object_physics(config.clawblox.player_object_physics);
+        instance.set_physics_config(&config.clawblox.physics);
         instance.instance_id = snapshot.instance.instance_id;
         instance.init_runtime();
         clawblox::snapshot::restore_game_instance(&mut instance, &snapshot.instance)
@@ -1949,11 +1961,6 @@ fn run_game(
                 eprintln!("Error: failed to restore snapshot state: {}", e);
                 std::process::exit(1);
             });
-        // Re-run the script bundle on resume so legacy snapshots captured before
-        // script-instance materialization still regain their runtime handlers.
-        // The bundle is now idempotent and only ensures Script/ModuleScript
-        // instances exist in the restored DataModel.
-        instance.load_script(&script);
         game::insert_instance(&game_handle, instance)
     } else {
         let result = find_or_create_instance(
@@ -1963,6 +1970,11 @@ fn run_game(
             config.observation.radius,
             Some(&script),
         );
+        if let Some(handle) = game_handle.instances.get(&result.instance_id) {
+            let mut instance = handle.write();
+            instance.set_player_object_physics(config.clawblox.player_object_physics);
+            instance.set_physics_config(&config.clawblox.physics);
+        }
         result.instance_id
     };
 
@@ -1997,6 +2009,7 @@ fn run_game(
     let rt = tokio::runtime::Runtime::new().unwrap();
     let resume_snapshot_for_server = resume_snapshot.clone();
     rt.block_on(async {
+        let mut recording_manifest_target: Option<(PathBuf, PathBuf)> = None;
         let recording_writer = if record {
             let rec_dir = if let Some(dir) = record_dir.as_ref() {
                 if dir.is_absolute() {
@@ -2022,6 +2035,7 @@ fn run_game(
                     if let Some(state_root) = rec_dir.parent() {
                         let manifest_path = manifest::manifest_path_for_state_root(state_root);
                         let _ = manifest::record_recording(&manifest_path, &rec_path, "clawrec");
+                        recording_manifest_target = Some((manifest_path, rec_path.clone()));
                     }
                     Some(Arc::new(tokio::sync::Mutex::new(writer)))
                 }
@@ -2048,6 +2062,8 @@ fn run_game(
             world_script_source: Arc::new(script.clone()),
             max_players: config.max_players,
             observation_radius: config.observation.radius,
+            player_object_physics: config.clawblox.player_object_physics,
+            physics_config: config.clawblox.physics.clone(),
             allow_reset: config.agent_api.allow_reset,
             afk_timeout_secs: config.afk_timeout,
             error_mode: ErrorMode::Halt,
@@ -2100,6 +2116,9 @@ fn run_game(
             recording_task = Some(tokio::spawn(async move {
                 let mut tick_interval = interval(Duration::from_millis(16));
                 let mut last_obs_key: Option<(u64, u64)> = None;
+                let mut base_observation: Option<SpectatorObservation> = None;
+                let mut known_entity_ids: HashSet<u32> = HashSet::new();
+                let mut replication_revision: u64 = 0;
                 let start = Instant::now();
                 let mut consecutive_observe_failures: u32 = 0;
                 let mut total_observe_failures: u64 = 0;
@@ -2111,8 +2130,73 @@ fn run_game(
                             }
                         }
                         _ = tick_interval.tick() => {
-                            let obs = game::get_spectator_observation_for_instance(&game_handle, instance_id);
-                            match obs {
+                            if base_observation.is_none() {
+                                let obs = game::get_spectator_observation_for_instance(&game_handle, instance_id);
+                                match obs {
+                                    Ok(mut obs) => {
+                                        if consecutive_observe_failures > 0 {
+                                            eprintln!(
+                                                "[recording] spectator observation recovered for instance {} after {} consecutive failures ({} total)",
+                                                instance_id,
+                                                consecutive_observe_failures,
+                                                total_observe_failures,
+                                            );
+                                            consecutive_observe_failures = 0;
+                                        }
+                                        let obs_key = (obs.tick, obs.server_time_ms);
+                                        if last_obs_key != Some(obs_key) {
+                                            resolve_local_spectator_assets(&mut obs, &recording_base_path);
+                                            known_entity_ids = obs.entities.iter().map(|entity| entity.id).collect();
+                                            replication_revision = game::replication_revision_for_instance(&game_handle, instance_id)
+                                                .unwrap_or(replication_revision);
+                                            let time_ms = start.elapsed().as_millis() as u64;
+                                            let recording_tick = {
+                                                let mut timeline = recording_timeline.lock().unwrap();
+                                                timeline.note_source_tick(obs.tick)
+                                            };
+                                            let mut recorded_obs = obs.clone();
+                                            recorded_obs.tick = recording_tick;
+                                            recorded_obs.server_time_ms = time_ms;
+                                            let mut w = writer.lock().await;
+                                            w.record_tick(recording_tick, time_ms, &recorded_obs).await;
+                                            last_obs_key = Some(obs_key);
+                                            base_observation = Some(obs);
+                                        }
+                                    }
+                                    Err(err) => {
+                                        consecutive_observe_failures = consecutive_observe_failures.saturating_add(1);
+                                        total_observe_failures = total_observe_failures.saturating_add(1);
+
+                                        if consecutive_observe_failures == 1 || consecutive_observe_failures % 60 == 0 {
+                                            eprintln!(
+                                                "[recording] spectator observation failed for instance {} (consecutive={}, total={}): {}",
+                                                instance_id,
+                                                consecutive_observe_failures,
+                                                total_observe_failures,
+                                                err,
+                                            );
+                                        }
+
+                                        if consecutive_observe_failures >= 1800 {
+                                            eprintln!(
+                                                "[recording] stopping spectator recorder for instance {} after {} consecutive observation failures",
+                                                instance_id,
+                                                consecutive_observe_failures,
+                                            );
+                                            break;
+                                        }
+                                    },
+                                }
+                                continue;
+                            }
+
+                            let update = game::get_replication_observation_update_for_instance(
+                                &game_handle,
+                                instance_id,
+                                &known_entity_ids,
+                                replication_revision,
+                            );
+                            match update {
                                 Ok(mut obs) => {
                                     if consecutive_observe_failures > 0 {
                                         eprintln!(
@@ -2123,18 +2207,43 @@ fn run_game(
                                         );
                                         consecutive_observe_failures = 0;
                                     }
-                                    let obs_key = (obs.tick, obs.server_time_ms);
+                                    let Some(base) = base_observation.as_mut() else {
+                                        continue;
+                                    };
+                                    if obs.observation.tick < base.tick
+                                        || obs.latest_revision < replication_revision
+                                    {
+                                        base_observation = None;
+                                        known_entity_ids.clear();
+                                        replication_revision = 0;
+                                        last_obs_key = None;
+                                        continue;
+                                    }
+                                    replication_revision = obs.latest_revision;
+                                    resolve_local_spectator_assets(&mut obs.observation, &recording_base_path);
+                                    let obs_key = (obs.observation.tick, obs.observation.server_time_ms);
                                     if last_obs_key != Some(obs_key) {
-                                        resolve_local_spectator_assets(&mut obs, &recording_base_path);
+                                        for entity in &obs.observation.entities {
+                                            known_entity_ids.insert(entity.id);
+                                        }
+                                        for id in &obs.removed_entity_ids {
+                                            known_entity_ids.remove(id);
+                                        }
+                                        apply_replication_update_to_observation(
+                                            base,
+                                            obs.observation,
+                                            &obs.removed_entity_ids,
+                                        );
                                         let time_ms = start.elapsed().as_millis() as u64;
                                         let recording_tick = {
                                             let mut timeline = recording_timeline.lock().unwrap();
-                                            timeline.note_source_tick(obs.tick)
+                                            timeline.note_source_tick(base.tick)
                                         };
-                                        obs.tick = recording_tick;
-                                        obs.server_time_ms = time_ms;
+                                        let mut recorded_obs = base.clone();
+                                        recorded_obs.tick = recording_tick;
+                                        recorded_obs.server_time_ms = time_ms;
                                         let mut w = writer.lock().await;
-                                        w.record_tick(recording_tick, time_ms, &obs).await;
+                                        w.record_tick(recording_tick, time_ms, &recorded_obs).await;
                                         last_obs_key = Some(obs_key);
                                     }
                                 }
@@ -2282,7 +2391,21 @@ fn run_game(
         }
         if let Some(writer) = recording_writer {
             let mut w = writer.lock().await;
-            w.close(0, 0).await;
+            let info = w.close(0, 0).await;
+            if let Some((manifest_path, rec_path)) = recording_manifest_target {
+                if let Err(err) = manifest::record_recording_info(
+                    &manifest_path,
+                    &rec_path,
+                    manifest::ManifestRecordingInfo {
+                        first_tick: info.first_tick,
+                        total_ticks: info.total_ticks,
+                        tick_rate: info.tick_rate,
+                        duration_ms: info.duration_ms,
+                    },
+                ) {
+                    eprintln!("Warning: failed to update recording manifest info: {}", err);
+                }
+            }
             eprintln!("Recording saved.");
         }
 
@@ -2296,10 +2419,12 @@ fn run_replay(
     speed: f32,
     port: u16,
     base_path: &str,
+    asset_base_path: Option<&str>,
     world_dir_override: Option<PathBuf>,
     agent_log_file: Option<PathBuf>,
 ) {
     let base_path = normalize_base_path(base_path);
+    let asset_base_path = normalize_base_path(asset_base_path.unwrap_or(&base_path));
     let rt = tokio::runtime::Runtime::new().unwrap();
     rt.block_on(async {
         let reader = recording::RecordingReader::open(&file).await.unwrap_or_else(|e| {
@@ -2397,10 +2522,12 @@ fn run_replay(
             reader: reader.clone(),
             playback: playback.clone(),
             base_path: base_path.clone(),
+            asset_base_path: asset_base_path.clone(),
             renderer_manifest,
             agent_timeline,
             replay_metadata,
             world_dir: world_dir.clone(),
+            camera: Arc::new(Mutex::new(ReplayCameraBridge::default())),
         };
 
         let cors = CorsLayer::new()
@@ -2412,12 +2539,14 @@ fn run_replay(
             .route("/", get(replay_ui_index))
             .route("/ui", get(replay_ui_index))
             .route("/ui/{*path}", get(local_ui_file))
+            .route("/replay/view", get(replay_view_index))
             .route("/spectate/ws", get(replay_spectate_ws))
             .route("/renderer/manifest", get(replay_renderer_manifest))
             .route("/replay/info", get(replay_info))
             .route("/replay/state", get(replay_state_at))
             .route("/replay/agent", get(replay_agent_messages))
             .route("/replay/metadata", get(replay_metadata_route))
+            .route("/replay/camera", get(replay_camera_get).put(replay_camera_put))
             .route("/replay/seek", post(replay_seek))
             .route("/replay/speed", post(replay_speed))
             .route("/replay/skip-idle", post(replay_skip_idle))
@@ -2451,15 +2580,434 @@ fn run_replay(
     });
 }
 
+const REPLAY_ADAPTER_SCHEMA: &str = "clawblox.spectator.v1";
+
+struct ReplayAdapterRecording {
+    reader: recording::RecordingReader,
+    meta: recording::RecordingMeta,
+    first_tick: u64,
+    world_dir: PathBuf,
+    scene_id: String,
+}
+
+#[derive(Deserialize)]
+struct JsonRpcRequest {
+    id: serde_json::Value,
+    method: String,
+    #[serde(default)]
+    params: serde_json::Value,
+}
+
+#[derive(Deserialize)]
+struct AdapterOpenParams {
+    recording_path: PathBuf,
+    #[serde(default)]
+    context: AdapterOpenContext,
+}
+
+#[derive(Default, Deserialize)]
+struct AdapterOpenContext {
+    world_dir: Option<PathBuf>,
+}
+
+#[derive(Deserialize)]
+struct AdapterHandleParams {
+    handle: String,
+}
+
+#[derive(Deserialize)]
+struct AdapterStateAtParams {
+    handle: String,
+    tick: Option<u64>,
+    time_ms: Option<u64>,
+}
+
+#[derive(Deserialize)]
+struct AdapterDeltaAtParams {
+    handle: String,
+    from_tick: u64,
+    tick: u64,
+}
+
+#[derive(Deserialize)]
+struct AdapterEventsBetweenParams {
+    handle: String,
+    start_tick: Option<u64>,
+    end_tick: Option<u64>,
+    #[serde(default)]
+    kinds: Vec<String>,
+}
+
+#[derive(Serialize)]
+struct AdapterOpenResult {
+    handle: String,
+    info: AdapterRecordingInfo,
+    scene_id: String,
+    state_schema: &'static str,
+}
+
+#[derive(Serialize)]
+struct AdapterRecordingInfo {
+    first_tick: u64,
+    last_tick: u64,
+    tick_rate: u32,
+    duration_ms: u64,
+}
+
+#[derive(Serialize)]
+struct AdapterReplayFrame {
+    tick: u64,
+    time_ms: u64,
+    scene_id: String,
+    state: AdapterReplayFrameState,
+}
+
+#[derive(Serialize)]
+struct AdapterReplayFrameState {
+    schema: &'static str,
+    payload: SpectatorObservation,
+}
+
+#[derive(Serialize)]
+struct AdapterEventsResult {
+    events: Vec<AdapterReplayEvent>,
+}
+
+#[derive(Serialize)]
+struct AdapterReplayEvent {
+    id: String,
+    kind: String,
+    tick: u64,
+    time_ms: u64,
+    payload: serde_json::Value,
+}
+
+#[derive(Serialize)]
+struct AdapterAssetsResult {
+    assets: Vec<AdapterAsset>,
+}
+
+#[derive(Serialize)]
+struct AdapterAsset {
+    id: String,
+    path: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    url_path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    content_type: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    size_bytes: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    scene_id: Option<String>,
+}
+
+fn run_replay_adapter() {
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let stdin = std::io::stdin();
+    let mut stdout = std::io::stdout();
+    let mut recordings: HashMap<String, ReplayAdapterRecording> = HashMap::new();
+    let mut next_handle: u64 = 1;
+
+    for line in stdin.lock().lines() {
+        let response = match line {
+            Ok(line) if line.trim().is_empty() => continue,
+            Ok(line) => match serde_json::from_str::<JsonRpcRequest>(line.trim()) {
+                Ok(request) => {
+                    let id = request.id.clone();
+                    match rt.block_on(handle_replay_adapter_request(
+                        request,
+                        &mut recordings,
+                        &mut next_handle,
+                    )) {
+                        Ok(result) => serde_json::json!({
+                            "jsonrpc": "2.0",
+                            "id": id,
+                            "result": result,
+                        }),
+                        Err(message) => serde_json::json!({
+                            "jsonrpc": "2.0",
+                            "id": id,
+                            "error": {
+                                "code": -32000,
+                                "message": message,
+                            },
+                        }),
+                    }
+                }
+                Err(err) => serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "id": null,
+                    "error": {
+                        "code": -32700,
+                        "message": format!("invalid JSON-RPC request: {}", err),
+                    },
+                }),
+            },
+            Err(err) => {
+                eprintln!("replay adapter stdin error: {}", err);
+                break;
+            }
+        };
+
+        if serde_json::to_writer(&mut stdout, &response).is_err() {
+            break;
+        }
+        if stdout.write_all(b"\n").is_err() || stdout.flush().is_err() {
+            break;
+        }
+    }
+}
+
+async fn handle_replay_adapter_request(
+    request: JsonRpcRequest,
+    recordings: &mut HashMap<String, ReplayAdapterRecording>,
+    next_handle: &mut u64,
+) -> Result<serde_json::Value, String> {
+    match request.method.as_str() {
+        "open" => {
+            let params: AdapterOpenParams = serde_json::from_value(request.params)
+                .map_err(|err| format!("invalid open params: {}", err))?;
+            let reader = recording::RecordingReader::open(&params.recording_path)
+                .await
+                .map_err(|err| format!("failed to open recording: {}", err))?;
+            let meta = reader
+                .meta()
+                .await
+                .map_err(|err| format!("failed to read recording metadata: {}", err))?;
+            let first_tick = reader
+                .first_tick()
+                .ok_or_else(|| "recording has no checkpoints".to_string())?;
+            let world_dir = params
+                .context
+                .world_dir
+                .filter(|path| !path.as_os_str().is_empty())
+                .unwrap_or_else(|| PathBuf::from(&meta.world_dir));
+            let scene_id = clawblox_replay_scene_id(&meta);
+            let handle = format!("clawrec-{}", *next_handle);
+            *next_handle += 1;
+            let result = AdapterOpenResult {
+                handle: handle.clone(),
+                info: AdapterRecordingInfo {
+                    first_tick,
+                    last_tick: meta.total_ticks,
+                    tick_rate: meta.tick_rate,
+                    duration_ms: meta.duration_ms,
+                },
+                scene_id: scene_id.clone(),
+                state_schema: REPLAY_ADAPTER_SCHEMA,
+            };
+            recordings.insert(
+                handle,
+                ReplayAdapterRecording {
+                    reader,
+                    meta,
+                    first_tick,
+                    world_dir,
+                    scene_id,
+                },
+            );
+            serde_json::to_value(result).map_err(|err| err.to_string())
+        }
+        "state_at" => {
+            let params: AdapterStateAtParams = serde_json::from_value(request.params)
+                .map_err(|err| format!("invalid state_at params: {}", err))?;
+            let recording = recordings
+                .get(&params.handle)
+                .ok_or_else(|| format!("unknown replay adapter handle: {}", params.handle))?;
+            let tick = adapter_requested_tick(recording, params.tick, params.time_ms)?;
+            let obs = recording
+                .reader
+                .get_state_at(tick)
+                .await
+                .map_err(|err| format!("failed to load state at tick {}: {}", tick, err))?;
+            let frame = AdapterReplayFrame {
+                tick: obs.tick,
+                time_ms: obs.server_time_ms,
+                scene_id: recording.scene_id.clone(),
+                state: AdapterReplayFrameState {
+                    schema: REPLAY_ADAPTER_SCHEMA,
+                    payload: obs,
+                },
+            };
+            serde_json::to_value(frame).map_err(|err| err.to_string())
+        }
+        "delta_at" => {
+            let params: AdapterDeltaAtParams = serde_json::from_value(request.params)
+                .map_err(|err| format!("invalid delta_at params: {}", err))?;
+            let recording = recordings
+                .get(&params.handle)
+                .ok_or_else(|| format!("unknown replay adapter handle: {}", params.handle))?;
+            let tick = params.tick.clamp(recording.first_tick, recording.meta.total_ticks);
+            let from_tick = params.from_tick.clamp(recording.first_tick, tick);
+            recording
+                .reader
+                .get_spectator_delta_between(from_tick, tick)
+                .await
+                .map_err(|err| format!("failed to load delta {}..{}: {}", from_tick, tick, err))
+        }
+        "events_between" => {
+            let params: AdapterEventsBetweenParams = serde_json::from_value(request.params)
+                .map_err(|err| format!("invalid events_between params: {}", err))?;
+            let recording = recordings
+                .get(&params.handle)
+                .ok_or_else(|| format!("unknown replay adapter handle: {}", params.handle))?;
+            let include_chat = params.kinds.is_empty() || params.kinds.iter().any(|kind| kind == "chat");
+            let mut events = Vec::new();
+            if include_chat {
+                let start_tick = params.start_tick.unwrap_or(recording.first_tick);
+                let end_tick = params.end_tick.unwrap_or(recording.meta.total_ticks);
+                let messages = recording
+                    .reader
+                    .get_chat_messages(start_tick, end_tick)
+                    .await
+                    .map_err(|err| format!("failed to load chat events: {}", err))?;
+                events.extend(messages.into_iter().map(|message| AdapterReplayEvent {
+                    id: message.message_id.clone(),
+                    kind: "chat".to_string(),
+                    tick: message.tick,
+                    time_ms: message.time_ms,
+                    payload: serde_json::json!({
+                        "id": message.message_id,
+                        "agent_id": message.agent_id,
+                        "agent_name": message.agent_name,
+                        "content": message.content,
+                        "created_at": message.created_at,
+                        "delivery_mode": message.delivery_mode,
+                        "hearing_radius": message.hearing_radius,
+                        "heard_by": message.heard_by,
+                        "audibility": message.audibility,
+                    }),
+                }));
+            }
+            serde_json::to_value(AdapterEventsResult { events }).map_err(|err| err.to_string())
+        }
+        "assets" => {
+            let params: AdapterHandleParams = serde_json::from_value(request.params)
+                .map_err(|err| format!("invalid assets params: {}", err))?;
+            let recording = recordings
+                .get(&params.handle)
+                .ok_or_else(|| format!("unknown replay adapter handle: {}", params.handle))?;
+            serde_json::to_value(AdapterAssetsResult {
+                assets: collect_clawblox_replay_assets(recording),
+            })
+            .map_err(|err| err.to_string())
+        }
+        "close" => {
+            let params: AdapterHandleParams = serde_json::from_value(request.params)
+                .map_err(|err| format!("invalid close params: {}", err))?;
+            recordings.remove(&params.handle);
+            Ok(serde_json::json!({ "ok": true }))
+        }
+        other => Err(format!("unsupported replay adapter method: {}", other)),
+    }
+}
+
+fn adapter_requested_tick(
+    recording: &ReplayAdapterRecording,
+    tick: Option<u64>,
+    time_ms: Option<u64>,
+) -> Result<u64, String> {
+    if let Some(tick) = tick {
+        return Ok(tick.clamp(recording.first_tick, recording.meta.total_ticks));
+    }
+    if let Some(time_ms) = time_ms {
+        let offset = time_ms.saturating_mul(recording.meta.tick_rate as u64) / 1000;
+        return Ok(recording
+            .first_tick
+            .saturating_add(offset)
+            .min(recording.meta.total_ticks));
+    }
+    Ok(recording.first_tick)
+}
+
+fn clawblox_replay_scene_id(meta: &recording::RecordingMeta) -> String {
+    let name = if meta.world_name.trim().is_empty() {
+        meta.world_dir.trim()
+    } else {
+        meta.world_name.trim()
+    };
+    format!("clawblox:{}", name)
+}
+
+fn collect_clawblox_replay_assets(recording: &ReplayAdapterRecording) -> Vec<AdapterAsset> {
+    let mut assets = Vec::new();
+    for root_name in ["assets", "static", "renderer"] {
+        let root = recording.world_dir.join(root_name);
+        collect_clawblox_replay_assets_under(
+            &recording.scene_id,
+            root_name,
+            &root,
+            &root,
+            &mut assets,
+        );
+    }
+    assets.sort_by(|a, b| a.id.cmp(&b.id));
+    assets
+}
+
+fn collect_clawblox_replay_assets_under(
+    scene_id: &str,
+    root_name: &str,
+    root: &Path,
+    dir: &Path,
+    out: &mut Vec<AdapterAsset>,
+) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            collect_clawblox_replay_assets_under(scene_id, root_name, root, &path, out);
+            continue;
+        }
+        if !path.is_file() {
+            continue;
+        }
+        let Ok(rel) = path.strip_prefix(root) else {
+            continue;
+        };
+        let rel = rel.to_string_lossy().replace('\\', "/");
+        let url_path = format!("/{}/{}", root_name, rel);
+        let size_bytes = entry.metadata().ok().map(|metadata| metadata.len());
+        out.push(AdapterAsset {
+            id: format!("{}:{}", root_name, rel),
+            path: path.to_string_lossy().to_string(),
+            url_path: Some(url_path),
+            content_type: replay_adapter_content_type_for_path(&path).map(str::to_string),
+            size_bytes,
+            scene_id: Some(scene_id.to_string()),
+        });
+    }
+}
+
+fn replay_adapter_content_type_for_path(path: &Path) -> Option<&'static str> {
+    match path.extension().and_then(|ext| ext.to_str()).unwrap_or("").to_ascii_lowercase().as_str() {
+        "glb" => Some("model/gltf-binary"),
+        "gltf" => Some("model/gltf+json"),
+        "png" => Some("image/png"),
+        "jpg" | "jpeg" => Some("image/jpeg"),
+        "webp" => Some("image/webp"),
+        "gif" => Some("image/gif"),
+        "js" => Some("text/javascript"),
+        "css" => Some("text/css"),
+        "json" => Some("application/json"),
+        "wasm" => Some("application/wasm"),
+        _ => None,
+    }
+}
+
 #[derive(Clone)]
 struct ReplayState {
     reader: Arc<recording::RecordingReader>,
     playback: Arc<tokio::sync::Mutex<replay::ReplayPlayback>>,
     base_path: String,
+    asset_base_path: String,
     renderer_manifest: LocalRendererManifest,
     agent_timeline: Option<Arc<ReplayAgentTimeline>>,
     replay_metadata: Option<Arc<ReplayMetadata>>,
     world_dir: PathBuf,
+    camera: Arc<Mutex<ReplayCameraBridge>>,
 }
 
 #[derive(Serialize)]
@@ -2467,6 +3015,19 @@ struct ReplayMetadataResponse {
     enabled: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     metadata: Option<ReplayMetadata>,
+}
+
+#[derive(Default)]
+struct ReplayCameraBridge {
+    current: Option<serde_json::Value>,
+    pending: Option<serde_json::Value>,
+}
+
+#[derive(Serialize)]
+struct ReplayCameraResponse {
+    enabled: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    state: Option<serde_json::Value>,
 }
 
 async fn replay_spectate_ws(
@@ -2489,10 +3050,30 @@ async fn handle_replay_ws(socket: WebSocket, state: ReplayState) {
                     Some(Ok(Message::Ping(data))) => {
                         if sender.send(Message::Pong(data)).await.is_err() { break; }
                     }
+                    Some(Ok(Message::Text(text))) => {
+                        if let Ok(value) = serde_json::from_str::<serde_json::Value>(&text) {
+                            if value.get("type").and_then(|v| v.as_str()) == Some("replay_camera_state") {
+                                if let Some(camera_state) = value.get("state").cloned() {
+                                    state.camera.lock().unwrap().current = Some(camera_state);
+                                }
+                            }
+                        }
+                    }
                     _ => {}
                 }
             }
             _ = tick_interval.tick() => {
+                let pending_camera = state.camera.lock().unwrap().pending.take();
+                if let Some(camera_state) = pending_camera {
+                    let payload = serde_json::json!({
+                        "type": "replay_camera_set",
+                        "state": camera_state,
+                    });
+                    if sender.send(Message::Text(payload.to_string().into())).await.is_err() {
+                        break;
+                    }
+                }
+
                 let tick = {
                     let mut pb = state.playback.lock().await;
                     let tick = pb.current_tick();
@@ -2527,7 +3108,7 @@ async fn handle_replay_ws(socket: WebSocket, state: ReplayState) {
 
                 match state.reader.get_state_at(tick).await {
                     Ok(mut obs) => {
-                        resolve_local_spectator_assets(&mut obs, &state.base_path);
+                        resolve_local_spectator_assets(&mut obs, &state.asset_base_path);
                         if let Ok(json) = serde_json::to_vec(&obs) {
                             let msg = Message::Text(String::from_utf8_lossy(&json).into_owned().into());
                             if sender.send(msg).await.is_err() { break; }
@@ -2577,7 +3158,7 @@ async fn replay_state_at(
     };
     match state.reader.get_state_at(tick).await {
         Ok(mut obs) => {
-            resolve_local_spectator_assets(&mut obs, &state.base_path);
+            resolve_local_spectator_assets(&mut obs, &state.asset_base_path);
             Ok(Json(obs))
         }
         Err(err) => Err((
@@ -2641,6 +3222,22 @@ async fn replay_metadata_route(State(state): State<ReplayState>) -> Json<ReplayM
             .as_ref()
             .map(|metadata| (**metadata).clone()),
     })
+}
+
+async fn replay_camera_get(State(state): State<ReplayState>) -> Json<ReplayCameraResponse> {
+    let camera = state.camera.lock().unwrap();
+    Json(ReplayCameraResponse {
+        enabled: camera.current.is_some(),
+        state: camera.current.clone(),
+    })
+}
+
+async fn replay_camera_put(
+    State(state): State<ReplayState>,
+    Json(camera_state): Json<serde_json::Value>,
+) -> axum::http::StatusCode {
+    state.camera.lock().unwrap().pending = Some(camera_state);
+    axum::http::StatusCode::OK
 }
 
 #[derive(Deserialize)]
@@ -3156,6 +3753,8 @@ struct LocalState {
     world_script_source: Arc<String>,
     max_players: u32,
     observation_radius: f32,
+    player_object_physics: bool,
+    physics_config: PhysicsConfig,
     allow_reset: bool,
     afk_timeout_secs: u64,
     error_mode: ErrorMode,
@@ -3230,6 +3829,177 @@ impl RecordingTimeline {
 
     fn note_reset_boundary(&mut self) {
         self.pending_epoch_break = true;
+    }
+}
+
+#[derive(Debug, Serialize)]
+#[serde(untagged)]
+enum LiveSpectatorEntityDelta {
+    Add {
+        id: u32,
+        add: SpectatorEntity,
+    },
+    Remove {
+        id: u32,
+        rm: bool,
+    },
+    Update {
+        id: u32,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        p: Option<[f32; 3]>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        r: Option<[[f32; 3]; 3]>,
+    },
+}
+
+#[derive(Debug, Serialize)]
+struct LiveSpectatorDelta {
+    #[serde(rename = "type")]
+    message_type: &'static str,
+    tick: u64,
+    server_time_ms: u64,
+    game_status: String,
+    entities: Vec<LiveSpectatorEntityDelta>,
+    players: Vec<SpectatorPlayerInfo>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    sounds: Vec<serde_json::Value>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    recent_events: Vec<serde_json::Value>,
+}
+
+fn spectator_render_matches(a: &SpectatorRender, b: &SpectatorRender) -> bool {
+    a.kind == b.kind
+        && a.role == b.role
+        && a.preset_id == b.preset_id
+        && a.primitive == b.primitive
+        && a.material == b.material
+        && a.color == b.color
+        && a.is_static == b.is_static
+        && a.casts_shadow == b.casts_shadow
+        && a.receives_shadow == b.receives_shadow
+        && a.visible == b.visible
+        && a.double_sided == b.double_sided
+        && a.transparency == b.transparency
+}
+
+fn spectator_entity_schema_matches(a: &SpectatorEntity, b: &SpectatorEntity) -> bool {
+    let billboard_matches =
+        serde_json::to_value(&a.billboard_gui).ok() == serde_json::to_value(&b.billboard_gui).ok();
+
+    a.entity_type == b.entity_type
+        && a.size == b.size
+        && a.shape == b.shape
+        && spectator_render_matches(&a.render, &b.render)
+        && a.health == b.health
+        && a.pickup_type == b.pickup_type
+        && a.model_url == b.model_url
+        && a.model_yaw_offset_deg == b.model_yaw_offset_deg
+        && a.attributes == b.attributes
+        && billboard_matches
+}
+
+fn compute_live_replication_delta(
+    base: &SpectatorObservation,
+    current: &SpectatorObservation,
+    removed_entity_ids: &[u32],
+) -> LiveSpectatorDelta {
+    let base_entities: HashMap<u32, &SpectatorEntity> = base
+        .entities
+        .iter()
+        .map(|entity| (entity.id, entity))
+        .collect();
+    let mut entities = Vec::new();
+
+    for entity in &current.entities {
+        match base_entities.get(&entity.id) {
+            None => entities.push(LiveSpectatorEntityDelta::Add {
+                id: entity.id,
+                add: entity.clone(),
+            }),
+            Some(base_entity) => {
+                if !spectator_entity_schema_matches(base_entity, entity) {
+                    entities.push(LiveSpectatorEntityDelta::Add {
+                        id: entity.id,
+                        add: entity.clone(),
+                    });
+                    continue;
+                }
+
+                let position_changed = base_entity.position != entity.position;
+                let rotation_changed = base_entity.rotation != entity.rotation;
+                if position_changed || rotation_changed {
+                    entities.push(LiveSpectatorEntityDelta::Update {
+                        id: entity.id,
+                        p: position_changed.then_some(entity.position),
+                        r: if rotation_changed {
+                            entity.rotation
+                        } else {
+                            None
+                        },
+                    });
+                }
+            }
+        }
+    }
+
+    for id in removed_entity_ids {
+        entities.push(LiveSpectatorEntityDelta::Remove { id: *id, rm: true });
+    }
+
+    LiveSpectatorDelta {
+        message_type: "spectator_delta",
+        tick: current.tick,
+        server_time_ms: current.server_time_ms,
+        game_status: current.game_status.clone(),
+        entities,
+        players: current.players.clone(),
+        sounds: current
+            .sounds
+            .iter()
+            .filter_map(|sound| serde_json::to_value(sound).ok())
+            .collect(),
+        recent_events: current
+            .recent_events
+            .iter()
+            .filter_map(|event| serde_json::to_value(event).ok())
+            .collect(),
+    }
+}
+
+fn apply_replication_update_to_observation(
+    base: &mut SpectatorObservation,
+    current: SpectatorObservation,
+    removed_entity_ids: &[u32],
+) {
+    base.tick = current.tick;
+    base.server_time_ms = current.server_time_ms;
+    base.game_status = current.game_status;
+    base.players = current.players;
+    base.sounds = current.sounds;
+    base.recent_events = current.recent_events;
+
+    if !removed_entity_ids.is_empty() {
+        let removed: HashSet<u32> = removed_entity_ids.iter().copied().collect();
+        base.entities.retain(|entity| !removed.contains(&entity.id));
+    }
+
+    if current.entities.is_empty() {
+        return;
+    }
+
+    let mut index_by_id: HashMap<u32, usize> = base
+        .entities
+        .iter()
+        .enumerate()
+        .map(|(index, entity)| (entity.id, index))
+        .collect();
+    for entity in current.entities {
+        if let Some(index) = index_by_id.get(&entity.id).copied() {
+            base.entities[index] = entity;
+        } else {
+            index_by_id.insert(entity.id, base.entities.len());
+            base.entities.push(entity);
+        }
     }
 }
 
@@ -3629,12 +4399,87 @@ fn embedded_ui_index_response(base_path: &str) -> axum::response::Response {
     embedded_index_response("index.html", base_path)
 }
 
+fn replay_view_response(base_path: &str) -> axum::response::Response {
+    let base_href = format!("{}/", normalize_base_path(base_path).trim_end_matches('/'));
+    let base_href = if base_href == "/" {
+        "/".to_string()
+    } else {
+        base_href
+    };
+    let html = format!(
+        r#"<!doctype html>
+<html lang="en">
+  <head>
+    <base href="{base_href}" />
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Clawblox Replay View</title>
+    <link rel="stylesheet" href="ui/styles.css" />
+    <script type="importmap">
+      {{
+        "imports": {{
+          "three": "https://esm.sh/three@0.160.0",
+          "three/": "https://esm.sh/three@0.160.0/",
+          "lucide": "https://esm.sh/lucide@0.468.0"
+        }}
+      }}
+    </script>
+    <link rel="modulepreload" crossorigin href="https://esm.sh/three@0.160.0/examples/jsm/loaders/GLTFLoader.js" />
+    <link rel="modulepreload" crossorigin href="https://esm.sh/three@0.160.0/examples/jsm/utils/SkeletonUtils.js" />
+    <style>
+      html, body, #app, .stage-wrap {{
+        width: 100%;
+        height: 100%;
+        margin: 0;
+        overflow: hidden;
+        background: #05070f;
+      }}
+      .hud-layer {{
+        pointer-events: none;
+      }}
+      .runtime-meta-sr {{
+        position: absolute;
+        width: 1px;
+        height: 1px;
+        overflow: hidden;
+        clip: rect(0, 0, 0, 0);
+      }}
+    </style>
+  </head>
+  <body>
+    <div id="app">
+      <main class="stage-wrap" aria-label="Replay viewport">
+        <canvas id="stage" aria-label="Replay renderer canvas"></canvas>
+        <div class="hud-layer" aria-hidden="true">
+          <div class="runtime-meta-sr">
+            <p id="status">Connecting...</p>
+            <div id="meta"></div>
+          </div>
+        </div>
+      </main>
+    </div>
+    <script type="module" src="ui/main.js"></script>
+  </body>
+</html>"#
+    );
+    (
+        axum::http::StatusCode::OK,
+        [("content-type", "text/html; charset=utf-8")],
+        html,
+    )
+        .into_response()
+}
+
 async fn local_ui_index(State(state): State<LocalState>) -> impl IntoResponse {
     embedded_ui_index_response(&state.base_path)
 }
 
 async fn replay_ui_index(State(state): State<ReplayState>) -> impl IntoResponse {
     embedded_ui_index_response(&state.base_path)
+}
+
+async fn replay_view_index(State(state): State<ReplayState>) -> impl IntoResponse {
+    replay_view_response(&state.base_path)
 }
 
 async fn external_ui_index(State(state): State<ExternalLocalState>) -> impl IntoResponse {
@@ -3705,6 +4550,8 @@ fn reset_local_instance(state: &LocalState) -> Result<(), String> {
         state.game_handle.async_bridge.clone(),
         state.error_mode,
     );
+    instance.set_player_object_physics(state.player_object_physics);
+    instance.set_physics_config(&state.physics_config);
     instance.instance_id = state.instance_id;
     instance.init_runtime();
     clawblox::snapshot::restore_game_instance(&mut instance, &state.initial_instance_snapshot)?;
@@ -3773,6 +4620,46 @@ fn build_local_player_observation(
     resolve_local_player_assets(&mut observation, &state.base_path);
     maybe_publish_authoritative_speech_events(&state, &observation.recent_events);
     Ok(observation)
+}
+
+fn local_instance_tick(state: &LocalState) -> Result<u64, (axum::http::StatusCode, String)> {
+    let handle = state
+        .game_handle
+        .instances
+        .get(&state.instance_id)
+        .ok_or_else(|| {
+            (
+                axum::http::StatusCode::NOT_FOUND,
+                format!("missing instance {}", state.instance_id),
+            )
+        })?;
+    let instance = handle.read();
+    if let Some(err) = &instance.halted_error {
+        return Err((
+            axum::http::StatusCode::SERVICE_UNAVAILABLE,
+            format!("Game halted: {}", err),
+        ));
+    }
+    Ok(instance.tick)
+}
+
+async fn build_local_player_observation_after_tick(
+    state: &LocalState,
+    agent_id: Uuid,
+    queued_before_tick: u64,
+) -> Result<PlayerObservation, (axum::http::StatusCode, String)> {
+    let timeout = Duration::from_millis(2_000);
+    let poll_interval = Duration::from_millis(2);
+    let deadline = Instant::now() + timeout;
+    let target_tick = queued_before_tick.saturating_add(2);
+
+    loop {
+        let observation = build_local_player_observation(state, agent_id)?;
+        if observation.tick >= target_tick || Instant::now() >= deadline {
+            return Ok(observation);
+        }
+        tokio::time::sleep(poll_interval).await;
+    }
 }
 
 fn perform_engine_reset_for_session(
@@ -4463,6 +5350,7 @@ async fn local_input(
     let speech_progress = extract_speech_progress_event(&input.input_type, &input.data);
     let input_type = input.input_type.clone();
     let input_data = input.data.clone();
+    let queued_before_tick = local_instance_tick(&state)?;
 
     game::queue_input(
         &state.game_handle,
@@ -4473,8 +5361,11 @@ async fn local_input(
     )
     .map_err(|e| (axum::http::StatusCode::BAD_REQUEST, e))?;
 
-    // Return observation
-    let observation = build_local_player_observation(&state, agent_id)?;
+    // Return an observation after the next full input-processing tick. The
+    // manager may receive the HTTP request after the current frame's
+    // agent-input phase, so one tick boundary can still be stale.
+    let observation =
+        build_local_player_observation_after_tick(&state, agent_id, queued_before_tick).await?;
     record_local_input(&state, agent_id, input_type, input_data, observation.tick);
 
     if let Some(progress) = speech_progress {
@@ -4626,6 +5517,9 @@ fn resolve_local_spectator_assets(obs: &mut SpectatorObservation, base_path: &st
         if let Some(ref mut url) = entity.model_url {
             resolve_local_asset_url(url, base_path);
         }
+        if let Some(attrs) = entity.attributes.as_mut() {
+            resolve_local_model_url_attr(attrs, base_path);
+        }
     }
 }
 
@@ -4760,6 +5654,9 @@ async fn handle_spectate_ws(socket: WebSocket, state: LocalState, role: Spectate
     let mut tick_interval = interval(Duration::from_millis(33));
     let mut last_tick: u64 = 0;
     let mut same_tick_count: u32 = 0;
+    let mut last_observation: Option<SpectatorObservation> = None;
+    let mut known_entity_ids: HashSet<u32> = HashSet::new();
+    let mut replication_revision: u64 = 0;
 
     loop {
         tokio::select! {
@@ -4860,38 +5757,86 @@ async fn handle_spectate_ws(socket: WebSocket, state: LocalState, role: Spectate
             }
 
             _ = tick_interval.tick() => {
-                let observation =
-                    game::get_spectator_observation_for_instance(&state.game_handle, state.instance_id);
-
-                match observation {
-                    Ok(obs) => {
-                        let mut obs = obs;
-                        resolve_local_spectator_assets(&mut obs, &state.base_path);
-                        maybe_publish_authoritative_speech_events(&state, &obs.recent_events);
-
-                        if obs.tick != last_tick {
+                if last_observation.is_none() {
+                    match game::get_spectator_observation_for_instance(&state.game_handle, state.instance_id) {
+                        Ok(mut obs) => {
+                            resolve_local_spectator_assets(&mut obs, &state.base_path);
+                            maybe_publish_authoritative_speech_events(&state, &obs.recent_events);
+                            known_entity_ids = obs.entities.iter().map(|entity| entity.id).collect();
+                            replication_revision = game::replication_revision_for_instance(&state.game_handle, state.instance_id)
+                                .unwrap_or(replication_revision);
                             last_tick = obs.tick;
                             same_tick_count = 0;
                             if let Ok(json) = serde_json::to_vec(&obs) {
-                                let msg =
-                                    Message::Text(String::from_utf8_lossy(&json).into_owned().into());
+                                let msg = Message::Text(String::from_utf8_lossy(&json).into_owned().into());
                                 if sender.send(msg).await.is_err() {
                                     break;
                                 }
                             }
+                            last_observation = Some(obs);
+                        }
+                        Err(_) => {
+                            let _ = sender
+                                .send(Message::Text(r#"{"error":"Game ended"}"#.to_string().into()))
+                                .await;
+                            break;
+                        }
+                    };
+                    continue;
+                }
+
+                match game::get_replication_observation_update_for_instance(
+                    &state.game_handle,
+                    state.instance_id,
+                    &known_entity_ids,
+                    replication_revision,
+                ) {
+                    Ok(mut update) => {
+                        resolve_local_spectator_assets(&mut update.observation, &state.base_path);
+                        maybe_publish_authoritative_speech_events(&state, &update.observation.recent_events);
+
+                        let should_send = if update.observation.tick != last_tick {
+                            last_tick = update.observation.tick;
+                            same_tick_count = 0;
+                            true
                         } else {
                             same_tick_count += 1;
                             if same_tick_count >= 5 {
                                 same_tick_count = 0;
-                                if let Ok(json) = serde_json::to_vec(&obs) {
-                                    let msg = Message::Text(
-                                        String::from_utf8_lossy(&json).into_owned().into(),
-                                    );
-                                    if sender.send(msg).await.is_err() {
-                                        break;
-                                    }
+                                true
+                            } else {
+                                false
+                            }
+                        };
+
+                        if should_send {
+                            let Some(base) = last_observation.as_mut() else {
+                                continue;
+                            };
+                            let delta = compute_live_replication_delta(
+                                base,
+                                &update.observation,
+                                &update.removed_entity_ids,
+                            );
+                            if let Ok(json) = serde_json::to_vec(&delta) {
+                                let msg = Message::Text(String::from_utf8_lossy(&json).into_owned().into());
+                                if sender.send(msg).await.is_err() {
+                                    break;
                                 }
                             }
+
+                            for entity in &update.observation.entities {
+                                known_entity_ids.insert(entity.id);
+                            }
+                            for id in &update.removed_entity_ids {
+                                known_entity_ids.remove(id);
+                            }
+                            replication_revision = update.latest_revision;
+                            apply_replication_update_to_observation(
+                                base,
+                                update.observation,
+                                &update.removed_entity_ids,
+                            );
                         }
                     }
                     Err(_) => {

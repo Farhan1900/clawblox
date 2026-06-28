@@ -176,14 +176,14 @@ fn test_gui_enum_and_font_properties_for_hud_compat() {
         .expect("Failed to load script");
 
     let globals = runtime.lua().globals().get::<mlua::Table>("_G").unwrap();
-    let x_align: String = globals.get("xAlign").unwrap();
-    let y_align: String = globals.get("yAlign").unwrap();
-    let font: String = globals.get("font").unwrap();
+    let x_align: mlua::AnyUserData = globals.get("xAlign").unwrap();
+    let y_align: mlua::AnyUserData = globals.get("yAlign").unwrap();
+    let font: mlua::AnyUserData = globals.get("font").unwrap();
     let stroke: f64 = globals.get("stroke").unwrap();
 
-    assert_eq!(x_align, "Left");
-    assert_eq!(y_align, "Top");
-    assert_eq!(font, "GothamBold");
+    assert_eq!(x_align.get::<String>("Name").unwrap(), "Left");
+    assert_eq!(y_align.get::<String>("Name").unwrap(), "Top");
+    assert_eq!(font.get::<String>("Name").unwrap(), "GothamBold");
     assert!((stroke - 0.35).abs() < 1e-6);
 }
 
@@ -284,6 +284,108 @@ fn test_signal_wait_yields_and_resumes() {
     assert!(done, "Signal:Wait should eventually resume");
     let dt: f64 = globals.get("waitDt").unwrap();
     assert!((dt - (1.0 / 60.0)).abs() < 1e-6);
+}
+
+#[test]
+fn test_vm_snapshot_restores_pending_task_wait_coroutine() {
+    let mut runtime = test_runtime();
+    runtime
+        .load_script(
+            r#"
+            _G.done = false
+            _G.elapsed = 0
+            task.spawn(function()
+                local elapsed = task.wait(0.2)
+                _G.done = true
+                _G.elapsed = elapsed
+            end)
+        "#,
+        )
+        .expect("Failed to load script");
+
+    runtime.tick(0.1).expect("Failed to tick before snapshot");
+    let snapshot = runtime
+        .capture_vm_snapshot()
+        .expect("Failed to capture VM snapshot");
+
+    let mut restored = test_runtime();
+    restored
+        .restore_vm_snapshot(&snapshot)
+        .expect("Failed to restore VM snapshot");
+
+    {
+        let pending = restored.pending_coroutines.lock().unwrap();
+        assert_eq!(pending.len(), 1);
+        let thread: Thread = restored.lua.registry_value(&pending[0]).unwrap();
+        let schedule: mlua::Table = restored
+            .lua
+            .globals()
+            .get("__clawblox_thread_schedule")
+            .unwrap();
+        let resume_at: Option<f64> = schedule.get(thread).unwrap();
+        assert_eq!(resume_at, Some(0.2));
+    }
+
+    restored
+        .tick(0.05)
+        .expect("Failed to tick restored runtime before scheduled resume");
+    let globals = restored.lua().globals().get::<mlua::Table>("_G").unwrap();
+    let done: bool = globals.get("done").unwrap_or(false);
+    assert!(!done, "task.wait coroutine resumed too early");
+
+    restored
+        .tick(0.1)
+        .expect("Failed to tick restored runtime after scheduled resume");
+    let done: bool = globals.get("done").unwrap();
+    let elapsed: f64 = globals.get("elapsed").unwrap();
+    assert!(done, "task.wait coroutine did not resume after restore");
+    assert!((elapsed - 0.25).abs() < 1e-6);
+}
+
+#[test]
+fn test_vm_snapshot_restores_pending_signal_wait_coroutine() {
+    let mut runtime = test_runtime();
+    runtime
+        .load_script(
+            r#"
+            _G.waitDone = false
+            _G.waitDt = 0
+            task.spawn(function()
+                local dt = RunService.Heartbeat:Wait()
+                _G.waitDt = dt
+                _G.waitDone = true
+            end)
+        "#,
+        )
+        .expect("Failed to load script");
+
+    let globals = runtime.lua().globals().get::<mlua::Table>("_G").unwrap();
+    assert!(!globals.get::<bool>("waitDone").unwrap());
+
+    let snapshot = runtime
+        .capture_vm_snapshot()
+        .expect("Failed to capture VM snapshot");
+
+    let mut restored = test_runtime();
+    restored
+        .restore_vm_snapshot(&snapshot)
+        .expect("Failed to restore VM snapshot");
+
+    restored
+        .tick(0.02)
+        .expect("Failed to tick restored runtime once");
+    let globals = restored.lua().globals().get::<mlua::Table>("_G").unwrap();
+    assert!(
+        !globals.get::<bool>("waitDone").unwrap(),
+        "Signal:Wait should resume on the frame after the restored signal fires"
+    );
+
+    restored
+        .tick(0.03)
+        .expect("Failed to tick restored runtime twice");
+    let globals = restored.lua().globals().get::<mlua::Table>("_G").unwrap();
+    assert!(globals.get::<bool>("waitDone").unwrap());
+    assert!((globals.get::<f64>("waitDt").unwrap() - 0.02).abs() < 1e-6);
 }
 
 #[test]
@@ -1502,6 +1604,234 @@ fn test_task_wait() {
         .get("waitDone")
         .unwrap();
     assert!(done, "task.wait should resume after delay");
+}
+
+#[test]
+fn test_vm_snapshot_resumes_scheduled_thread_without_rerunning_script() {
+    let mut runtime = test_runtime();
+    runtime
+        .load_script(
+            r#"
+            _G.started = (_G.started or 0) + 1
+            local captured = 41
+            task.delay(0.05, function()
+                _G.done = (_G.done or 0) + 1
+                _G.captured = captured + 1
+            end)
+        "#,
+        )
+        .expect("Failed to load script");
+
+    runtime.tick(0.01).expect("Failed to tick source runtime");
+    let snapshot = runtime
+        .capture_vm_snapshot()
+        .expect("Failed to capture Lua VM snapshot");
+
+    let mut restored = test_runtime();
+    restored
+        .restore_vm_snapshot(&snapshot)
+        .expect("Failed to restore Lua VM snapshot");
+
+    restored
+        .tick(0.02)
+        .expect("Failed to tick restored runtime");
+    let globals = restored.lua().globals().get::<mlua::Table>("_G").unwrap();
+    assert_eq!(globals.get::<Option<i64>>("done").unwrap(), None);
+    assert_eq!(globals.get::<i64>("started").unwrap(), 1);
+
+    restored
+        .tick(0.04)
+        .expect("Failed to tick restored runtime");
+    assert_eq!(globals.get::<i64>("done").unwrap(), 1);
+    assert_eq!(globals.get::<i64>("captured").unwrap(), 42);
+    assert_eq!(
+        globals.get::<i64>("started").unwrap(),
+        1,
+        "restoring VM state must restore globals without re-running the script body"
+    );
+}
+
+#[test]
+fn test_vm_snapshot_resumes_deferred_thread_without_rerunning_script() {
+    let mut runtime = test_runtime();
+    runtime
+        .load_script(
+            r#"
+            _G.started = (_G.started or 0) + 1
+            local captured = 11
+            task.defer(function()
+                _G.deferred = (_G.deferred or 0) + 1
+                _G.deferredCaptured = captured + 1
+            end)
+        "#,
+        )
+        .expect("Failed to load script");
+
+    let snapshot = runtime
+        .capture_vm_snapshot()
+        .expect("Failed to capture Lua VM snapshot");
+
+    let mut restored = test_runtime();
+    restored
+        .restore_vm_snapshot(&snapshot)
+        .expect("Failed to restore Lua VM snapshot");
+
+    let globals = restored.lua().globals().get::<mlua::Table>("_G").unwrap();
+    assert_eq!(globals.get::<Option<i64>>("deferred").unwrap(), None);
+    assert_eq!(globals.get::<i64>("started").unwrap(), 1);
+
+    restored
+        .tick(1.0 / 60.0)
+        .expect("Failed to tick restored runtime");
+    assert_eq!(globals.get::<i64>("deferred").unwrap(), 1);
+    assert_eq!(globals.get::<i64>("deferredCaptured").unwrap(), 12);
+    assert_eq!(
+        globals.get::<i64>("started").unwrap(),
+        1,
+        "restoring deferred VM state must not re-run the script body"
+    );
+}
+
+#[test]
+fn test_vm_snapshot_rejects_instance_missing_from_restored_host_graph() {
+    let mut runtime = test_runtime();
+    runtime
+        .load_script(
+            r#"
+            local part = Instance.new("Part")
+            task.delay(0.05, function()
+                _G.part = part
+            end)
+        "#,
+        )
+        .expect("Failed to load script");
+
+    let snapshot = runtime
+        .capture_vm_snapshot()
+        .expect("Instance userdata should be represented by the host userdata adapter");
+    let mut restored = test_runtime();
+    let err = restored
+        .restore_vm_snapshot(&snapshot)
+        .expect_err("runtime-only restore cannot resolve an unparented source Instance id");
+    assert!(
+        err.contains("unknown Instance id"),
+        "expected unknown Instance id restore error, got: {err}"
+    );
+}
+
+#[test]
+fn test_vm_snapshot_restores_captured_value_userdata() {
+    let mut runtime = test_runtime();
+    runtime
+        .load_script(
+            r#"
+            local position = Vector3.new(1, 2, 3)
+            task.delay(0.05, function()
+                _G.positionX = position.X
+                _G.positionY = position.Y
+                _G.positionZ = position.Z
+            end)
+        "#,
+        )
+        .expect("Failed to load script");
+
+    runtime.tick(0.01).expect("Failed to tick source runtime");
+    let snapshot = runtime
+        .capture_vm_snapshot()
+        .expect("Failed to capture Lua VM snapshot");
+
+    let mut restored = test_runtime();
+    restored
+        .restore_vm_snapshot(&snapshot)
+        .expect("Failed to restore Lua VM snapshot");
+
+    restored
+        .tick(0.06)
+        .expect("Failed to tick restored runtime");
+    let globals = restored.lua().globals().get::<mlua::Table>("_G").unwrap();
+    assert_eq!(globals.get::<f32>("positionX").unwrap(), 1.0);
+    assert_eq!(globals.get::<f32>("positionY").unwrap(), 2.0);
+    assert_eq!(globals.get::<f32>("positionZ").unwrap(), 3.0);
+}
+
+#[test]
+fn test_vm_snapshot_restores_signal_connections() {
+    let mut runtime = test_runtime();
+    runtime
+        .load_script(
+            r#"
+            local count = 5
+            RunService.Heartbeat:Connect(function(dt)
+                count += 1
+                _G.signalCount = count
+                _G.signalDt = dt
+            end)
+        "#,
+        )
+        .expect("Failed to load script");
+
+    runtime.tick(0.01).expect("Failed to tick source runtime");
+    let globals = runtime.lua().globals().get::<mlua::Table>("_G").unwrap();
+    assert_eq!(globals.get::<i64>("signalCount").unwrap(), 6);
+
+    let snapshot = runtime
+        .capture_vm_snapshot()
+        .expect("Failed to capture Lua VM snapshot");
+    let mut restored = test_runtime();
+    restored
+        .restore_vm_snapshot(&snapshot)
+        .expect("Failed to restore Lua VM snapshot");
+
+    restored
+        .tick(0.02)
+        .expect("Failed to tick restored runtime");
+    let globals = restored.lua().globals().get::<mlua::Table>("_G").unwrap();
+    assert_eq!(globals.get::<i64>("signalCount").unwrap(), 7);
+    assert!((globals.get::<f64>("signalDt").unwrap() - 0.02).abs() < 1e-6);
+}
+
+#[test]
+fn test_vm_snapshot_restores_signal_connection_userdata() {
+    let mut runtime = test_runtime();
+    runtime
+        .load_script(
+            r#"
+            local count = 0
+            local connection
+            connection = RunService.Heartbeat:Connect(function()
+                count += 1
+                _G.connectionCount = count
+            end)
+            task.delay(0.05, function()
+                connection:Disconnect()
+                _G.connectionStillConnected = connection.Connected
+            end)
+        "#,
+        )
+        .expect("Failed to load script");
+
+    runtime.tick(0.01).expect("Failed to tick source runtime");
+    let globals = runtime.lua().globals().get::<mlua::Table>("_G").unwrap();
+    assert_eq!(globals.get::<i64>("connectionCount").unwrap(), 1);
+
+    let snapshot = runtime
+        .capture_vm_snapshot()
+        .expect("Failed to capture Lua VM snapshot");
+    let mut restored = test_runtime();
+    restored
+        .restore_vm_snapshot(&snapshot)
+        .expect("Failed to restore Lua VM snapshot");
+
+    restored
+        .tick(0.06)
+        .expect("Failed to tick restored runtime");
+    let globals = restored.lua().globals().get::<mlua::Table>("_G").unwrap();
+    assert_eq!(
+        globals.get::<i64>("connectionCount").unwrap(),
+        1,
+        "captured RBXScriptConnection should disconnect before Heartbeat fires"
+    );
+    assert!(!globals.get::<bool>("connectionStillConnected").unwrap());
 }
 
 #[test]
@@ -3104,6 +3434,80 @@ fn test_ancestry_changed_signal_exists_and_fires() {
     let globals = runtime.lua().globals().get::<mlua::Table>("_G").unwrap();
     let count: i64 = globals.get("count").unwrap();
     assert!(count >= 2, "expected ancestry callbacks, got {}", count);
+}
+
+#[test]
+fn test_descendant_added_signal_exists_and_fires_for_nested_instances() {
+    let mut runtime = test_runtime();
+    runtime
+        .load_script(
+            r#"
+            local model = Instance.new("Model")
+            local child = Instance.new("Part")
+            local nested = Instance.new("Part")
+            nested.Name = "Nested"
+            child.Name = "Child"
+            model.Name = "Model"
+
+            _G.modelAdded = {}
+            _G.workspaceAdded = {}
+            model.DescendantAdded:Connect(function(inst)
+                table.insert(_G.modelAdded, inst.Name)
+            end)
+            Workspace.DescendantAdded:Connect(function(inst)
+                table.insert(_G.workspaceAdded, inst.Name)
+            end)
+
+            child.Parent = model
+            nested.Parent = child
+            model.Parent = Workspace
+        "#,
+        )
+        .expect("Failed to run script");
+
+    let globals = runtime.lua().globals().get::<mlua::Table>("_G").unwrap();
+    let model_added: mlua::Table = globals.get("modelAdded").unwrap();
+    let workspace_added: mlua::Table = globals.get("workspaceAdded").unwrap();
+
+    assert_eq!(model_added.get::<String>(1).unwrap(), "Child");
+    assert_eq!(model_added.get::<String>(2).unwrap(), "Nested");
+    assert_eq!(workspace_added.get::<String>(1).unwrap(), "Model");
+    assert_eq!(workspace_added.get::<String>(2).unwrap(), "Child");
+    assert_eq!(workspace_added.get::<String>(3).unwrap(), "Nested");
+}
+
+#[test]
+fn test_descendant_removing_signal_fires_before_parent_is_cleared() {
+    let mut runtime = test_runtime();
+    runtime
+        .load_script(
+            r#"
+            local model = Instance.new("Model")
+            model.Name = "Model"
+            model.Parent = Workspace
+
+            local child = Instance.new("Part")
+            child.Name = "Child"
+            child.Parent = model
+
+            _G.removingName = nil
+            _G.parentAtRemoving = nil
+            model.DescendantRemoving:Connect(function(inst)
+                _G.removingName = inst.Name
+                _G.parentAtRemoving = inst.Parent and inst.Parent.Name or "nil"
+            end)
+
+            child.Parent = nil
+        "#,
+        )
+        .expect("Failed to run script");
+
+    let globals = runtime.lua().globals().get::<mlua::Table>("_G").unwrap();
+    let removing_name: String = globals.get("removingName").unwrap();
+    let parent_at_removing: String = globals.get("parentAtRemoving").unwrap();
+
+    assert_eq!(removing_name, "Child");
+    assert_eq!(parent_at_removing, "Model");
 }
 
 #[test]

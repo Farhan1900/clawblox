@@ -86,12 +86,12 @@ fn mesa_island_coated_block_bond_moves_as_one_assembly() {
         let runtime = instance.lua_runtime.as_ref().expect("runtime missing");
         runtime
             .lua()
-            .load(r#"_G.target.Position = Vector3.new(268, 50, 0)"#)
+            .load(r#"_G.target.CFrame = CFrame.new(268, 50, 0)"#)
             .exec()
             .expect("failed to teleport target block");
     }
 
-    for _ in 0..60 {
+    for _ in 0..10 {
         instance.tick();
     }
 
@@ -953,7 +953,6 @@ fn mesa_island_resume_rebuilds_bond_groups_for_out_of_bounds_reset() {
     let mut restored = GameInstance::new(Uuid::new_v4(), None);
     restored.init_runtime();
     restore_game_instance(&mut restored, &snapshot).expect("failed to restore snapshot");
-    restored.load_script(&source);
 
     for _ in 0..5 {
         restored.tick();

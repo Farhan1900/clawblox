@@ -1,17 +1,21 @@
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::time::Instant;
 use uuid::Uuid;
 
-use crate::game::instance::GameInstance;
+use crate::game::instance::{ErrorMode, GameInstance, GameStatus, SpectatorReplicatedEvent};
 use crate::game::lua::instance::{
-    AlignOrientationData, AlignPositionData, AttachmentData, AttributeValue, BillboardGuiData,
-    BodyAngularVelocityData, BodyForceData, BodyVelocityData, CFrameValueData, ClassName,
-    GuiObjectData, HumanoidData, Instance, InstanceData, ModelData, ObjectValueData, PartData,
-    ScriptData, TerrainCell, TerrainData, TerrainVoxel, TextXAlignment, TextYAlignment,
-    UICornerData, VectorForceData, WeldConstraintData, WeldData,
+    AlignOrientationData, AlignPositionData, AnimationData, AnimatorData, AttachmentData,
+    AttributeValue, BillboardGuiData, BodyAngularVelocityData, BodyForceData, BodyVelocityData,
+    CFrameValueData, ClassName, GuiObjectData, HumanoidData, Instance, InstanceData, InstanceId,
+    ModelData, ObjectValueData, PartData, ScriptData, SoundData, TerrainCell, TerrainData,
+    TerrainVoxel, TextXAlignment, TextYAlignment, UICornerData, VectorForceData,
+    WeldConstraintData, WeldData,
 };
+pub use crate::game::lua::runtime::LuaVmSnapshot;
+use crate::game::lua::runtime::{Game, KickRequest, PhysicsCommand};
 use crate::game::lua::services::agent_input::AgentInput;
+use crate::game::lua::services::debris::DebrisEntrySnapshot;
 use crate::game::lua::services::physics_service::{
     CollisionGroupPairEntry, CollisionGroupRegistryEntry, PhysicsService,
 };
@@ -20,8 +24,9 @@ use crate::game::lua::types::{
     ActuatorRelativeTo, CFrame, Color3, FluidForces, HumanoidStateType, Material, PartType,
     PhysicalProperties, UDim, UDim2, Vector3,
 };
+use crate::game::replication::{DirtyInstanceSnapshot, SharedWorldReplicationState};
 
-const SNAPSHOT_SCHEMA_VERSION: u32 = 2;
+const SNAPSHOT_SCHEMA_VERSION: u32 = 7;
 
 fn default_fluid_forces_snapshot() -> String {
     "Default".to_string()
@@ -33,6 +38,26 @@ pub struct GameInstanceSnapshot {
     pub game_id: Uuid,
     pub instance_id: Uuid,
     pub tick: u64,
+    #[serde(default = "default_game_status_snapshot")]
+    pub status: GameStatus,
+    #[serde(default)]
+    pub elapsed_ms: u64,
+    #[serde(default = "default_observation_radius_snapshot")]
+    pub observation_radius: f32,
+    #[serde(default = "default_player_object_physics_snapshot")]
+    pub player_object_physics: bool,
+    #[serde(default = "default_error_mode_snapshot")]
+    pub error_mode: ErrorMode,
+    #[serde(default)]
+    pub halted_error: Option<String>,
+    #[serde(default = "default_afk_timeout_ms_snapshot")]
+    pub afk_timeout_ms: u64,
+    #[serde(default)]
+    pub empty_since_elapsed_ms: Option<u64>,
+    #[serde(default = "default_max_players_snapshot")]
+    pub max_players: u32,
+    #[serde(default = "default_players_character_auto_loads_snapshot")]
+    pub players_character_auto_loads: bool,
     pub workspace_gravity: f32,
     #[serde(default = "default_fluid_forces_snapshot")]
     pub workspace_fluid_forces: String,
@@ -50,6 +75,59 @@ pub struct GameInstanceSnapshot {
     pub pending_inputs: Vec<PendingInputSnapshot>,
     #[serde(default)]
     pub remote_events: Vec<ReplicatedEventSnapshot>,
+    #[serde(default)]
+    pub debris_queue: Vec<DebrisQueueSnapshot>,
+    #[serde(default)]
+    pub recent_replicated_events: Vec<SpectatorReplicatedEvent>,
+    #[serde(default = "default_next_replicated_event_id")]
+    pub next_replicated_event_id: u64,
+    #[serde(default)]
+    pub replication_revision: u64,
+    #[serde(default)]
+    pub replication_dirty_instances: Vec<ReplicationDirtyInstanceSnapshot>,
+    #[serde(default)]
+    pub orphan_instances: Vec<InstanceSnapshot>,
+    #[serde(default)]
+    pub prev_touches: Vec<TouchPairSnapshot>,
+    #[serde(default)]
+    pub pending_bots: Vec<String>,
+    #[serde(default)]
+    pub kick_requests: Vec<KickRequestSnapshot>,
+    #[serde(default)]
+    pub physics_commands: Vec<PhysicsCommandSnapshot>,
+    pub lua_vm: LuaVmSnapshot,
+}
+
+fn default_next_replicated_event_id() -> u64 {
+    1
+}
+
+fn default_max_players_snapshot() -> u32 {
+    crate::game::instance::DEFAULT_MAX_PLAYERS
+}
+
+fn default_observation_radius_snapshot() -> f32 {
+    crate::game::instance::DEFAULT_OBSERVATION_RADIUS
+}
+
+fn default_player_object_physics_snapshot() -> bool {
+    true
+}
+
+fn default_game_status_snapshot() -> GameStatus {
+    GameStatus::Playing
+}
+
+fn default_error_mode_snapshot() -> ErrorMode {
+    ErrorMode::Continue
+}
+
+fn default_afk_timeout_ms_snapshot() -> u64 {
+    300_000
+}
+
+fn default_players_character_auto_loads_snapshot() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -67,8 +145,16 @@ pub struct PhysicsCollisionGroupPairSnapshot {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PlayerSnapshot {
+    #[serde(default)]
+    pub player_instance_id: Option<u64>,
+    #[serde(default)]
+    pub player_gui_id: Option<u64>,
     pub agent_id: Uuid,
     pub name: String,
+    #[serde(default)]
+    pub player_gui_children: Vec<InstanceSnapshot>,
+    #[serde(default)]
+    pub idle_ms: u64,
     #[serde(default)]
     pub character_id: Option<u64>,
     #[serde(default)]
@@ -144,10 +230,55 @@ pub struct ReplicatedEventSnapshot {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DebrisQueueSnapshot {
+    pub instance_id: u64,
+    pub destroy_at_secs: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TouchPairSnapshot {
+    pub a_id: u64,
+    pub b_id: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReplicationDirtyInstanceSnapshot {
+    pub instance_id: u64,
+    pub revision: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct KickRequestSnapshot {
+    pub user_id: u64,
+    #[serde(default)]
+    pub message: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type")]
+pub enum PhysicsCommandSnapshot {
+    ApplyImpulse {
+        part_id: u64,
+        impulse: [f32; 3],
+    },
+    ApplyImpulseAtPosition {
+        part_id: u64,
+        impulse: [f32; 3],
+        position: [f32; 3],
+    },
+    ApplyAngularImpulse {
+        part_id: u64,
+        impulse: [f32; 3],
+    },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct InstanceSnapshot {
     pub id: u64,
     pub class_name: String,
     pub name: String,
+    #[serde(default)]
+    pub destroyed: bool,
     #[serde(default)]
     pub tags: Vec<String>,
     #[serde(default)]
@@ -162,6 +293,12 @@ pub struct InstanceSnapshot {
     pub humanoid: Option<HumanoidSnapshot>,
     #[serde(default)]
     pub script: Option<ScriptSnapshot>,
+    #[serde(default)]
+    pub animation: Option<AnimationSnapshot>,
+    #[serde(default)]
+    pub animator: Option<AnimatorSnapshot>,
+    #[serde(default)]
+    pub sound: Option<SoundSnapshot>,
     #[serde(default)]
     pub int_value: Option<i64>,
     #[serde(default)]
@@ -260,6 +397,24 @@ pub struct HumanoidSnapshot {
 pub struct ScriptSnapshot {
     pub source: String,
     pub disabled: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AnimationSnapshot {
+    pub animation_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AnimatorSnapshot {
+    pub loaded_tracks: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SoundSnapshot {
+    pub stream_id: String,
+    pub volume: f32,
+    pub playback_speed: f32,
+    pub is_playing: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -363,6 +518,8 @@ pub struct AlignPositionSnapshot {
     pub responsiveness: f32,
     pub rigidity_enabled: bool,
     pub max_force: f32,
+    #[serde(default = "default_align_position_max_velocity")]
+    pub max_velocity: f32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -373,6 +530,16 @@ pub struct AlignOrientationSnapshot {
     pub attachment1_id: Option<u64>,
     pub responsiveness: f32,
     pub rigidity_enabled: bool,
+    #[serde(default = "default_align_orientation_max_torque")]
+    pub max_torque: [f32; 3],
+}
+
+fn default_align_position_max_velocity() -> f32 {
+    f32::INFINITY
+}
+
+fn default_align_orientation_max_torque() -> [f32; 3] {
+    [10000.0, 10000.0, 10000.0]
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -501,6 +668,7 @@ pub fn capture_game_instance(instance: &GameInstance) -> Result<GameInstanceSnap
         let data = workspace.data.lock().unwrap();
         (data.gravity, snapshot_fluid_forces(data.fluid_forces))
     };
+    let players_character_auto_loads = runtime.players().data.lock().unwrap().character_auto_loads;
     let physics_service = runtime.game().physics_service();
     let physics_collision_groups = physics_service
         .snapshot_registry()
@@ -583,12 +751,102 @@ pub fn capture_game_instance(instance: &GameInstance) -> Result<GameInstanceSnap
             target_user_id: evt.target_user_id,
         })
         .collect();
+    let (next_replicated_event_id, recent_replicated_events) =
+        instance.snapshot_replicated_events();
+    let (replication_revision, replication_dirty_instances) = runtime
+        .lua()
+        .app_data_ref::<SharedWorldReplicationState>()
+        .map(|shared| {
+            let state = shared.lock().unwrap();
+            (
+                state.latest_revision(),
+                state
+                    .snapshot_dirty_instances()
+                    .into_iter()
+                    .map(|entry| ReplicationDirtyInstanceSnapshot {
+                        instance_id: entry.id,
+                        revision: entry.revision,
+                    })
+                    .collect(),
+            )
+        })
+        .unwrap_or_default();
+    let prev_touches = instance
+        .snapshot_prev_touches()
+        .into_iter()
+        .map(|(a_id, b_id)| TouchPairSnapshot { a_id, b_id })
+        .collect();
+    let pending_bots = runtime
+        .players()
+        .data
+        .lock()
+        .unwrap()
+        .pending_bots
+        .iter()
+        .cloned()
+        .collect();
+    let kick_requests = runtime
+        .game()
+        .snapshot_kick_requests()
+        .into_iter()
+        .map(|request| KickRequestSnapshot {
+            user_id: request.user_id,
+            message: request.message,
+        })
+        .collect();
+    let physics_commands = runtime
+        .game()
+        .snapshot_physics_commands()
+        .into_iter()
+        .map(snapshot_physics_command)
+        .collect();
+    let debris_queue = runtime
+        .game()
+        .debris_service()
+        .snapshot_queue()
+        .into_iter()
+        .map(|entry| DebrisQueueSnapshot {
+            instance_id: entry.instance.id().0,
+            destroy_at_secs: entry.destroy_at_secs,
+        })
+        .collect();
+    let lua_vm_capture = runtime.capture_vm_snapshot_with_references()?;
+    let mut player_root_ids = players
+        .iter()
+        .flat_map(|player| [player.player_instance_id, player.player_gui_id])
+        .flatten()
+        .collect::<Vec<_>>();
+    let mut player_gui_child_ids = HashSet::new();
+    for player in &players {
+        collect_instance_snapshot_ids(&player.player_gui_children, &mut player_gui_child_ids);
+    }
+    player_root_ids.extend(player_gui_child_ids);
+    let orphan_instances = capture_orphan_instance_roots(
+        &lua_vm_capture.referenced_instances,
+        [
+            workspace_children.as_slice(),
+            server_script_service_children.as_slice(),
+            server_storage_children.as_slice(),
+            replicated_storage_children.as_slice(),
+        ],
+        player_root_ids,
+    )?;
 
     Ok(GameInstanceSnapshot {
         schema_version: SNAPSHOT_SCHEMA_VERSION,
         game_id: instance.game_id,
         instance_id: instance.instance_id,
         tick: instance.tick,
+        status: instance.status,
+        elapsed_ms: instance.elapsed_ms(),
+        observation_radius: instance.observation_radius,
+        player_object_physics: instance.player_object_physics(),
+        error_mode: instance.error_mode,
+        halted_error: instance.halted_error.clone(),
+        afk_timeout_ms: instance.snapshot_afk_timeout_ms(),
+        empty_since_elapsed_ms: instance.snapshot_empty_since_elapsed_ms(),
+        max_players: instance.max_players,
+        players_character_auto_loads,
         workspace_gravity,
         workspace_fluid_forces,
         physics_collision_groups,
@@ -600,6 +858,17 @@ pub fn capture_game_instance(instance: &GameInstance) -> Result<GameInstanceSnap
         players,
         pending_inputs,
         remote_events,
+        debris_queue,
+        recent_replicated_events,
+        next_replicated_event_id,
+        replication_revision,
+        replication_dirty_instances,
+        orphan_instances,
+        prev_touches,
+        pending_bots,
+        kick_requests,
+        physics_commands,
+        lua_vm: lua_vm_capture.snapshot,
     })
 }
 
@@ -623,6 +892,7 @@ pub fn restore_game_instance(
         agent_input_service,
         remote_event_service,
         physics_service,
+        debris_service,
     ) = {
         let runtime = instance.lua_runtime.as_ref().ok_or_else(|| {
             "cannot restore instance without an initialized Lua runtime".to_string()
@@ -636,12 +906,38 @@ pub fn restore_game_instance(
             runtime.agent_input_service(),
             runtime.game().remote_event_service(),
             runtime.game().physics_service(),
+            runtime.game().debris_service(),
         )
     };
 
     instance.game_id = snapshot.game_id;
     instance.instance_id = snapshot.instance_id;
     instance.tick = snapshot.tick;
+    instance.status = snapshot.status;
+    instance.max_players = snapshot.max_players;
+    instance.observation_radius = snapshot.observation_radius;
+    instance.set_player_object_physics(snapshot.player_object_physics);
+    instance.error_mode = snapshot.error_mode;
+    instance.halted_error = snapshot.halted_error.clone();
+    {
+        let runtime = instance.lua_runtime.as_ref().ok_or_else(|| {
+            "cannot restore runtime error mode without an initialized Lua runtime".to_string()
+        })?;
+        runtime.lua().set_app_data(instance.error_mode);
+    }
+    instance.restore_elapsed_ms(snapshot.elapsed_ms);
+    instance.restore_afk_timeout_ms(snapshot.afk_timeout_ms);
+    instance.restore_replicated_events(
+        snapshot.next_replicated_event_id,
+        snapshot.recent_replicated_events.clone(),
+    );
+    instance.restore_prev_touches(
+        snapshot
+            .prev_touches
+            .iter()
+            .map(|pair| (pair.a_id, pair.b_id))
+            .collect(),
+    );
 
     {
         let mut data = workspace.data.lock().unwrap();
@@ -690,10 +986,13 @@ pub fn restore_game_instance(
         &mut instance_map,
         &mut fixups,
     )?;
+    restore_orphan_instance_roots(&snapshot.orphan_instances, &mut instance_map, &mut fixups)?;
 
     apply_ref_fixups(&instance_map, fixups);
 
-    restore_players(instance, snapshot, &players_service, &instance_map)?;
+    restore_players(instance, snapshot, &players_service, &mut instance_map)?;
+    instance.restore_empty_since_elapsed_ms(snapshot.empty_since_elapsed_ms);
+    restore_replication_state(instance, snapshot, &instance_map)?;
 
     {
         let mut pending = agent_input_service.data.lock().unwrap();
@@ -723,6 +1022,52 @@ pub fn restore_game_instance(
             })
             .collect();
     }
+    let debris_entries = snapshot
+        .debris_queue
+        .iter()
+        .map(|entry| {
+            let instance = instance_map
+                .get(&entry.instance_id)
+                .cloned()
+                .ok_or_else(|| {
+                    format!(
+                        "missing restored debris target instance {}",
+                        entry.instance_id
+                    )
+                })?;
+            Ok(DebrisEntrySnapshot {
+                instance,
+                destroy_at_secs: entry.destroy_at_secs,
+            })
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+    debris_service.restore_queue(debris_entries);
+    {
+        let mut players_data = players_service.data.lock().unwrap();
+        players_data.max_players = snapshot.max_players;
+        players_data.character_auto_loads = snapshot.players_character_auto_loads;
+        players_data.pending_bots = snapshot.pending_bots.iter().cloned().collect();
+    }
+    let game = {
+        let runtime = instance.lua_runtime.as_ref().ok_or_else(|| {
+            "cannot restore host queues without an initialized Lua runtime".to_string()
+        })?;
+        runtime.game()
+    };
+    restore_runtime_queues(
+        &instance_map,
+        &snapshot.kick_requests,
+        &snapshot.physics_commands,
+        &game,
+    )?;
+
+    let runtime = instance.lua_runtime.as_mut().ok_or_else(|| {
+        "cannot restore Lua VM snapshot without an initialized Lua runtime".to_string()
+    })?;
+    runtime.restore_vm_snapshot_with_instances(
+        &snapshot.lua_vm,
+        instance_map.values().cloned().collect::<Vec<_>>(),
+    )?;
 
     Ok(())
 }
@@ -734,6 +1079,7 @@ fn snapshot_instance(instance: Instance) -> Result<InstanceSnapshot, String> {
         id: data.id.0,
         class_name: data.class_name.as_str().to_string(),
         name: data.name.clone(),
+        destroyed: data.is_destroyed(),
         tags: data.tags.iter().cloned().collect(),
         attributes: data
             .attributes
@@ -745,6 +1091,9 @@ fn snapshot_instance(instance: Instance) -> Result<InstanceSnapshot, String> {
         terrain: data.terrain_data.as_ref().map(snapshot_terrain_data),
         humanoid: data.humanoid_data.as_ref().map(snapshot_humanoid_data),
         script: data.script_data.as_ref().map(snapshot_script_data),
+        animation: data.animation_data.as_ref().map(snapshot_animation_data),
+        animator: data.animator_data.as_ref().map(snapshot_animator_data),
+        sound: data.sound_data.as_ref().map(snapshot_sound_data),
         int_value: data.int_value_data.as_ref().map(|v| v.value),
         number_value: data.number_value_data.as_ref().map(|v| v.value),
         bool_value: data.bool_value_data.as_ref().map(|v| v.value),
@@ -804,6 +1153,52 @@ fn snapshot_instance(instance: Instance) -> Result<InstanceSnapshot, String> {
         children,
         ..snapshot
     })
+}
+
+fn capture_orphan_instance_roots<'a>(
+    referenced_instances: &[Instance],
+    rooted_groups: impl IntoIterator<Item = &'a [InstanceSnapshot]>,
+    additional_rooted_ids: impl IntoIterator<Item = u64>,
+) -> Result<Vec<InstanceSnapshot>, String> {
+    let mut rooted_ids = HashSet::new();
+    for group in rooted_groups {
+        collect_instance_snapshot_ids(group, &mut rooted_ids);
+    }
+    rooted_ids.extend(additional_rooted_ids);
+
+    let mut roots_by_id = HashMap::new();
+    for instance in referenced_instances {
+        let Some(root) = topmost_unrooted_ancestor(instance, &rooted_ids) else {
+            continue;
+        };
+        roots_by_id.entry(root.id().0).or_insert(root);
+    }
+
+    let mut roots = roots_by_id.into_values().collect::<Vec<_>>();
+    roots.sort_by_key(|instance| instance.id().0);
+    roots.into_iter().map(snapshot_instance).collect()
+}
+
+fn collect_instance_snapshot_ids(snapshots: &[InstanceSnapshot], ids: &mut HashSet<u64>) {
+    for snapshot in snapshots {
+        ids.insert(snapshot.id);
+        collect_instance_snapshot_ids(&snapshot.children, ids);
+    }
+}
+
+fn topmost_unrooted_ancestor(instance: &Instance, rooted_ids: &HashSet<u64>) -> Option<Instance> {
+    if rooted_ids.contains(&instance.id().0) {
+        return None;
+    }
+
+    let mut root = instance.clone();
+    while let Some(parent) = root.parent() {
+        if rooted_ids.contains(&parent.id().0) {
+            return None;
+        }
+        root = parent;
+    }
+    Some(root)
 }
 
 fn capture_player_snapshot(
@@ -897,13 +1292,40 @@ fn capture_player_snapshot(
         }
     }
 
+    let (player_instance_id, player_gui) = {
+        let data = player.data.lock().unwrap();
+        let player_gui = data
+            .player_data
+            .as_ref()
+            .and_then(|pdata| pdata.player_gui.as_ref())
+            .and_then(|weak| weak.upgrade())
+            .map(Instance::from_ref);
+        (data.id.0, player_gui)
+    };
+    let player_gui_id = player_gui.as_ref().map(|gui| gui.id().0);
+    let player_gui_children = player_gui
+        .map(|gui| {
+            gui.get_children()
+                .into_iter()
+                .map(snapshot_instance)
+                .collect::<Result<Vec<_>, String>>()
+        })
+        .transpose()?
+        .unwrap_or_default();
+
     Ok(PlayerSnapshot {
+        player_instance_id: Some(player_instance_id),
+        player_gui_id,
         agent_id,
         name: instance
             .player_names
             .get(&agent_id)
             .cloned()
             .unwrap_or_else(|| format!("Player-{}", user_id)),
+        player_gui_children,
+        idle_ms: instance
+            .snapshot_player_idle_ms(agent_id)
+            .unwrap_or_default(),
         character_id,
         humanoid_root_part_id,
         attributes: player
@@ -944,23 +1366,36 @@ fn restore_players(
     instance: &mut GameInstance,
     snapshot: &GameInstanceSnapshot,
     players_service: &crate::game::lua::services::PlayersService,
-    instance_map: &HashMap<u64, Instance>,
+    instance_map: &mut HashMap<u64, Instance>,
 ) -> Result<(), String> {
     instance.players.clear();
     instance.player_hrp_ids.clear();
     instance.player_names.clear();
     players_service.data.lock().unwrap().players.clear();
 
+    let mut player_fixups = Vec::new();
     for player in &snapshot.players {
         let user_id = GameInstance::user_id_from_agent_id(player.agent_id);
         instance.players.insert(player.agent_id, user_id);
         instance
             .player_names
             .insert(player.agent_id, player.name.clone());
-        instance.record_player_activity(player.agent_id);
+        instance.restore_player_idle_ms(player.agent_id, player.idle_ms);
 
         let player_instance = Instance::from_data(InstanceData::new_player(user_id, &player.name));
         let player_gui = Instance::from_data(InstanceData::new_player_gui("PlayerGui"));
+        {
+            let mut data = player_instance.data.lock().unwrap();
+            if let Some(player_instance_id) = player.player_instance_id {
+                data.id = InstanceId(player_instance_id);
+            }
+        }
+        {
+            let mut data = player_gui.data.lock().unwrap();
+            if let Some(player_gui_id) = player.player_gui_id {
+                data.id = InstanceId(player_gui_id);
+            }
+        }
         player_gui.set_parent(Some(&player_instance));
         {
             let mut player_data = player_instance.data.lock().unwrap();
@@ -971,6 +1406,15 @@ fn restore_players(
             pdata.player_gui = Some(std::sync::Arc::downgrade(&player_gui.data));
         }
         players_service.add_player(player_instance.clone());
+        instance_map.insert(player_instance.id().0, player_instance.clone());
+        instance_map.insert(player_gui.id().0, player_gui.clone());
+        restore_root_children(
+            &player.player_gui_children,
+            &player_gui,
+            None,
+            instance_map,
+            &mut player_fixups,
+        )?;
 
         apply_attributes(&player_instance, &player.attributes);
 
@@ -1065,6 +1509,9 @@ fn restore_players(
                 instance
                     .physics
                     .set_character_position(hrp_id, hrp_snapshot.position);
+                instance
+                    .physics
+                    .set_character_rotation(hrp_id, &hrp_snapshot.cframe.rotation);
                 let inferred_grounded = infer_restored_character_grounded(instance, hrp_id, height);
                 if let Some(state) = instance.physics.get_character_state_mut(hrp_id) {
                     if let Some(controller_snapshot) = player.character_controller.as_ref() {
@@ -1107,6 +1554,8 @@ fn restore_players(
         }
     }
 
+    apply_ref_fixups(instance_map, player_fixups);
+
     instance.empty_since = if instance.players.is_empty() {
         Some(Instant::now())
     } else {
@@ -1148,6 +1597,134 @@ fn restore_physics_service(
         .map_err(|err| err.to_string())
 }
 
+fn snapshot_physics_command(command: PhysicsCommand) -> PhysicsCommandSnapshot {
+    match command {
+        PhysicsCommand::ApplyImpulse { part_id, impulse } => PhysicsCommandSnapshot::ApplyImpulse {
+            part_id,
+            impulse: snapshot_vector3(impulse),
+        },
+        PhysicsCommand::ApplyImpulseAtPosition {
+            part_id,
+            impulse,
+            position,
+        } => PhysicsCommandSnapshot::ApplyImpulseAtPosition {
+            part_id,
+            impulse: snapshot_vector3(impulse),
+            position: snapshot_vector3(position),
+        },
+        PhysicsCommand::ApplyAngularImpulse { part_id, impulse } => {
+            PhysicsCommandSnapshot::ApplyAngularImpulse {
+                part_id,
+                impulse: snapshot_vector3(impulse),
+            }
+        }
+    }
+}
+
+fn restore_physics_command(
+    command: &PhysicsCommandSnapshot,
+    instance_map: &HashMap<u64, Instance>,
+) -> Result<PhysicsCommand, String> {
+    let part_id = match command {
+        PhysicsCommandSnapshot::ApplyImpulse { part_id, .. }
+        | PhysicsCommandSnapshot::ApplyImpulseAtPosition { part_id, .. }
+        | PhysicsCommandSnapshot::ApplyAngularImpulse { part_id, .. } => *part_id,
+    };
+    let target = instance_map.get(&part_id).ok_or_else(|| {
+        format!(
+            "missing restored physics command target instance {}",
+            part_id
+        )
+    })?;
+    if target.data.lock().unwrap().part_data.is_none() {
+        return Err(format!(
+            "restored physics command target {} is not a BasePart",
+            part_id
+        ));
+    }
+
+    Ok(match command {
+        PhysicsCommandSnapshot::ApplyImpulse { part_id, impulse } => PhysicsCommand::ApplyImpulse {
+            part_id: *part_id,
+            impulse: restore_vector3(*impulse),
+        },
+        PhysicsCommandSnapshot::ApplyImpulseAtPosition {
+            part_id,
+            impulse,
+            position,
+        } => PhysicsCommand::ApplyImpulseAtPosition {
+            part_id: *part_id,
+            impulse: restore_vector3(*impulse),
+            position: restore_vector3(*position),
+        },
+        PhysicsCommandSnapshot::ApplyAngularImpulse { part_id, impulse } => {
+            PhysicsCommand::ApplyAngularImpulse {
+                part_id: *part_id,
+                impulse: restore_vector3(*impulse),
+            }
+        }
+    })
+}
+
+fn restore_runtime_queues(
+    instance_map: &HashMap<u64, Instance>,
+    kick_requests: &[KickRequestSnapshot],
+    physics_commands: &[PhysicsCommandSnapshot],
+    game: &Game,
+) -> Result<(), String> {
+    game.restore_kick_requests(
+        kick_requests
+            .iter()
+            .map(|request| KickRequest {
+                user_id: request.user_id,
+                message: request.message.clone(),
+            })
+            .collect(),
+    );
+    game.restore_physics_commands(
+        physics_commands
+            .iter()
+            .map(|command| restore_physics_command(command, instance_map))
+            .collect::<Result<Vec<_>, _>>()?,
+    );
+    Ok(())
+}
+
+fn restore_replication_state(
+    instance: &GameInstance,
+    snapshot: &GameInstanceSnapshot,
+    instance_map: &HashMap<u64, Instance>,
+) -> Result<(), String> {
+    let runtime = instance.lua_runtime.as_ref().ok_or_else(|| {
+        "cannot restore replication state without an initialized Lua runtime".to_string()
+    })?;
+    let Some(shared) = runtime.lua().app_data_ref::<SharedWorldReplicationState>() else {
+        return Ok(());
+    };
+    let entries = snapshot
+        .replication_dirty_instances
+        .iter()
+        .map(|entry| {
+            let weak = instance_map
+                .get(&entry.instance_id)
+                .map(|instance| std::sync::Arc::downgrade(&instance.data))
+                .unwrap_or_else(std::sync::Weak::new);
+            (
+                DirtyInstanceSnapshot {
+                    id: entry.instance_id,
+                    revision: entry.revision,
+                },
+                weak,
+            )
+        })
+        .collect::<Vec<_>>();
+    shared
+        .lock()
+        .unwrap()
+        .restore_dirty_instances(snapshot.replication_revision, entries);
+    Ok(())
+}
+
 fn restore_root_children(
     children: &[InstanceSnapshot],
     root: &Instance,
@@ -1162,6 +1739,17 @@ fn restore_root_children(
         } else {
             instance.set_parent(Some(root));
         }
+    }
+    Ok(())
+}
+
+fn restore_orphan_instance_roots(
+    roots: &[InstanceSnapshot],
+    map: &mut HashMap<u64, Instance>,
+    fixups: &mut Vec<RefFixup>,
+) -> Result<(), String> {
+    for root in roots {
+        restore_instance_node(root, map, fixups)?;
     }
     Ok(())
 }
@@ -1188,7 +1776,9 @@ fn apply_instance_snapshot(
 ) -> Result<(), String> {
     {
         let mut data = instance.data.lock().unwrap();
+        data.id = InstanceId(snapshot.id);
         data.name = snapshot.name.clone();
+        data.set_destroyed_for_restore(snapshot.destroyed);
         data.tags = snapshot.tags.iter().cloned().collect();
         data.attributes = snapshot
             .attributes
@@ -1219,6 +1809,22 @@ fn apply_instance_snapshot(
         {
             script.source = script_snapshot.source.clone();
             script.disabled = script_snapshot.disabled;
+        }
+        if let (Some(animation), Some(saved)) =
+            (data.animation_data.as_mut(), snapshot.animation.as_ref())
+        {
+            animation.animation_id = saved.animation_id.clone();
+        }
+        if let (Some(animator), Some(saved)) =
+            (data.animator_data.as_mut(), snapshot.animator.as_ref())
+        {
+            animator.loaded_tracks = saved.loaded_tracks;
+        }
+        if let (Some(sound), Some(saved)) = (data.sound_data.as_mut(), snapshot.sound.as_ref()) {
+            sound.stream_id = saved.stream_id.clone();
+            sound.volume = saved.volume;
+            sound.playback_speed = saved.playback_speed;
+            sound.is_playing = saved.is_playing;
         }
         if let (Some(value), Some(saved)) = (data.int_value_data.as_mut(), snapshot.int_value) {
             value.value = saved;
@@ -1311,6 +1917,7 @@ fn apply_instance_snapshot(
             align.responsiveness = saved.responsiveness;
             align.rigidity_enabled = saved.rigidity_enabled;
             align.max_force = saved.max_force;
+            align.max_velocity = saved.max_velocity;
             align.attachment0 = None;
             align.attachment1 = None;
             fixups.push(RefFixup {
@@ -1328,6 +1935,7 @@ fn apply_instance_snapshot(
         ) {
             align.responsiveness = saved.responsiveness;
             align.rigidity_enabled = saved.rigidity_enabled;
+            align.max_torque = restore_vector3(saved.max_torque);
             align.attachment0 = None;
             align.attachment1 = None;
             fixups.push(RefFixup {
@@ -1532,6 +2140,12 @@ fn create_instance_from_class_name(class_name: &str, name: &str) -> Result<Insta
         "ModuleScript" => Instance::from_data(
             crate::game::lua::instance::InstanceData::new_module_script(name),
         ),
+        "Animation" => Instance::from_data(
+            crate::game::lua::instance::InstanceData::new_animation(name),
+        ),
+        "Animator" => {
+            Instance::from_data(crate::game::lua::instance::InstanceData::new_animator(name))
+        }
         "RemoteEvent" => Instance::from_data(
             crate::game::lua::instance::InstanceData::new_remote_event(name),
         ),
@@ -1812,6 +2426,27 @@ fn snapshot_script_data(script: &ScriptData) -> ScriptSnapshot {
     }
 }
 
+fn snapshot_animation_data(animation: &AnimationData) -> AnimationSnapshot {
+    AnimationSnapshot {
+        animation_id: animation.animation_id.clone(),
+    }
+}
+
+fn snapshot_animator_data(animator: &AnimatorData) -> AnimatorSnapshot {
+    AnimatorSnapshot {
+        loaded_tracks: animator.loaded_tracks,
+    }
+}
+
+fn snapshot_sound_data(sound: &SoundData) -> SoundSnapshot {
+    SoundSnapshot {
+        stream_id: sound.stream_id.clone(),
+        volume: sound.volume,
+        playback_speed: sound.playback_speed,
+        is_playing: sound.is_playing,
+    }
+}
+
 fn snapshot_object_value_data(value: &ObjectValueData) -> ObjectRefSnapshot {
     ObjectRefSnapshot {
         target_id: value
@@ -1891,6 +2526,7 @@ fn snapshot_align_position_data(data: &AlignPositionData) -> AlignPositionSnapsh
         responsiveness: data.responsiveness,
         rigidity_enabled: data.rigidity_enabled,
         max_force: data.max_force,
+        max_velocity: data.max_velocity,
     }
 }
 
@@ -1908,6 +2544,7 @@ fn snapshot_align_orientation_data(data: &AlignOrientationData) -> AlignOrientat
             .map(|instance| instance.lock().unwrap().id.0),
         responsiveness: data.responsiveness,
         rigidity_enabled: data.rigidity_enabled,
+        max_torque: snapshot_vector3(data.max_torque),
     }
 }
 
@@ -2227,6 +2864,286 @@ mod tests {
     use super::*;
     use crate::game::instance::GameInstance;
     use crate::game::lua::instance::InstanceData;
+    use mlua::ObjectLike;
+    use std::collections::HashSet;
+
+    fn assert_rotation_close(actual: [[f32; 3]; 3], expected: [[f32; 3]; 3], context: &str) {
+        for row in 0..3 {
+            for col in 0..3 {
+                assert!(
+                    (actual[row][col] - expected[row][col]).abs() < 1e-4,
+                    "{context}: rotation[{row}][{col}] expected {} got {}",
+                    expected[row][col],
+                    actual[row][col]
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn roundtrip_resumes_lua_closure_capturing_instance_and_value_userdata() {
+        let game_id = Uuid::new_v4();
+        let mut instance = GameInstance::new(game_id, None);
+        instance.load_script(
+            r#"
+            _G.done = nil
+            local part = Instance.new("Part")
+            part.Name = "PersistTarget"
+            part.Anchored = true
+            part.Parent = workspace
+            local position = Vector3.new(7, 8, 9)
+            local color = Color3.new(0.25, 0.5, 0.75)
+            local size = UDim2.new(0.5, 12, 0.25, 34)
+            local debris = game:GetService("Debris")
+
+            task.delay(0.05, function()
+                part.Name = "RestoredByClosure"
+                part.Position = position
+                part.Color = color
+                debris:AddItem(part, 10)
+                _G.done = true
+                _G.positionX = position.X
+                _G.colorG = color.G
+                _G.sizeOffset = size.X.Offset + size.Y.Offset
+                _G.debrisType = typeof(debris)
+            end)
+            "#,
+        );
+        instance.tick();
+
+        let snapshot = capture_game_instance(&instance).unwrap();
+
+        let mut restored = GameInstance::new(game_id, None);
+        restored.init_runtime();
+        restore_game_instance(&mut restored, &snapshot).unwrap();
+
+        let restored_runtime = restored.lua_runtime.as_ref().unwrap();
+        let globals = restored_runtime
+            .lua()
+            .globals()
+            .get::<mlua::Table>("_G")
+            .unwrap();
+        assert_eq!(globals.get::<Option<bool>>("done").unwrap(), None);
+
+        for _ in 0..4 {
+            restored.tick();
+        }
+
+        let restored_runtime = restored.lua_runtime.as_ref().unwrap();
+        let globals = restored_runtime
+            .lua()
+            .globals()
+            .get::<mlua::Table>("_G")
+            .unwrap();
+        assert!(globals.get::<bool>("done").unwrap());
+        assert_eq!(globals.get::<f32>("positionX").unwrap(), 7.0);
+        assert_eq!(globals.get::<f32>("colorG").unwrap(), 0.5);
+        assert_eq!(globals.get::<i32>("sizeOffset").unwrap(), 46);
+        assert_eq!(globals.get::<String>("debrisType").unwrap(), "userdata");
+
+        let restored_part = restored_runtime
+            .workspace()
+            .instance
+            .find_first_child("RestoredByClosure", true)
+            .unwrap();
+        let data = restored_part.data.lock().unwrap();
+        let part_data = data.part_data.as_ref().unwrap();
+        assert_eq!(snapshot_vector3(part_data.position), [7.0, 8.0, 9.0]);
+        assert_eq!(snapshot_color3(part_data.color), [0.25, 0.5, 0.75]);
+    }
+
+    #[test]
+    fn roundtrip_restores_instance_signal_connections() {
+        let game_id = Uuid::new_v4();
+        let mut instance = GameInstance::new(game_id, None);
+        instance.load_script(
+            r#"
+            local folder = Instance.new("Folder")
+            folder.Name = "SignalParent"
+            folder.Parent = workspace
+
+            local count = 20
+            folder.ChildAdded:Connect(function(child)
+                count += 1
+                _G.childSignalCount = count
+            end)
+
+            task.delay(0.05, function()
+                local child = Instance.new("Part")
+                child.Name = "AfterRestoreChild"
+                child.Anchored = true
+                child.Parent = folder
+            end)
+            "#,
+        );
+        instance.tick();
+
+        let snapshot = capture_game_instance(&instance).unwrap();
+
+        let mut restored = GameInstance::new(game_id, None);
+        restored.init_runtime();
+        restore_game_instance(&mut restored, &snapshot).unwrap();
+
+        for _ in 0..4 {
+            restored.tick();
+        }
+
+        let restored_runtime = restored.lua_runtime.as_ref().unwrap();
+        let globals = restored_runtime
+            .lua()
+            .globals()
+            .get::<mlua::Table>("_G")
+            .unwrap();
+        assert_eq!(globals.get::<i64>("childSignalCount").unwrap(), 21);
+
+        let parent = restored_runtime
+            .workspace()
+            .instance
+            .find_first_child("SignalParent", true)
+            .unwrap();
+        assert!(parent
+            .find_first_child("AfterRestoreChild", false)
+            .is_some());
+    }
+
+    #[test]
+    fn roundtrip_restores_once_signal_connections() {
+        let game_id = Uuid::new_v4();
+        let mut instance = GameInstance::new(game_id, None);
+        instance.load_script(
+            r#"
+            local folder = Instance.new("Folder")
+            folder.Name = "OnceSignalParent"
+            folder.Parent = workspace
+
+            _G.onceSignalCount = 0
+            folder.ChildAdded:Once(function(child)
+                _G.onceSignalCount += 1
+                _G.onceSignalLastChild = child.Name
+            end)
+
+            task.delay(0.05, function()
+                local first = Instance.new("Folder")
+                first.Name = "AfterRestoreFirstChild"
+                first.Parent = folder
+
+                local second = Instance.new("Folder")
+                second.Name = "AfterRestoreSecondChild"
+                second.Parent = folder
+            end)
+            "#,
+        );
+        instance.tick();
+
+        let snapshot = capture_game_instance(&instance).unwrap();
+
+        let mut restored = GameInstance::new(game_id, None);
+        restored.init_runtime();
+        restore_game_instance(&mut restored, &snapshot).unwrap();
+
+        for _ in 0..4 {
+            restored.tick();
+        }
+
+        let restored_runtime = restored.lua_runtime.as_ref().unwrap();
+        let globals = restored_runtime
+            .lua()
+            .globals()
+            .get::<mlua::Table>("_G")
+            .unwrap();
+        assert_eq!(
+            globals.get::<i64>("onceSignalCount").unwrap(),
+            1,
+            "restored :Once connection should fire exactly once"
+        );
+        assert_eq!(
+            globals.get::<String>("onceSignalLastChild").unwrap(),
+            "AfterRestoreFirstChild"
+        );
+
+        let parent = restored_runtime
+            .workspace()
+            .instance
+            .find_first_child("OnceSignalParent", true)
+            .unwrap();
+        assert!(parent
+            .find_first_child("AfterRestoreFirstChild", false)
+            .is_some());
+        assert!(parent
+            .find_first_child("AfterRestoreSecondChild", false)
+            .is_some());
+    }
+
+    #[test]
+    fn roundtrip_restores_animation_track_scheduler_and_signals() {
+        let game_id = Uuid::new_v4();
+        let mut instance = GameInstance::new(game_id, None);
+        instance.load_script(
+            r#"
+            local humanoid = Instance.new("Humanoid")
+            local animation = Instance.new("Animation")
+            animation.AnimationId = "local://fire_rifle"
+            local track = humanoid:LoadAnimation(animation)
+            _G.track = track
+            _G.ended = 0
+            _G.trackId = track.TrackId
+            track.Ended:Connect(function()
+                _G.ended += 1
+            end)
+            track:Play(0, 1, 1)
+            "#,
+        );
+        instance.tick();
+
+        let runtime = instance.lua_runtime.as_ref().unwrap();
+        let globals = runtime.lua().globals().get::<mlua::Table>("_G").unwrap();
+        let before_track: mlua::AnyUserData = globals.get("track").unwrap();
+        let before_position: f32 = before_track.get("TimePosition").unwrap();
+        assert!(
+            before_position > 0.0,
+            "track should have advanced before snapshot"
+        );
+        assert!(before_track.get::<bool>("IsPlaying").unwrap());
+        assert_eq!(globals.get::<i64>("ended").unwrap(), 0);
+
+        let snapshot = capture_game_instance(&instance).unwrap();
+
+        let mut restored = GameInstance::new(game_id, None);
+        restored.init_runtime();
+        restore_game_instance(&mut restored, &snapshot).unwrap();
+
+        let restored_runtime = restored.lua_runtime.as_ref().unwrap();
+        let globals = restored_runtime
+            .lua()
+            .globals()
+            .get::<mlua::Table>("_G")
+            .unwrap();
+        let restored_track: mlua::AnyUserData = globals.get("track").unwrap();
+        assert_eq!(
+            restored_track.get::<u64>("TrackId").unwrap(),
+            globals.get::<u64>("trackId").unwrap()
+        );
+        assert!(restored_track.get::<bool>("IsPlaying").unwrap());
+        let restored_position: f32 = restored_track.get("TimePosition").unwrap();
+        assert!(
+            restored_position >= before_position,
+            "track time should be preserved across restore"
+        );
+
+        for _ in 0..20 {
+            restored.tick();
+        }
+
+        let restored_runtime = restored.lua_runtime.as_ref().unwrap();
+        let globals = restored_runtime
+            .lua()
+            .globals()
+            .get::<mlua::Table>("_G")
+            .unwrap();
+        let restored_track: mlua::AnyUserData = globals.get("track").unwrap();
+        assert!(!restored_track.get::<bool>("IsPlaying").unwrap());
+        assert_eq!(globals.get::<i64>("ended").unwrap(), 1);
+    }
 
     #[test]
     fn roundtrip_restores_workspace_server_storage_and_players() {
@@ -2366,11 +3283,13 @@ mod tests {
         let hrp = character
             .find_first_child("HumanoidRootPart", false)
             .unwrap();
+        let expected_hrp_cframe =
+            CFrame::new(5.0, 6.5, 7.5).multiply(&CFrame::from_orientation(0.0, 1.25, 0.0));
         {
             let mut data = hrp.data.lock().unwrap();
             let part_data = data.part_data.as_mut().unwrap();
-            part_data.position = Vector3::new(5.0, 6.5, 7.5);
-            part_data.cframe = CFrame::new(5.0, 6.5, 7.5);
+            part_data.position = expected_hrp_cframe.position;
+            part_data.cframe = expected_hrp_cframe;
             part_data.velocity = Vector3::new(1.0, 2.0, 3.0);
         }
 
@@ -2551,7 +3470,23 @@ mod tests {
             snapshot_vector3(restored_hrp_part.velocity),
             [1.0, 2.0, 3.0]
         );
+        assert_rotation_close(
+            restored_hrp_part.cframe.rotation,
+            expected_hrp_cframe.rotation,
+            "restored HRP Lua CFrame",
+        );
         drop(restored_hrp_data);
+        let restored_hrp_id = *restored.player_hrp_ids.get(&agent_id).unwrap();
+        let restored_physics_rotation = restored
+            .physics
+            .get_character_state(restored_hrp_id)
+            .and_then(|state| restored.physics.get_rotation_matrix(state.body_handle))
+            .unwrap();
+        assert_rotation_close(
+            restored_physics_rotation,
+            expected_hrp_cframe.rotation,
+            "restored HRP physics body",
+        );
 
         let restored_character_models = restored_runtime
             .workspace()
@@ -2560,5 +3495,1411 @@ mod tests {
             .filter(|child| child.is_a("Model") && child.name() == "Tester")
             .count();
         assert_eq!(restored_character_models, 1);
+    }
+
+    #[test]
+    fn roundtrip_restores_player_service_configuration() {
+        let game_id = Uuid::new_v4();
+        let mut instance = GameInstance::new_with_config(
+            game_id,
+            2,
+            64.0,
+            None,
+            crate::game::instance::ErrorMode::Continue,
+        );
+        instance.load_script(
+            r#"
+            Players.CharacterAutoLoads = false
+            _G.beforeMaxPlayers = Players.MaxPlayers
+            _G.beforeCharacterAutoLoads = Players.CharacterAutoLoads
+            "#,
+        );
+
+        let snapshot = capture_game_instance(&instance).unwrap();
+
+        let mut restored = GameInstance::new(game_id, None);
+        restored.init_runtime();
+        restore_game_instance(&mut restored, &snapshot).unwrap();
+
+        assert_eq!(restored.max_players, 2);
+        assert_eq!(restored.available_slots(), 2);
+        assert!(restored.has_capacity());
+
+        let runtime = restored.lua_runtime.as_ref().unwrap();
+        runtime
+            .lua()
+            .load(
+                r#"
+                _G.afterMaxPlayers = Players.MaxPlayers
+                _G.afterCharacterAutoLoads = Players.CharacterAutoLoads
+                "#,
+            )
+            .exec()
+            .unwrap();
+
+        let globals = runtime.lua().globals().get::<mlua::Table>("_G").unwrap();
+        assert_eq!(globals.get::<u32>("beforeMaxPlayers").unwrap(), 2);
+        assert!(!globals.get::<bool>("beforeCharacterAutoLoads").unwrap());
+        assert_eq!(globals.get::<u32>("afterMaxPlayers").unwrap(), 2);
+        assert!(!globals.get::<bool>("afterCharacterAutoLoads").unwrap());
+    }
+
+    #[test]
+    fn roundtrip_restores_host_runtime_configuration() {
+        let game_id = Uuid::new_v4();
+        let mut instance = GameInstance::new_with_config(game_id, 4, 5.0, None, ErrorMode::Halt);
+        instance.init_runtime();
+        instance.status = GameStatus::Waiting;
+        instance.set_player_object_physics(false);
+
+        let snapshot = capture_game_instance(&instance).unwrap();
+
+        let mut restored = GameInstance::new(game_id, None);
+        restored.init_runtime();
+        restore_game_instance(&mut restored, &snapshot).unwrap();
+
+        assert_eq!(restored.status, GameStatus::Waiting);
+        assert_eq!(restored.max_players, 4);
+        assert_eq!(restored.observation_radius, 5.0);
+        assert!(!restored.player_object_physics());
+        assert_eq!(restored.error_mode, ErrorMode::Halt);
+
+        let runtime_error_mode = *restored
+            .lua_runtime
+            .as_ref()
+            .unwrap()
+            .lua()
+            .app_data_ref::<ErrorMode>()
+            .unwrap();
+        assert_eq!(runtime_error_mode, ErrorMode::Halt);
+    }
+
+    #[test]
+    fn roundtrip_restores_halted_error_state() {
+        let game_id = Uuid::new_v4();
+        let mut instance = GameInstance::new_with_config(game_id, 8, 100.0, None, ErrorMode::Halt);
+        instance.load_script(r#"error("checkpoint halt")"#);
+
+        let halted_error = instance
+            .halted_error
+            .clone()
+            .expect("script error should halt the source instance");
+        assert!(
+            halted_error.contains("checkpoint halt"),
+            "unexpected halt error: {halted_error}"
+        );
+
+        let snapshot = capture_game_instance(&instance).unwrap();
+
+        let mut restored = GameInstance::new(game_id, None);
+        restored.init_runtime();
+        restore_game_instance(&mut restored, &snapshot).unwrap();
+
+        assert_eq!(restored.error_mode, ErrorMode::Halt);
+        assert_eq!(restored.halted_error, Some(halted_error));
+
+        let tick_before = restored.tick;
+        restored.tick();
+        assert_eq!(
+            restored.tick, tick_before,
+            "restored halted instance must not resume ticking"
+        );
+    }
+
+    #[test]
+    fn roundtrip_restores_lua_held_service_player_userdata() {
+        let game_id = Uuid::new_v4();
+        let mut instance = GameInstance::new(game_id, None);
+        instance.init_runtime();
+        let agent_id = Uuid::new_v4();
+        assert!(instance.add_player(agent_id, "PersistedPlayer"));
+
+        let runtime = instance.lua_runtime.as_ref().unwrap();
+        runtime
+            .lua()
+            .load(
+                r#"
+                local player = Players:GetPlayers()[1]
+                _G.player = player
+                _G.playerGui = player.PlayerGui
+
+                local screen = Instance.new("ScreenGui")
+                screen.Name = "PersistedPlayerScreen"
+                screen.ResetOnSpawn = false
+                screen.Parent = player.PlayerGui
+                _G.playerScreenGui = screen
+                "#,
+            )
+            .exec()
+            .unwrap();
+
+        let snapshot = capture_game_instance(&instance).unwrap();
+
+        let mut restored = GameInstance::new(game_id, None);
+        restored.init_runtime();
+        restore_game_instance(&mut restored, &snapshot).unwrap();
+
+        let runtime = restored.lua_runtime.as_ref().unwrap();
+        runtime
+            .lua()
+            .load(
+                r#"
+                local player = Players:GetPlayers()[1]
+                local child = player.PlayerGui:FindFirstChild("PersistedPlayerScreen")
+
+                _G.samePlayer = _G.player == player
+                _G.samePlayerGui = _G.playerGui == player.PlayerGui
+                _G.samePlayerGuiChild = _G.playerScreenGui == child
+                _G.restoredPlayerName = player.Name
+                _G.restoredChildResetOnSpawn = child.ResetOnSpawn
+                "#,
+            )
+            .exec()
+            .unwrap();
+
+        let globals = runtime.lua().globals().get::<mlua::Table>("_G").unwrap();
+        assert!(globals.get::<bool>("samePlayer").unwrap());
+        assert!(globals.get::<bool>("samePlayerGui").unwrap());
+        assert!(globals.get::<bool>("samePlayerGuiChild").unwrap());
+        assert_eq!(
+            globals.get::<String>("restoredPlayerName").unwrap(),
+            "PersistedPlayer"
+        );
+        assert!(!globals.get::<bool>("restoredChildResetOnSpawn").unwrap());
+    }
+
+    #[test]
+    fn roundtrip_restores_player_afk_timers() {
+        let game_id = Uuid::new_v4();
+        let mut instance = GameInstance::new(game_id, None);
+        instance.init_runtime();
+        instance.set_afk_timeout(std::time::Duration::from_millis(40));
+        let agent_id = Uuid::new_v4();
+        assert!(instance.add_player(agent_id, "IdlePlayer"));
+
+        std::thread::sleep(std::time::Duration::from_millis(70));
+        let snapshot = capture_game_instance(&instance).unwrap();
+
+        let mut restored = GameInstance::new(game_id, None);
+        restored.init_runtime();
+        restore_game_instance(&mut restored, &snapshot).unwrap();
+        assert!(restored.players.contains_key(&agent_id));
+        assert_eq!(restored.afk_timeout(), std::time::Duration::from_millis(40));
+
+        restored.tick();
+
+        assert!(
+            !restored.players.contains_key(&agent_id),
+            "restored player should keep pre-checkpoint idle age and be kicked by the next AFK check"
+        );
+    }
+
+    #[test]
+    fn roundtrip_restores_align_constraint_limits() {
+        let game_id = Uuid::new_v4();
+        let mut instance = GameInstance::new(game_id, None);
+        instance.load_script(
+            r#"
+            local alignPosition = Instance.new("AlignPosition")
+            alignPosition.Name = "PersistedAlignPosition"
+            alignPosition.MaxVelocity = 12.5
+            alignPosition.MaxForce = 4567
+            alignPosition.Parent = workspace
+            _G.alignPosition = alignPosition
+
+            local alignOrientation = Instance.new("AlignOrientation")
+            alignOrientation.Name = "PersistedAlignOrientation"
+            alignOrientation.MaxTorque = Vector3.new(9, 8, 7)
+            alignOrientation.Parent = workspace
+            _G.alignOrientation = alignOrientation
+            "#,
+        );
+
+        let snapshot = capture_game_instance(&instance).unwrap();
+
+        let mut restored = GameInstance::new(game_id, None);
+        restored.init_runtime();
+        restore_game_instance(&mut restored, &snapshot).unwrap();
+
+        let runtime = restored.lua_runtime.as_ref().unwrap();
+        runtime
+            .lua()
+            .load(
+                r#"
+                _G.restoredMaxVelocity = _G.alignPosition.MaxVelocity
+                _G.restoredMaxForce = _G.alignPosition.MaxForce
+                _G.restoredTorqueX = _G.alignOrientation.MaxTorque.X
+                _G.restoredTorqueY = _G.alignOrientation.MaxTorque.Y
+                _G.restoredTorqueZ = _G.alignOrientation.MaxTorque.Z
+                "#,
+            )
+            .exec()
+            .unwrap();
+
+        let globals = runtime.lua().globals().get::<mlua::Table>("_G").unwrap();
+        assert!((globals.get::<f32>("restoredMaxVelocity").unwrap() - 12.5).abs() < 1e-6);
+        assert!((globals.get::<f32>("restoredMaxForce").unwrap() - 4567.0).abs() < 1e-6);
+        assert!((globals.get::<f32>("restoredTorqueX").unwrap() - 9.0).abs() < 1e-6);
+        assert!((globals.get::<f32>("restoredTorqueY").unwrap() - 8.0).abs() < 1e-6);
+        assert!((globals.get::<f32>("restoredTorqueZ").unwrap() - 7.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn roundtrip_restores_media_instance_payloads() {
+        let game_id = Uuid::new_v4();
+        let mut instance = GameInstance::new(game_id, None);
+        instance.load_script(
+            r#"
+            local animator = Instance.new("Animator")
+            animator.Name = "PersistedAnimator"
+            animator.Parent = workspace
+            _G.animator = animator
+
+            local animation = Instance.new("Animation")
+            animation.Name = "PersistedAnimation"
+            animation.AnimationId = "local://persisted-animation"
+            animation.Parent = workspace
+            _G.animation = animation
+
+            animator:LoadAnimation(animation)
+
+            local sound = Instance.new("Sound")
+            sound.Name = "PersistedSound"
+            sound.StreamId = "asset://persisted-sound"
+            sound.Volume = 0.75
+            sound.PlaybackSpeed = 1.25
+            sound.Parent = workspace
+            sound:Play()
+            _G.sound = sound
+            "#,
+        );
+
+        let snapshot = capture_game_instance(&instance).unwrap();
+
+        let mut restored = GameInstance::new(game_id, None);
+        restored.init_runtime();
+        restore_game_instance(&mut restored, &snapshot).unwrap();
+
+        let runtime = restored.lua_runtime.as_ref().unwrap();
+        runtime
+            .lua()
+            .load(
+                r#"
+                _G.restoredAnimationId = _G.animation.AnimationId
+                _G.restoredSoundStreamId = _G.sound.StreamId
+                _G.restoredSoundVolume = _G.sound.Volume
+                _G.restoredSoundPlaybackSpeed = _G.sound.PlaybackSpeed
+                _G.restoredSoundIsPlaying = _G.sound.IsPlaying
+                "#,
+            )
+            .exec()
+            .unwrap();
+
+        let globals = runtime.lua().globals().get::<mlua::Table>("_G").unwrap();
+        assert_eq!(
+            globals.get::<String>("restoredAnimationId").unwrap(),
+            "local://persisted-animation"
+        );
+        assert_eq!(
+            globals.get::<String>("restoredSoundStreamId").unwrap(),
+            "asset://persisted-sound"
+        );
+        assert!((globals.get::<f32>("restoredSoundVolume").unwrap() - 0.75).abs() < 1e-6);
+        assert!((globals.get::<f32>("restoredSoundPlaybackSpeed").unwrap() - 1.25).abs() < 1e-6);
+        assert!(globals.get::<bool>("restoredSoundIsPlaying").unwrap());
+
+        let restored_animator = runtime
+            .workspace()
+            .instance
+            .find_first_child("PersistedAnimator", true)
+            .unwrap();
+        let restored_animator_data = restored_animator.data.lock().unwrap();
+        assert_eq!(
+            restored_animator_data
+                .animator_data
+                .as_ref()
+                .map(|animator| animator.loaded_tracks),
+            Some(1)
+        );
+    }
+
+    #[test]
+    fn roundtrip_resumes_lua_closure_capturing_instance_and_service() {
+        let game_id = Uuid::new_v4();
+        let mut instance = GameInstance::new(game_id, None);
+        instance.load_script(
+            r#"
+            _G.starts = (_G.starts or 0) + 1
+
+            local part = Instance.new("Part")
+            part.Name = "CapturedBeforeResume"
+            part.Anchored = true
+            part.Parent = Workspace
+
+            local offset = Vector3.new(1, 2, 3)
+            local storage = game:GetService("ServerStorage")
+
+            task.delay(0.05, function()
+                part.Name = "CapturedAfterResume"
+                part.Position = offset
+
+                local marker = Instance.new("Folder")
+                marker.Name = "ServiceCapturedAfterResume"
+                marker.Parent = storage
+
+                _G.done = (_G.done or 0) + 1
+            end)
+            "#,
+        );
+
+        instance.tick();
+        let snapshot = capture_game_instance(&instance).unwrap();
+
+        let mut restored = GameInstance::new(game_id, None);
+        restored.init_runtime();
+        restore_game_instance(&mut restored, &snapshot).unwrap();
+
+        for _ in 0..4 {
+            restored.tick();
+        }
+
+        let runtime = restored.lua_runtime.as_ref().unwrap();
+        let globals = runtime.lua().globals().get::<mlua::Table>("_G").unwrap();
+        assert_eq!(globals.get::<i64>("starts").unwrap(), 1);
+        assert_eq!(globals.get::<i64>("done").unwrap(), 1);
+
+        let part = runtime
+            .workspace()
+            .instance
+            .find_first_child("CapturedAfterResume", true)
+            .expect("captured Part should be mutated by restored closure");
+        let position = part
+            .data
+            .lock()
+            .unwrap()
+            .part_data
+            .as_ref()
+            .unwrap()
+            .position;
+        assert_eq!(snapshot_vector3(position), [1.0, 2.0, 3.0]);
+
+        let storage_marker = runtime
+            .game()
+            .server_storage()
+            .find_first_child("ServiceCapturedAfterResume", false);
+        assert!(
+            storage_marker.is_some(),
+            "captured ServerStorage service should resolve after restore"
+        );
+    }
+
+    #[test]
+    fn roundtrip_restores_mutable_global_delta_and_deletions() {
+        let game_id = Uuid::new_v4();
+        let mut instance = GameInstance::new(game_id, None);
+        instance.load_script(
+            r#"
+            _G.persistedTable = { count = 12 }
+            _G.persistedFunction = function(x)
+                return x + persistedTable.count
+            end
+            _G.persistedConnection = RunService.Heartbeat:Connect(function()
+                _G.connectionCallbackRan = true
+            end)
+            Workspace = { marker = 123.5 }
+            warn = nil
+            "#,
+        );
+
+        let snapshot = capture_game_instance(&instance).unwrap();
+
+        let mut restored = GameInstance::new(game_id, None);
+        restored.init_runtime();
+        restore_game_instance(&mut restored, &snapshot).unwrap();
+
+        let runtime = restored.lua_runtime.as_ref().unwrap();
+        let globals = runtime.lua().globals();
+        let table: mlua::Table = globals.get("persistedTable").unwrap();
+        assert_eq!(table.get::<i64>("count").unwrap(), 12);
+        let function: mlua::Function = globals.get("persistedFunction").unwrap();
+        assert_eq!(function.call::<i64>(30).unwrap(), 42);
+        runtime
+            .lua()
+            .load(
+                r#"
+                _G.connectionWasConnected = persistedConnection.Connected
+                persistedConnection:Disconnect()
+                _G.connectionIsConnected = persistedConnection.Connected
+                "#,
+            )
+            .exec()
+            .unwrap();
+        assert!(globals.get::<bool>("connectionWasConnected").unwrap());
+        assert!(!globals.get::<bool>("connectionIsConnected").unwrap());
+        let workspace_replacement: mlua::Table = globals.get("Workspace").unwrap();
+        assert_eq!(workspace_replacement.get::<f64>("marker").unwrap(), 123.5);
+        assert!(
+            matches!(
+                globals.get::<mlua::Value>("warn").unwrap(),
+                mlua::Value::Nil
+            ),
+            "deleted baseline global should remain deleted after restore"
+        );
+    }
+
+    #[test]
+    fn roundtrip_restores_non_string_global_keys() {
+        let game_id = Uuid::new_v4();
+        let mut instance = GameInstance::new(game_id, None);
+        instance.load_script(
+            r#"
+            local tableKey = { kind = "table-key" }
+            local userdataKey = Vector3.new(1, 2, 3)
+
+            _G.tableKey = tableKey
+            _G.userdataKey = userdataKey
+            _G[tableKey] = {
+                value = 37,
+                callback = function(x)
+                    return x + 5
+                end,
+            }
+            _G[userdataKey] = CFrame.new(4, 5, 6)
+            "#,
+        );
+
+        let snapshot = capture_game_instance(&instance).unwrap();
+
+        let mut restored = GameInstance::new(game_id, None);
+        restored.init_runtime();
+        restore_game_instance(&mut restored, &snapshot).unwrap();
+
+        let runtime = restored.lua_runtime.as_ref().unwrap();
+        runtime
+            .lua()
+            .load(
+                r#"
+                local tableValue = _G[_G.tableKey]
+                local userdataValue = _G[_G.userdataKey]
+                _G.tableKeyValue = tableValue.value
+                _G.tableKeyCallbackValue = tableValue.callback(10)
+                _G.userdataKeyCFrameX = userdataValue.Position.X
+                "#,
+            )
+            .exec()
+            .unwrap();
+
+        let globals = runtime.lua().globals().get::<mlua::Table>("_G").unwrap();
+        assert_eq!(globals.get::<i64>("tableKeyValue").unwrap(), 37);
+        assert_eq!(globals.get::<i64>("tableKeyCallbackValue").unwrap(), 15);
+        assert_eq!(globals.get::<f32>("userdataKeyCFrameX").unwrap(), 4.0);
+    }
+
+    #[test]
+    fn roundtrip_restores_debris_queue() {
+        let game_id = Uuid::new_v4();
+        let mut instance = GameInstance::new(game_id, None);
+        instance.load_script(
+            r#"
+            local part = Instance.new("Part")
+            part.Name = "DebrisTarget"
+            part.Anchored = true
+            part.Parent = workspace
+
+            game:GetService("Debris"):AddItem(part, 0.05)
+            "#,
+        );
+
+        let snapshot = capture_game_instance(&instance).unwrap();
+
+        let mut restored = GameInstance::new(game_id, None);
+        restored.init_runtime();
+        restore_game_instance(&mut restored, &snapshot).unwrap();
+
+        let runtime = restored.lua_runtime.as_ref().unwrap();
+        assert!(runtime
+            .workspace()
+            .instance
+            .find_first_child("DebrisTarget", true)
+            .is_some());
+
+        restored.tick();
+        assert!(restored
+            .lua_runtime
+            .as_ref()
+            .unwrap()
+            .workspace()
+            .instance
+            .find_first_child("DebrisTarget", true)
+            .is_some());
+
+        for _ in 0..4 {
+            restored.tick();
+        }
+
+        assert!(restored
+            .lua_runtime
+            .as_ref()
+            .unwrap()
+            .workspace()
+            .instance
+            .find_first_child("DebrisTarget", true)
+            .is_none());
+    }
+
+    #[test]
+    fn roundtrip_restores_recent_replicated_events_and_next_id() {
+        let game_id = Uuid::new_v4();
+        let mut instance = GameInstance::new(game_id, None);
+        instance.load_script(
+            r#"
+            local remote = Instance.new("RemoteEvent")
+            remote.Name = "RoundtripEvent"
+            remote.Parent = game:GetService("ReplicatedStorage")
+            remote:FireAllClients({ phase = "before" })
+            "#,
+        );
+        instance.tick();
+
+        let before_obs = instance.get_spectator_observation();
+        assert_eq!(before_obs.recent_events.len(), 1);
+        assert_eq!(before_obs.recent_events[0].id, 1);
+        assert_eq!(before_obs.recent_events[0].name, "RoundtripEvent");
+
+        let snapshot = capture_game_instance(&instance).unwrap();
+
+        let mut restored = GameInstance::new(game_id, None);
+        restored.init_runtime();
+        restore_game_instance(&mut restored, &snapshot).unwrap();
+
+        let restored_obs = restored.get_spectator_observation();
+        assert_eq!(restored_obs.recent_events.len(), 1);
+        assert_eq!(restored_obs.recent_events[0].id, 1);
+        assert_eq!(restored_obs.recent_events[0].name, "RoundtripEvent");
+        assert_eq!(
+            restored_obs.recent_events[0].payload["phase"],
+            serde_json::Value::String("before".to_string())
+        );
+
+        restored
+            .lua_runtime
+            .as_ref()
+            .unwrap()
+            .game()
+            .remote_event_service()
+            .fire_all_clients(
+                "RoundtripEvent".to_string(),
+                serde_json::json!({ "phase": "after" }),
+                true,
+            );
+        restored.tick();
+
+        let after_obs = restored.get_spectator_observation();
+        assert_eq!(after_obs.recent_events.len(), 2);
+        assert_eq!(after_obs.recent_events[0].id, 1);
+        assert_eq!(after_obs.recent_events[1].id, 2);
+        assert_eq!(
+            after_obs.recent_events[1].payload["phase"],
+            serde_json::Value::String("after".to_string())
+        );
+    }
+
+    #[test]
+    fn roundtrip_restores_replication_dirty_state() {
+        let game_id = Uuid::new_v4();
+        let mut instance = GameInstance::new(game_id, None);
+        instance.load_script(
+            r#"
+            local moving = Instance.new("Part")
+            moving.Name = "MovingReplicationPart"
+            moving.Anchored = true
+            moving.Position = Vector3.new(0, 5, 0)
+            moving.Parent = workspace
+            _G.moving = moving
+
+            local removed = Instance.new("Part")
+            removed.Name = "RemovedReplicationPart"
+            removed.Anchored = true
+            removed.Position = Vector3.new(10, 5, 0)
+            removed.Parent = workspace
+            "#,
+        );
+        let known_revision = instance.replication_revision();
+        let initial_observation = instance.get_spectator_observation();
+        let moving_id = initial_observation
+            .entities
+            .iter()
+            .find(|entity| entity.position == [0.0, 5.0, 0.0])
+            .map(|entity| entity.id)
+            .expect("moving part should be visible before checkpoint");
+        let removed_id = initial_observation
+            .entities
+            .iter()
+            .find(|entity| entity.position == [10.0, 5.0, 0.0])
+            .map(|entity| entity.id)
+            .expect("removed part should be visible before checkpoint");
+        let known_ids = HashSet::from([moving_id, removed_id]);
+
+        instance
+            .lua_runtime
+            .as_ref()
+            .unwrap()
+            .lua()
+            .load(
+                r#"
+                _G.moving.Position = Vector3.new(4, 6, 8)
+                workspace.RemovedReplicationPart:Destroy()
+                "#,
+            )
+            .exec()
+            .unwrap();
+        let dirty_revision = instance.replication_revision();
+        assert!(
+            dirty_revision > known_revision,
+            "test setup should create a newer replication revision"
+        );
+
+        let snapshot = capture_game_instance(&instance).unwrap();
+
+        let mut restored = GameInstance::new(game_id, None);
+        restored.init_runtime();
+        restore_game_instance(&mut restored, &snapshot).unwrap();
+
+        assert_eq!(restored.replication_revision(), dirty_revision);
+        let update = restored.get_replication_observation_update(&known_ids, known_revision);
+        assert_eq!(update.latest_revision, dirty_revision);
+        assert!(
+            update.dirty_instance_count >= 2,
+            "restored dirty table should contain the changed and removed parts"
+        );
+        assert!(
+            update
+                .observation
+                .entities
+                .iter()
+                .any(|entity| entity.id == moving_id && entity.position == [4.0, 6.0, 8.0]),
+            "restored dirty update should include the moved entity"
+        );
+        assert!(
+            update.removed_entity_ids.contains(&removed_id),
+            "restored dirty update should include removed entity id"
+        );
+    }
+
+    #[test]
+    fn roundtrip_restores_lua_held_orphan_instances() {
+        let game_id = Uuid::new_v4();
+        let mut instance = GameInstance::new(game_id, None);
+        instance.load_script(
+            r#"
+            local model = Instance.new("Model")
+            model.Name = "OrphanModel"
+            _G.orphanModel = model
+
+            local child = Instance.new("Part")
+            child.Name = "OrphanChild"
+            child.Anchored = true
+            child.Position = Vector3.new(3, 4, 5)
+            child.Parent = model
+            _G.orphanChild = child
+
+            local doomed = Instance.new("Part")
+            doomed.Name = "DestroyedButHeld"
+            doomed.Anchored = true
+            doomed.Position = Vector3.new(7, 8, 9)
+            doomed.Parent = workspace
+            _G.destroyedPart = doomed
+            doomed:Destroy()
+            "#,
+        );
+
+        let snapshot = capture_game_instance(&instance).unwrap();
+
+        let mut restored = GameInstance::new(game_id, None);
+        restored.init_runtime();
+        restore_game_instance(&mut restored, &snapshot).unwrap();
+
+        let runtime = restored.lua_runtime.as_ref().unwrap();
+        let globals = runtime.lua().globals().get::<mlua::Table>("_G").unwrap();
+        let orphan_child: mlua::AnyUserData = globals.get("orphanChild").unwrap();
+        assert_eq!(orphan_child.get::<String>("Name").unwrap(), "OrphanChild");
+        let orphan_parent: mlua::AnyUserData = orphan_child.get("Parent").unwrap();
+        assert_eq!(orphan_parent.get::<String>("Name").unwrap(), "OrphanModel");
+        let orphan_position: Vector3 = orphan_child.get("Position").unwrap();
+        assert_eq!(snapshot_vector3(orphan_position), [3.0, 4.0, 5.0]);
+
+        let destroyed_part: mlua::AnyUserData = globals.get("destroyedPart").unwrap();
+        assert_eq!(
+            destroyed_part.get::<String>("Name").unwrap(),
+            "DestroyedButHeld"
+        );
+        assert!(matches!(
+            destroyed_part.get::<mlua::Value>("Parent").unwrap(),
+            mlua::Value::Nil
+        ));
+        let destroyed_position: Vector3 = destroyed_part.get("Position").unwrap();
+        assert_eq!(snapshot_vector3(destroyed_position), [7.0, 8.0, 9.0]);
+        let destroyed_instance = destroyed_part.borrow::<Instance>().unwrap();
+        assert!(destroyed_instance.data.lock().unwrap().is_destroyed());
+    }
+
+    #[test]
+    fn roundtrip_restores_lua_held_datastore_handles() {
+        let game_id = Uuid::new_v4();
+        let mut instance = GameInstance::new(game_id, None);
+        instance.load_script(
+            r#"
+            local service = game:GetService("DataStoreService")
+            _G.store = service:GetDataStore("PlayerData")
+            _G.ordered = service:GetOrderedDataStore("Leaderboard")
+            "#,
+        );
+
+        let snapshot = capture_game_instance(&instance).unwrap();
+
+        let mut restored = GameInstance::new(game_id, None);
+        restored.init_runtime();
+        restore_game_instance(&mut restored, &snapshot).unwrap();
+
+        let runtime = restored.lua_runtime.as_ref().unwrap();
+        runtime
+            .lua()
+            .load(
+                r#"
+                _G.storeType = typeof(_G.store)
+                _G.orderedType = typeof(_G.ordered)
+                local okStore, errStore = pcall(function()
+                    return _G.store:GetAsync("player-1")
+                end)
+                local okOrdered, errOrdered = pcall(function()
+                    return _G.ordered:GetSortedAsync(false, 10)
+                end)
+                _G.storeCallOk = okStore
+                _G.orderedCallOk = okOrdered
+                _G.storeErr = tostring(errStore)
+                _G.orderedErr = tostring(errOrdered)
+                "#,
+            )
+            .exec()
+            .unwrap();
+        let globals = runtime.lua().globals().get::<mlua::Table>("_G").unwrap();
+        assert_eq!(globals.get::<String>("storeType").unwrap(), "userdata");
+        assert_eq!(globals.get::<String>("orderedType").unwrap(), "userdata");
+        assert!(!globals.get::<bool>("storeCallOk").unwrap());
+        assert!(!globals.get::<bool>("orderedCallOk").unwrap());
+        assert!(globals
+            .get::<String>("storeErr")
+            .unwrap()
+            .contains("DataStoreService not available"));
+        assert!(globals
+            .get::<String>("orderedErr")
+            .unwrap()
+            .contains("DataStoreService not available"));
+    }
+
+    #[test]
+    fn roundtrip_restores_lua_held_workspace_query_userdata() {
+        let game_id = Uuid::new_v4();
+        let mut instance = GameInstance::new(game_id, None);
+        instance.load_script(
+            r#"
+            local target = Instance.new("Part")
+            target.Name = "RaycastTarget"
+            target.Anchored = true
+            target.Size = Vector3.new(4, 2, 4)
+            target.Position = Vector3.new(0, 5, 0)
+            target.Parent = workspace
+            _G.target = target
+
+            local ignored = Instance.new("Part")
+            ignored.Name = "IgnoredQueryPart"
+            ignored.Anchored = true
+            ignored.Size = Vector3.new(4, 2, 4)
+            ignored.Position = Vector3.new(10, 5, 0)
+            ignored.Parent = workspace
+            _G.ignored = ignored
+
+            local rayParams = RaycastParams.new()
+            rayParams.FilterType = Enum.RaycastFilterType.Exclude
+            rayParams.FilterDescendantsInstances = { ignored }
+            rayParams.IgnoreWater = true
+            rayParams.CollisionGroup = "Default"
+            rayParams.RespectCanCollide = true
+            _G.rayParams = rayParams
+            _G.raycastHit = workspace:Raycast(Vector3.new(0, 20, 0), Vector3.new(0, -40, 0), rayParams)
+
+            local overlapParams = OverlapParams.new()
+            overlapParams.FilterType = Enum.RaycastFilterType.Include
+            overlapParams.FilterDescendantsInstances = { target }
+            overlapParams.MaxParts = 3
+            overlapParams.CollisionGroup = "Default"
+            overlapParams.RespectCanCollide = true
+            _G.overlapParams = overlapParams
+            "#,
+        );
+
+        let snapshot = capture_game_instance(&instance).unwrap();
+
+        let mut restored = GameInstance::new(game_id, None);
+        restored.init_runtime();
+        restore_game_instance(&mut restored, &snapshot).unwrap();
+
+        let runtime = restored.lua_runtime.as_ref().unwrap();
+        runtime
+            .lua()
+            .load(
+                r#"
+                _G.rayFilterType = _G.rayParams.FilterType.Name
+                _G.rayFilterName = _G.rayParams.FilterDescendantsInstances[1].Name
+                _G.rayIgnoreWater = _G.rayParams.IgnoreWater
+                _G.rayRespectCanCollide = _G.rayParams.RespectCanCollide
+                _G.rayHitName = _G.raycastHit.Instance.Name
+                _G.rayHitY = _G.raycastHit.Position.Y
+
+                _G.overlapFilterType = _G.overlapParams.FilterType.Name
+                _G.overlapFilterName = _G.overlapParams.FilterDescendantsInstances[1].Name
+                _G.overlapMaxParts = _G.overlapParams.MaxParts
+                _G.overlapRespectCanCollide = _G.overlapParams.RespectCanCollide
+                local parts = workspace:GetPartBoundsInBox(CFrame.new(0, 5, 0), Vector3.new(8, 8, 8), _G.overlapParams)
+                _G.overlapCount = #parts
+                _G.overlapName = parts[1] and parts[1].Name or ""
+                "#,
+            )
+            .exec()
+            .unwrap();
+        let globals = runtime.lua().globals().get::<mlua::Table>("_G").unwrap();
+        assert_eq!(globals.get::<String>("rayFilterType").unwrap(), "Exclude");
+        assert_eq!(
+            globals.get::<String>("rayFilterName").unwrap(),
+            "IgnoredQueryPart"
+        );
+        assert!(globals.get::<bool>("rayIgnoreWater").unwrap());
+        assert!(globals.get::<bool>("rayRespectCanCollide").unwrap());
+        assert_eq!(
+            globals.get::<String>("rayHitName").unwrap(),
+            "RaycastTarget"
+        );
+        assert!(globals.get::<f32>("rayHitY").unwrap() > 5.0);
+
+        assert_eq!(
+            globals.get::<String>("overlapFilterType").unwrap(),
+            "Include"
+        );
+        assert_eq!(
+            globals.get::<String>("overlapFilterName").unwrap(),
+            "RaycastTarget"
+        );
+        assert_eq!(globals.get::<i32>("overlapMaxParts").unwrap(), 3);
+        assert!(globals.get::<bool>("overlapRespectCanCollide").unwrap());
+        assert_eq!(globals.get::<i32>("overlapCount").unwrap(), 1);
+        assert_eq!(
+            globals.get::<String>("overlapName").unwrap(),
+            "RaycastTarget"
+        );
+    }
+
+    #[test]
+    fn roundtrip_restores_lua_held_value_and_service_userdata() {
+        let game_id = Uuid::new_v4();
+        let mut instance = GameInstance::new(game_id, None);
+        instance.load_script(
+            r#"
+            _G.vector2 = Vector2.new(3, 4)
+            _G.ray = Ray.new(Vector3.new(1, 2, 3), Vector3.new(4, 5, 6))
+            _G.region = Region3.new(Vector3.new(-1, -2, -3), Vector3.new(5, 6, 7))
+            _G.dateTime = DateTime.fromUnixTimestampMillis(1700000000123)
+
+            _G.gameService = game
+            _G.workspaceService = game:GetService("Workspace")
+            _G.playersService = game:GetService("Players")
+            _G.runService = game:GetService("RunService")
+            _G.agentInputService = game:GetService("AgentInputService")
+            _G.dataStoreService = game:GetService("DataStoreService")
+            _G.debrisService = game:GetService("Debris")
+            _G.physicsService = game:GetService("PhysicsService")
+            _G.remoteEventService = game:GetService("RemoteEventService")
+            _G.httpService = game:GetService("HttpService")
+            "#,
+        );
+
+        let snapshot = capture_game_instance(&instance).unwrap();
+
+        let mut restored = GameInstance::new(game_id, None);
+        restored.init_runtime();
+        restore_game_instance(&mut restored, &snapshot).unwrap();
+
+        let runtime = restored.lua_runtime.as_ref().unwrap();
+        runtime
+            .lua()
+            .load(
+                r#"
+                _G.vector2Type = typeof(_G.vector2)
+                _G.vector2Magnitude = _G.vector2.Magnitude
+                _G.vector2UnitX = _G.vector2.Unit.X
+
+                _G.rayOriginX = _G.ray.Origin.X
+                _G.rayDirectionZ = _G.ray.Direction.Z
+                _G.regionSizeX = _G.region.Size.X
+                _G.dateTimeMillis = _G.dateTime.UnixTimestampMillis
+
+                _G.workspaceName = _G.workspaceService.Name
+                _G.playersMaxPlayers = _G.playersService.MaxPlayers
+                _G.hasHeartbeat = _G.runService.Heartbeat ~= nil
+                _G.hasInputSignal = _G.agentInputService.InputReceived ~= nil
+                _G.dataStoreType = typeof(_G.dataStoreService:GetDataStore("PersistedStore"))
+                _G.debrisName = _G.debrisService.Name
+                _G.physicsMaxGroups = _G.physicsService:GetMaxCollisionGroups()
+                _G.remoteName = _G.remoteEventService.Name
+                _G.httpJson = _G.httpService:JSONEncode({ ok = true })
+                _G.gameWorkspaceSame = _G.gameService:GetService("Workspace") == _G.workspaceService
+                "#,
+            )
+            .exec()
+            .unwrap();
+
+        let globals = runtime.lua().globals().get::<mlua::Table>("_G").unwrap();
+        assert_eq!(globals.get::<String>("vector2Type").unwrap(), "Vector2");
+        assert!((globals.get::<f32>("vector2Magnitude").unwrap() - 5.0).abs() < 1e-5);
+        assert!((globals.get::<f32>("vector2UnitX").unwrap() - 0.6).abs() < 1e-5);
+        assert_eq!(globals.get::<f32>("rayOriginX").unwrap(), 1.0);
+        assert_eq!(globals.get::<f32>("rayDirectionZ").unwrap(), 6.0);
+        assert_eq!(globals.get::<f32>("regionSizeX").unwrap(), 6.0);
+        assert_eq!(
+            globals.get::<i64>("dateTimeMillis").unwrap(),
+            1_700_000_000_123
+        );
+        assert_eq!(globals.get::<String>("workspaceName").unwrap(), "Workspace");
+        assert_eq!(globals.get::<u32>("playersMaxPlayers").unwrap(), 8);
+        assert!(globals.get::<bool>("hasHeartbeat").unwrap());
+        assert!(globals.get::<bool>("hasInputSignal").unwrap());
+        assert_eq!(globals.get::<String>("dataStoreType").unwrap(), "userdata");
+        assert_eq!(globals.get::<String>("debrisName").unwrap(), "Debris");
+        assert!(globals.get::<i32>("physicsMaxGroups").unwrap() > 0);
+        assert_eq!(
+            globals.get::<String>("remoteName").unwrap(),
+            "RemoteEventService"
+        );
+        assert_eq!(globals.get::<String>("httpJson").unwrap(), r#"{"ok":true}"#);
+        assert!(globals.get::<bool>("gameWorkspaceSame").unwrap());
+    }
+
+    #[test]
+    fn roundtrip_restores_lua_held_enum_userdata() {
+        let game_id = Uuid::new_v4();
+        let mut instance = GameInstance::new(game_id, None);
+        instance.load_script(
+            r#"
+            _G.partType = Enum.PartType.Ball
+            _G.material = Enum.Material.Neon
+            _G.relativeTo = Enum.ActuatorRelativeTo.World
+            _G.fluidForces = Enum.FluidForces.Experimental
+            _G.humanoidState = Enum.HumanoidStateType.Jumping
+            _G.filterType = Enum.RaycastFilterType.Include
+            _G.textXAlignment = Enum.TextXAlignment.Right
+            _G.textYAlignment = Enum.TextYAlignment.Bottom
+            _G.font = Enum.Font.SourceSansBold
+            "#,
+        );
+
+        let snapshot = capture_game_instance(&instance).unwrap();
+
+        let mut restored = GameInstance::new(game_id, None);
+        restored.init_runtime();
+        restore_game_instance(&mut restored, &snapshot).unwrap();
+
+        let runtime = restored.lua_runtime.as_ref().unwrap();
+        runtime
+            .lua()
+            .load(
+                r#"
+                local part = Instance.new("Part")
+                part.Shape = _G.partType
+                part.Material = _G.material
+
+                local vectorForce = Instance.new("VectorForce")
+                vectorForce.RelativeTo = _G.relativeTo
+
+                local humanoid = Instance.new("Humanoid")
+                humanoid:ChangeState(_G.humanoidState)
+
+                local params = RaycastParams.new()
+                params.FilterType = _G.filterType
+
+                local label = Instance.new("TextLabel")
+                label.TextXAlignment = _G.textXAlignment
+                label.TextYAlignment = _G.textYAlignment
+                label.Font = _G.font
+
+                Workspace.FluidForces = _G.fluidForces
+
+                _G.partTypeName = part.Shape.Name
+                _G.partTypeValue = part.Shape.Value
+                _G.materialName = part.Material.Name
+                _G.materialValue = part.Material.Value
+                _G.relativeToName = vectorForce.RelativeTo.Name
+                _G.fluidForcesName = Workspace.FluidForces.Name
+                _G.fluidForcesValue = Workspace.FluidForces.Value
+                _G.humanoidStateName = humanoid:GetState().Name
+                _G.filterTypeName = params.FilterType.Name
+                _G.filterTypeString = tostring(params.FilterType)
+                _G.textXAlignmentName = label.TextXAlignment.Name
+                _G.textYAlignmentName = label.TextYAlignment.Name
+                _G.fontName = label.Font.Name
+            "#,
+            )
+            .exec()
+            .unwrap();
+
+        let globals = runtime.lua().globals().get::<mlua::Table>("_G").unwrap();
+        assert_eq!(globals.get::<String>("partTypeName").unwrap(), "Ball");
+        assert_eq!(globals.get::<i32>("partTypeValue").unwrap(), 0);
+        assert_eq!(globals.get::<String>("materialName").unwrap(), "Neon");
+        assert_eq!(globals.get::<i32>("materialValue").unwrap(), 288);
+        assert_eq!(globals.get::<String>("relativeToName").unwrap(), "World");
+        assert_eq!(
+            globals.get::<String>("fluidForcesName").unwrap(),
+            "Experimental"
+        );
+        assert_eq!(globals.get::<i32>("fluidForcesValue").unwrap(), 1);
+        assert_eq!(
+            globals.get::<String>("humanoidStateName").unwrap(),
+            "Jumping"
+        );
+        assert_eq!(globals.get::<String>("filterTypeName").unwrap(), "Include");
+        assert_eq!(
+            globals.get::<String>("filterTypeString").unwrap(),
+            "Enum.RaycastFilterType.Include"
+        );
+        assert_eq!(
+            globals.get::<String>("textXAlignmentName").unwrap(),
+            "Right"
+        );
+        assert_eq!(
+            globals.get::<String>("textYAlignmentName").unwrap(),
+            "Bottom"
+        );
+        assert_eq!(globals.get::<String>("fontName").unwrap(), "SourceSansBold");
+    }
+
+    #[test]
+    fn roundtrip_restores_module_require_cache() {
+        let game_id = Uuid::new_v4();
+        let mut instance = GameInstance::new(game_id, None);
+        instance.load_script(
+            r#"
+            local module = Instance.new("ModuleScript")
+            module.Name = "CachedModule"
+            module.Source = [[
+                _G.moduleRunCount = (_G.moduleRunCount or 0) + 1
+                return { value = _G.moduleRunCount }
+            ]]
+            module.Parent = game:GetService("ServerStorage")
+
+            _G.cachedModule = module
+            _G.cachedBefore = require(module)
+            _G.beforeValue = _G.cachedBefore.value
+            "#,
+        );
+
+        let snapshot = capture_game_instance(&instance).unwrap();
+
+        let mut restored = GameInstance::new(game_id, None);
+        restored.init_runtime();
+        restore_game_instance(&mut restored, &snapshot).unwrap();
+
+        let runtime = restored.lua_runtime.as_ref().unwrap();
+        runtime
+            .lua()
+            .load(
+                r#"
+                _G.cachedAfter = require(_G.cachedModule)
+                _G.afterValue = _G.cachedAfter.value
+                _G.sameCachedTable = _G.cachedBefore == _G.cachedAfter
+                "#,
+            )
+            .exec()
+            .unwrap();
+
+        let globals = runtime.lua().globals().get::<mlua::Table>("_G").unwrap();
+        assert_eq!(globals.get::<i64>("moduleRunCount").unwrap(), 1);
+        assert_eq!(globals.get::<i64>("beforeValue").unwrap(), 1);
+        assert_eq!(globals.get::<i64>("afterValue").unwrap(), 1);
+        assert!(globals.get::<bool>("sameCachedTable").unwrap());
+    }
+
+    #[test]
+    fn roundtrip_restores_touch_transition_state() {
+        let game_id = Uuid::new_v4();
+        let mut instance = GameInstance::new(game_id, None);
+        instance.load_script(
+            r#"
+            Workspace.Gravity = 0
+
+            local a = Instance.new("Part")
+            a.Name = "TouchA"
+            a.Anchored = true
+            a.Size = Vector3.new(4, 4, 4)
+            a.Position = Vector3.new(0, 5, 0)
+            a.Parent = Workspace
+
+            local b = Instance.new("Part")
+            b.Name = "TouchB"
+            b.Anchored = false
+            b.Size = Vector3.new(4, 4, 4)
+            b.Position = Vector3.new(0, 5, 0)
+            b.Parent = Workspace
+            _G.touchB = b
+
+            _G.touched = 0
+            _G.ended = 0
+            a.Touched:Connect(function(other)
+                if other.Name == "TouchB" then
+                    _G.touched += 1
+                end
+            end)
+            a.TouchEnded:Connect(function(other)
+                if other.Name == "TouchB" then
+                    _G.ended += 1
+                end
+            end)
+            "#,
+        );
+
+        instance.tick();
+        let runtime = instance.lua_runtime.as_ref().unwrap();
+        let globals = runtime.lua().globals().get::<mlua::Table>("_G").unwrap();
+        assert_eq!(globals.get::<i64>("touched").unwrap(), 1);
+        assert_eq!(globals.get::<i64>("ended").unwrap(), 0);
+
+        let snapshot = capture_game_instance(&instance).unwrap();
+
+        let mut restored = GameInstance::new(game_id, None);
+        restored.init_runtime();
+        restore_game_instance(&mut restored, &snapshot).unwrap();
+
+        restored
+            .lua_runtime
+            .as_ref()
+            .unwrap()
+            .lua()
+            .load(
+                r#"
+                _G.touchB.Position = Vector3.new(20, 5, 0)
+                "#,
+            )
+            .exec()
+            .unwrap();
+        restored.tick();
+
+        let restored_runtime = restored.lua_runtime.as_ref().unwrap();
+        let globals = restored_runtime
+            .lua()
+            .globals()
+            .get::<mlua::Table>("_G")
+            .unwrap();
+        assert_eq!(globals.get::<i64>("touched").unwrap(), 1);
+        assert_eq!(globals.get::<i64>("ended").unwrap(), 1);
+    }
+
+    #[test]
+    fn roundtrip_restores_signal_waiting_coroutine() {
+        let game_id = Uuid::new_v4();
+        let mut instance = GameInstance::new(game_id, None);
+        instance.load_script(
+            r#"
+            _G.waitStarted = false
+            _G.waitDone = false
+            _G.waitedDt = nil
+
+            task.spawn(function()
+                _G.waitStarted = true
+                local dt = RunService.Heartbeat:Wait()
+                _G.waitDone = true
+                _G.waitedDt = dt
+            end)
+            "#,
+        );
+
+        instance.tick();
+        let runtime = instance.lua_runtime.as_ref().unwrap();
+        let globals = runtime.lua().globals().get::<mlua::Table>("_G").unwrap();
+        assert!(globals.get::<bool>("waitStarted").unwrap());
+        assert!(!globals.get::<bool>("waitDone").unwrap());
+
+        let snapshot = capture_game_instance(&instance).unwrap();
+
+        let mut restored = GameInstance::new(game_id, None);
+        restored.init_runtime();
+        restore_game_instance(&mut restored, &snapshot).unwrap();
+
+        let restored_runtime = restored.lua_runtime.as_ref().unwrap();
+        let globals = restored_runtime
+            .lua()
+            .globals()
+            .get::<mlua::Table>("_G")
+            .unwrap();
+        assert!(globals.get::<bool>("waitStarted").unwrap());
+        assert!(!globals.get::<bool>("waitDone").unwrap());
+
+        restored.tick();
+
+        let restored_runtime = restored.lua_runtime.as_ref().unwrap();
+        let globals = restored_runtime
+            .lua()
+            .globals()
+            .get::<mlua::Table>("_G")
+            .unwrap();
+        assert!(globals.get::<bool>("waitDone").unwrap());
+        let waited_dt = globals.get::<f64>("waitedDt").unwrap();
+        assert!(
+            waited_dt > 0.0,
+            "restored Heartbeat:Wait should resume with a positive delta"
+        );
+    }
+
+    #[test]
+    fn roundtrip_restores_pending_bot_queue() {
+        let game_id = Uuid::new_v4();
+        let mut instance = GameInstance::new(game_id, None);
+        instance.load_script(
+            r#"
+            Players:AddBot("QueuedBot")
+            "#,
+        );
+
+        let snapshot = capture_game_instance(&instance).unwrap();
+
+        let mut restored = GameInstance::new(game_id, None);
+        restored.init_runtime();
+        restore_game_instance(&mut restored, &snapshot).unwrap();
+        assert!(
+            restored
+                .player_names
+                .values()
+                .all(|name| name != "QueuedBot"),
+            "pending bot should not be created until the restored tick drains the queue"
+        );
+
+        restored.tick();
+        assert!(
+            restored
+                .player_names
+                .values()
+                .any(|name| name == "QueuedBot"),
+            "restored pending bot queue should be drained on the next tick"
+        );
+    }
+
+    #[test]
+    fn roundtrip_restores_pending_kick_queue() {
+        let game_id = Uuid::new_v4();
+        let mut instance = GameInstance::new(game_id, None);
+        instance.init_runtime();
+        let agent_id = Uuid::new_v4();
+        assert!(instance.add_player(agent_id, "KickMe"));
+        let runtime = instance.lua_runtime.as_ref().unwrap();
+        runtime
+            .lua()
+            .load(
+                r#"
+                local player = Players:GetPlayers()[1]
+                player:Kick("queued before checkpoint")
+                "#,
+            )
+            .exec()
+            .unwrap();
+
+        let snapshot = capture_game_instance(&instance).unwrap();
+
+        let mut restored = GameInstance::new(game_id, None);
+        restored.init_runtime();
+        restore_game_instance(&mut restored, &snapshot).unwrap();
+        assert!(restored.players.contains_key(&agent_id));
+
+        restored.tick();
+        assert!(
+            !restored.players.contains_key(&agent_id),
+            "restored kick queue should remove the player on the next tick"
+        );
+    }
+
+    #[test]
+    fn roundtrip_restores_pending_physics_command_queue() {
+        let game_id = Uuid::new_v4();
+        let mut instance = GameInstance::new(game_id, None);
+        instance.load_script(
+            r#"
+            Workspace.Gravity = 0
+
+            local part = Instance.new("Part")
+            part.Name = "ImpulseAfterRestore"
+            part.Size = Vector3.new(2, 2, 2)
+            part.Position = Vector3.new(0, 10, 0)
+            part.Anchored = false
+            part.CanCollide = false
+            part.Parent = Workspace
+            _G.impulsePart = part
+
+            part:ApplyImpulse(Vector3.new(part:GetMass() * 12, 0, 0))
+            "#,
+        );
+
+        let snapshot = capture_game_instance(&instance).unwrap();
+
+        let mut restored = GameInstance::new(game_id, None);
+        restored.init_runtime();
+        restore_game_instance(&mut restored, &snapshot).unwrap();
+
+        restored.tick();
+        let runtime = restored.lua_runtime.as_ref().unwrap();
+        let vx: f64 = runtime
+            .lua()
+            .load("return _G.impulsePart.AssemblyLinearVelocity.X")
+            .eval()
+            .unwrap();
+        assert!(
+            vx > 8.0,
+            "restored pending impulse should affect the part, got vx={vx}"
+        );
+    }
+
+    #[test]
+    fn roundtrip_restores_bind_to_close_callbacks() {
+        let game_id = Uuid::new_v4();
+        let mut instance = GameInstance::new(game_id, None);
+        instance.load_script(
+            r#"
+            local marker = Instance.new("Folder")
+            marker.Name = "CloseMarker"
+            marker.Parent = workspace
+
+            game:BindToClose(function()
+                marker:SetAttribute("Closed", true)
+            end)
+            "#,
+        );
+
+        let snapshot = capture_game_instance(&instance).unwrap();
+
+        let mut restored = GameInstance::new(game_id, None);
+        restored.init_runtime();
+        restore_game_instance(&mut restored, &snapshot).unwrap();
+
+        let marker = restored
+            .lua_runtime
+            .as_ref()
+            .unwrap()
+            .workspace()
+            .instance
+            .find_first_child("CloseMarker", true)
+            .unwrap();
+        assert!(marker.get_attribute("Closed").is_none());
+
+        drop(restored.lua_runtime.take());
+
+        assert!(matches!(
+            marker.get_attribute("Closed"),
+            Some(AttributeValue::Bool(true))
+        ));
     }
 }

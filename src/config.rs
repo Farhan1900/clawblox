@@ -129,6 +129,54 @@ impl Default for AgentApiConfig {
     }
 }
 
+/// Built-in Clawblox runtime configuration.
+#[derive(Debug, Clone, Deserialize)]
+pub struct ClawbloxConfig {
+    /// Whether player character controllers physically couple to dynamic world objects.
+    #[serde(default = "default_player_object_physics")]
+    pub player_object_physics: bool,
+    /// Rapier physics tuning for the built-in runtime.
+    #[serde(default)]
+    pub physics: PhysicsConfig,
+}
+
+impl Default for ClawbloxConfig {
+    fn default() -> Self {
+        Self {
+            player_object_physics: default_player_object_physics(),
+            physics: PhysicsConfig::default(),
+        }
+    }
+}
+
+fn default_player_object_physics() -> bool {
+    true
+}
+
+/// Built-in physics solver configuration.
+#[derive(Debug, Clone, Deserialize)]
+pub struct PhysicsConfig {
+    /// Number of outer contact-solver iterations per physics step.
+    ///
+    /// Rapier's default is 4. Lower values reduce large awake-island cost but
+    /// make stacked/penetrating contacts softer; higher values favor stability
+    /// at the cost of CPU.
+    #[serde(default = "default_physics_solver_iterations")]
+    pub solver_iterations: usize,
+}
+
+impl Default for PhysicsConfig {
+    fn default() -> Self {
+        Self {
+            solver_iterations: default_physics_solver_iterations(),
+        }
+    }
+}
+
+fn default_physics_solver_iterations() -> usize {
+    4
+}
+
 /// Speech delivery mode.
 #[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
@@ -216,6 +264,9 @@ pub struct WorldConfig {
     /// Agent sandbox configuration
     #[serde(default)]
     pub sandbox: SandboxConfig,
+    /// Built-in Clawblox runtime configuration.
+    #[serde(default)]
+    pub clawblox: ClawbloxConfig,
     /// AFK timeout in seconds (0 = disabled). Players idle longer than this are kicked.
     #[serde(default = "default_afk_timeout")]
     pub afk_timeout: u64,
@@ -310,6 +361,12 @@ impl WorldConfig {
                 ));
             }
         }
+        if !(1..=32).contains(&self.clawblox.physics.solver_iterations) {
+            return Err(WorldConfigError::ValidationError(
+                path.to_path_buf(),
+                "clawblox.physics.solver_iterations must be between 1 and 32".to_string(),
+            ));
+        }
         Ok(())
     }
 }
@@ -357,6 +414,8 @@ mod tests {
         assert_eq!(config.observation.radius, 100.0);
         assert_eq!(config.speech.mode, SpeechMode::Global);
         assert_eq!(config.speech.hearing_radius, 30.0);
+        assert!(config.clawblox.player_object_physics);
+        assert_eq!(config.clawblox.physics.solver_iterations, 4);
         assert!(!config.sandbox.enable_weaker_nested_sandbox);
         assert_eq!(config.sandbox.deps_root, None);
     }
@@ -395,6 +454,12 @@ mod tests {
             deps_root = "/opt/conda"
             add_deps_lib_to_library_path = false
 
+            [clawblox]
+            player_object_physics = false
+
+            [clawblox.physics]
+            solver_iterations = 2
+
             [run]
             command = ["custom-runner", "--flag"]
         "#;
@@ -412,6 +477,8 @@ mod tests {
         assert_eq!(config.observation.radius, 64.0);
         assert_eq!(config.speech.mode, SpeechMode::Proximity);
         assert_eq!(config.speech.hearing_radius, 24.0);
+        assert!(!config.clawblox.player_object_physics);
+        assert_eq!(config.clawblox.physics.solver_iterations, 2);
         assert!(config.sandbox.enable_weaker_nested_sandbox);
         assert_eq!(
             config.sandbox.deps_root.as_deref(),

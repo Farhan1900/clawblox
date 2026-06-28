@@ -242,6 +242,28 @@ impl Instance {
         Ok(created)
     }
 
+    pub(crate) fn cached_userdata_value(lua: &Lua, instance: &Instance) -> Result<Value> {
+        Ok(Value::UserData(Self::cached_userdata(lua, instance)?))
+    }
+
+    pub(crate) fn optional_cached_userdata_value(
+        lua: &Lua,
+        instance: Option<Instance>,
+    ) -> Result<Value> {
+        match instance {
+            Some(instance) => Self::cached_userdata_value(lua, &instance),
+            None => Ok(Value::Nil),
+        }
+    }
+
+    pub(crate) fn cached_userdata_sequence(lua: &Lua, instances: Vec<Instance>) -> Result<Table> {
+        let table = lua.create_table()?;
+        for (idx, instance) in instances.into_iter().enumerate() {
+            table.set(idx + 1, Self::cached_userdata(lua, &instance)?)?;
+        }
+        Ok(table)
+    }
+
     pub fn new(class_name: ClassName, name: &str) -> Self {
         Self {
             data: Arc::new(Mutex::new(InstanceData::new(class_name, name))),
@@ -268,6 +290,27 @@ impl Instance {
 
     pub fn set_name(&self, name: &str) {
         self.data.lock().unwrap().name = name.to_string();
+    }
+
+    pub fn mark_replication_dirty(&self, lua: &Lua) {
+        if let Some(shared) =
+            lua.app_data_ref::<crate::game::replication::SharedWorldReplicationState>()
+        {
+            shared.lock().unwrap().mark(&self.data);
+        }
+    }
+
+    pub fn mark_replication_dirty_recursive(&self, lua: &Lua) {
+        let mut instances = Vec::new();
+        instances.push(Arc::clone(&self.data));
+        for descendant in self.get_descendants() {
+            instances.push(Arc::clone(&descendant.data));
+        }
+        if let Some(shared) =
+            lua.app_data_ref::<crate::game::replication::SharedWorldReplicationState>()
+        {
+            shared.lock().unwrap().mark_many(instances);
+        }
     }
 
     pub fn fire_remote_on_server_event(
@@ -415,6 +458,11 @@ impl Instance {
 
     pub fn set_parent_with_lua(&self, parent: Option<&Instance>, lua: &Lua) -> Result<()> {
         let old_parent = self.parent();
+        if let Some(old_parent) = &old_parent {
+            old_parent.mark_replication_dirty(lua);
+            self.mark_replication_dirty_recursive(lua);
+            self.fire_descendant_removing_from_ancestors(lua, old_parent)?;
+        }
         self.set_parent(parent);
 
         if let Some(old_parent) = old_parent {
@@ -428,6 +476,8 @@ impl Instance {
         }
 
         if let Some(new_parent) = parent {
+            new_parent.mark_replication_dirty(lua);
+            self.mark_replication_dirty_recursive(lua);
             let signal = new_parent.data.lock().unwrap().child_added.clone();
             let child_ud = lua.create_userdata(self.clone())?;
             Self::fire_signal(
@@ -435,10 +485,66 @@ impl Instance {
                 &signal,
                 MultiValue::from_iter([Value::UserData(child_ud)]),
             )?;
+
+            self.fire_descendant_added_from_ancestors(lua, new_parent)?;
         }
 
         self.fire_ancestry_changed_recursive(lua)?;
         self.fire_property_changed_if_listening(lua, "Parent")?;
+        Ok(())
+    }
+
+    fn self_and_descendants(&self) -> Vec<Instance> {
+        let mut instances = vec![self.clone()];
+        instances.extend(self.get_descendants());
+        instances
+    }
+
+    fn ancestor_chain_from(&self, ancestor: &Instance) -> Vec<Instance> {
+        let mut ancestors = vec![ancestor.clone()];
+        let mut current = ancestor.parent();
+        while let Some(parent) = current {
+            current = parent.parent();
+            ancestors.push(parent);
+        }
+        ancestors
+    }
+
+    fn fire_descendant_added_from_ancestors(&self, lua: &Lua, ancestor: &Instance) -> Result<()> {
+        let descendants = self.self_and_descendants();
+        let ancestors = self.ancestor_chain_from(ancestor);
+        for descendant in descendants {
+            for ancestor in &ancestors {
+                let signal = ancestor.data.lock().unwrap().descendant_added.clone();
+                let descendant_ud = lua.create_userdata(descendant.clone())?;
+                Self::fire_signal(
+                    lua,
+                    &signal,
+                    MultiValue::from_iter([Value::UserData(descendant_ud)]),
+                )?;
+            }
+        }
+        Ok(())
+    }
+
+    fn fire_descendant_removing_from_ancestors(
+        &self,
+        lua: &Lua,
+        ancestor: &Instance,
+    ) -> Result<()> {
+        let descendants = self.self_and_descendants();
+        let ancestors = self.ancestor_chain_from(ancestor);
+        for descendant in descendants {
+            for ancestor in &ancestors {
+                let signal = ancestor.data.lock().unwrap().descendant_removing.clone();
+                let descendant_ud = lua.create_userdata(descendant.clone())?;
+                Self::fire_signal(
+                    lua,
+                    &signal,
+                    MultiValue::from_iter([Value::UserData(descendant_ud)]),
+                )?;
+            }
+        }
         Ok(())
     }
 
@@ -633,6 +739,7 @@ impl Instance {
         value: AttributeValue,
     ) -> Result<()> {
         self.set_attribute(name, value);
+        self.mark_replication_dirty(lua);
 
         let (attribute_changed, specific_signal) = {
             let mut data = self.data.lock().unwrap();

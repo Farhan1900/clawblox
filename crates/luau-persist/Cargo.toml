@@ -1,0 +1,19 @@
+[package]
+name = "luau-persist"
+version = "0.1.0"
+edition = "2021"
+build = "build.rs"
+
+[features]
+default = []
+luau-vector4 = ["mlua-sys/luau-vector4"]
+
+[dependencies]
+mlua-sys = { version = "0.10", features = ["luau"] }
+thiserror = "2"
+
+[build-dependencies]
+cc = "1"
+
+[dev-dependencies]
+pretty_assertions = "1"

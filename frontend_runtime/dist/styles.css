@@ -28,6 +28,17 @@ body {
   overflow: hidden;
 }
 
+.runtime-viewport-only #chat-toggle,
+.runtime-viewport-only #chat-panel,
+.runtime-viewport-only #player-list,
+.runtime-viewport-only #agent-log-toggle,
+.runtime-viewport-only #agent-log-panel,
+.runtime-viewport-only #behavior-panel,
+.runtime-viewport-only #replay-panel,
+.runtime-viewport-only .runtime-meta-sr {
+  display: none !important;
+}
+
 #app {
   position: relative;
 }

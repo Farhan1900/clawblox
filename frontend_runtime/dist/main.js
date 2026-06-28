@@ -5,7 +5,7 @@ import {
   Wrench,
   CircleAlert,
   User,
-} from "lucide"
+} from "https://esm.sh/lucide@0.468.0"
 
 function icon(iconNode, size = 14) {
   const el = createLucideElement(iconNode)
@@ -39,6 +39,8 @@ const SPECTATOR_TOKEN = (() => {
   return token ? token.trim() : ''
 })()
 
+const RUNTIME_VIEWPORT_ONLY = new URLSearchParams(window.location.search).get('viewport') === '1'
+
 function withSpectatorToken(path) {
   const url = new URL(withBasePath(path), window.location.origin)
   if (SPECTATOR_TOKEN) url.searchParams.set('spectator_token', SPECTATOR_TOKEN)
@@ -48,38 +50,42 @@ function withSpectatorToken(path) {
 const statusEl = document.getElementById('status')
 const metaEl = document.getElementById('meta')
 const canvas = document.getElementById('stage')
-const chatToggleEl = document.getElementById('chat-toggle')
-const chatPanelEl = document.getElementById('chat-panel')
-const chatFeedEl = document.getElementById('chat-feed')
-const chatFormEl = document.getElementById('chat-form')
-const chatInputEl = document.getElementById('chat-input')
-const chatSendEl = document.getElementById('chat-send')
-const chatConnectionEl = document.getElementById('chat-connection')
-const chatLocalStatusEl = document.getElementById('chat-local-status')
-const playerListCountEl = document.getElementById('player-list-count')
-const playerListBodyEl = document.getElementById('player-list-body')
-const behaviorPanelEl = document.getElementById('behavior-panel')
-const behaviorPanelToggleEl = document.getElementById('behavior-panel-toggle')
-const behaviorTimelineShellEl = document.getElementById('behavior-timeline-shell')
-const behaviorRulerEl = document.getElementById('behavior-ruler')
-const behaviorTracksEl = document.getElementById('behavior-tracks')
-const behaviorGlobalPlayheadEl = document.getElementById('behavior-global-playhead')
-const behaviorDetailsEl = document.getElementById('behavior-details')
-const replayPanelEl = document.getElementById('replay-panel')
-const replayPlayToggleEl = document.getElementById('replay-play-toggle')
-const replayPlayIconEl = document.getElementById('replay-play-icon')
-const replaySliderEl = document.getElementById('replay-slider')
-const replayTimeCurrentEl = document.getElementById('replay-time-current')
-const replayTimeTotalEl = document.getElementById('replay-time-total')
-const replaySpeedEl = document.getElementById('replay-speed')
-const replaySkipIdleEl = document.getElementById('replay-skip-idle')
-const agentLogPanelEl = document.getElementById('agent-log-panel')
-const agentLogFeedEl = document.getElementById('agent-log-feed')
-const workspaceFeedEl = document.getElementById('workspace-feed')
-const agentLogStatusEl = document.getElementById('agent-log-status')
-const agentLogToggleEl = document.getElementById('agent-log-toggle')
-const agentLogTabMessagesEl = document.getElementById('agent-log-tab-messages')
-const agentLogTabWorkspaceEl = document.getElementById('agent-log-tab-workspace')
+const chatToggleEl = RUNTIME_VIEWPORT_ONLY ? null : document.getElementById('chat-toggle')
+const chatPanelEl = RUNTIME_VIEWPORT_ONLY ? null : document.getElementById('chat-panel')
+const chatFeedEl = RUNTIME_VIEWPORT_ONLY ? null : document.getElementById('chat-feed')
+const chatFormEl = RUNTIME_VIEWPORT_ONLY ? null : document.getElementById('chat-form')
+const chatInputEl = RUNTIME_VIEWPORT_ONLY ? null : document.getElementById('chat-input')
+const chatSendEl = RUNTIME_VIEWPORT_ONLY ? null : document.getElementById('chat-send')
+const chatConnectionEl = RUNTIME_VIEWPORT_ONLY ? null : document.getElementById('chat-connection')
+const chatLocalStatusEl = RUNTIME_VIEWPORT_ONLY ? null : document.getElementById('chat-local-status')
+const playerListCountEl = RUNTIME_VIEWPORT_ONLY ? null : document.getElementById('player-list-count')
+const playerListBodyEl = RUNTIME_VIEWPORT_ONLY ? null : document.getElementById('player-list-body')
+const behaviorPanelEl = RUNTIME_VIEWPORT_ONLY ? null : document.getElementById('behavior-panel')
+const behaviorPanelToggleEl = RUNTIME_VIEWPORT_ONLY ? null : document.getElementById('behavior-panel-toggle')
+const behaviorTimelineShellEl = RUNTIME_VIEWPORT_ONLY ? null : document.getElementById('behavior-timeline-shell')
+const behaviorRulerEl = RUNTIME_VIEWPORT_ONLY ? null : document.getElementById('behavior-ruler')
+const behaviorTracksEl = RUNTIME_VIEWPORT_ONLY ? null : document.getElementById('behavior-tracks')
+const behaviorGlobalPlayheadEl = RUNTIME_VIEWPORT_ONLY ? null : document.getElementById('behavior-global-playhead')
+const behaviorDetailsEl = RUNTIME_VIEWPORT_ONLY ? null : document.getElementById('behavior-details')
+const replayPanelEl = RUNTIME_VIEWPORT_ONLY ? null : document.getElementById('replay-panel')
+const replayPlayToggleEl = RUNTIME_VIEWPORT_ONLY ? null : document.getElementById('replay-play-toggle')
+const replayPlayIconEl = RUNTIME_VIEWPORT_ONLY ? null : document.getElementById('replay-play-icon')
+const replaySliderEl = RUNTIME_VIEWPORT_ONLY ? null : document.getElementById('replay-slider')
+const replayTimeCurrentEl = RUNTIME_VIEWPORT_ONLY ? null : document.getElementById('replay-time-current')
+const replayTimeTotalEl = RUNTIME_VIEWPORT_ONLY ? null : document.getElementById('replay-time-total')
+const replaySpeedEl = RUNTIME_VIEWPORT_ONLY ? null : document.getElementById('replay-speed')
+const replaySkipIdleEl = RUNTIME_VIEWPORT_ONLY ? null : document.getElementById('replay-skip-idle')
+const agentLogPanelEl = RUNTIME_VIEWPORT_ONLY ? null : document.getElementById('agent-log-panel')
+const agentLogFeedEl = RUNTIME_VIEWPORT_ONLY ? null : document.getElementById('agent-log-feed')
+const workspaceFeedEl = RUNTIME_VIEWPORT_ONLY ? null : document.getElementById('workspace-feed')
+const agentLogStatusEl = RUNTIME_VIEWPORT_ONLY ? null : document.getElementById('agent-log-status')
+const agentLogToggleEl = RUNTIME_VIEWPORT_ONLY ? null : document.getElementById('agent-log-toggle')
+const agentLogTabMessagesEl = RUNTIME_VIEWPORT_ONLY ? null : document.getElementById('agent-log-tab-messages')
+const agentLogTabWorkspaceEl = RUNTIME_VIEWPORT_ONLY ? null : document.getElementById('agent-log-tab-workspace')
+const replayChromeAvailable = !!replayPanelEl
+const agentPanelAvailable = !!agentLogPanelEl
+const workspacePanelAvailable = !!workspaceFeedEl
+const behaviorPanelAvailable = !!behaviorPanelEl
 
 const chatState = {
   open: false,
@@ -94,6 +100,80 @@ const chatState = {
 }
 let selectedSpectatorPlayerId = null
 let latestSpectatorState = null
+
+function applySpectatorDelta(baseState, delta) {
+  if (!baseState || !delta || delta.type !== 'spectator_delta') return null
+  const changedEntityIds = []
+  const removedEntityIds = []
+  const addedEntityIds = []
+
+  const next = {
+    ...baseState,
+    tick: typeof delta.tick === 'number' ? delta.tick : baseState.tick,
+    server_time_ms: typeof delta.server_time_ms === 'number' ? delta.server_time_ms : baseState.server_time_ms,
+    game_status: typeof delta.game_status === 'string' ? delta.game_status : baseState.game_status,
+    players: Array.isArray(delta.players) ? delta.players : (baseState.players || []),
+    entities: Array.isArray(baseState.entities) ? baseState.entities.slice() : [],
+    sounds: Array.isArray(delta.sounds) ? delta.sounds : (baseState.sounds || []),
+    recent_events: Array.isArray(delta.recent_events) ? delta.recent_events : [],
+  }
+
+  if (!Array.isArray(delta.entities) || delta.entities.length === 0) {
+    next.__spectatorDelta = { changedEntityIds, removedEntityIds, addedEntityIds }
+    return next
+  }
+
+  const entityIndex = new Map()
+  for (let i = 0; i < next.entities.length; i += 1) {
+    const id = next.entities[i]?.id
+    if (typeof id === 'number') entityIndex.set(id, i)
+  }
+
+  const removedIds = new Set()
+
+  for (const entry of delta.entities) {
+    const id = entry?.id
+    if (typeof id !== 'number') continue
+
+    if (entry.rm) {
+      removedIds.add(id)
+      removedEntityIds.push(id)
+      continue
+    }
+
+    if (entry.add && typeof entry.add === 'object') {
+      const index = entityIndex.get(id)
+      if (index == null) {
+        entityIndex.set(id, next.entities.length)
+        next.entities.push(entry.add)
+      } else {
+        next.entities[index] = entry.add
+      }
+      removedIds.delete(id)
+      addedEntityIds.push(id)
+      changedEntityIds.push(id)
+      continue
+    }
+
+    const index = entityIndex.get(id)
+    if (index == null) continue
+    const current = next.entities[index]
+    next.entities[index] = {
+      ...current,
+      position: Array.isArray(entry.p) ? entry.p : current.position,
+      rotation: Array.isArray(entry.r) ? entry.r : current.rotation,
+    }
+    changedEntityIds.push(id)
+  }
+
+  if (removedIds.size > 0) {
+    next.entities = next.entities.filter((entity) => !removedIds.has(entity?.id))
+  }
+
+  next.__spectatorDelta = { changedEntityIds, removedEntityIds, addedEntityIds }
+  return next
+}
+
 const replayState = {
   enabled: false,
   info: null,
@@ -111,6 +191,7 @@ const replayState = {
   metadataEnabled: false,
   metadataLoaded: false,
   metadata: null,
+  clientDriven: false,
   externalViewEnabled: false,
   externalViewUrl: null,
   behaviorPanelOpen: readStoredBool('clawblox_behavior_panel_open', false),
@@ -120,6 +201,55 @@ const replayState = {
   behaviorViewEndTick: null,
   behaviorPanState: null,
 }
+const replayPlaybackClock = {
+  initialized: false,
+  tick: 0,
+  carryTicks: 0,
+  lastNowMs: 0,
+  seekVersion: null,
+}
+const replayViewportWarmup = {
+  minQueueDepth: 20,
+  minWarmupFrames: 6,
+  minPostRestoreWarmupFrames: 3,
+  warmupFrames: 0,
+  postRestoreWarmupFrames: 0,
+  maxWarmupRenderMs: 0,
+  assetsSettled: false,
+  restored: false,
+  postRestoreWarmupComplete: false,
+  restoredFrameConsumed: false,
+  renderedFrame: false,
+  ready: false,
+  listeners: new Set(),
+}
+let replayViewportWarmupPump = null
+const replayFrameQueue = []
+const replayFrameQueueTarget = 60
+const replayFrameQueueLowWater = 20
+const replayLongTasks = {
+  count: 0,
+  totalMs: 0,
+  maxMs: 0,
+}
+if (typeof PerformanceObserver !== 'undefined') {
+  try {
+    const observer = new PerformanceObserver((list) => {
+      for (const entry of list.getEntries()) {
+        const duration = Number(entry.duration)
+        if (!Number.isFinite(duration) || duration <= 0) continue
+        replayLongTasks.count += 1
+        replayLongTasks.totalMs += duration
+        replayLongTasks.maxMs = Math.max(replayLongTasks.maxMs, duration)
+      }
+    })
+    observer.observe({ type: 'longtask', buffered: true })
+  } catch {
+    // Long Task API is optional.
+  }
+}
+let pendingReplayCameraState = null
+let lastCameraReportMs = 0
 const internalApiRegistry = new Map()
 
 function normalizeInternalApiName(name) {
@@ -156,6 +286,7 @@ function setInternalApi(name, api) {
     return null
   }
   internalApiRegistry.set(key, api)
+  if (key === 'camera') applyPendingReplayCameraState()
   return api
 }
 
@@ -315,9 +446,83 @@ function setReplayPlayUi(paused) {
   }
 }
 
+function syncReplayPlaybackClock(info, { force = false } = {}) {
+  if (!info) return
+  const tick = Number(info.current_tick ?? info.first_tick ?? 0)
+  const seekVersion = Number.isFinite(Number(info.seek_version)) ? Number(info.seek_version) : null
+  if (!replayPlaybackClock.initialized || force || info.paused || seekVersion !== replayPlaybackClock.seekVersion) {
+    replayPlaybackClock.initialized = true
+    replayPlaybackClock.tick = Number.isFinite(tick) ? tick : 0
+    replayPlaybackClock.carryTicks = 0
+    replayPlaybackClock.lastNowMs = performance.now()
+    replayPlaybackClock.seekVersion = seekVersion
+  }
+}
+
+function stepReplayPlaybackClock(nowMs = performance.now()) {
+  const info = replayState.info || {}
+  if (!replayPlaybackClock.initialized) syncReplayPlaybackClock(info, { force: true })
+  const elapsedMs = Math.max(0, nowMs - replayPlaybackClock.lastNowMs)
+  replayPlaybackClock.lastNowMs = nowMs
+  const tickRate = Math.max(0, Number(info.tick_rate || 60))
+  const speed = Math.max(0, Number(info.speed ?? 1))
+  const paused = !!info.paused
+  const firstTick = Math.max(0, Number(info.first_tick || 0))
+  const totalTicks = Math.max(firstTick, Number(info.total_ticks || firstTick))
+  const maxStepTicks = Math.max(1, Math.ceil((tickRate * Math.max(1, speed)) / 60))
+  if (paused || speed === 0 || tickRate === 0) {
+    return {
+      tick: Math.max(firstTick, Math.min(totalTicks, Math.round(replayPlaybackClock.tick))),
+      elapsedMs,
+      rawAdvanceTicks: 0,
+      appliedAdvanceTicks: 0,
+      droppedTicks: 0,
+      paused: true,
+    }
+  }
+  const exactAdvance = replayPlaybackClock.carryTicks + (elapsedMs / 1000) * tickRate * speed
+  const rawAdvanceTicks = Math.floor(exactAdvance)
+  const appliedAdvanceTicks = Math.min(rawAdvanceTicks, maxStepTicks)
+  const droppedTicks = Math.max(0, rawAdvanceTicks - appliedAdvanceTicks)
+  replayPlaybackClock.carryTicks = 0
+  replayPlaybackClock.tick = Math.max(firstTick, Math.min(totalTicks, Math.round(replayPlaybackClock.tick + appliedAdvanceTicks)))
+  return {
+    tick: replayPlaybackClock.tick,
+    elapsedMs,
+    rawAdvanceTicks,
+    appliedAdvanceTicks,
+    droppedTicks,
+    paused: false,
+  }
+}
+
+function consumeReplayLongTaskMetrics() {
+  const metrics = {
+    long_task_count: replayLongTasks.count,
+    long_task_total_ms: replayLongTasks.totalMs,
+    long_task_max_ms: replayLongTasks.maxMs,
+  }
+  replayLongTasks.count = 0
+  replayLongTasks.totalMs = 0
+  replayLongTasks.maxMs = 0
+  return metrics
+}
+
 function renderReplayInfo(info) {
+  const previousInfo = replayState.info
   replayState.info = info
   if (!replayState.enabled || !info) return
+  replayState.clientDriven = info.client_driven === true
+  const previousSeekVersion = Number.isFinite(Number(previousInfo?.seek_version)) ? Number(previousInfo.seek_version) : null
+  const seekVersion = Number.isFinite(Number(info.seek_version)) ? Number(info.seek_version) : null
+  const wasPaused = !!previousInfo?.paused
+  const paused = !!info.paused
+  if (replayState.clientDriven && previousSeekVersion !== null && seekVersion !== previousSeekVersion) {
+    clearReplayFrameQueue()
+  }
+  syncReplayPlaybackClock(info, {
+    force: seekVersion !== previousSeekVersion || (wasPaused && !paused),
+  })
   setReplayPlayUi(!!info.paused)
   if (replaySliderEl) {
     replaySliderEl.min = String(info.first_tick || 0)
@@ -335,6 +540,49 @@ function renderReplayInfo(info) {
   if (replaySkipIdleEl) replaySkipIdleEl.checked = !!info.skip_idle
   if (replayState.behaviorPanelOpen) renderBehaviorPanel()
   renderSidePanel(info.current_tick || info.first_tick || 0)
+}
+
+function notifyReplayViewportWarmup() {
+  if (!replayViewportWarmup.assetsSettled) return
+  if (!replayState.clientDriven) {
+    if (!replayViewportWarmup.renderedFrame) return
+    replayViewportWarmup.ready = true
+    const listeners = [...replayViewportWarmup.listeners]
+    replayViewportWarmup.listeners.clear()
+    for (const listener of listeners) listener()
+    return
+  }
+  if (replayViewportWarmup.warmupFrames < replayViewportWarmup.minWarmupFrames) return
+  if (!replayViewportWarmup.restored) return
+  if (!replayViewportWarmup.postRestoreWarmupComplete) return
+  if (replayState.clientDriven && replayFrameQueue.length < replayViewportWarmup.minQueueDepth) return
+  replayViewportWarmup.ready = true
+  const listeners = [...replayViewportWarmup.listeners]
+  replayViewportWarmup.listeners.clear()
+  for (const listener of listeners) listener()
+}
+
+function whenReplayViewportWarm() {
+  notifyReplayViewportWarmup()
+  if (replayViewportWarmup.ready) return Promise.resolve()
+  return new Promise((resolve) => replayViewportWarmup.listeners.add(resolve))
+}
+
+function markReplayViewportAssetsSettled() {
+  if (!replayViewportWarmup.assetsSettled) {
+    replayViewportWarmup.assetsSettled = true
+    replayViewportWarmup.warmupFrames = 0
+    replayViewportWarmup.postRestoreWarmupFrames = 0
+    replayViewportWarmup.maxWarmupRenderMs = 0
+    replayViewportWarmup.restored = false
+    replayViewportWarmup.postRestoreWarmupComplete = false
+    replayViewportWarmup.restoredFrameConsumed = false
+    replayViewportWarmup.ready = false
+  }
+  notifyReplayViewportWarmup()
+  if (!replayViewportWarmup.ready && typeof replayViewportWarmupPump === 'function') {
+    replayViewportWarmupPump()
+  }
 }
 
 function renderAgentLogMessages(currentTick, payload = null) {
@@ -1146,17 +1394,17 @@ async function refreshReplayInfo() {
   try {
     const info = await fetchReplayInfo()
     renderReplayInfo(info)
-    if (!replayState.metadataLoaded) {
+    if (behaviorPanelAvailable && !replayState.metadataLoaded) {
       const metadata = await fetchReplayMetadata()
       applyReplayMetadata(metadata)
     }
-    if (!replayState.agentLoaded) {
+    if (agentPanelAvailable && !replayState.agentLoaded) {
       const logs = await fetchReplayAgentMessages()
       if (logs) renderAgentLogMessages(info?.current_tick || 0, logs)
-    } else {
+    } else if (agentPanelAvailable) {
       renderAgentLogMessages(info?.current_tick || 0)
     }
-    if (!replayState.workspaceLoaded) {
+    if (workspacePanelAvailable && !replayState.workspaceLoaded) {
       const workspace = await fetchReplayWorkspaceEvents()
       if (workspace) {
         applyWorkspaceEvents(workspace)
@@ -1270,6 +1518,111 @@ function renderInjectedSpectatorState(state, info = null, options = null) {
   renderPlayerList(state?.players)
   rerenderSpectatorState(options)
   return true
+}
+
+function replayCameraApi() {
+  return internalApiRegistry.get('camera') || null
+}
+
+function applyReplayCameraState(state) {
+  const api = replayCameraApi()
+  if (!api || !state || typeof state !== 'object') {
+    pendingReplayCameraState = state || null
+    return false
+  }
+  try {
+    if (state.modeOverride && typeof api.setMode === 'function') api.setMode(state.modeOverride)
+    else if (typeof api.clearModeOverride === 'function') api.clearModeOverride()
+    if (state.spectator && typeof api.setSpectatorPose === 'function') {
+      api.setSpectatorPose(state.spectator)
+    }
+    pendingReplayCameraState = null
+    return true
+  } catch (err) {
+    console.error('[replay camera] restore failed', err)
+    return false
+  }
+}
+
+function applyPendingReplayCameraState() {
+  if (!pendingReplayCameraState) return false
+  return applyReplayCameraState(pendingReplayCameraState)
+}
+
+function reportReplayCameraState(ws) {
+  if (!replayState.enabled || !ws || ws.readyState !== WebSocket.OPEN) return
+  const now = Date.now()
+  if (now - lastCameraReportMs < 250) return
+  const api = replayCameraApi()
+  if (!api || typeof api.getState !== 'function') return
+  try {
+    const state = api.getState()
+    ws.send(JSON.stringify({ type: 'replay_camera_state', state }))
+    lastCameraReportMs = now
+  } catch (err) {
+    console.error('[replay camera] report failed', err)
+  }
+}
+
+function afterNextPaint() {
+  return new Promise((resolve) => {
+    requestAnimationFrame(() => requestAnimationFrame(resolve))
+  })
+}
+
+function scheduleVisualFrame(callback, timeoutMs = 34) {
+  let fired = false
+  let rafId = 0
+  let timeoutId = 0
+  const run = (source) => {
+    if (fired) return
+    fired = true
+    if (timeoutId) clearTimeout(timeoutId)
+    callback(performance.now(), source)
+  }
+  rafId = requestAnimationFrame(() => run('raf'))
+  timeoutId = window.setTimeout(() => {
+    if (rafId) cancelAnimationFrame(rafId)
+    run('timeout')
+  }, timeoutMs)
+}
+
+let replayViewportReadySeq = 0
+let replayViewportReadyReported = false
+let replayViewportReadyPending = false
+
+async function reportReplayViewportReady(state) {
+  if (!replayState.enabled || replayViewportReadyReported || replayViewportReadyPending) return
+  replayViewportReadyPending = true
+  const seq = ++replayViewportReadySeq
+  try {
+    await afterNextPaint()
+    if (seq !== replayViewportReadySeq || !replayState.enabled || replayViewportReadyReported) return
+    await threeSdk.whenTrackedAssetsSettled()
+    markReplayViewportAssetsSettled()
+    await whenReplayViewportWarm()
+    await afterNextPaint()
+    await threeSdk.whenTrackedAssetsSettled()
+    await afterNextPaint()
+    if (seq !== replayViewportReadySeq || !replayState.enabled || replayViewportReadyReported) return
+    consumeReplayLongTaskMetrics()
+    replayViewportReadyReported = true
+    window.parent?.postMessage({
+      type: 'replay:viewport-ready',
+      version: 1,
+      href: window.location.href,
+      tick: Number.isFinite(Number(state?.tick)) ? Number(state.tick) : null,
+      assets: threeSdk.getTrackedAssetLoadState(),
+    }, window.location.origin)
+  } catch (err) {
+    console.error('[replay] viewport readiness failed', err)
+  } finally {
+    replayViewportReadyPending = false
+  }
+}
+
+function notifyRendererStateReady(state) {
+  if (replayState.enabled) void reportReplayViewportReady(state)
 }
 
 function resolveSpectatorPlayerId(target) {
@@ -1560,6 +1913,8 @@ function isRendererInstance(value) {
   ) && (
     value.onState === undefined || typeof value.onState === 'function'
   ) && (
+    value.onFrame === undefined || typeof value.onFrame === 'function'
+  ) && (
     value.onResize === undefined || typeof value.onResize === 'function'
   )
 }
@@ -1648,7 +2003,10 @@ function createSnapshotBuffer(options = {}) {
     const fromState = from.state
     const toState = to.state
     const fromPlayers = indexById(fromState?.players)
-    const fromEntities = indexById(fromState?.entities)
+    const changedEntityIds = Array.isArray(toState?.__spectatorDelta?.changedEntityIds)
+      ? new Set(toState.__spectatorDelta.changedEntityIds)
+      : null
+    const fromEntities = changedEntityIds?.size === 0 ? null : indexById(fromState?.entities)
 
     const players = Array.isArray(toState?.players)
       ? toState.players.map((p) => {
@@ -1659,7 +2017,10 @@ function createSnapshotBuffer(options = {}) {
       : []
 
     const entities = Array.isArray(toState?.entities)
-      ? toState.entities.map((e) => {
+      ? changedEntityIds?.size === 0
+        ? toState.entities
+        : toState.entities.map((e) => {
+        if (changedEntityIds && !changedEntityIds.has(e.id)) return e
         const fe = fromEntities.get(e.id)
         if (!fe || !Array.isArray(fe.position) || !Array.isArray(e.position)) return e
         return { ...e, position: lerpVec3(fe.position, e.position, t) }
@@ -2015,36 +2376,44 @@ async function bootstrap() {
   if (replayInfo) {
     setReplayMode(true)
     renderReplayInfo(replayInfo)
-    const metadata = await fetchReplayMetadata().catch((err) => {
-      console.error(err)
-      return null
-    })
-    if (metadata) applyReplayMetadata(metadata)
-    const logs = await fetchReplayAgentMessages().catch((err) => {
-      console.error(err)
-      return null
-    })
-    if (logs) renderAgentLogMessages(replayInfo?.current_tick || 0, logs)
-    const workspace = await fetchReplayWorkspaceEvents().catch((err) => {
-      console.error(err)
-      return null
-    })
-    if (workspace) {
-      applyWorkspaceEvents(workspace)
-      renderSidePanel(replayInfo?.current_tick || 0)
-    }
-    startReplayPolling()
-    const externalView = await fetchExternalReplayView().catch((err) => {
-      console.error(err)
-      return null
-    })
-    if (externalView?.enabled && externalView?.url) {
-      mountExternalReplayView(externalView.url)
-      setStatus('Connected | Replay | External viewport', 'ok')
-      window.addEventListener('beforeunload', () => {
-        if (replayState.pollTimer) clearInterval(replayState.pollTimer)
+    if (!RUNTIME_VIEWPORT_ONLY && behaviorPanelAvailable) {
+      const metadata = await fetchReplayMetadata().catch((err) => {
+        console.error(err)
+        return null
       })
-      return
+      if (metadata) applyReplayMetadata(metadata)
+    }
+    if (!RUNTIME_VIEWPORT_ONLY && agentPanelAvailable) {
+      const logs = await fetchReplayAgentMessages().catch((err) => {
+        console.error(err)
+        return null
+      })
+      if (logs) renderAgentLogMessages(replayInfo?.current_tick || 0, logs)
+    }
+    if (!RUNTIME_VIEWPORT_ONLY && workspacePanelAvailable) {
+      const workspace = await fetchReplayWorkspaceEvents().catch((err) => {
+        console.error(err)
+        return null
+      })
+      if (workspace) {
+        applyWorkspaceEvents(workspace)
+        renderSidePanel(replayInfo?.current_tick || 0)
+      }
+    }
+    if (!RUNTIME_VIEWPORT_ONLY) startReplayPolling()
+    if (replayChromeAvailable) {
+      const externalView = await fetchExternalReplayView().catch((err) => {
+        console.error(err)
+        return null
+      })
+      if (externalView?.enabled && externalView?.url) {
+        mountExternalReplayView(externalView.url)
+        setStatus('Connected | Replay | External viewport', 'ok')
+        window.addEventListener('beforeunload', () => {
+          if (replayState.pollTimer) clearInterval(replayState.pollTimer)
+        })
+        return
+      }
     }
   }
 
@@ -2118,6 +2487,274 @@ async function bootstrap() {
   const ws = new WebSocket(`${protocol}//${window.location.host}${withSpectatorToken('/spectate/ws')}`)
   ws.binaryType = 'arraybuffer'
   spectateWs = ws
+  let pendingRendererState = null
+  let pendingRendererTrace = null
+  let pendingRendererReplayMeta = null
+  let rendererFrameScheduled = false
+  let rendererFrameLoopActive = false
+  let rendererFrameLoopRaf = 0
+  let rendererFrameLoopLastMs = performance.now()
+  let hasRenderedReplayState = false
+  let lastReplayMessageMs = null
+  let lastReplayMessageTick = null
+  let lastReplayRequestedTick = null
+  let replayWindowRequestOutstanding = false
+  let viewportReplayControlTimer = null
+
+  function reportReplayViewportError(message, data = {}) {
+    if (!replayState.enabled || hasRenderedReplayState) return
+    try {
+      window.parent?.postMessage({
+        type: 'replay:viewport-error',
+        version: 1,
+        href: window.location.href,
+        message,
+        ...data,
+      }, window.location.origin)
+    } catch (err) {
+      console.error('[replay] viewport error report failed', err)
+    }
+  }
+
+  function startRendererFrameLoop() {
+    if (typeof renderer.onFrame !== 'function' || rendererFrameLoopActive) return
+    rendererFrameLoopActive = true
+    rendererFrameLoopLastMs = performance.now()
+    const step = (nowMs) => {
+      if (!rendererFrameLoopActive) return
+      rendererFrameLoopRaf = requestAnimationFrame(step)
+      const dt = Math.max(0, Math.min((nowMs - rendererFrameLoopLastMs) / 1000, 0.05))
+      rendererFrameLoopLastMs = nowMs
+      if (rendererFrameScheduled || pendingRendererState) return
+      renderer.onFrame({ dt, nowMs, replay: replayState.enabled })
+      applyPendingReplayCameraState()
+      if (replayState.enabled && ws.readyState === WebSocket.OPEN) reportReplayCameraState(ws)
+    }
+    rendererFrameLoopRaf = requestAnimationFrame(step)
+  }
+
+  function stopRendererFrameLoop() {
+    rendererFrameLoopActive = false
+    if (rendererFrameLoopRaf) cancelAnimationFrame(rendererFrameLoopRaf)
+    rendererFrameLoopRaf = 0
+  }
+
+  function replayRequestStepTicks() {
+    const info = replayState.info || {}
+    const tickRate = Math.max(0, Number(info.tick_rate || 60))
+    const speed = Math.max(0, Number(info.speed ?? 1))
+    return Math.max(1, Math.ceil((tickRate * Math.max(1, speed)) / 60))
+  }
+
+  function requestReplayFrame(reason = 'buffer') {
+    if (!replayState.enabled || ws.readyState !== WebSocket.OPEN) return
+    const stepTicks = replayRequestStepTicks()
+    const step = lastReplayRequestedTick == null
+      ? stepReplayPlaybackClock()
+      : {
+          tick: lastReplayRequestedTick + stepTicks,
+          elapsedMs: 0,
+          rawAdvanceTicks: stepTicks,
+          appliedAdvanceTicks: stepTicks,
+          droppedTicks: 0,
+          paused: !!replayState.info?.paused,
+        }
+    if (step.paused && hasRenderedReplayState && replayViewportWarmup.ready) return
+    const previousTick = lastReplayRequestedTick
+    const windowSize = Math.max(1, replayFrameQueueTarget - replayFrameQueue.length)
+    lastReplayRequestedTick = step.tick + stepTicks * (windowSize - 1)
+    replayWindowRequestOutstanding = true
+    ws.send(JSON.stringify({
+      type: 'replay_request_frame',
+      tick: step.tick,
+      previous_tick: previousTick,
+      seek_version: Number.isFinite(Number(replayState.info?.seek_version)) ? Number(replayState.info.seek_version) : null,
+      reason,
+      window_size: windowSize,
+      step_ticks: stepTicks,
+      speed: Number(replayState.info?.speed ?? 1),
+      paused: !!replayState.info?.paused,
+      elapsed_ms: step.elapsedMs,
+      raw_advance_ticks: step.rawAdvanceTicks,
+      applied_advance_ticks: step.appliedAdvanceTicks,
+      dropped_ticks: step.droppedTicks,
+    }))
+  }
+
+  function clearReplayFrameQueue() {
+    replayFrameQueue.length = 0
+    lastReplayRequestedTick = null
+    replayWindowRequestOutstanding = false
+    replayViewportWarmup.ready = false
+    replayViewportWarmup.warmupFrames = 0
+    replayViewportWarmup.postRestoreWarmupFrames = 0
+    replayViewportWarmup.maxWarmupRenderMs = 0
+    replayViewportWarmup.assetsSettled = false
+    replayViewportWarmup.restored = false
+    replayViewportWarmup.postRestoreWarmupComplete = false
+    replayViewportWarmup.restoredFrameConsumed = false
+    replayViewportWarmup.renderedFrame = false
+  }
+
+  function maybeRequestReplayFrames(reason = 'buffer-low') {
+    if (!replayState.enabled || ws.readyState !== WebSocket.OPEN) return
+    if (replayWindowRequestOutstanding) return
+    if (replayFrameQueue.length > replayFrameQueueLowWater) return
+    requestReplayFrame(reason)
+  }
+
+  function enqueueReplayRendererState(state, trace = null) {
+    replayFrameQueue.push({ state, trace })
+    notifyReplayViewportWarmup()
+    if (replayFrameQueue.length > replayFrameQueueLowWater) replayWindowRequestOutstanding = false
+    maybeRequestReplayFrames('buffer-fill')
+    pumpReplayFrameQueue()
+  }
+
+  function pumpReplayFrameQueue() {
+    if (!replayState.enabled || rendererFrameScheduled || replayFrameQueue.length === 0) return
+    if (replayState.info?.paused) {
+      if (!hasRenderedReplayState) {
+        scheduleRendererState(replayFrameQueue[0].state, replayFrameQueue[0].trace, { replayWarmup: 'initial' })
+        return
+      }
+      if (!replayViewportWarmup.assetsSettled || replayViewportWarmup.ready) return
+      if (replayViewportWarmup.warmupFrames < replayViewportWarmup.minWarmupFrames) {
+        const warmupIndex = Math.min(replayViewportWarmup.warmupFrames, replayFrameQueue.length - 1)
+        const warmup = replayFrameQueue[warmupIndex]
+        scheduleRendererState(warmup.state, warmup.trace, { replayWarmup: 'prewarm' })
+        return
+      }
+      if (!replayViewportWarmup.restored) {
+        scheduleRendererState(replayFrameQueue[0].state, replayFrameQueue[0].trace, { replayWarmup: 'restore' })
+        return
+      }
+      if (replayViewportWarmup.postRestoreWarmupFrames < replayViewportWarmup.minPostRestoreWarmupFrames) {
+        const warmupIndex = Math.min(replayViewportWarmup.postRestoreWarmupFrames + 1, replayFrameQueue.length - 1)
+        const warmup = replayFrameQueue[warmupIndex]
+        scheduleRendererState(warmup.state, warmup.trace, { replayWarmup: 'post-restore-prewarm' })
+        return
+      }
+      if (!replayViewportWarmup.postRestoreWarmupComplete) {
+        scheduleRendererState(replayFrameQueue[0].state, replayFrameQueue[0].trace, { replayWarmup: 'final-restore' })
+      }
+      return
+    }
+    if (
+      replayViewportWarmup.ready &&
+      replayViewportWarmup.restored &&
+      !replayViewportWarmup.restoredFrameConsumed &&
+      replayFrameQueue.length > 1
+    ) {
+      replayFrameQueue.shift()
+      replayViewportWarmup.restoredFrameConsumed = true
+    }
+    const next = replayFrameQueue.shift()
+    scheduleRendererState(next.state, next.trace)
+  }
+
+  replayViewportWarmupPump = pumpReplayFrameQueue
+  startRendererFrameLoop()
+
+  async function syncViewportReplayControls() {
+    if (!RUNTIME_VIEWPORT_ONLY || !replayState.enabled) return
+    try {
+      const previous = replayState.info || {}
+      const info = await fetchReplayInfo()
+      const previousSeekVersion = Number.isFinite(Number(previous.seek_version)) ? Number(previous.seek_version) : null
+      const seekVersion = Number.isFinite(Number(info.seek_version)) ? Number(info.seek_version) : null
+      const wasPaused = !!previous.paused
+      const paused = !!info.paused
+      if (seekVersion !== previousSeekVersion) clearReplayFrameQueue()
+      renderReplayInfo(info)
+      if (!paused) {
+        pumpReplayFrameQueue()
+        maybeRequestReplayFrames('control-sync')
+      }
+    } catch {
+      // The viewport remains render-only; transient control polling failures are non-fatal.
+    }
+  }
+
+  function startViewportReplayControlSync() {
+    if (!RUNTIME_VIEWPORT_ONLY || viewportReplayControlTimer) return
+    viewportReplayControlTimer = setInterval(() => {
+      void syncViewportReplayControls()
+    }, 250)
+  }
+
+  function scheduleRendererState(state, trace = null, replayMeta = null) {
+    pendingRendererState = state
+    pendingRendererTrace = trace
+    pendingRendererReplayMeta = replayMeta
+    if (rendererFrameScheduled) return
+    rendererFrameScheduled = true
+    const scheduledAtMs = performance.now()
+    scheduleVisualFrame((frameNowMs, frameSource) => {
+      rendererFrameScheduled = false
+      const state = pendingRendererState
+      const trace = pendingRendererTrace
+      const replayMeta = pendingRendererReplayMeta
+      pendingRendererState = null
+      pendingRendererTrace = null
+      pendingRendererReplayMeta = null
+      if (!state) return
+      const rendererState = prioritizeSelectedPlayer(state)
+      const renderStartMs = performance.now()
+      if (renderer.onState) renderer.onState(rendererState)
+      const renderEndMs = performance.now()
+      const rendererProfile = typeof renderer.getProfile === 'function' ? renderer.getProfile() : null
+      if (replayState.enabled) {
+        hasRenderedReplayState = true
+        replayViewportWarmup.renderedFrame = true
+      }
+      if (replayState.enabled && replayViewportWarmup.assetsSettled && !replayViewportWarmup.ready) {
+        const renderMs = renderEndMs - renderStartMs
+        if (replayMeta?.replayWarmup === 'prewarm') {
+          replayViewportWarmup.warmupFrames += 1
+          replayViewportWarmup.maxWarmupRenderMs = Math.max(replayViewportWarmup.maxWarmupRenderMs, renderMs)
+        } else if (replayMeta?.replayWarmup === 'restore') {
+          replayViewportWarmup.restored = true
+        } else if (replayMeta?.replayWarmup === 'post-restore-prewarm') {
+          replayViewportWarmup.postRestoreWarmupFrames += 1
+          replayViewportWarmup.maxWarmupRenderMs = Math.max(replayViewportWarmup.maxWarmupRenderMs, renderMs)
+        } else if (replayMeta?.replayWarmup === 'final-restore') {
+          replayViewportWarmup.postRestoreWarmupComplete = true
+        }
+      }
+      applyPendingReplayCameraState()
+      reportReplayCameraState(ws)
+      if (replayState.enabled && ws.readyState === WebSocket.OPEN) {
+        const longTaskMetrics = consumeReplayLongTaskMetrics()
+        ws.send(JSON.stringify({
+          type: 'replay_render_ready',
+          tick: Number.isFinite(Number(state?.tick)) ? Number(state.tick) : null,
+          render_ms: renderEndMs - renderStartMs,
+          raf_delay_ms: frameNowMs - scheduledAtMs,
+          frame_source: frameSource,
+          replay_warmup: replayMeta?.replayWarmup ?? null,
+          warmup_frames: replayViewportWarmup.warmupFrames,
+          post_restore_warmup_frames: replayViewportWarmup.postRestoreWarmupFrames,
+          warmup_max_render_ms: replayViewportWarmup.maxWarmupRenderMs,
+          ws_delta_ms: trace?.wsDeltaMs ?? null,
+          tick_delta: trace?.tickDelta ?? null,
+          message_to_render_ms: trace?.receiveMs == null ? null : renderStartMs - trace.receiveMs,
+          payload_bytes: trace?.payloadBytes ?? null,
+          decode_ms: trace?.decodeMs ?? null,
+          parse_ms: trace?.parseMs ?? null,
+          apply_delta_ms: trace?.applyDeltaMs ?? null,
+          pre_schedule_ms: trace?.preScheduleMs ?? null,
+          renderer_profile: rendererProfile,
+          queue_depth: replayFrameQueue.length,
+          ...longTaskMetrics,
+        }))
+        maybeRequestReplayFrames('rendered-low-water')
+      }
+      notifyRendererStateReady(state)
+      notifyReplayViewportWarmup()
+      if (replayState.enabled) pumpReplayFrameQueue()
+    })
+  }
 
   ws.onopen = () => {
     chatState.wsConnected = true
@@ -2127,27 +2764,41 @@ async function bootstrap() {
       'ok'
     )
     if (!replayState.enabled && !chatState.loadedHistory) void loadChatHistory()
+    if (replayState.enabled) {
+      requestReplayFrame('open')
+      startViewportReplayControlSync()
+    }
   }
   ws.onerror = () => {
     setChatConnection('WS error')
     setStatus('WebSocket error', 'error')
+    reportReplayViewportError('Replay connection failed before the first frame')
   }
-  ws.onclose = () => {
+  ws.onclose = (event) => {
     chatState.wsConnected = false
     setChatConnection('Offline')
     setStatus('Disconnected', 'warn')
     renderPlayerList([])
+    reportReplayViewportError('Replay connection closed before the first frame', { code: event?.code ?? null })
   }
 
   ws.onmessage = (event) => {
     try {
+      const rawReceiveMs = performance.now()
+      const payloadBytes = event.data instanceof ArrayBuffer
+        ? event.data.byteLength
+        : typeof event.data === 'string'
+          ? event.data.length
+          : null
       let text
       if (event.data instanceof ArrayBuffer) {
         text = new TextDecoder().decode(event.data)
       } else {
         text = String(event.data)
       }
+      const decodedMs = performance.now()
       const data = JSON.parse(text)
+      const parsedMs = performance.now()
       if (data && data.type === 'audio_chunk') {
         onAudioChunk(data)
         return
@@ -2156,10 +2807,45 @@ async function bootstrap() {
         appendChatMessage(data)
         return
       }
+      if (data && data.type === 'spectator_delta') {
+        const applyStartMs = performance.now()
+        const state = applySpectatorDelta(latestSpectatorState, data)
+        const appliedMs = performance.now()
+        if (!state) {
+          setStatus('Missing base spectator state; reconnecting', 'warn')
+          ws.close()
+          return
+        }
+        latestSpectatorState = state
+        wsStats.frames += 1
+        if (typeof state?.tick === 'number') wsStats.lastTick = state.tick
+        const tick = Number(state?.tick)
+        const trace = {
+          receiveMs: rawReceiveMs,
+          payloadBytes,
+          decodeMs: decodedMs - rawReceiveMs,
+          parseMs: parsedMs - decodedMs,
+          applyDeltaMs: appliedMs - applyStartMs,
+          preScheduleMs: performance.now() - rawReceiveMs,
+          wsDeltaMs: lastReplayMessageMs == null ? null : rawReceiveMs - lastReplayMessageMs,
+          tickDelta: Number.isFinite(tick) && Number.isFinite(lastReplayMessageTick) ? tick - lastReplayMessageTick : null,
+        }
+        lastReplayMessageMs = rawReceiveMs
+        if (Number.isFinite(tick)) lastReplayMessageTick = tick
+        renderPlayerList(state?.players)
+        if (replayState.enabled && (replayState.agentLoaded || replayState.workspaceLoaded) && typeof state?.tick === 'number') {
+          renderSidePanel(state.tick)
+        }
+        if (replayState.enabled) enqueueReplayRendererState(state, trace)
+        else scheduleRendererState(state, trace)
+        return
+      }
       if (data && typeof data.type === 'string') {
         if (data.type === 'replay_error') {
           setStatus(data.message || 'Replay error', 'error')
           console.error('[replay]', data.message || 'Replay error', data)
+        } else if (data.type === 'replay_camera_set') {
+          applyReplayCameraState(data.state)
         }
         return
       }
@@ -2171,12 +2857,25 @@ async function bootstrap() {
       latestSpectatorState = state
       wsStats.frames += 1
       if (typeof state?.tick === 'number') wsStats.lastTick = state.tick
+      const tick = Number(state?.tick)
+      const trace = {
+        receiveMs: rawReceiveMs,
+        payloadBytes,
+        decodeMs: decodedMs - rawReceiveMs,
+        parseMs: parsedMs - decodedMs,
+        applyDeltaMs: 0,
+        preScheduleMs: performance.now() - rawReceiveMs,
+        wsDeltaMs: lastReplayMessageMs == null ? null : rawReceiveMs - lastReplayMessageMs,
+        tickDelta: Number.isFinite(tick) && Number.isFinite(lastReplayMessageTick) ? tick - lastReplayMessageTick : null,
+      }
+      lastReplayMessageMs = rawReceiveMs
+      if (Number.isFinite(tick)) lastReplayMessageTick = tick
       renderPlayerList(state?.players)
       if (replayState.enabled && (replayState.agentLoaded || replayState.workspaceLoaded) && typeof state?.tick === 'number') {
         renderSidePanel(state.tick)
       }
-      const rendererState = prioritizeSelectedPlayer(state)
-      if (renderer.onState) renderer.onState(rendererState)
+      if (replayState.enabled) enqueueReplayRendererState(state, trace)
+      else scheduleRendererState(state, trace)
     } catch (error) {
       console.error(error)
       setStatus('Failed to parse spectator state', 'error')
@@ -2184,6 +2883,8 @@ async function bootstrap() {
   }
 
   window.addEventListener('beforeunload', () => {
+    stopRendererFrameLoop()
+    if (viewportReplayControlTimer) clearInterval(viewportReplayControlTimer)
     runtimeKit.internal.dispose()
     if (renderer.unmount) renderer.unmount()
     if (replayState.pollTimer) clearInterval(replayState.pollTimer)

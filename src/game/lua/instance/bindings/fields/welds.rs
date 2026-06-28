@@ -46,7 +46,7 @@ pub(super) fn add_fields<F: UserDataFields<Instance>>(fields: &mut F) {
             .and_then(|w| w.upgrade())
             .map(Instance::from_ref))
     });
-    fields.add_field_method_set("Part0", |_, this, part: Option<Instance>| {
+    fields.add_field_method_set("Part0", |lua, this, part: Option<Instance>| {
         let mut data = this.data.lock().unwrap();
         let weak = part.map(|p| Arc::downgrade(&p.data));
         if let Some(weld) = &mut data.weld_data {
@@ -56,6 +56,8 @@ pub(super) fn add_fields<F: UserDataFields<Instance>>(fields: &mut F) {
             wc.part0 = weak;
             compute_weld_constraint_relative_cframe(&mut data);
         }
+        drop(data);
+        this.mark_replication_dirty(lua);
         Ok(())
     });
 
@@ -77,7 +79,7 @@ pub(super) fn add_fields<F: UserDataFields<Instance>>(fields: &mut F) {
             .and_then(|w| w.upgrade())
             .map(Instance::from_ref))
     });
-    fields.add_field_method_set("Part1", |_, this, part: Option<Instance>| {
+    fields.add_field_method_set("Part1", |lua, this, part: Option<Instance>| {
         let mut data = this.data.lock().unwrap();
         let weak = part.map(|p| Arc::downgrade(&p.data));
         if let Some(weld) = &mut data.weld_data {
@@ -87,6 +89,8 @@ pub(super) fn add_fields<F: UserDataFields<Instance>>(fields: &mut F) {
             wc.part1 = weak;
             compute_weld_constraint_relative_cframe(&mut data);
         }
+        drop(data);
+        this.mark_replication_dirty(lua);
         Ok(())
     });
 
@@ -94,10 +98,12 @@ pub(super) fn add_fields<F: UserDataFields<Instance>>(fields: &mut F) {
         let data = this.data.lock().unwrap();
         Ok(data.weld_data.as_ref().map(|w| w.c0))
     });
-    fields.add_field_method_set("C0", |_, this, cframe: CFrame| {
+    fields.add_field_method_set("C0", |lua, this, cframe: CFrame| {
         let mut data = this.data.lock().unwrap();
         if let Some(weld) = &mut data.weld_data {
             weld.c0 = cframe.orthonormalized();
+            drop(data);
+            this.mark_replication_dirty(lua);
         }
         Ok(())
     });
@@ -106,10 +112,12 @@ pub(super) fn add_fields<F: UserDataFields<Instance>>(fields: &mut F) {
         let data = this.data.lock().unwrap();
         Ok(data.weld_data.as_ref().map(|w| w.c1))
     });
-    fields.add_field_method_set("C1", |_, this, cframe: CFrame| {
+    fields.add_field_method_set("C1", |lua, this, cframe: CFrame| {
         let mut data = this.data.lock().unwrap();
         if let Some(weld) = &mut data.weld_data {
             weld.c1 = cframe.orthonormalized();
+            drop(data);
+            this.mark_replication_dirty(lua);
         }
         Ok(())
     });
@@ -131,19 +139,28 @@ pub(super) fn add_fields<F: UserDataFields<Instance>>(fields: &mut F) {
         }
         Ok(None)
     });
-    fields.add_field_method_set("Enabled", |_, this, enabled: bool| {
+    fields.add_field_method_set("Enabled", |lua, this, enabled: bool| {
+        let mut changed = false;
         let mut data = this.data.lock().unwrap();
         if let Some(weld) = &mut data.weld_data {
             weld.enabled = enabled;
+            changed = true;
         }
         if let Some(wc) = &mut data.weld_constraint_data {
             wc.enabled = enabled;
+            changed = true;
         }
         if let Some(billboard) = &mut data.billboard_gui_data {
             billboard.enabled = enabled;
+            changed = true;
         }
         if let Some(gui) = &mut data.gui_data {
             gui.enabled = enabled;
+            changed = true;
+        }
+        drop(data);
+        if changed {
+            this.mark_replication_dirty(lua);
         }
         Ok(())
     });

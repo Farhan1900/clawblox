@@ -10,6 +10,8 @@ use crate::workspace_recording::WorkspaceRecordingManifest;
 pub struct ClawbloxManifest {
     pub schema_version: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run: Option<ManifestRun>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub world: Option<ManifestWorld>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub recordings: Vec<ManifestRecording>,
@@ -17,6 +19,22 @@ pub struct ClawbloxManifest {
     pub checkpoints: Vec<ManifestCheckpoint>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub agents: Vec<ManifestAgent>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ManifestRun {
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub index: Option<u32>,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub status: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub started_at: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub ended_at: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub resume_from: String,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -52,6 +70,16 @@ pub struct ManifestRecording {
     pub events: Option<String>,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub format: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub info: Option<ManifestRecordingInfo>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ManifestRecordingInfo {
+    pub first_tick: u64,
+    pub total_ticks: u64,
+    pub tick_rate: u32,
+    pub duration_ms: u64,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -62,6 +90,8 @@ pub struct ManifestCheckpoint {
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub created_at: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tick: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sim_time: Option<f64>,
 }
 
@@ -70,6 +100,8 @@ pub struct ManifestAgent {
     pub id: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub name: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub run_name: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub backend: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
@@ -109,6 +141,7 @@ pub struct WorldStarted<'a> {
 pub struct AgentConnected<'a> {
     pub id: &'a str,
     pub name: &'a str,
+    pub run_name: &'a str,
     pub backend: &'a str,
     pub model: &'a str,
     pub agent_dir: &'a Path,
@@ -116,6 +149,15 @@ pub struct AgentConnected<'a> {
     pub world_agent_id: &'a str,
     pub base_url: &'a str,
     pub internal_base_url: &'a str,
+}
+
+pub struct RunRecorded<'a> {
+    pub id: &'a str,
+    pub index: Option<u32>,
+    pub status: &'a str,
+    pub started_at: &'a str,
+    pub ended_at: &'a str,
+    pub resume_from: Option<&'a Path>,
 }
 
 pub fn manifest_path_for_state_root(state_root: &Path) -> PathBuf {
@@ -177,6 +219,27 @@ pub fn write(path: &Path, manifest: &ClawbloxManifest) -> Result<(), String> {
         .map_err(|err| format!("failed to replace manifest '{}': {err}", path.display()))
 }
 
+/// Annotate the current manifest with metadata about the bounded run that
+/// produced it. This is intentionally a pure manifest operation: it does not
+/// start, stop, resume, or mutate a world.
+pub fn record_run(path: &Path, run: RunRecorded<'_>) -> Result<(), String> {
+    update(path, |manifest| {
+        let state_root = manifest_state_root(path);
+        manifest.run = Some(ManifestRun {
+            id: run.id.to_string(),
+            index: run.index,
+            status: run.status.to_string(),
+            started_at: run.started_at.to_string(),
+            ended_at: run.ended_at.to_string(),
+            resume_from: run
+                .resume_from
+                .map(|path| path_value(&state_root, path))
+                .unwrap_or_default(),
+        });
+        Ok(())
+    })
+}
+
 pub fn record_world_started(path: &Path, started: WorldStarted<'_>) -> Result<(), String> {
     update(path, |manifest| {
         let state_root = manifest_state_root(path);
@@ -211,6 +274,7 @@ pub fn record_agent_connected(path: &Path, connected: AgentConnected<'_>) -> Res
         let mut agent = agent_from_dir(path, connected.agent_dir, id);
         agent.id = id.to_string();
         agent.name = connected.name.to_string();
+        agent.run_name = connected.run_name.to_string();
         agent.backend = connected.backend.to_string();
         agent.model = connected.model.to_string();
         agent.dir = path_value(&state_root, connected.agent_dir);
@@ -228,6 +292,7 @@ pub fn refresh_agent_from_dir(
     agent_dir: &Path,
     id: &str,
     name: &str,
+    run_name: &str,
     backend: &str,
     model: &str,
 ) -> Result<(), String> {
@@ -235,6 +300,9 @@ pub fn refresh_agent_from_dir(
         let mut agent = agent_from_dir(path, agent_dir, id);
         if !name.is_empty() {
             agent.name = name.to_string();
+        }
+        if !run_name.is_empty() {
+            agent.run_name = run_name.to_string();
         }
         if !backend.is_empty() {
             agent.backend = backend.to_string();
@@ -252,6 +320,7 @@ pub fn record_agent_workspace_recording(
     agent_dir: &Path,
     id: &str,
     agent_name: &str,
+    run_name: &str,
     events_path: &Path,
     blobs_dir: &Path,
 ) -> Result<(), String> {
@@ -265,6 +334,9 @@ pub fn record_agent_workspace_recording(
         };
         if !agent_name.trim().is_empty() {
             agent.name = agent_name.to_string();
+        }
+        if !run_name.trim().is_empty() {
+            agent.run_name = run_name.to_string();
         }
         agent.workspace_recording = Some(WorkspaceRecordingManifest {
             events: path_value(&state_root, events_path),
@@ -290,7 +362,28 @@ pub fn record_recording(path: &Path, recording_path: &Path, format: &str) -> Res
             path: rel,
             events,
             format: format.to_string(),
+            info: None,
         });
+        Ok(())
+    })
+}
+
+pub fn record_recording_info(
+    path: &Path,
+    recording_path: &Path,
+    info: ManifestRecordingInfo,
+) -> Result<(), String> {
+    update(path, |manifest| {
+        let state_root = manifest_state_root(path);
+        let rel = path_value(&state_root, recording_path);
+        let Some(recording) = manifest.recordings.iter_mut().find(|item| item.path == rel) else {
+            return Err(format!(
+                "recording '{}' is not declared in manifest '{}'",
+                rel,
+                path.display()
+            ));
+        };
+        recording.info = Some(info);
         Ok(())
     })
 }
@@ -299,6 +392,7 @@ pub fn record_checkpoint(
     path: &Path,
     checkpoint_path: &Path,
     format: &str,
+    tick: Option<u64>,
     sim_time: Option<f64>,
 ) -> Result<(), String> {
     update(path, |manifest| {
@@ -311,6 +405,7 @@ pub fn record_checkpoint(
             path: rel,
             format: format.to_string(),
             created_at: chrono::Utc::now().to_rfc3339(),
+            tick,
             sim_time,
         });
         Ok(())
@@ -318,16 +413,30 @@ pub fn record_checkpoint(
 }
 
 fn upsert_agent(agents: &mut Vec<ManifestAgent>, agent: ManifestAgent) {
-    if let Some(existing) = agents.iter_mut().find(|item| item.id == agent.id) {
+    if let Some(existing) = agents
+        .iter_mut()
+        .find(|item| same_agent_entry(item, &agent))
+    {
         merge_agent(existing, agent);
     } else {
         agents.push(agent);
     }
 }
 
+fn same_agent_entry(existing: &ManifestAgent, next: &ManifestAgent) -> bool {
+    (!existing.id.is_empty() && existing.id == next.id)
+        || (!existing.dir.is_empty() && existing.dir == next.dir)
+}
+
 fn merge_agent(existing: &mut ManifestAgent, next: ManifestAgent) {
+    if !next.id.is_empty() && (existing.id.is_empty() || !next.world_agent_id.is_empty()) {
+        existing.id = next.id;
+    }
     if !next.name.is_empty() {
         existing.name = next.name;
+    }
+    if !next.run_name.is_empty() {
+        existing.run_name = next.run_name;
     }
     if !next.backend.is_empty() {
         existing.backend = next.backend;

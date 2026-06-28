@@ -4,7 +4,7 @@ use rapier3d::control::{
 };
 use rapier3d::prelude::*;
 
-use super::PhysicsWorld;
+use super::{rotation_matrix_to_quaternion, PhysicsWorld};
 use crate::game::constants::humanoid as humanoid_consts;
 use crate::game::constants::physics as consts;
 use crate::game::lua::services::physics_service::CollisionGroupMask;
@@ -237,6 +237,20 @@ impl PhysicsWorld {
         true
     }
 
+    /// Sets the full orientation for a character controller body.
+    pub fn set_character_rotation(&mut self, lua_id: u64, rotation: &[[f32; 3]; 3]) -> bool {
+        let Some(state) = self.character_controllers.get(&lua_id) else {
+            return false;
+        };
+        let Some(body) = self.rigid_body_set.get_mut(state.body_handle) else {
+            return false;
+        };
+        let rot = rotation_matrix_to_quaternion(rotation);
+        body.set_rotation(rot, true);
+        body.set_next_kinematic_rotation(rot);
+        true
+    }
+
     /// Updates the collision group used by the character controller collider and movement queries.
     pub fn set_character_collision_group(
         &mut self,
@@ -454,6 +468,18 @@ impl PhysicsWorld {
         desired_translation: [f32; 3],
         dt: f32,
     ) -> Option<EffectiveCharacterMovement> {
+        self.move_character_with_object_physics(lua_id, desired_translation, dt, true)
+    }
+
+    /// Moves a character using the kinematic controller, optionally applying
+    /// newer dynamic-object coupling such as explicit push impulses.
+    pub fn move_character_with_object_physics(
+        &mut self,
+        lua_id: u64,
+        desired_translation: [f32; 3],
+        dt: f32,
+        player_object_physics: bool,
+    ) -> Option<EffectiveCharacterMovement> {
         let state = self.character_controllers.get(&lua_id)?;
         let body_handle = state.body_handle;
         let collider_handle = state.collider_handle;
@@ -597,7 +623,7 @@ impl PhysicsWorld {
         // controller treats every collider as an immovable wall, so a loose
         // part that comes to rest against the capsule (and then falls
         // asleep) walls the character in permanently.
-        if !collisions.is_empty() {
+        if player_object_physics && !collisions.is_empty() {
             controller.solve_character_collision_impulses(
                 dt,
                 &mut self.rigid_body_set,

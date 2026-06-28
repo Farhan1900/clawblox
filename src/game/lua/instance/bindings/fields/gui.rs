@@ -1,6 +1,9 @@
 use mlua::{UserDataFields, Value};
 
-use crate::game::lua::types::{Color3, UDim, Vector3};
+use crate::game::lua::types::{
+    enums::{FontEnum, TextXAlignmentEnum, TextYAlignmentEnum},
+    Color3, UDim, Vector3,
+};
 
 use super::super::super::*;
 
@@ -11,10 +14,12 @@ pub(super) fn add_fields<F: UserDataFields<Instance>>(fields: &mut F) {
         let data = this.data.lock().unwrap();
         Ok(data.billboard_gui_data.as_ref().map(|b| b.studs_offset))
     });
-    fields.add_field_method_set("StudsOffset", |_, this, offset: Vector3| {
+    fields.add_field_method_set("StudsOffset", |lua, this, offset: Vector3| {
         let mut data = this.data.lock().unwrap();
         if let Some(billboard) = &mut data.billboard_gui_data {
             billboard.studs_offset = offset;
+            drop(data);
+            this.mark_replication_dirty(lua);
         }
         Ok(())
     });
@@ -23,10 +28,12 @@ pub(super) fn add_fields<F: UserDataFields<Instance>>(fields: &mut F) {
         let data = this.data.lock().unwrap();
         Ok(data.billboard_gui_data.as_ref().map(|b| b.always_on_top))
     });
-    fields.add_field_method_set("AlwaysOnTop", |_, this, value: bool| {
+    fields.add_field_method_set("AlwaysOnTop", |lua, this, value: bool| {
         let mut data = this.data.lock().unwrap();
         if let Some(billboard) = &mut data.billboard_gui_data {
             billboard.always_on_top = value;
+            drop(data);
+            this.mark_replication_dirty(lua);
         }
         Ok(())
     });
@@ -40,10 +47,12 @@ pub(super) fn add_fields<F: UserDataFields<Instance>>(fields: &mut F) {
             .and_then(|w| w.upgrade())
             .map(Instance::from_ref))
     });
-    fields.add_field_method_set("Adornee", |_, this, part: Option<Instance>| {
+    fields.add_field_method_set("Adornee", |lua, this, part: Option<Instance>| {
         let mut data = this.data.lock().unwrap();
         if let Some(billboard) = &mut data.billboard_gui_data {
             billboard.adornee = part.map(|p| Arc::downgrade(&p.data));
+            drop(data);
+            this.mark_replication_dirty(lua);
         }
         Ok(())
     });
@@ -249,15 +258,30 @@ pub(super) fn add_fields<F: UserDataFields<Instance>>(fields: &mut F) {
     // Font (TextLabel, TextButton)
     fields.add_field_method_get("Font", |_, this| {
         let data = this.data.lock().unwrap();
-        Ok(data.gui_data.as_ref().and_then(|g| g.font.clone()))
+        Ok(data.gui_data.as_ref().and_then(|g| {
+            g.font.as_ref().map(|font| match font.as_str() {
+                "GothamBold" => FontEnum::GothamBold,
+                "Gotham" => FontEnum::Gotham,
+                "SourceSansBold" => FontEnum::SourceSansBold,
+                _ => FontEnum::SourceSans,
+            })
+        }))
     });
     fields.add_field_method_set("Font", |_, this, font: Value| {
         let mut data = this.data.lock().unwrap();
         if let Some(gui) = &mut data.gui_data {
-            if let Value::String(s) = font {
-                if let Ok(font_name) = s.to_str() {
-                    gui.font = Some(font_name.to_string());
+            match font {
+                Value::String(s) => {
+                    if let Ok(font_name) = s.to_str() {
+                        gui.font = Some(font_name.to_string());
+                    }
                 }
+                Value::UserData(ud) => {
+                    if let Ok(font) = ud.borrow::<FontEnum>() {
+                        gui.font = Some(font.name().to_string());
+                    }
+                }
+                _ => {}
             }
         }
         Ok(())
@@ -281,11 +305,11 @@ pub(super) fn add_fields<F: UserDataFields<Instance>>(fields: &mut F) {
         let data = this.data.lock().unwrap();
         if let Some(gui) = &data.gui_data {
             let alignment = match gui.text_x_alignment {
-                TextXAlignment::Left => "Left",
-                TextXAlignment::Center => "Center",
-                TextXAlignment::Right => "Right",
+                TextXAlignment::Left => TextXAlignmentEnum::Left,
+                TextXAlignment::Center => TextXAlignmentEnum::Center,
+                TextXAlignment::Right => TextXAlignmentEnum::Right,
             };
-            Ok(Value::String(lua.create_string(alignment)?))
+            Ok(Value::UserData(lua.create_userdata(alignment)?))
         } else {
             Ok(Value::Nil)
         }
@@ -293,14 +317,26 @@ pub(super) fn add_fields<F: UserDataFields<Instance>>(fields: &mut F) {
     fields.add_field_method_set("TextXAlignment", |_, this, alignment: Value| {
         let mut data = this.data.lock().unwrap();
         if let Some(gui) = &mut data.gui_data {
-            if let Value::String(s) = alignment {
-                if let Ok(str_val) = s.to_str() {
-                    gui.text_x_alignment = match str_val.as_ref() {
-                        "Left" => TextXAlignment::Left,
-                        "Right" => TextXAlignment::Right,
-                        _ => TextXAlignment::Center,
+            match alignment {
+                Value::String(s) => {
+                    if let Ok(str_val) = s.to_str() {
+                        gui.text_x_alignment = match str_val.as_ref() {
+                            "Left" => TextXAlignment::Left,
+                            "Right" => TextXAlignment::Right,
+                            _ => TextXAlignment::Center,
+                        };
+                    }
+                }
+                Value::UserData(ud) => {
+                    if let Ok(alignment) = ud.borrow::<TextXAlignmentEnum>() {
+                        gui.text_x_alignment = match *alignment {
+                            TextXAlignmentEnum::Left => TextXAlignment::Left,
+                            TextXAlignmentEnum::Center => TextXAlignment::Center,
+                            TextXAlignmentEnum::Right => TextXAlignment::Right,
+                        };
                     };
                 }
+                _ => {}
             }
         }
         Ok(())
@@ -311,11 +347,11 @@ pub(super) fn add_fields<F: UserDataFields<Instance>>(fields: &mut F) {
         let data = this.data.lock().unwrap();
         if let Some(gui) = &data.gui_data {
             let alignment = match gui.text_y_alignment {
-                TextYAlignment::Top => "Top",
-                TextYAlignment::Center => "Center",
-                TextYAlignment::Bottom => "Bottom",
+                TextYAlignment::Top => TextYAlignmentEnum::Top,
+                TextYAlignment::Center => TextYAlignmentEnum::Center,
+                TextYAlignment::Bottom => TextYAlignmentEnum::Bottom,
             };
-            Ok(Value::String(lua.create_string(alignment)?))
+            Ok(Value::UserData(lua.create_userdata(alignment)?))
         } else {
             Ok(Value::Nil)
         }
@@ -323,14 +359,26 @@ pub(super) fn add_fields<F: UserDataFields<Instance>>(fields: &mut F) {
     fields.add_field_method_set("TextYAlignment", |_, this, alignment: Value| {
         let mut data = this.data.lock().unwrap();
         if let Some(gui) = &mut data.gui_data {
-            if let Value::String(s) = alignment {
-                if let Ok(str_val) = s.to_str() {
-                    gui.text_y_alignment = match str_val.as_ref() {
-                        "Top" => TextYAlignment::Top,
-                        "Bottom" => TextYAlignment::Bottom,
-                        _ => TextYAlignment::Center,
+            match alignment {
+                Value::String(s) => {
+                    if let Ok(str_val) = s.to_str() {
+                        gui.text_y_alignment = match str_val.as_ref() {
+                            "Top" => TextYAlignment::Top,
+                            "Bottom" => TextYAlignment::Bottom,
+                            _ => TextYAlignment::Center,
+                        };
+                    }
+                }
+                Value::UserData(ud) => {
+                    if let Ok(alignment) = ud.borrow::<TextYAlignmentEnum>() {
+                        gui.text_y_alignment = match *alignment {
+                            TextYAlignmentEnum::Top => TextYAlignment::Top,
+                            TextYAlignmentEnum::Center => TextYAlignment::Center,
+                            TextYAlignmentEnum::Bottom => TextYAlignment::Bottom,
+                        };
                     };
                 }
+                _ => {}
             }
         }
         Ok(())

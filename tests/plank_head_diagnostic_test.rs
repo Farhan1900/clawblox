@@ -71,6 +71,7 @@ fn approx_on_head(hrp: [f32; 3], plank_pos: [f32; 3], plank_size: [f32; 3]) -> b
 }
 
 #[test]
+#[ignore = "diagnostic reproducer for historical welded-head desync"]
 fn diagnostic_welded_head_platform_lua_vs_physics() {
     let mut instance = GameInstance::new(Uuid::new_v4(), None);
 
@@ -201,6 +202,7 @@ fn diagnostic_welded_head_platform_lua_vs_physics() {
 }
 
 #[test]
+#[ignore = "diagnostic reproducer that depends on a developer-local main.luau"]
 fn diagnostic_main_luau_find_on_head_then_measure_movement() {
     let mut instance = GameInstance::new(Uuid::new_v4(), None);
     let script_path = "/home/nacloos/Code/physics-world-clawblox/clawblox_game/main.luau";

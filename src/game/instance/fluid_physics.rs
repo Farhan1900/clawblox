@@ -39,6 +39,10 @@ struct FluidSample {
 
 impl GameInstance {
     pub(super) fn apply_fluid_forces(&mut self, dt: f32) {
+        if self.workspace_feature_counts.terrain_with_water == 0 {
+            return;
+        }
+
         let Some(runtime) = &self.lua_runtime else {
             return;
         };

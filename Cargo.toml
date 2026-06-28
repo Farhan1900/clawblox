@@ -4,7 +4,7 @@ version = "0.1.4"
 edition = "2021"
 
 [workspace]
-members = [".", "python/clawblox"]
+members = [".", "python/clawblox", "crates/luau-persist"]
 
 [dependencies]
 home = "=0.5.9"
@@ -17,12 +17,14 @@ sha2 = "0.10"
 tower-http = { version = "0.6", features = ["cors", "fs"] }
 uuid = { version = "1", features = ["v4", "serde"] }
 rand = "0.8"
-rapier3d = "0.25"
+rapier3d = { version = "0.25", features = ["profiler"] }
 crossbeam-channel = "0.5"
 nalgebra = "0.33"
 sqlx = { version = "0.8", features = ["runtime-tokio", "postgres", "sqlite", "uuid", "chrono"] }
 chrono = { version = "0.4", features = ["serde"] }
 mlua = { version = "0.11", features = ["luau", "serialize", "send", "async"] }
+mlua-sys = { version = "0.10", features = ["luau"] }
+luau-persist = { path = "crates/luau-persist" }
 dashmap = "6"
 parking_lot = "0.12"
 toml = "0.8"

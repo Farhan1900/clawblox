@@ -2,6 +2,65 @@ use super::*;
 use crate::game::lua::instance::AttributeValue;
 
 #[test]
+fn test_fallen_parts_destroy_height_defaults_disabled() {
+    let mut instance = GameInstance::new(Uuid::new_v4(), None);
+    instance.load_script(
+        r#"
+            local p = Instance.new("Part")
+            p.Name = "BelowDefaultFallenHeight"
+            p.Position = Vector3.new(0, -1000, 0)
+            p.Parent = Workspace
+            _G.p = p
+        "#,
+    );
+
+    instance.tick();
+
+    let parent_exists: bool = instance
+        .lua_runtime
+        .as_ref()
+        .unwrap()
+        .lua()
+        .load("return _G.p.Parent ~= nil")
+        .eval()
+        .unwrap();
+    assert!(parent_exists);
+}
+
+#[test]
+fn test_fallen_parts_destroy_height_destroys_dynamic_parts() {
+    let mut instance = GameInstance::new(Uuid::new_v4(), None);
+    instance.load_script(
+        r#"
+            Workspace.FallenPartsDestroyHeight = -10
+            _G.destroyed = false
+
+            local p = Instance.new("Part")
+            p.Name = "FallenPart"
+            p.Position = Vector3.new(0, -20, 0)
+            p.Parent = Workspace
+            p.Destroying:Connect(function()
+                _G.destroyed = true
+            end)
+            _G.p = p
+        "#,
+    );
+
+    instance.tick();
+
+    let (parent_exists, destroyed): (bool, bool) = instance
+        .lua_runtime
+        .as_ref()
+        .unwrap()
+        .lua()
+        .load("return _G.p.Parent ~= nil, _G.destroyed")
+        .eval()
+        .unwrap();
+    assert!(!parent_exists);
+    assert!(destroyed);
+}
+
+#[test]
 fn test_player_goto_action() {
     let mut instance = GameInstance::new(Uuid::new_v4(), None);
 
@@ -843,6 +902,37 @@ fn test_observation_radius_filters_world_entities_by_bounds() {
         names.contains(&"GameState"),
         "Non-spatial folder metadata should remain visible"
     );
+
+    instance
+        .lua_runtime
+        .as_ref()
+        .unwrap()
+        .lua()
+        .load(
+            r#"
+            local player = game:GetService("Players"):GetPlayers()[1]
+            player:SetAttribute("ObservationRadius", 1)
+        "#,
+        )
+        .exec()
+        .unwrap();
+
+    let obs = instance.get_player_observation(agent_id).unwrap();
+    let names: Vec<&str> = obs
+        .world
+        .entities
+        .iter()
+        .map(|entity| entity.name.as_str())
+        .collect();
+
+    assert!(
+        !names.contains(&"EdgePlatform"),
+        "Player ObservationRadius attribute should shrink world entity visibility"
+    );
+    assert!(
+        names.contains(&"GameState"),
+        "Dynamic radius should not hide non-spatial folder metadata"
+    );
 }
 
 #[test]
@@ -1011,6 +1101,26 @@ fn test_observation_radius_filters_other_players() {
     assert!(
         obs.other_players.is_empty(),
         "Player beyond configured observation radius should be filtered out"
+    );
+
+    instance
+        .lua_runtime
+        .as_ref()
+        .unwrap()
+        .lua()
+        .load(
+            r#"
+            local player = game:GetService("Players"):GetPlayers()[1]
+            player:SetAttribute("ObservationRadius", 100)
+        "#,
+        )
+        .exec()
+        .unwrap();
+
+    let obs = instance.get_player_observation(agent_a).unwrap();
+    assert!(
+        obs.other_players.is_empty(),
+        "ObservationRadius attribute should not expand beyond configured observation radius"
     );
 }
 
