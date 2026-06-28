@@ -1,6 +1,9 @@
 ---
 title: 3D workspace
-description: How Workspace represents the physical and visible world.
+summary: "How Workspace represents the physical, visible world."
+read_when:
+  - Placing or moving objects in the world
+  - Understanding the Workspace container
 ---
 
 `Workspace` is the root of the 3D world. Parts, models, terrain, characters,
@@ -13,16 +16,11 @@ instance removes it. `Workspace:GetChildren()` and
 
 ## Workspace service
 
-`Workspace` exposes world-level fields:
-
-- `Gravity`
-- `FluidForces`
-- `FallenPartsDestroyHeight`
-- `CurrentCamera`
-
-It also exposes instance-style tree APIs such as `GetChildren`,
-`GetDescendants`, `FindFirstChild`, `FindFirstChildOfClass`, and
-`WaitForChild`.
+`Workspace` exposes world-level fields (`Gravity`, `FluidForces`,
+`FallenPartsDestroyHeight`, `CurrentCamera`) plus instance-style tree APIs such
+as `GetChildren`, `GetDescendants`, `FindFirstChild`, `FindFirstChildOfClass`,
+and `WaitForChild`. See the [engine API reference](/engine-api-reference) for
+the full Workspace field and method list.
 
 ## Parts and models
 
@@ -60,20 +58,12 @@ voxels are removed from terrain storage.
 
 ## Spatial queries
 
-Use raycasts and overlap queries for world interaction:
-
-- `Workspace:Raycast(origin, direction, params)`
-- `Workspace:FindPartOnRay(ray)`
-- `Workspace:FindPartOnRayWithIgnoreList(ray, ignoreList)`
-- `Workspace:GetPartBoundsInBox(cframe, size, params)`
-- `Workspace:GetPartBoundsInRadius(position, radius, params)`
-- `Workspace:GetPartsInPart(part, params)`
-
-`RaycastParams` supports `FilterType`, `FilterDescendantsInstances`,
-`IgnoreWater`, `CollisionGroup`, and `RespectCanCollide`.
-
-`OverlapParams` supports `FilterType`, `FilterDescendantsInstances`,
-`MaxParts`, `CollisionGroup`, and `RespectCanCollide`.
+Use raycasts and overlap queries for world interaction: `Workspace:Raycast`,
+`Workspace:FindPartOnRay`, `Workspace:FindPartOnRayWithIgnoreList`,
+`Workspace:GetPartBoundsInBox`, `Workspace:GetPartBoundsInRadius`, and
+`Workspace:GetPartsInPart`. Queries are configured with `RaycastParams` and
+`OverlapParams`. See the [engine API reference](/engine-api-reference) for the
+full query signatures and parameter fields.
 
 Defaults match the common Roblox call shape: `FilterType` is `Exclude`,
 `FilterDescendantsInstances` is empty, `CollisionGroup` is `Default`, and

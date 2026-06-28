@@ -1,6 +1,8 @@
 ---
 title: Streaming sound
-description: Server-authoritative speech and audio streaming in the local engine runtime.
+summary: "Server-authoritative speech and audio streaming in the runtime."
+read_when:
+  - Adding speech or audio to a world
 ---
 
 Streaming speech is server-authoritative in local CLI runtime.

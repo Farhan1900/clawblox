@@ -1,6 +1,9 @@
 ---
 title: Engine API reference
-description: Current supported and partially supported Roblox-like APIs in the Clawblox engine.
+summary: "Which Roblox-like APIs the engine supports, fully or partially."
+read_when:
+  - Checking whether a Roblox API is available
+  - Porting Roblox code to Clawblox
 ---
 
 This page is the index for the Clawblox engine API surface. It should answer:
@@ -121,6 +124,29 @@ the shortcut.
 `game:BindToClose(callback)` registers shutdown callbacks. Registered
 callbacks are included in Lua VM snapshots.
 
+`Players` exposes:
+
+- fields: `LocalPlayer`, `MaxPlayers`, `CharacterAutoLoads`, `PlayerAdded`,
+  `PlayerRemoving`
+- methods: `GetPlayers`, `GetPlayerByUserId`, `GetPlayerFromCharacter`,
+  `GetChildren`, `FindFirstChild`, `AddBot`
+
+`MaxPlayers` is read-only from Luau and comes from `world.toml`.
+`CharacterAutoLoads` is writable; when enabled, joined players get default
+characters automatically. `AddBot(name)` queues a server-side bot player for
+creation on the next tick.
+
+`PhysicsService` owns collision groups with a maximum of 32 groups:
+
+- `RegisterCollisionGroup`, `CreateCollisionGroup`, `UnregisterCollisionGroup`,
+  `RemoveCollisionGroup`, `RenameCollisionGroup`
+- `CollisionGroupSetCollidable`, `CollisionGroupsAreCollidable`
+- `SetPartCollisionGroup`
+- `GetCollisionGroups`, `GetRegisteredCollisionGroups`, `GetCollisionGroupId`,
+  `GetCollisionGroupName`, `GetMaxCollisionGroups`, `IsCollisionGroupRegistered`
+
+Collision groups affect real contacts in the physics layer.
+
 `DataStoreService:GetDataStore(name)` returns a key-value store with
 `GetAsync`, `SetAsync`, `RemoveAsync`, and `UpdateAsync`.
 `UpdateAsync` uses compare-and-set retry semantics for Roblox-style atomic
@@ -211,6 +237,50 @@ Important constructors and helpers:
   `DateTime.fromUnixTimestampMillis`
 - `BrickColor.new`, `BrickColor.Gray`
 
+## Datatype members
+
+`Vector2`:
+
+- properties: `X`, `Y`, `Magnitude`, `Unit`
+- methods: `Dot`, `Lerp`, `Unit`
+- operators: `+`, `-`, component and scalar `*`, component and scalar `/`,
+  unary `-`
+
+`Vector3`:
+
+- properties: `X`, `Y`, `Z`, `Magnitude`, `Unit`
+- methods: `Dot`, `Cross`, `Lerp`, `FuzzyEq`
+- operators: `+`, `-`, component and scalar `*`, component and scalar `/`,
+  unary `-`
+
+`CFrame`:
+
+- properties: `Position`, `LookVector` (forward, `-Z`), `RightVector` (`+X`),
+  `UpVector` (`+Y`), `X`, `Y`, `Z`
+- methods: `Inverse`, `Lerp`, `ToWorldSpace`, `ToObjectSpace`,
+  `PointToWorldSpace`, `PointToObjectSpace`, `GetComponents`,
+  `ToEulerAnglesXYZ`, `ToOrientation`
+- operators: `cf * cf`, `cf * v3`, `cf + v3`, `cf - v3`
+
+`GetComponents` returns 12 numbers. `ToEulerAnglesXYZ` returns radians in XYZ
+order; `ToOrientation` returns radians in YXZ order.
+
+`Color3`:
+
+- properties: `R`, `G`, `B` (each `0..1`)
+- methods: `Lerp`, `ToHSV`, `ToHex`
+
+`UDim`:
+
+- properties: `Scale`, `Offset`
+- operators: `+`, `-`
+
+`UDim2`:
+
+- properties: `X`, `Y`, `Width` (alias for `X`), `Height` (alias for `Y`)
+- methods: `Lerp`
+- operators: `+`, `-`
+
 ## Query result types
 
 `RaycastResult` exposes:
@@ -257,6 +327,9 @@ APIs:
   `GetChildren`, `GetDescendants`, `GetDebugId`, `IsA`, `IsDescendantOf`,
   `WaitForChild`
 
+Supported attribute value types are `nil`, boolean, number, string, `Vector3`,
+`Color3`, and array-style tables of supported attribute values.
+
 ## Major class property groups
 
 `BasePart` and `Part` expose transform, physics, material, and touch state:
@@ -270,7 +343,33 @@ APIs:
   `Elasticity`, `FrictionWeight`, `ElasticityWeight`, `Shape`, `Touched`,
   `TouchEnded`
 
-`Model` exposes `PrimaryPart`.
+`BasePart` and `Part` methods: `GetMass`, `GetConnectedParts`, `ApplyImpulse`,
+`ApplyImpulseAtPosition`, `ApplyAngularImpulse`, `GetPivot`, `PivotTo`,
+`GetPrimaryPartCFrame`, `SetPrimaryPartCFrame`. `ApplyImpulse` applies a
+world-space impulse to the part's assembly at its center of mass.
+`ApplyImpulseAtPosition` applies it at a world-space position, which can add
+angular velocity. `ApplyAngularImpulse` applies a world-space angular impulse.
+For welded assemblies these operate on the shared physics assembly.
+
+In Roblox-style APIs, `Friction`, `Density`, and `Elasticity` are not direct
+`BasePart` fields; set them through `CustomPhysicalProperties` with
+`PhysicalProperties.new(density, friction, elasticity, frictionWeight,
+elasticityWeight)`, or assign `nil` to clear the override.
+
+`Model` exposes `PrimaryPart`, plus methods `GetPrimaryPartCFrame`,
+`SetPrimaryPartCFrame`, `GetPivot`, and `PivotTo`.
+
+`Workspace.Terrain` is created automatically and exposes:
+
+- `FillBlock(cframe, size, material)`
+- `ReadVoxelChannels(region, resolution, channelIds)`
+- `WriteVoxelChannels(region, resolution, channels)`
+
+Terrain voxel channel resolution must be `4`. `Region3` bounds must be aligned
+to that grid and contain at least one voxel. Supported channel names are
+`SolidMaterial`, `SolidOccupancy`, and `LiquidOccupancy`; `SolidOccupancy` and
+`LiquidOccupancy` values are clamped to `0..1`, and empty voxels are removed
+from terrain storage.
 
 `Workspace` exposes:
 
@@ -338,6 +437,41 @@ Media classes expose:
 fires `Stopped` only when transitioning from playing to stopped. `MarkEnded()`
 is Clawblox-specific and lets the renderer/runtime mark playback complete; it
 fires `Ended` and `Stopped` when the sound was playing.
+
+Value objects (`IntValue`, `NumberValue`, `BoolValue`, `StringValue`,
+`ObjectValue`, `CFrameValue`) expose `Value` and `Changed`. `ObjectValue.Value`
+accepts an `Instance` or `nil`; `CFrameValue.Value` accepts a `CFrame`.
+
+`Script` and `ModuleScript` expose `Source` and `Disabled`.
+
+`RemoteEvent` instances expose `OnServerEvent`, `FireAllClients`, and
+`FireClient`. Instance events use the `RemoteEvent` instance name as the event
+name and serialize Lua arguments into JSON-like payloads. With no arguments the
+payload is `null`; with one argument the payload is that value; with multiple
+arguments the payload is an array. `FireClient(player, ...)` targets one player
+and is excluded from public spectator observations.
+
+## Property defaults
+
+Documented non-obvious defaults:
+
+- `Workspace.Gravity`: `196.2`
+- `BasePart`: `Size = (4, 1, 2)`, `Color = (0.6, 0.6, 0.6)`,
+  `Transparency = 0`, `Anchored = false`, `CanCollide = true`,
+  `CanQuery = true`, `CanTouch = true`, `Material = Plastic`,
+  `Massless = false`, `CustomPhysicalProperties = nil`
+- `Humanoid`: `Health = 100`, `MaxHealth = 100`, `WalkSpeed = 16`,
+  `JumpPower = 50`, `JumpHeight = 7.2`, `AutoRotate = true`, `HipHeight = 2`
+- GUI base: `BackgroundColor3 = (1, 1, 1)`, `BackgroundTransparency = 0`,
+  `BorderColor3 = (0.1, 0.1, 0.1)`, `BorderSizePixel = 1`, `ZIndex = 0`,
+  `LayoutOrder = 0`, `Visible = true`, `AnchorPoint = (0, 0)`, `Rotation = 0`
+- `ScreenGui`: `DisplayOrder = 0`, `IgnoreGuiInset = false`, `Enabled = true`
+- `BillboardGui`: `Size = {0,100,0,50}`, `AlwaysOnTop = false`,
+  `Enabled = true`, `Adornee = nil`
+- `TextLabel`: `Text = ""`, `TextColor3 = (0, 0, 0)`, `TextSize = 14`
+  (minimum `1`), `TextTransparency = 0`, `TextScaled = false`,
+  `TextXAlignment = Center`, `TextYAlignment = Center`
+- `ImageLabel`: `Image = ""`, `ImageColor3 = (1, 1, 1)`, `ImageTransparency = 0`
 
 ## Enums
 

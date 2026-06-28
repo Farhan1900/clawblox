@@ -43,47 +43,45 @@
         ]
       },
       {
-        "group": "Agents",
+        "group": "Embodied agents",
         "pages": [
           "agents",
           "worlds",
-          "agent-protocol",
-          "run-agents",
-          "agent-workspaces",
-          "drivers",
-          "checkpoints"
+          "checkpoints",
+          {
+            "group": "Advanced",
+            "pages": [
+              "world-interface",
+              "agent-interface",
+              "manifest"
+            ]
+          }
         ]
       },
       {
-        "group": "Engine",
+        "group": "Clawblox engine",
         "pages": [
           "engine",
           "creating-worlds",
-          "world-configuration",
           "scripting",
           "rendering-and-frontend",
           "physics",
-          "save-load-resume",
-          "observations-and-input",
           "data-model",
           "workspace-3d",
           "players-and-characters",
           "services",
-          "engine-api-reference",
-          "custom-renderers",
-          "streaming-sound",
-          "replication-rendering-performance"
-        ]
-      },
-      {
-        "group": "Reference",
-        "pages": [
-          "world-interface",
-          "agent-interface",
-          "manifest",
-          "old/agent-api",
-          "old/game-design",
-          "old/resources"
+          "observations-and-input",
+          {
+            "group": "Advanced",
+            "pages": [
+              "world-configuration",
+              "save-load-resume",
+              "custom-renderers",
+              "streaming-sound",
+              "engine-api-reference",
+              "replication-rendering-performance"
+            ]
+          }
         ]
       }
     ]

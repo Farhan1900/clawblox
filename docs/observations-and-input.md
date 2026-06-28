@@ -1,6 +1,9 @@
 ---
 title: Observations and input
-description: How agents and players observe worlds and send actions into Luau.
+summary: "How agents and players observe a world and send actions into Luau."
+read_when:
+  - Defining a world's action and observation schema
+  - Wiring agent input to game logic
 ---
 
 Clawblox has two related runtime streams:

@@ -1,10 +1,14 @@
 ---
 title: Running worlds
-description: Run a world locally, from GitHub, with recording, or resumed from a snapshot.
+summary: "Run a world locally, from GitHub, with recording, or resumed from a snapshot."
+read_when:
+  - Running a world
+  - You need run flags like port, record, or resume
 ---
 
 Every world runs the same way: point `clawblox run` at a folder that contains a
-`world.toml`. The rest of this page covers the flags you add on top of that.
+[`world.toml`](/worlds). This page covers the flags you add on top of that. To
+start an agent alongside the world, see [Agents](/agents).
 
 ## Single world
 
@@ -26,10 +30,15 @@ Common flags:
 
 ```bash
 clawblox run <world> --port 8280
-clawblox run <world> --agent codex
+clawblox run <world> --agent codex          # also start an agent
 clawblox run <world> --record --record-dir runs/r001/recordings
 clawblox run <world> --resume runs/r001/resume/latest.json
 ```
+
+`--agent` starts a managed agent in the world; see [Agents](/agents)
+for coding agents, sandboxing, and multi-agent runs. `--resume` restores a saved
+world snapshot; see [Save, load, and resume](/save-load-resume) for what a
+snapshot captures.
 
 ## Remote worlds
 
@@ -48,88 +57,28 @@ Example:
 clawblox run https://github.com/nacloos/clawblox/tree/main/worlds/mesa-small-world-3
 ```
 
-The downloaded folder is cached under:
-
-```text
-~/.clawblox/worlds/
-```
-
-Set `CLAWBLOX_HOME` to use another location:
+The downloaded folder is cached under `~/.clawblox/worlds/`. Set `CLAWBLOX_HOME`
+to use another location:
 
 ```bash
 CLAWBLOX_HOME=/tmp/clawblox clawblox run https://github.com/nacloos/clawblox/tree/main/worlds/mesa-small-world-3
 ```
 
-## Multi-world launcher
-
-Mesa Island includes a tmux launcher for multi-agent runs:
-
-```bash
-./worlds/mesa-island/launch_multi.sh \
-  --num-worlds 1 \
-  --agents-per-world 5 \
-  --world-dir worlds/mesa-island \
-  --template worlds/mesa-island/agent-template \
-  --record true
-```
-
-This creates a run directory under `worlds/mesa-island/results/<run-id>/`.
-
-## Agent sandbox config
-
-Agent sandbox policy can be declared by the world:
-
-```toml
-[sandbox]
-deps_root = "/opt/conda"
-enable_weaker_nested_sandbox = true
-add_deps_lib_to_library_path = true
-```
-
-`deps_root` is mounted read-only at `/sandbox-deps` for sandboxed agents.
-Absolute dependency prefixes are also mounted read-only at their original path
-so console scripts with absolute shebangs continue to work.
-When `add_deps_lib_to_library_path` is true, Clawblox also adds
-`/sandbox-deps/lib` to `LD_LIBRARY_PATH`; disable it if the dependency prefix
-contains libraries that conflict with system tools.
-`enable_weaker_nested_sandbox` is only for unprivileged Docker/WSL2 containers
-where standard `bubblewrap` sandboxing is unavailable. Leave it unset on normal
-hosts.
-
 ## Resume
 
-Resume is strict. There is no fallback to a fresh run.
-
-For a single world:
+Resume is strict: there is no fallback to a fresh run.
 
 ```bash
-clawblox run worlds/mesa-island --resume worlds/mesa-island/results/<run-id>/worlds/world-0/resume/latest.json
+clawblox run <world> --resume <snapshot.json>
 ```
 
-For a Mesa Island multi-agent run:
-
-```bash
-./worlds/mesa-island/launch_multi.sh --resume worlds/mesa-island/results/<run-id>
-```
-
-`launch_multi.sh --stop` now captures a snapshot for each live world before shutdown. If snapshot capture fails, shutdown aborts so the run remains resumable.
-
-Expected files:
-
-- `results/<run-id>/run.env`
-- `results/<run-id>/worlds/world-*/resume/latest.json`
-- `results/<run-id>/worlds/world-*/agents/*/world_session.txt`
-
-What resume restores:
-
-- the authoritative world snapshot
-- the same `game_id` and `instance_id`
-- player identities and live session tokens
-- chat history stored in the local runtime snapshot
-- agent world-session reuse when the launcher restarts agents
+Relative paths are resolved from the world directory. Replay and resume are
+different: replay reads a recording, resume restores a live world snapshot. See
+[Save, load, and resume](/save-load-resume) for snapshot contents, and
+[Checkpoints](/checkpoints) for resuming a world together with its agents.
 
 ## Notes
 
 - Restart the server after editing world files.
-- Replay and resume are different features. Replay reads `.clawrec`; resume reads a live snapshot.
-- Use tmux or the Mesa Island launcher if you want the run to continue after closing a terminal.
+- Use `clawblox start` to run in the background and `clawblox stop` to stop it.
+- For multi-agent runs and agent sandboxing, see [Agents](/agents).

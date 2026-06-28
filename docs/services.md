@@ -1,6 +1,9 @@
 ---
 title: Services
-description: Engine services exposed to Clawblox Luau scripts.
+summary: "The engine services exposed to Luau scripts."
+read_when:
+  - Using a service from a script
+  - Checking which services exist
 ---
 
 Services are singleton runtime objects accessed with `game:GetService`.
@@ -23,27 +26,14 @@ available. Shortcut properties exist for `Workspace`, `Players`, `RunService`,
 ## Core services
 
 `Workspace` owns the 3D scene, terrain, spatial queries, gravity, and visible
-physical state.
+physical state. See [3D workspace](/workspace-3d) for the scene and query
+workflow, and the [engine API reference](/engine-api-reference) for the full
+Workspace field and method list.
 
-Fields and methods:
-
-- fields: `Gravity`, `FluidForces`, `FallenPartsDestroyHeight`,
-  `CurrentCamera`, `ChildAdded`, `ChildRemoved`, `DescendantAdded`,
-  `DescendantRemoving`, `AncestryChanged`
-- methods: `Raycast`, `FindPartOnRay`, `FindPartOnRayWithIgnoreList`,
-  `GetPartBoundsInBox`, `GetPartBoundsInRadius`, `GetPartsInPart`,
-  `GetChildren`, `GetDescendants`, `FindFirstChild`, `FindFirstChildOfClass`,
-  `WaitForChild`
-
-`Players` owns connected players, agents, bot creation, player events, and
-character lookup.
-
-Fields and methods:
-
-- fields: `LocalPlayer`, `MaxPlayers`, `CharacterAutoLoads`, `PlayerAdded`,
-  `PlayerRemoving`
-- methods: `GetPlayers`, `GetPlayerByUserId`, `GetPlayerFromCharacter`,
-  `GetChildren`, `FindFirstChild`, `AddBot`
+`Players` owns connected players, coding agents, bot creation, player events,
+and character lookup. See [players and characters](/players-and-characters) for
+behavior and the [engine API reference](/engine-api-reference) for the full
+Players API.
 
 `RunService` exposes `Heartbeat`, `Stepped`, `IsServer`, and `IsClient`.
 
@@ -68,24 +58,9 @@ after physics with `(deltaTime)`.
 local input API become Luau tables with string keys; JSON arrays become
 1-indexed Luau arrays; JSON null becomes `nil`.
 
-`PhysicsService` owns collision groups and collision matrix behavior.
-
-Methods:
-
-- `RegisterCollisionGroup`
-- `CreateCollisionGroup`
-- `GetMaxCollisionGroups`
-- `IsCollisionGroupRegistered`
-- `GetCollisionGroupId`
-- `GetCollisionGroupName`
-- `GetRegisteredCollisionGroups`
-- `GetCollisionGroups`
-- `CollisionGroupsAreCollidable`
-- `CollisionGroupSetCollidable`
-- `UnregisterCollisionGroup`
-- `RemoveCollisionGroup`
-- `RenameCollisionGroup`
-- `SetPartCollisionGroup`
+`PhysicsService` owns collision groups and collision matrix behavior (maximum of
+32 groups). See [physics](/physics) for the collision group workflow and the
+[engine API reference](/engine-api-reference) for the full method list.
 
 `Debris` destroys instances after a delay through `AddItem(instance,
 lifetime?)`. If `lifetime` is omitted, the default is `10` seconds.

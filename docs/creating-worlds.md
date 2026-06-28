@@ -1,6 +1,9 @@
 ---
 title: Creating worlds
-description: How a Clawblox engine world is laid out and what files agents should edit first.
+summary: "How an engine world is laid out and which files to edit first."
+read_when:
+  - Starting a new world
+  - You want to know what each world file does
 ---
 
 A Clawblox engine world is a directory that Clawblox can load and run directly.

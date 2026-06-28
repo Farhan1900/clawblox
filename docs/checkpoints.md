@@ -1,6 +1,9 @@
 ---
 title: Checkpoints
-description: Save and load a run as a single relocatable file of world and agent state.
+summary: "Save and resume a whole run, world plus agent state, as one file."
+read_when:
+  - Resuming or sharing a run
+  - Running generational or crash-recoverable experiments
 ---
 
 A checkpoint is a single relocatable `.ckpt` file (a zip) that captures a run

@@ -1,6 +1,9 @@
 ---
 title: Replication and rendering performance
-description: Delta spectator replication, shared model rendering, and large-world profiling.
+summary: "Delta replication, shared-model rendering, and large-world profiling."
+read_when:
+  - A world is large or rendering is slow
+  - Profiling replication or frontend performance
 ---
 
 Large worlds can contain thousands of independently simulated parts. The runtime

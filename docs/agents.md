@@ -1,64 +1,156 @@
 ---
-title: Agents overview
-description: Run and manage embodied agents in worlds.
+title: Agents
+summary: "Run coding agents as embodied agents in worlds, and where their state lives."
+read_when:
+  - Running an agent in a world
+  - Choosing a coding agent or inspecting agent state
 ---
 
-Clawblox agents run long-lived agents in interactive worlds.
-
-They run through existing coding-agent tools such as Codex, Claude Code, and
-Kimi. Clawblox handles the world connection, workspace, session files, logs, and
-resume and checkpoint plumbing around those tools.
+Clawblox runs long-lived agents in interactive worlds. The agents are existing
+coding agents such as Codex and Claude Code; Clawblox handles the world
+connection, workspace, session files, logs, and resume and checkpoint plumbing
+around them.
 
 An agent has a name, a workspace, session files, transcripts, logs, and a
-connection to a world. Clawblox keeps those pieces together so runs are easier
-to inspect, continue, checkpoint, and compare.
+connection to a world. Clawblox keeps those pieces together so runs are easy to
+inspect, continue, checkpoint, and compare. Agents are not tied to the Clawblox
+engine: they can run in any world that implements the [world protocol](/worlds).
 
-Agents are not tied to Clawblox engine. They can run in any world that exposes
-the world interface.
+## Coding agents
 
-## What Clawblox manages
+A coding agent is a tool like Codex, Claude Code, or Kimi: a CLI that already
+knows how to talk to its model provider. Clawblox starts and manages it; it does
+not replace it.
 
-- world access and session headers
-- agent workspaces and memory files
-- driver sessions for tools like Codex, Claude Code, and Kimi
-- logs, transcripts, and rerunnable command files
-- optional sandboxing
-- checkpoints that can include world state and agent state
+Supported coding agents:
 
-## CLI
-
-The simplest path is to start an agent when you run a world:
-
-```bash
-clawblox run https://github.com/nacloos/clawblox/tree/main/worlds/mesa-small-world-3 --agent codex
+```text
+codex     Codex CLI
+claude    Claude Code
+kimi      Kimi Code
 ```
 
-In the CLI, `--agent codex` means “start a managed Clawblox agent using the
-Codex driver.”
+Install and log in to the coding agent you want before running it. You also need
+`tmux`: Clawblox starts the coding agent inside a tmux session so it keeps
+running and can be inspected.
 
-## Python
+## Running an agent
 
-Python gives you the same pieces as objects:
+The quickest way is to pass `--agent` when starting a world:
+
+```bash
+clawblox run <world> --agent codex
+```
+
+This starts the world, then starts a managed agent connected to it. Useful
+options:
+
+```bash
+clawblox run <world> \
+  --agent codex \
+  --agent-name Rocky \
+  --model gpt-5.5 \
+  --agent-dir runs/rocky \
+  --sandbox
+```
+
+Use Python to orchestrate worlds and agents from a script:
 
 ```python
 from pathlib import Path
 from clawblox import Agent, World, default_system_prompt
 
-world = World(dir="https://github.com/nacloos/clawblox/tree/main/worlds/mesa-small-world-3")
-world.start(port=8080)
+world = World(dir="worlds/mesa-small-world-3")
+world.start(port=8080, record=True, record_dir=Path("runs/r001/recordings"))
 
 agent = Agent(
-    agent="codex",
-    name="Rocky",
-    dir=Path("runs/rocky"),
+    agent="codex",          # which coding agent
+    name="Rocky",           # this agent's name
+    dir=Path("runs/r001/agents/rocky"),
     model="gpt-5.5",
+    sandbox=True,
 )
 
-world.connect(agent=agent)
+access = world.connect(agent=agent)
 agent.start(
     initial_prompt="Begin.",
     system_prompt=default_system_prompt(),
 )
 ```
 
-The Python constructor currently uses `agent="codex"` for the driver name.
+`world.connect(agent=agent)` joins the world, writes the world session id into
+the agent directory, and sets the environment the agent needs. The agent then
+reads the world's [protocol](/worlds#the-world-protocol) to learn how to observe
+and act.
+
+## Sandbox
+
+Pass `--sandbox` (CLI) or `sandbox=True` (Python) to run the coding agent in a
+restricted sandbox. A world can declare its sandbox policy in `world.toml`:
+
+```toml
+[sandbox]
+deps_root = "/opt/conda"
+enable_weaker_nested_sandbox = true
+add_deps_lib_to_library_path = true
+```
+
+`deps_root` is mounted read-only at `/sandbox-deps` for sandboxed agents.
+Absolute dependency prefixes are also mounted read-only at their original path,
+so console scripts with absolute shebangs keep working. When
+`add_deps_lib_to_library_path` is true, Clawblox adds `/sandbox-deps/lib` to
+`LD_LIBRARY_PATH`; disable it if the prefix has libraries that conflict with
+system tools. `enable_weaker_nested_sandbox` is only for unprivileged
+Docker/WSL2 containers where standard `bubblewrap` sandboxing is unavailable;
+leave it unset on normal hosts.
+
+## Multiple agents
+
+Mesa Island includes a tmux launcher for multi-agent runs:
+
+```bash
+./worlds/mesa-island/launch_multi.sh \
+  --num-worlds 1 \
+  --agents-per-world 5 \
+  --world-dir worlds/mesa-island \
+  --template worlds/mesa-island/agent-template \
+  --record true
+```
+
+This creates a run directory under `worlds/mesa-island/results/<run-id>/`.
+Resume it with `launch_multi.sh --resume <run-id>`; `--stop` snapshots each live
+world before shutdown so the run stays resumable. See [Checkpoints](/checkpoints)
+for resuming world and agent state together.
+
+## Workspace and memory
+
+Each agent has an agent directory that keeps everything needed to inspect and
+continue it:
+
+```text
+agent-dir/
+  workspace/         persistent working area and memory files
+  runtime/           generated system prompt and rerunnable command script
+  logs/              agent and runtime logs
+  session/           provider continuation state and transcripts
+  home/              agent home/config directory
+  events.jsonl       structured operation log
+  world_session.txt  world session id
+```
+
+`workspace/` is the agent's persistent working area. Memory files live there,
+along with anything the agent creates while acting in the world. The default
+prompt expects files such as:
+
+```text
+SOUL.md
+SEMANTIC_MEMORY.md
+EPISODIC_MEMORY.md
+```
+
+World-specific templates can seed these files. `session/` stores provider
+continuation state and transcripts when the coding agent supports them.
+
+The workspace is the backend-agnostic part of agent state and the safest part to
+share. See [Checkpoints](/checkpoints) to package world and agent state together,
+and [Agent integration](/agent-interface) to add support for a new coding agent.

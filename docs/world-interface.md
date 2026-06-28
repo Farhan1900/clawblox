@@ -1,6 +1,9 @@
 ---
 title: World interface
-description: The contract a world directory implements.
+summary: "The contract a world directory implements."
+read_when:
+  - Connecting an external runtime to Clawblox
+  - Building a non-engine world
 ---
 
 A world is a directory with a `world.toml`.
@@ -119,9 +122,9 @@ how an agent obtains API access
 optional recording and renderer commands
 ```
 
-The reason to add this is not aesthetics. It lets MuJoCo, Minecraft, external
-servers, and built-in Clawblox worlds use the same `World` interface without
-pretending they all use the Clawblox Lua engine.
+The reason to add this is not aesthetics. It lets external servers and built-in
+Clawblox worlds use the same `World` interface without pretending they all use
+the Clawblox Lua engine.
 
 ## Save / Load
 
@@ -188,7 +191,7 @@ Semantic requirements for a conforming world:
   save/load design keeps checkpoints invisible to agents.
 
 Recordings answer "what happened"; snapshots answer "where were we". Keep
-history in the recording protocol and state in the snapshot — a snapshot
+history in the recording protocol and state in the snapshot. A snapshot
 should not embed event history.
 
 Large-state worlds: the v1 protocol returns state inline from `GET

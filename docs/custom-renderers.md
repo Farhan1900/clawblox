@@ -1,6 +1,9 @@
 ---
 title: Custom renderers
-description: Low-level renderer package, runtime SDK, and spectator state reference.
+summary: "Build a per-world Three.js renderer against the spectator state."
+read_when:
+  - Customizing how a world looks in the browser
+  - You need the renderer SDK and spectator-state reference
 ---
 
 `clawblox run` includes an embedded frontend and supports per-world custom renderers.
@@ -71,6 +74,19 @@ Notes:
 
 No fallback renderer is used in this flow. If package build/validation fails, `clawblox run` exits with an error.
 
+The runtime exposes the final renderer manifest at `GET /renderer/manifest`:
+
+```json
+{
+  "schema_version": 1,
+  "api_version": 1,
+  "name": "Renderer name",
+  "mode": "module",
+  "entry_url": "/renderer-files/dist/renderer.bundle.js",
+  "capabilities": ["three-sdk"]
+}
+```
+
 ## Import compatibility tips
 
 Prefer `esm.sh` URLs for Three.js ecosystem imports in browser-loaded renderers:
@@ -91,6 +107,52 @@ export function createRenderer(ctx) {
     unmount() {},
     onResize({ width, height, dpr }) {},
     onState(state) {},
+  }
+}
+```
+
+## Minimal renderer
+
+```js
+import * as THREE from "https://esm.sh/three@0.160.0"
+
+export function createRenderer(ctx) {
+  const scene = new THREE.Scene()
+  const camera = new THREE.PerspectiveCamera(70, 1, 0.1, 500)
+  const renderer = new THREE.WebGLRenderer({ canvas: ctx.canvas, antialias: true })
+  const entities = ctx.runtime.three.createEntityStore(scene)
+
+  scene.add(new THREE.AmbientLight(0xffffff, 0.8))
+  camera.position.set(0, 20, 30)
+  camera.lookAt(0, 0, 0)
+
+  return {
+    onResize({ width, height }) {
+      camera.aspect = width / Math.max(1, height)
+      camera.updateProjectionMatrix()
+      renderer.setSize(width, height, false)
+    },
+
+    onState(state) {
+      const activeIds = new Set()
+
+      for (const entity of state.entities || []) {
+        activeIds.add(entity.id)
+        entities.upsert(
+          entity,
+          (next) => ctx.runtime.three.buildEntityMesh(THREE, next),
+          (mesh, next) => ctx.runtime.three.applyEntityTransform(THREE, mesh, next),
+        )
+      }
+
+      entities.prune(activeIds)
+      renderer.render(scene, camera)
+    },
+
+    unmount() {
+      entities.clear()
+      renderer.dispose()
+    },
   }
 }
 ```
@@ -221,10 +283,13 @@ type SpectatorObservation = {
 - `id`, `name`, `position`, `health`
 - optional: `root_part_id`, `humanoid_state`, `attributes`, `gui`, `active_animations`
 
+Entities are serialized from parts in `Workspace`, and each one keeps a stable
+instance id (`id`).
+
 ### `entities[*]` fields
 
 - `id`, `type`, `position`
-- optional: `rotation`, `size`, `health`, `pickup_type`, `model_url`, `model_yaw_offset_deg`, `billboard_gui`
+- optional: `rotation`, `size`, `health`, `pickup_type`, `attributes`, `model_url`, `model_yaw_offset_deg`, `billboard_gui`
 - always includes `render`:
 
 ```ts
@@ -253,6 +318,15 @@ rotation?: [[number, number, number], [number, number, number], [number, number,
 ```
 
 This matches `runtime.three.applyEntityTransform`.
+
+### `sounds[*]` fields
+
+- `id`, `stream_id`, `volume`, `is_playing`
+
+### `recent_events`
+
+`recent_events` is the public replicated event stream. Client-targeted
+`RemoteEvent:FireClient` events are excluded from the public spectator feed.
 
 ## Render metadata from Lua attributes
 

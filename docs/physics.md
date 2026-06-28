@@ -1,6 +1,9 @@
 ---
 title: Physics
-description: How Clawblox simulates parts, terrain, collisions, forces, and actuators.
+summary: "How the engine simulates parts, terrain, collisions, forces, and actuators."
+read_when:
+  - Building worlds with physical objects
+  - Tuning collisions, forces, or movement
 ---
 
 Clawblox has Roblox-like 3D physics backed by the engine simulation. Luau code
@@ -57,22 +60,10 @@ Supported `Part.Shape` values are `Ball`, `Block`, `Cylinder`, `Ring`, and
 ## Collision groups
 
 `PhysicsService` supports Roblox-style collision groups with a maximum of 32
-groups:
-
-- `RegisterCollisionGroup`
-- `CreateCollisionGroup`
-- `UnregisterCollisionGroup`
-- `RemoveCollisionGroup`
-- `RenameCollisionGroup`
-- `CollisionGroupSetCollidable`
-- `CollisionGroupsAreCollidable`
-- `SetPartCollisionGroup`
-- `GetCollisionGroups`
-- `GetRegisteredCollisionGroups`
-- `GetCollisionGroupId`
-- `GetCollisionGroupName`
-- `GetMaxCollisionGroups`
-- `IsCollisionGroupRegistered`
+groups, registered and made collidable through methods such as
+`RegisterCollisionGroup`, `CollisionGroupSetCollidable`, and
+`SetPartCollisionGroup`. See the [engine API reference](/engine-api-reference)
+for the full collision group method list.
 
 Collision groups affect real contacts in the physics layer.
 
@@ -90,17 +81,10 @@ Supported physics classes include:
 - `AlignPosition`
 - `AlignOrientation`
 
-`BasePart` also supports:
-
-- `GetMass`
-- `GetConnectedParts`
-- `ApplyImpulse`
-- `ApplyImpulseAtPosition`
-- `ApplyAngularImpulse`
-- `GetPivot`
-- `PivotTo`
-- `GetPrimaryPartCFrame`
-- `SetPrimaryPartCFrame`
+`BasePart` also supports mass, impulse, pivot, and primary-part methods such as
+`GetMass`, `GetConnectedParts`, `ApplyImpulse`, `ApplyImpulseAtPosition`,
+`ApplyAngularImpulse`, `GetPivot`, and `PivotTo`. See the
+[engine API reference](/engine-api-reference) for the full method list.
 
 `SetNetworkOwner` and `SetNetworkOwnershipAuto` are accepted for Roblox
 compatibility, but Clawblox currently runs authoritative server simulation, so

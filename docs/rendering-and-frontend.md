@@ -1,6 +1,9 @@
 ---
 title: Rendering and frontend
-description: How Clawblox browser rendering works and how it differs from Roblox UI.
+summary: "How browser rendering works and how it differs from Roblox UI."
+read_when:
+  - Working on how a world is displayed
+  - Coming from Roblox and expecting its UI model
 ---
 
 Clawblox engine worlds render in the browser. The server owns gameplay state;
@@ -11,128 +14,25 @@ This is where Clawblox diverges most from Roblox. Roblox-like GUI instances
 exist, but rich presentation should usually be implemented in the browser
 renderer with Three.js.
 
-## Renderer package
+## Server-authoritative rendering
 
-A custom renderer lives under `renderer/`:
+The simulation runs on the server, which holds the authoritative state of the
+world. Each tick it serializes a spectator observation and streams it to the
+browser over a live websocket. The frontend is a pure view: it does not own
+gameplay state, it just turns the latest observation into pixels.
 
-```text
-renderer/
-  package.json
-  src/
-    index.js
-  dist/
-    renderer.bundle.js
-```
+Because of this, a renderer is rebuildable from the most recent payload. The
+runtime calls your renderer with each new observation, and your code reconciles
+the scene against it. There is no hidden client-side game state to keep in sync;
+if the renderer is dropped and recreated, it can reconstruct the full scene from
+the next observation.
 
-`world.toml` points at the built module:
+## Renderer packages
 
-```toml
-[renderer]
-mode = "module"
-api_version = 1
-entry = "dist/renderer.bundle.js"
-capabilities = ["three-sdk"]
-```
-
-For current local engine runs, `renderer/package.json` is the build driver:
-
-```json
-{
-  "type": "module",
-  "clawbloxRenderer": {
-    "apiVersion": 1,
-    "entry": "./src/index.js",
-    "outFile": "./dist/renderer.bundle.js",
-    "capabilities": ["three-sdk"]
-  }
-}
-```
-
-`clawbloxRenderer.entry` is the source file. `clawbloxRenderer.outFile` is the
-built bundle served to the browser. Keep `world.toml` `renderer.entry` aligned
-with `outFile`, but do not rely on it as the only build setting.
-
-If `renderer/package.json` has a `build` script, `clawblox run` executes
-`npm run build`. Otherwise it bundles the detected source entry with `esbuild`
-or `npx esbuild`. The runtime rejects a bundle that does not appear to export
-`createRenderer`.
-
-The local runtime exposes the final renderer manifest at
-`GET /renderer/manifest`:
-
-```json
-{
-  "schema_version": 1,
-  "api_version": 1,
-  "name": "Renderer name",
-  "mode": "module",
-  "entry_url": "/renderer-files/dist/renderer.bundle.js",
-  "capabilities": ["three-sdk"]
-}
-```
-
-## Renderer contract
-
-The module exports `createRenderer(ctx)`:
-
-```js
-export function createRenderer(ctx) {
-  return {
-    mount() {},
-    unmount() {},
-    onResize({ width, height, dpr }) {},
-    onState(state) {},
-  }
-}
-```
-
-## Minimal renderer
-
-```js
-import * as THREE from "https://esm.sh/three@0.160.0"
-
-export function createRenderer(ctx) {
-  const scene = new THREE.Scene()
-  const camera = new THREE.PerspectiveCamera(70, 1, 0.1, 500)
-  const renderer = new THREE.WebGLRenderer({ canvas: ctx.canvas, antialias: true })
-  const entities = ctx.runtime.three.createEntityStore(scene)
-
-  scene.add(new THREE.AmbientLight(0xffffff, 0.8))
-  camera.position.set(0, 20, 30)
-  camera.lookAt(0, 0, 0)
-
-  return {
-    onResize({ width, height }) {
-      camera.aspect = width / Math.max(1, height)
-      camera.updateProjectionMatrix()
-      renderer.setSize(width, height, false)
-    },
-
-    onState(state) {
-      const activeIds = new Set()
-
-      for (const entity of state.entities || []) {
-        activeIds.add(entity.id)
-        entities.upsert(
-          entity,
-          (next) => ctx.runtime.three.buildEntityMesh(THREE, next),
-          (mesh, next) => ctx.runtime.three.applyEntityTransform(THREE, mesh, next),
-        )
-      }
-
-      entities.prune(activeIds)
-      renderer.render(scene, camera)
-    },
-
-    unmount() {
-      entities.clear()
-      renderer.dispose()
-    },
-  }
-}
-```
-
-`ctx.runtime` exposes SDK namespaces:
+A custom renderer is a small JavaScript package that lives under `renderer/` in
+a world and exports a `createRenderer(ctx)` factory. The runtime builds the
+package, serves the bundle to the browser, and calls your factory with a `ctx`
+whose `ctx.runtime` SDK exposes helpers grouped into namespaces:
 
 - `state` for snapshot interpolation and indexing
 - `animation` for active animation-track inspection
@@ -140,48 +40,50 @@ export function createRenderer(ctx) {
 - `three` for Three.js camera, material, entity, model, and disposal helpers
 - `input` for local `/join`, `/input`, and `/observe` bridging
 
-## State shape
+You would write a custom renderer when the default viewer is not enough: to give
+a world its own art direction, custom camera behavior, bespoke models, or browser
+UI that sends interaction back through the input bridge. Worlds that just need a
+functional 3D view can rely on the default viewer.
 
-`onState(state)` receives a spectator observation. The important fields are:
-
-- `instance_id`
-- `tick`
-- `server_time_ms`
-- `game_status`
-- `players`
-- `entities`
-- `sounds`
-- `recent_events`
-
-Entities are serialized from parts in `Workspace`. They include transform,
-size, shape, render metadata, attributes, optional `model_url`, optional
-`billboard_gui`, and a stable instance id.
-
-Players include name, position, health, optional humanoid state, attributes,
-optional GUI state, and active animations.
-
-Sounds include `id`, `stream_id`, `volume`, and `is_playing`. Recent events are
-the public replicated event stream; client-targeted `RemoteEvent:FireClient`
-events are excluded from the public spectator feed.
+See [Custom renderers](/custom-renderers) for the renderer SDK, the
+`createRenderer(ctx)` contract, package metadata, build behavior, and runtime
+endpoints.
 
 ## Render metadata
 
-Lua scripts can set attributes on parts to control renderer behavior:
+Lua scripts drive presentation by tagging parts with attributes instead of baking
+visuals into gameplay code. Attributes such as `RenderRole`, `RenderPresetId`,
+`RenderPrimitive`, `RenderMaterial`, and `RenderColor` let world code describe how
+a part should look without the renderer needing to understand gameplay. A part can
+also reference a static mesh asset with `ModelUrl` (for example
+`ModelUrl = "asset://foo.glb"`, which the local runtime resolves to
+`/assets/foo.glb`).
 
-- `RenderRole`
-- `RenderPresetId`
-- `RenderPrimitive`
-- `RenderMaterial`
-- `RenderColor`
-- `RenderStatic`
-- `RenderVisible`
-- `RenderCastsShadow`
-- `RenderReceivesShadow`
-- `ModelUrl`
-- `ModelYawOffsetDeg`
+This keeps gameplay truth in Luau-owned instances while the renderer reads simple,
+declarative hints. `RenderRole` carries semantic categories, `RenderPresetId`
+selects a reusable visual recipe, and `ModelUrl` is asset identity, not gameplay
+meaning.
 
-`ModelUrl = "asset://foo.glb"` is resolved to `/assets/foo.glb` by the local
-runtime.
+See [Custom renderers](/custom-renderers) for the full render-metadata attribute
+reference and the `asset://` resolution rules.
+
+## Spectator state
+
+`onState(state)` receives a spectator observation. At a high level it carries
+`instance_id`, `tick`, `server_time_ms`, and `game_status`, plus the lists the
+renderer draws from:
+
+- `players` include name, position, health, optional humanoid state, attributes,
+  optional GUI state, and active animations.
+- `entities` are serialized from parts in `Workspace`. They include transform,
+  size, shape, render metadata, attributes, an optional model reference, an
+  optional billboard GUI, and a stable instance id.
+- `sounds` describe active audio streams.
+- `recent_events` carry the public replicated event stream.
+
+See [Custom renderers](/custom-renderers) for the full spectator state reference,
+including the `SpectatorObservation` type and every player, entity, sound, and
+event field.
 
 ## GUI instances
 
@@ -205,14 +107,9 @@ serialized as part metadata for floating labels and markers attached to world
 objects. Treat `ScreenGui` trees as optional structured state for custom
 renderers, not as a full Roblox UI layer.
 
-## More detail
-
-See [Custom renderers](/custom-renderers) for the lower-level renderer API,
-runtime endpoints, package metadata, and shared model helpers.
-
 ## Renderer-facing conventions
 
-For agent-built worlds, keep the renderer contract declarative:
+For coding-agent-built worlds, keep the renderer contract declarative:
 
 - put gameplay truth in Luau-owned instances and attributes
 - use `RenderRole` for semantic categories such as `door`, `resource`, `hazard`,

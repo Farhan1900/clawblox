@@ -1,6 +1,9 @@
 ---
 title: Data model
-description: The Roblox-style instance tree used by Clawblox engine worlds.
+summary: "The Roblox-style instance tree engine worlds are built from."
+read_when:
+  - Scripting against instances, services, and attributes
+  - Understanding world structure
 ---
 
 The Clawblox data model is a Roblox-style tree of instances. Luau scripts
@@ -34,29 +37,13 @@ Core instance events include:
 - `Destroying`
 - `AttributeChanged`
 
-Core methods include:
-
-- `SetAttribute`
-- `GetAttribute`
-- `GetAttributes`
-- `GetAttributeChangedSignal`
-- `GetPropertyChangedSignal`
-- `AddTag`
-- `HasTag`
-- `RemoveTag`
-- `GetTags`
-- `Clone`
-- `Destroy`
-- `ClearAllChildren`
-- `FindFirstChild`
-- `FindFirstChildOfClass`
-- `FindFirstChildWhichIsA`
-- `GetChildren`
-- `GetDescendants`
-- `GetDebugId`
-- `IsA`
-- `IsDescendantOf`
-- `WaitForChild`
+Core methods cover attributes (`SetAttribute`, `GetAttribute`, `GetAttributes`,
+`GetAttributeChangedSignal`, `GetPropertyChangedSignal`), tags (`AddTag`,
+`HasTag`, `RemoveTag`, `GetTags`), and tree operations (`Clone`, `Destroy`,
+`ClearAllChildren`, `FindFirstChild`, `FindFirstChildOfClass`,
+`FindFirstChildWhichIsA`, `GetChildren`, `GetDescendants`, `IsA`,
+`IsDescendantOf`, `WaitForChild`). See the
+[engine API reference](/engine-api-reference) for the full method list.
 
 Supported attribute value types are `nil`, boolean, number, string, `Vector3`,
 `Color3`, and array-style tables containing supported attribute values.
@@ -67,34 +54,13 @@ and world queries, but they are not currently exposed through a separate
 
 ## Supported classes
 
-The engine currently registers these instance classes:
-
-- `Instance`
-- `Folder`
-- `Workspace`
-- `Terrain`
-- `Model`
-- `BasePart`
-- `Part`
-- `Camera`
-- `Player`
-- `Humanoid`
-- `Animation`
-- `Animator`
-- `Script`
-- `ModuleScript`
-- `ServerScriptService`
-- `ServerStorage`
-- `ReplicatedStorage`
-- `RemoteEvent`
-- `Sound`
-- value objects: `IntValue`, `NumberValue`, `BoolValue`, `StringValue`,
-  `ObjectValue`, `CFrameValue`
-- physics objects: `Weld`, `WeldConstraint`, `BodyVelocity`, `BodyForce`,
-  `BodyAngularVelocity`, `Attachment`, `VectorForce`, `AlignPosition`,
-  `AlignOrientation`
-- GUI objects: `PlayerGui`, `ScreenGui`, `Frame`, `TextLabel`, `TextButton`,
-  `ImageLabel`, `ImageButton`, `BillboardGui`, `UICorner`
+The engine registers core classes (`Instance`, `Folder`, `Workspace`,
+`Terrain`, `Model`, `BasePart`, `Part`, `Camera`, `Player`, `Humanoid`,
+`Animation`, `Animator`, `Script`, `ModuleScript`, the storage services,
+`RemoteEvent`, and `Sound`) along with value objects, physics objects, and GUI
+objects. See the [engine API reference](/engine-api-reference) for the full,
+exhaustive list of registered classes and the constructors available through
+`Instance.new`.
 
 ## Services and storage
 

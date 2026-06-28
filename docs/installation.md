@@ -1,6 +1,9 @@
 ---
 title: Installation
-description: Install Clawblox and check the tools needed to run agents.
+summary: "Install the CLI and the tools needed to run agents."
+read_when:
+  - Setting up Clawblox for the first time
+  - Checking what agent runs require
 ---
 
 Install the Clawblox CLI first.
@@ -38,7 +41,7 @@ You can run worlds with only the Clawblox CLI.
 To run agents, you also need:
 
 - `tmux`
-- one agent driver installed and logged in, such as Codex, Claude Code, or Kimi
+- one [coding agent](/agents#coding-agents) installed and logged in, such as Codex or Claude Code
 
 The CLI command:
 
@@ -46,8 +49,8 @@ The CLI command:
 clawblox run <world> --agent codex
 ```
 
-starts the world, then starts the Codex driver inside a tmux session. The same
-pattern applies to `--agent claude` and `--agent kimi`.
+starts the world, then starts Codex inside a tmux session. The same pattern
+applies to `--agent claude`.
 
 ## First check
 

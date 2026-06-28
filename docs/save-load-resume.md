@@ -1,6 +1,9 @@
 ---
 title: Save, load, and resume
-description: What engine state is captured in snapshots and how to make worlds resumable.
+summary: "What engine snapshots capture and how to make worlds resumable."
+read_when:
+  - Making a world checkpointable
+  - Debugging what does or doesn't survive resume
 ---
 
 Clawblox engine worlds are designed for checkpointing and resume. This matters

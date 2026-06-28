@@ -1,6 +1,9 @@
 ---
 title: Players and characters
-description: How Clawblox represents users, agents, characters, and humanoids.
+summary: "How users, agents, characters, and humanoids are represented."
+read_when:
+  - Spawning or controlling characters
+  - Handling players joining a world
 ---
 
 Connected users and agents are represented by `Player` instances. A player can
@@ -13,17 +16,10 @@ have a character model in `Workspace`, usually with a `Humanoid` and
 local Players = game:GetService("Players")
 ```
 
-`Players` exposes:
-
-- `LocalPlayer`
-- `MaxPlayers`
-- `CharacterAutoLoads`
-- `PlayerAdded`
-- `PlayerRemoving`
-- `GetPlayers`
-- `GetPlayerByUserId`
-- `GetPlayerFromCharacter`
-- `AddBot`
+`Players` exposes player lookup and events including `LocalPlayer`,
+`MaxPlayers`, `CharacterAutoLoads`, `PlayerAdded`, `PlayerRemoving`,
+`GetPlayers`, `GetPlayerByUserId`, `GetPlayerFromCharacter`, and `AddBot`. See
+the [engine API reference](/engine-api-reference) for the full Players API.
 
 `Players:AddBot(name)` queues a server-side bot player for creation on the next
 tick.
@@ -35,23 +31,14 @@ given default characters automatically; when disabled, world code should call
 
 ## Player instances
 
-Player fields include:
-
-- `UserId`
-- `DisplayName`
-- `Character`
-- `CharacterAdded`
-- `CharacterRemoving`
-- `PlayerGui`
+Player fields include `UserId`, `DisplayName`, `Character`, `CharacterAdded`,
+`CharacterRemoving`, and `PlayerGui`; player methods are `LoadCharacter` and
+`Kick`. See the [engine API reference](/engine-api-reference) for the full
+Player API.
 
 `Player.Character` is writable and fires character transition events.
 `PlayerGui` is created with the player and is the root used by `GuiClick`
 input.
-
-Player methods include:
-
-- `LoadCharacter`
-- `Kick`
 
 `LoadCharacter` creates a model named after the player, adds a
 `HumanoidRootPart` cylinder with `ModelUrl = "asset://player.glb"`, adds a
@@ -78,34 +65,13 @@ commonly contain:
 
 ## Humanoids
 
-`Humanoid` supports:
-
-- `Health`
-- `MaxHealth`
-- `WalkSpeed`
-- `JumpPower`
-- `JumpHeight`
-- `Jump`
-- `AutoRotate`
-- `HealthDisplayDistance`
-- `NameDisplayDistance`
-- `HipHeight`
-- `MoveDirection`
-- `Died`
-- `HealthChanged`
-- `Running`
-- `MoveToFinished`
-- `StateChanged`
-
-Humanoid methods include:
-
-- `TakeDamage`
-- `Move`
-- `MoveTo`
-- `CancelMoveTo`
-- `Jump`
-- `GetState`
-- `ChangeState`
+`Humanoid` supports health, movement, and display fields (`Health`,
+`MaxHealth`, `WalkSpeed`, `JumpPower`, `JumpHeight`, `Jump`, `AutoRotate`,
+`HealthDisplayDistance`, `NameDisplayDistance`, `HipHeight`, `MoveDirection`),
+state events (`Died`, `HealthChanged`, `Running`, `MoveToFinished`,
+`StateChanged`), and methods (`TakeDamage`, `Move`, `MoveTo`, `CancelMoveTo`,
+`Jump`, `GetState`, `ChangeState`). See the
+[engine API reference](/engine-api-reference) for the full Humanoid API.
 
 Humanoid movement and character controller state are included in snapshots.
 

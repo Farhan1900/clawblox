@@ -1,6 +1,9 @@
 ---
 title: Luau scripting
-description: Roblox-like Luau globals, services, scheduling, and resumability in the Clawblox engine.
+summary: "Roblox-like Luau globals, services, scheduling, and resumability."
+read_when:
+  - Writing world logic in Luau
+  - Looking up a global, service, or scheduling API
 ---
 
 Clawblox implements a Roblox-like Luau scripting system for engine worlds. Many
@@ -197,94 +200,51 @@ task.cancel(t)
 
 ## Classes
 
-### Instance
-Base class for all objects in the world data model.
+The full class, property, method, event, and default tables live in the
+[engine API reference](/engine-api-reference). The data model concepts behind
+instances, parenting, and attributes are in [data model](/data-model). This
+section shows the common authoring patterns.
 
-#### Properties
-| Property | Type | Description |
-|----------|------|-------------|
-| `Name` | string | The name of this instance |
-| `Parent` | Instance? | The parent of this instance |
-| `ClassName` | string | (read-only) The class name |
+Every object is an `Instance`. Construct one with `Instance.new`:
 
-#### Methods
-| Method | Returns | Description |
-|--------|---------|-------------|
-| `Clone()` | Instance | Creates a copy of this instance and descendants |
-| `Destroy()` | void | Removes this instance and all descendants |
-| `FindFirstChild(name, recursive?)` | Instance? | Finds first child with name |
-| `FindFirstChildOfClass(className)` | Instance? | Finds first child of class |
-| `GetChildren()` | `{Instance}` | Returns array of direct children |
-| `GetDescendants()` | `{Instance}` | Returns array of all descendants |
-| `IsA(className)` | bool | Checks if instance is of class |
-| `IsDescendantOf(ancestor)` | bool | Checks if descendant of ancestor |
-| `SetAttribute(name, value)` | void | Sets a custom attribute |
-| `GetAttribute(name)` | any | Gets a custom attribute |
-| `GetAttributes()` | `{[string]: any}` | Gets all attributes |
-| `AddTag(tag)` | void | Adds a tag to this instance |
-| `HasTag(tag)` | bool | Returns true if instance has the tag |
-| `RemoveTag(tag)` | void | Removes a tag from this instance |
-| `GetTags()` | `{string}` | Returns array of all tags |
-
-#### Events
-| Event | Parameters | Description |
-|-------|------------|-------------|
-| `ChildAdded` | (child: Instance) | Fires when child is added |
-| `ChildRemoved` | (child: Instance) | Fires when child is removed |
-| `Destroying` | () | Fires before instance is destroyed |
-| `AttributeChanged` | (name: string) | Fires when attribute changes |
-
-#### Constructor
 ```lua
 local part = Instance.new("Part")
 local part = Instance.new("Part", parent)  -- with parent
 ```
 
----
+A `Part` is the basic physical object:
 
-### BasePart
-Base class for all physical parts. Inherits from Instance.
+```lua
+local part = Instance.new("Part")
+part.Shape = Enum.PartType.Ball
+part.Size = Vector3.new(4, 4, 4)
+part.Position = Vector3.new(0, 10, 0)
+part.Anchored = false
+part.Parent = Workspace
+```
 
-#### Properties
-| Property | Type | Default | Description |
-|----------|------|---------|-------------|
-| `Position` | Vector3 | (0,0,0) | World position |
-| `CFrame` | CFrame | identity | Position and orientation |
-| `Size` | Vector3 | (4,1,2) | Part dimensions |
-| `Anchored` | bool | false | Immovable by physics |
-| `CanCollide` | bool | true | Physical collision enabled |
-| `CanQuery` | bool | true | Included in spatial queries/raycast overlap tests |
-| `CanTouch` | bool | true | Touched events enabled |
-| `Transparency` | number | 0 | 0 = opaque, 1 = invisible |
-| `Color` | Color3 | (0.6,0.6,0.6) | Part color |
-| `Material` | Enum.Material | Plastic | Surface material |
-| `Velocity` | Vector3 | (0,0,0) | Linear velocity |
-| `AssemblyLinearVelocity` | Vector3 | (0,0,0) | Assembly velocity |
-| `AssemblyAngularVelocity` | Vector3 | (0,0,0) | Assembly angular velocity |
-| `Massless` | bool | false | If true, part contributes zero mass |
-| `CustomPhysicalProperties` | PhysicalProperties? | nil | Optional override for density/friction/elasticity |
+`Folder` groups instances:
 
-#### Events
-| Event | Parameters | Description |
-|-------|------------|-------------|
-| `Touched` | (otherPart: BasePart) | Part touched another part |
-| `TouchEnded` | (otherPart: BasePart) | Parts stopped touching |
+```lua
+local folder = Instance.new("Folder")
+folder.Name = "Weapons"
+folder.Parent = Workspace
+```
 
-#### Methods
-| Method | Returns | Description |
-|--------|---------|-------------|
-| `GetMass()` | number | Returns the part's mass using its size and physical properties |
-| `SetNetworkOwner(owner)` | void | Accepted for Roblox compatibility; physics ownership is engine controlled |
-| `ApplyImpulse(impulse)` | void | Applies a world-space impulse to the part's assembly at its center of mass |
-| `ApplyImpulseAtPosition(impulse, position)` | void | Applies a world-space impulse at a world-space position, which can add angular velocity |
-| `ApplyAngularImpulse(impulse)` | void | Applies a world-space angular impulse to the part's assembly |
+`Weld` rigidly attaches two parts:
 
-For welded assemblies, these methods operate on the shared physics assembly. Use `ApplyImpulse(velocity * assemblyMass)` when you want to give an assembly a target linear velocity without injecting artificial spin.
+```lua
+local weld = Instance.new("Weld")
+weld.Part0 = partA
+weld.Part1 = partB
+weld.C0 = CFrame.new(0, 1, 0)
+weld.Parent = partA
+```
 
-#### Physics Properties (Roblox parity)
+### Physics properties
 
-In Roblox-style APIs, `Friction`, `Density`, and `Elasticity` are not direct `BasePart` fields.
-Use `CustomPhysicalProperties` instead.
+In Roblox-style APIs, `Friction`, `Density`, and `Elasticity` are not direct
+`BasePart` fields. Use `CustomPhysicalProperties` instead:
 
 ```lua
 local part = Instance.new("Part")
@@ -303,156 +263,19 @@ To clear the override:
 part.CustomPhysicalProperties = nil
 ```
 
----
-
-### Part
-A basic part. Inherits from BasePart.
-
-#### Properties
-| Property | Type | Description |
-|----------|------|-------------|
-| `Shape` | Enum.PartType | Ball, Block, Cylinder, Wedge |
-
-```lua
-local part = Instance.new("Part")
-part.Shape = Enum.PartType.Ball
-part.Size = Vector3.new(4, 4, 4)
-part.Position = Vector3.new(0, 10, 0)
-part.Anchored = false
-part.Parent = Workspace
-```
-
----
-
-### Model
-A container for grouping Instances. Inherits from Instance.
-
-#### Properties
-| Property | Type | Description |
-|----------|------|-------------|
-| `PrimaryPart` | BasePart? | The primary part for CFrame operations |
-
-#### Methods
-| Method | Returns | Description |
-|--------|---------|-------------|
-| `GetPrimaryPartCFrame()` | CFrame | CFrame of primary part |
-| `SetPrimaryPartCFrame(cframe)` | void | Moves model via primary part |
-
----
-
-### Weld
-A constraint that welds two parts together. Inherits from Instance.
-
-#### Properties
-| Property | Type | Default | Description |
-|----------|------|---------|-------------|
-| `Part0` | BasePart? | nil | First part to weld |
-| `Part1` | BasePart? | nil | Second part to weld |
-| `C0` | CFrame | identity | Offset relative to Part0 |
-| `C1` | CFrame | identity | Offset relative to Part1 |
-| `Enabled` | bool | true | Whether the weld is active |
-
-```lua
-local weld = Instance.new("Weld")
-weld.Part0 = partA
-weld.Part1 = partB
-weld.C0 = CFrame.new(0, 1, 0)
-weld.Parent = partA
-```
-
----
-
-### Humanoid
-Controls character behavior. Inherits from Instance.
-
-#### Properties
-| Property | Type | Default | Description |
-|----------|------|---------|-------------|
-| `Health` | number | 100 | Current health |
-| `MaxHealth` | number | 100 | Maximum health |
-| `WalkSpeed` | number | 16 | Movement speed (studs/sec) |
-| `JumpPower` | number | 50 | Jump force |
-| `JumpHeight` | number | 7.2 | Jump height (studs) |
-| `AutoRotate` | bool | true | Rotate toward movement |
-| `HipHeight` | number | 2 | Height off ground |
-
-#### Methods
-| Method | Returns | Description |
-|--------|---------|-------------|
-| `TakeDamage(amount)` | void | Reduces health |
-| `Move(direction, relativeToCamera?)` | void | Walk in direction |
-| `MoveTo(position, part?)` | void | Walk to position |
-| `CancelMoveTo()` | void | Cancels the current MoveTo |
-
-#### Events
-| Event | Parameters | Description |
-|-------|------------|-------------|
-| `Died` | () | Health reached 0 |
-| `HealthChanged` | (health: number) | Health changed |
-| `MoveToFinished` | (reached: bool) | MoveTo completed |
-
----
-
-### Player
-Represents a connected player. Inherits from Instance.
-
-#### Properties
-| Property | Type | Description |
-|----------|------|-------------|
-| `UserId` | number | Unique player ID |
-| `Name` | string | Player's username |
-| `DisplayName` | string | Player's display name |
-| `Character` | Model? | Player's character model |
-| `PlayerGui` | PlayerGui? | (read-only) Player's GUI container |
-
-#### Methods
-| Method | Returns | Description |
-|--------|---------|-------------|
-| `LoadCharacter()` | void | Spawns/respawns character |
-| `Kick(message?)` | void | Removes player from the world |
-
-#### Events
-| Event | Parameters | Description |
-|-------|------------|-------------|
-| `CharacterAdded` | (character: Model) | Character spawned |
-| `CharacterRemoving` | (character: Model) | Character despawning |
-
----
-
-### Folder
-A container for organizing instances. Inherits from Instance. Has no additional properties or methods.
-
-```lua
-local folder = Instance.new("Folder")
-folder.Name = "Weapons"
-folder.Parent = Workspace
-```
-
----
+`BasePart` also exposes impulse methods (`ApplyImpulse`,
+`ApplyImpulseAtPosition`, `ApplyAngularImpulse`) and `GetMass`. For welded
+assemblies these operate on the shared physics assembly. Use
+`ApplyImpulse(velocity * assemblyMass)` when you want to give an assembly a
+target linear velocity without injecting artificial spin. See
+[physics](/physics) for the full forces and constraints workflow.
 
 ## Services
 
 ### Players
-Manages connected players.
-
-#### Properties
-| Property | Type | Description |
-|----------|------|-------------|
-| `LocalPlayer` | Player? | (client only) The local player |
-| `MaxPlayers` | number | Maximum players allowed |
-
-#### Methods
-| Method | Returns | Description |
-|--------|---------|-------------|
-| `GetPlayers()` | `{Player}` | All connected players |
-| `GetPlayerByUserId(userId)` | Player? | Find player by ID |
-| `GetPlayerFromCharacter(character)` | Player? | Find player from character model |
-
-#### Events
-| Event | Parameters | Description |
-|-------|------------|-------------|
-| `PlayerAdded` | (player: Player) | Player joined |
-| `PlayerRemoving` | (player: Player) | Player leaving |
+Manages connected players. See the [engine API reference](/engine-api-reference)
+for the full Players API and [players and characters](/players-and-characters)
+for character and humanoid behavior.
 
 ```lua
 local Players = game:GetService("Players")
@@ -471,21 +294,9 @@ end)
 ---
 
 ### Workspace
-The 3D world container. Inherits from Instance.
-
-#### Properties
-| Property | Type | Description |
-|----------|------|-------------|
-| `Gravity` | number | World gravity (default: 196.2) |
-| `CurrentCamera` | Camera? | Active camera |
-
-#### Methods
-| Method | Returns | Description |
-|--------|---------|-------------|
-| `Raycast(origin, direction, params?)` | RaycastResult? | Cast a ray |
-| `GetPartBoundsInBox(cframe, size, params?)` | `{BasePart}` | Parts in box region |
-| `GetPartBoundsInRadius(position, radius, params?)` | `{BasePart}` | Parts in sphere |
-| `GetPartsInPart(part, params?)` | `{BasePart}` | Parts overlapping a query part |
+The 3D world container. See the [engine API reference](/engine-api-reference)
+for the full Workspace API and [3D workspace](/workspace-3d) for spatial query
+and terrain details.
 
 ```lua
 -- Raycast example
@@ -501,19 +312,10 @@ end
 ---
 
 ### RunService
-Frame loop and timing.
-
-#### Properties
-| Property | Type | Description |
-|----------|------|-------------|
-| `Heartbeat` | RBXScriptSignal | Fires every frame (after physics) |
-| `Stepped` | RBXScriptSignal | Fires every frame (before physics) |
-
-#### Methods
-| Method | Returns | Description |
-|--------|---------|-------------|
-| `IsServer()` | bool | Running on server |
-| `IsClient()` | bool | Running on client |
+Frame loop and timing. `Stepped` fires before physics with `(time, deltaTime)`;
+`Heartbeat` fires after physics with `(deltaTime)`. `IsServer()` and
+`IsClient()` report the runtime side. See the
+[engine API reference](/engine-api-reference) for the full RunService API.
 
 ```lua
 local RunService = game:GetService("RunService")
@@ -526,13 +328,10 @@ end)
 ---
 
 ### HttpService
-Provides JSON encoding and decoding.
-
-#### Methods
-| Method | Returns | Description |
-|--------|---------|-------------|
-| `JSONEncode(value)` | string | Converts a Lua value to a JSON string |
-| `JSONDecode(json)` | any | Parses a JSON string into a Lua value |
+Provides JSON encoding and decoding through `JSONEncode(value)` and
+`JSONDecode(json)`. Invalid JSON decodes to `nil`; the service is not an
+outbound HTTP client. See the [engine API reference](/engine-api-reference) and
+[services](/services) for details.
 
 ```lua
 local HttpService = game:GetService("HttpService")
@@ -548,30 +347,13 @@ print(decoded.score) -- 100
 ---
 
 ### DataStoreService
-Persistent key-value storage backed by the database.
-
-#### Methods
-| Method | Returns | Description |
-|--------|---------|-------------|
-| `GetDataStore(name)` | DataStore | Gets a named data store |
-| `GetOrderedDataStore(name)` | OrderedDataStore | Gets a named ordered data store |
-
-#### DataStore
-
-| Method | Returns | Description |
-|--------|---------|-------------|
-| `GetAsync(key)` | any | Gets the value for a key (yields) |
-| `SetAsync(key, value)` | void | Sets the value for a key (yields) |
-| `RemoveAsync(key)` | void | Removes a key (yields) |
-| `UpdateAsync(key, transform)` | any | Atomically updates a key (yields) |
-
-#### OrderedDataStore
-
-| Method | Returns | Description |
-|--------|---------|-------------|
-| `GetAsync(key)` | any | Gets the value for a key (yields) |
-| `SetAsync(key, value)` | void | Sets a value (must have `score` field) (yields) |
-| `GetSortedAsync(ascending, limit)` | `{{key, value}}` | Returns sorted entries (yields) |
+Persistent key-value storage backed by the database. `GetDataStore(name)`
+returns a store with the yielding methods `GetAsync`, `SetAsync`, `RemoveAsync`,
+and `UpdateAsync`. `GetOrderedDataStore(name)` returns an ordered store with
+`SetAsync` (values must include a `score` field), `GetSortedAsync`, and
+`GetAsync`. See the [engine API reference](/engine-api-reference) for signatures
+and [services](/services) for `UpdateAsync` retry semantics and datastore
+backends.
 
 ```lua
 local DataStoreService = game:GetService("DataStoreService")
@@ -601,21 +383,14 @@ end
 
 ### AgentInputService
 
-**Clawblox extension** - Handles input from AI agents via the local runtime API.
+**Clawblox extension**: handles input from coding agents via the local runtime API.
 
-Worlds should support both renderer-driven player input and AI agent input
+Worlds should support both renderer-driven player input and coding-agent input
 through `AgentInputService` so the same Luau code works for all player types.
-
-#### Events
-| Event | Parameters | Description |
-|-------|------------|-------------|
-| `InputReceived` | (player, inputType, data) | Fires when an agent sends input |
-
-#### Methods
-| Method | Returns | Description |
-|--------|---------|-------------|
-| `GetInputs(player)` | `{Input}` | Get and clear pending inputs for player |
-| `HasPendingInputs(player)` | bool | Check if there are pending inputs |
+It fires `InputReceived(player, inputType, data)` and exposes `GetInputs(player)`
+(get and clear pending inputs) and `HasPendingInputs(player)`. See the
+[engine API reference](/engine-api-reference) and
+[observations and input](/observations-and-input) for the full contract.
 
 #### Input Flow
 
@@ -665,56 +440,15 @@ end)
 
 ## GUI
 
-GUI classes for building 2D interfaces. All GUI elements inherit from GuiObject base properties.
+GUI classes build 2D interfaces. `Frame`, `TextLabel`, `TextButton`,
+`ImageLabel`, and `ImageButton` inherit the shared `GuiObject` layout and visual
+properties; `TextButton` and `ImageButton` also fire `MouseButton1Click`,
+`MouseButton1Down`, `MouseButton1Up`, `MouseEnter`, and `MouseLeave`. See the
+[engine API reference](/engine-api-reference) for the full GUI property,
+default, and event tables.
 
-### GuiObject (Base)
-Base class for all 2D GUI elements. Not instantiated directly.
-
-#### Properties
-| Property | Type | Default | Description |
-|----------|------|---------|-------------|
-| `Position` | UDim2 | `{0,0,0,0}` | Position (scale + offset) |
-| `Size` | UDim2 | `{0,0,0,0}` | Size (scale + offset) |
-| `AnchorPoint` | `{X, Y}` | `{0, 0}` | Anchor point (0-1) |
-| `Rotation` | number | 0 | Rotation in degrees |
-| `BackgroundColor3` | Color3 | (1,1,1) | Background color |
-| `BackgroundTransparency` | number | 0 | 0 = opaque, 1 = invisible |
-| `BorderColor3` | Color3 | (0.1,0.1,0.1) | Border color |
-| `BorderSizePixel` | number | 1 | Border thickness in pixels |
-| `ZIndex` | number | 0 | Rendering order |
-| `LayoutOrder` | number | 0 | Layout sort order |
-| `Visible` | bool | true | Whether element is visible |
-
----
-
-### PlayerGui
-Container for a player's GUI elements. Accessed via `player.PlayerGui`. Parent ScreenGuis here.
-
----
-
-### ScreenGui
-Top-level GUI container. Parent to PlayerGui.
-
-#### Properties
-| Property | Type | Default | Description |
-|----------|------|---------|-------------|
-| `DisplayOrder` | number | 0 | Rendering order among ScreenGuis |
-| `IgnoreGuiInset` | bool | false | Extend into top bar area |
-| `Enabled` | bool | true | Whether this GUI is visible |
-
----
-
-### BillboardGui
-A GUI that appears in 3D space, attached to a part.
-
-#### Properties
-| Property | Type | Default | Description |
-|----------|------|---------|-------------|
-| `Size` | UDim2 | `{0,100,0,50}` | Size of the billboard |
-| `StudsOffset` | Vector3 | (0,0,0) | Offset from adornee in studs |
-| `AlwaysOnTop` | bool | false | Render on top of 3D objects |
-| `Enabled` | bool | true | Whether the billboard is visible |
-| `Adornee` | BasePart? | nil | Part to attach to |
+Parent a `ScreenGui` under a player's `PlayerGui` for on-screen interfaces, or
+use a `BillboardGui` to attach a GUI to a part in 3D space:
 
 ```lua
 local billboard = Instance.new("BillboardGui")
@@ -724,69 +458,6 @@ billboard.AlwaysOnTop = true
 billboard.Adornee = character:FindFirstChild("HumanoidRootPart")
 billboard.Parent = character
 ```
-
----
-
-### Frame
-A container element. Inherits all GuiObject properties.
-
-```lua
-local frame = Instance.new("Frame")
-frame.Size = UDim2.fromScale(0.5, 0.5)
-frame.Position = UDim2.fromScale(0.25, 0.25)
-frame.BackgroundColor3 = Color3.fromRGB(30, 30, 30)
-frame.BackgroundTransparency = 0.2
-frame.Parent = screenGui
-```
-
----
-
-### TextLabel
-Displays text. Inherits all GuiObject properties.
-
-#### Properties
-| Property | Type | Default | Description |
-|----------|------|---------|-------------|
-| `Text` | string | "" | Displayed text |
-| `TextColor3` | Color3 | (0,0,0) | Text color |
-| `TextSize` | number | 14 | Font size (min 1) |
-| `TextTransparency` | number | 0 | 0 = opaque, 1 = invisible |
-| `TextScaled` | bool | false | Scale text to fit |
-| `TextXAlignment` | string | "Center" | "Left", "Center", "Right" |
-| `TextYAlignment` | string | "Center" | "Top", "Center", "Bottom" |
-
----
-
-### TextButton
-A clickable text element. Inherits all TextLabel properties.
-
-#### Events
-| Event | Parameters | Description |
-|-------|------------|-------------|
-| `MouseButton1Click` | () | Button clicked |
-| `MouseButton1Down` | () | Mouse pressed |
-| `MouseButton1Up` | () | Mouse released |
-| `MouseEnter` | () | Mouse entered |
-| `MouseLeave` | () | Mouse left |
-
----
-
-### ImageLabel
-Displays an image. Inherits all GuiObject properties.
-
-#### Properties
-| Property | Type | Default | Description |
-|----------|------|---------|-------------|
-| `Image` | string | "" | Image URL or asset path |
-| `ImageColor3` | Color3 | (1,1,1) | Image tint color |
-| `ImageTransparency` | number | 0 | 0 = opaque, 1 = invisible |
-
----
-
-### ImageButton
-A clickable image element. Inherits all ImageLabel properties. Has the same events as TextButton.
-
----
 
 ### GUI Example
 
@@ -890,229 +561,14 @@ spectator observation stream.
 
 ## Data Types
 
-### Vector2
-2D vector.
+The engine registers Roblox-like datatypes including `Vector2`, `Vector3`,
+`CFrame`, `Color3`, `UDim`, `UDim2`, `Ray`, `Region3`, `PhysicalProperties`,
+`BrickColor`, and `DateTime`, plus the query types `RaycastResult`,
+`RaycastParams`, and `OverlapParams`. See the
+[engine API reference](/engine-api-reference) for the full constructor, member,
+and operator tables.
 
-#### Constructors
-```lua
-Vector2.new(x, y)
-Vector2.zero         -- (0, 0)
-Vector2.one          -- (1, 1)
-Vector2.xAxis        -- (1, 0)
-Vector2.yAxis        -- (0, 1)
-```
-
-#### Properties
-| Property | Type | Description |
-|----------|------|-------------|
-| `X` | number | X component |
-| `Y` | number | Y component |
-| `Magnitude` | number | Length |
-| `Unit` | Vector2 | Normalized vector |
-
-#### Methods
-| Method | Returns | Description |
-|--------|---------|-------------|
-| `Dot(other)` | number | Dot product |
-| `Lerp(goal, alpha)` | Vector2 | Linear interpolation |
-| `Unit()` | Vector2 | Normalized vector |
-
----
-
-### Vector3
-3D vector.
-
-#### Constructors
-```lua
-Vector3.new(x, y, z)
-Vector3.zero         -- (0, 0, 0)
-Vector3.one          -- (1, 1, 1)
-Vector3.xAxis        -- (1, 0, 0)
-Vector3.yAxis        -- (0, 1, 0)
-Vector3.zAxis        -- (0, 0, 1)
-```
-
-#### Properties
-| Property | Type | Description |
-|----------|------|-------------|
-| `X` | number | X component |
-| `Y` | number | Y component |
-| `Z` | number | Z component |
-| `Magnitude` | number | Length |
-| `Unit` | Vector3 | Normalized (length 1) |
-
-#### Methods
-| Method | Returns | Description |
-|--------|---------|-------------|
-| `Dot(other)` | number | Dot product |
-| `Cross(other)` | Vector3 | Cross product |
-| `Lerp(goal, alpha)` | Vector3 | Linear interpolation |
-| `FuzzyEq(other, epsilon?)` | bool | Approximate equality |
-
-#### Operators
-```lua
-v1 + v2      -- Add
-v1 - v2      -- Subtract
-v1 * v2      -- Component multiply
-v1 * n       -- Scalar multiply
-v1 / v2      -- Component divide
-v1 / n       -- Scalar divide
--v           -- Negate
-```
-
----
-
-### CFrame
-Position and orientation (Coordinate Frame).
-
-#### Constructors
-```lua
-CFrame.new()                        -- Identity
-CFrame.new(x, y, z)                 -- Position only
-CFrame.new(pos, lookAt)             -- Look at point
-CFrame.lookAt(pos, target, up?)     -- Look at with up vector
-CFrame.fromEulerAnglesXYZ(rx, ry, rz)
-CFrame.Angles(rx, ry, rz)           -- Alias for above
-CFrame.fromOrientation(rx, ry, rz)  -- YXZ orientation constructor
-```
-
-#### Properties
-| Property | Type | Description |
-|----------|------|-------------|
-| `Position` | Vector3 | Position component |
-| `LookVector` | Vector3 | Forward direction (-Z) |
-| `RightVector` | Vector3 | Right direction (+X) |
-| `UpVector` | Vector3 | Up direction (+Y) |
-| `X`, `Y`, `Z` | number | Position components |
-
-#### Methods
-| Method | Returns | Description |
-|--------|---------|-------------|
-| `Inverse()` | CFrame | Inverse transformation |
-| `Lerp(goal, alpha)` | CFrame | Interpolate |
-| `ToWorldSpace(cf)` | CFrame | Transform to world |
-| `ToObjectSpace(cf)` | CFrame | Transform to local |
-| `PointToWorldSpace(v3)` | Vector3 | Point to world |
-| `PointToObjectSpace(v3)` | Vector3 | Point to local |
-| `GetComponents()` | (12 numbers) | Matrix components |
-| `ToEulerAnglesXYZ()` | (rx, ry, rz) | Euler angles in XYZ order (radians) |
-| `ToOrientation()` | (rx, ry, rz) | Orientation angles in YXZ order (radians) |
-
-#### Operators
-```lua
-cf1 * cf2    -- Combine transformations
-cf * v3      -- Transform point
-cf + v3      -- Translate
-cf - v3      -- Translate inverse
-```
-
----
-
-### Color3
-RGB color.
-
-#### Constructors
-```lua
-Color3.new(r, g, b)           -- 0-1 range
-Color3.fromRGB(r, g, b)       -- 0-255 range
-Color3.fromHSV(h, s, v)       -- HSV color space
-Color3.fromHex("#FF5500")     -- Hex string
-```
-
-#### Properties
-| Property | Type | Description |
-|----------|------|-------------|
-| `R` | number | Red (0-1) |
-| `G` | number | Green (0-1) |
-| `B` | number | Blue (0-1) |
-
-#### Methods
-| Method | Returns | Description |
-|--------|---------|-------------|
-| `Lerp(goal, alpha)` | Color3 | Interpolate colors |
-| `ToHSV()` | (h, s, v) | Convert to HSV |
-| `ToHex()` | string | Convert to hex |
-
----
-
-### UDim
-A one-dimensional value with scale (fraction) and offset (pixels).
-
-#### Constructor
-```lua
-UDim.new(scale, offset)
-```
-
-#### Properties
-| Property | Type | Description |
-|----------|------|-------------|
-| `Scale` | number | Scale component (0-1 fraction) |
-| `Offset` | number | Offset component (pixels) |
-
-#### Operators
-```lua
-udim1 + udim2    -- Add
-udim1 - udim2    -- Subtract
-```
-
----
-
-### UDim2
-A two-dimensional value (X and Y UDims) for GUI positioning and sizing.
-
-#### Constructors
-```lua
-UDim2.new(xScale, xOffset, yScale, yOffset)
-UDim2.fromScale(xScale, yScale)    -- Offset = 0
-UDim2.fromOffset(xOffset, yOffset) -- Scale = 0
-```
-
-#### Properties
-| Property | Type | Description |
-|----------|------|-------------|
-| `X` | UDim | X component |
-| `Y` | UDim | Y component |
-| `Width` | UDim | Alias for X |
-| `Height` | UDim | Alias for Y |
-
-#### Methods
-| Method | Returns | Description |
-|--------|---------|-------------|
-| `Lerp(goal, alpha)` | UDim2 | Linear interpolation |
-
-#### Operators
-```lua
-udim2a + udim2b    -- Add
-udim2a - udim2b    -- Subtract
-```
-
----
-
-### RaycastResult
-Returned by Workspace:Raycast().
-
-#### Properties
-| Property | Type | Description |
-|----------|------|-------------|
-| `Instance` | BasePart | Part that was hit |
-| `Position` | Vector3 | Hit position |
-| `Normal` | Vector3 | Surface normal |
-| `Distance` | number | Distance to hit |
-| `Material` | Enum.Material | Hit material |
-
----
-
-### RaycastParams
-Parameters for raycasting.
-
-#### Properties
-| Property | Type | Description |
-|----------|------|-------------|
-| `FilterType` | Enum.RaycastFilterType | Include or Exclude |
-| `FilterDescendantsInstances` | `{Instance}` | Instances to filter |
-| `IgnoreWater` | bool | Ignore water |
-| `CollisionGroup` | string | Collision group |
-| `RespectCanCollide` | bool | Use `CanCollide` instead of query-only filtering |
+Spatial query parameters configure raycasts and overlap queries:
 
 ```lua
 local params = RaycastParams.new()
@@ -1121,29 +577,6 @@ params.FilterDescendantsInstances = {character}
 
 local result = Workspace:Raycast(origin, direction, params)
 ```
-
----
-
-### OverlapParams
-Parameters for overlap queries.
-
-#### Defaults
-| Property | Default |
-|----------|---------|
-| `FilterType` | `Enum.RaycastFilterType.Exclude` |
-| `FilterDescendantsInstances` | `{}` |
-| `MaxParts` | `0` (no limit) |
-| `CollisionGroup` | `"Default"` |
-| `RespectCanCollide` | `false` |
-
-#### Properties
-| Property | Type | Description |
-|----------|------|-------------|
-| `FilterType` | Enum.RaycastFilterType | Include or Exclude |
-| `FilterDescendantsInstances` | `{Instance}` | Instances to filter |
-| `MaxParts` | number | Maximum results; `0` means no limit |
-| `CollisionGroup` | string | Collision group used by the query |
-| `RespectCanCollide` | bool | Use `CanCollide` instead of query-only filtering |
 
 ```lua
 local params = OverlapParams.new()
@@ -1158,80 +591,12 @@ local parts = Workspace:GetPartBoundsInRadius(Vector3.new(0, 5, 0), 12, params)
 
 ## Enums
 
-### Enum.PartType
-```lua
-Enum.PartType.Ball
-Enum.PartType.Block
-Enum.PartType.Cylinder
-Enum.PartType.Ring
-Enum.PartType.Wedge
-```
-
-`Enum.PartShape` is also available as a legacy alias with the same values.
-
-### Enum.Material
-```lua
-Enum.Material.Air
-Enum.Material.Plastic
-Enum.Material.Wood
-Enum.Material.Metal
-Enum.Material.Glass
-Enum.Material.Neon
-Enum.Material.Concrete
-Enum.Material.Brick
-Enum.Material.Granite
-Enum.Material.Grass
-Enum.Material.Ice
-Enum.Material.Sand
-Enum.Material.Fabric
-Enum.Material.Marble
-Enum.Material.Slate
-Enum.Material.SmoothPlastic
-Enum.Material.ForceField
-Enum.Material.Water
-```
-
-### Enum.HumanoidStateType
-```lua
-Enum.HumanoidStateType.Running
-Enum.HumanoidStateType.Landed
-Enum.HumanoidStateType.Jumping
-Enum.HumanoidStateType.Freefall
-Enum.HumanoidStateType.Dead
-Enum.HumanoidStateType.Physics
-Enum.HumanoidStateType.None
-```
-
-### Enum.RaycastFilterType
-```lua
-Enum.RaycastFilterType.Include
-Enum.RaycastFilterType.Exclude
-Enum.RaycastFilterType.Whitelist  -- alias for Include
-Enum.RaycastFilterType.Blacklist  -- alias for Exclude
-```
-
-### GUI and physics enums
-```lua
-Enum.ActuatorRelativeTo.Attachment0
-Enum.ActuatorRelativeTo.Attachment1
-Enum.ActuatorRelativeTo.World
-
-Enum.FluidForces.Default
-Enum.FluidForces.Experimental
-
-Enum.TextXAlignment.Left
-Enum.TextXAlignment.Center
-Enum.TextXAlignment.Right
-
-Enum.TextYAlignment.Top
-Enum.TextYAlignment.Center
-Enum.TextYAlignment.Bottom
-
-Enum.Font.GothamBold
-Enum.Font.Gotham
-Enum.Font.SourceSans
-Enum.Font.SourceSansBold
-```
+The engine implements Roblox-like enum families including `Enum.PartType`
+(with the legacy `Enum.PartShape` alias), `Enum.Material`,
+`Enum.HumanoidStateType`, `Enum.RaycastFilterType`, `Enum.ActuatorRelativeTo`,
+`Enum.FluidForces`, `Enum.TextXAlignment`, `Enum.TextYAlignment`, `Enum.Font`,
+and `Enum.SurfaceType`. See the [engine API reference](/engine-api-reference)
+for the full list of enum values.
 
 ---
 

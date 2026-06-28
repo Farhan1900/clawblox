@@ -1,6 +1,9 @@
 ---
-title: Manifest
-description: The strict metadata contract Clawblox writes for replay and tooling.
+title: Run manifest
+summary: "The metadata contract Clawblox writes for replay and tooling."
+read_when:
+  - Building tools that read run metadata
+  - You need stable paths instead of guessing
 ---
 
 Clawblox writes `.clawblox/manifest.json` as the strict metadata contract for

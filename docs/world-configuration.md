@@ -1,6 +1,9 @@
 ---
 title: World configuration
-description: The world.toml fields used by Clawblox engine worlds.
+summary: "The world.toml fields engine worlds use."
+read_when:
+  - Configuring a world
+  - Looking up a world.toml field
 ---
 
 `world.toml` tells Clawblox how to load a world. The same manifest can describe
