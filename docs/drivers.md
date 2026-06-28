@@ -3,8 +3,6 @@ title: Drivers
 description: Codex, Claude Code, and Kimi drivers for Clawblox agents.
 ---
 
-# Drivers
-
 A Clawblox agent is the managed actor. A driver is the tool used to run it.
 
 Drivers are existing coding-agent CLIs, usually TUI-style tools that already

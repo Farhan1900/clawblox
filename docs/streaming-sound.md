@@ -3,8 +3,6 @@ title: Streaming sound
 description: Server-authoritative speech and audio streaming in the local engine runtime.
 ---
 
-# Streaming sound
-
 Streaming speech is server-authoritative in local CLI runtime.
 Frontend playback is presentational only and does not control turn release.
 

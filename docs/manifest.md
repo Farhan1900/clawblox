@@ -1,4 +1,7 @@
-# Manifest
+---
+title: Manifest
+description: The strict metadata contract Clawblox writes for replay and tooling.
+---
 
 Clawblox writes `.clawblox/manifest.json` as the strict metadata contract for
 replay and app tooling. Tools should read this file instead of probing backend

@@ -3,8 +3,6 @@ title: Agents overview
 description: Run and manage embodied agents in worlds.
 ---
 
-# Clawblox agents
-
 Clawblox agents run long-lived agents in interactive worlds.
 
 They run through existing coding-agent tools such as Codex, Claude Code, and

@@ -1,78 +1,103 @@
-TODO: outdated
+---
+title: World design
+description: Design guidance for Clawblox worlds played by humans and agents.
+---
 
-# Game Design Guidelines
+These are general guidelines for designing engaging Clawblox worlds, not strict
+rules. Every world is different, so use judgment and adapt these principles to
+fit the experience you are building.
 
-These are general guidelines for designing engaging games, not strict rules. Every game is different — use your judgment and adapt these principles to fit your vision.
+## Core loop
 
-## Core Loop
+Every interactive world needs a core loop: a repeatable cycle that gives
+players a clear reason to act, observe feedback, and continue.
 
-Every game needs a core loop: a repeatable cycle that forms the heartbeat of the experience.
+**Challenge -> Action -> Reward -> Repeat**
 
-**Challenge → Action → Reward → Repeat**
-
-- Players should understand what to do within 30 seconds of joining. If the objective isn't immediately clear, the game will lose players before it starts.
+- Players should understand what to do within 30 seconds of joining. If the
+  objective is not clear, they will stall before the world starts to work.
 - Define one clear objective and make progress toward it visible at all times.
-- Loops operate at multiple timescales:
-  - **Moment-to-moment**: individual actions and their immediate feedback
-  - **Session-level**: goals a player works toward in a single play session
-  - **Long-term**: overall progression across multiple sessions
-- Each cycle of the loop should deliver:
-  - **Clarity** — players understand what to do
-  - **Motivation** — there's a clear reason to keep going
-  - **Feedback** — actions produce meaningful responses
-  - **Satisfaction** — effort is rewarded
+- Loops operate at multiple timescales: immediate actions, session-level goals,
+  and longer-term progression.
+- Each cycle should deliver clarity, motivation, feedback, and satisfaction.
 
 ## Progression
 
-Progression gives players a sense of growth and a reason to keep playing.
+Progression gives players a sense of growth and a reason to return.
 
-- **Vertical progression**: power increases — stronger stats, higher levels, better gear.
-- **Horizontal progression**: options expand — new abilities, playstyles, areas to explore.
-- New content should build on existing loops, not replace them. Progression reinforces core gameplay rather than overshadowing it.
-- Escalating costs create natural pacing — each upgrade costs more than the last, stretching out the experience.
-- Nested loops: each larger loop introduces fresh challenges using familiar mechanics. Players master one layer, then a new layer opens up.
-- Persist meaningful progress so players have reason to return.
+- **Vertical progression**: power increases through stronger stats, higher
+  levels, or better gear.
+- **Horizontal progression**: options expand through new abilities, playstyles,
+  areas, or tools.
+- New content should build on existing loops rather than replace them.
+- Escalating costs create natural pacing.
+- Persist meaningful progress when the world depends on return visits.
 
-## World Design
+## 3D layout
 
-The world is the stage for gameplay. Its layout shapes how players move, explore, and interact.
+The world is the stage for play. Its layout shapes how players and agents move,
+explore, and interact.
 
-- **Scale**: players are roughly 5 studs tall. Design spaces around that reference — a doorway is ~7 studs, a room ~20 studs across.
-- **Boundaries**: always enclose the playable area. Players who wander off the edge have a bad experience.
-- **Visual communication**: use distinct colors, materials, and elevation to convey purpose. Players should be able to look at an area and intuit what it's for.
-- **Spawn placement**: start players in safe, fair positions away from immediate hazards.
-- **Verticality**: elevation differences create more interesting navigation and spatial dynamics.
-- **Guided layout**: the world should teach through its structure. Guide players naturally toward objectives using sightlines, pathways, and visual cues.
+- **Scale**: players are roughly 5 studs tall. Design spaces around that
+  reference: a doorway is about 7 studs tall and a compact room is about 20
+  studs across.
+- **Boundaries**: enclose the playable area unless falling or leaving is a
+  deliberate mechanic.
+- **Visual communication**: use distinct colors, materials, and elevation to
+  convey purpose.
+- **Spawn placement**: start players in safe, fair positions away from immediate
+  hazards.
+- **Verticality**: elevation differences create more interesting navigation and
+  spatial dynamics.
+- **Guided layout**: use sightlines, pathways, landmarks, and contrast to guide
+  players toward objectives.
 
-## Player Experience
+## Player experience
 
-Good games respect the player's time and attention.
+Good worlds respect the player's time and attention.
 
-- **Feedback**: every meaningful action should produce a visible or audible response. Players need to know what happened and why.
-- **Fairness**: protect new and respawning players. Include comeback mechanics. Avoid snowball effects where one player's lead becomes insurmountable.
-- **Onboarding**: start simple, then layer in complexity as players demonstrate mastery. Don't front-load all mechanics at once.
-- **Pacing**: alternate between high-intensity and low-intensity moments. Constant action fatigues; constant calm bores.
-- **Multiplayer scaling**: consider how the experience changes with different player counts. A game designed for 8 players should still be fun with 2.
-- **Flow**: aim for a difficulty curve that matches player skill. Too easy is boring, too hard is frustrating. The sweet spot is where challenge and ability are balanced.
+- **Feedback**: every meaningful action should produce a visible, audible, or
+  observable response.
+- **Fairness**: protect new and respawning players. Avoid snowball effects where
+  one player's lead becomes insurmountable.
+- **Onboarding**: start simple, then layer in complexity as players demonstrate
+  mastery.
+- **Pacing**: alternate between high-intensity and low-intensity moments.
+- **Multiplayer scaling**: consider how the experience changes with different
+  player counts.
+- **Flow**: aim for a difficulty curve that balances challenge and ability.
 
-## Designing for AI Agents
+## Designing for agents
 
-Games on Clawblox can be played by AI agents. Good agent-compatible design makes games better for everyone.
+Clawblox worlds can be played by AI agents. Agent-compatible design usually
+makes the world clearer for everyone.
 
-- **Small action space**: keep inputs discrete and minimal — a movement action plus a few game-specific actions. Agents struggle with large or continuous action spaces.
-- **Rich observations**: expose all relevant game state through player attributes. The more information an agent has, the better decisions it can make.
-- **Separate public vs hidden state**: if agents should not know a value, do not put it in public player/world attributes. Keep hidden authoritative state in server-only engine-managed objects such as `ServerStorage`.
-- **Descriptive naming**: agents read entity names to understand the world. Name things clearly and consistently.
-- **Spatial information**: provide positions, sizes, and boundaries so agents can reason about navigation and distance.
-- **Progress signals**: design clear indicators of success that agents can optimize toward — scores, resources, levels, or other measurable state.
-- **Dual-audience balance**: consider both human and agent players. Mechanics that are fun for humans but impossible for agents (or vice versa) limit your audience.
+- **Small action space**: keep inputs discrete and minimal.
+- **Rich observations**: expose relevant state through player attributes,
+  entity names, positions, sizes, and world attributes.
+- **Separate public and hidden state**: if agents should not know a value, do
+  not put it in public attributes. Keep hidden authoritative state in
+  server-only containers such as `ServerStorage`.
+- **Descriptive naming**: agents read entity names to understand the world.
+- **Progress signals**: expose measurable success indicators such as scores,
+  resources, levels, or objectives.
+- **Dual-audience balance**: consider both human and agent players.
 
-## Designing for Resume
+## Designing for resume
 
-If a world should support exact run resume, authoritative mutable state must live in engine-managed state.
+If a world should support exact resume, authoritative mutable state must live in
+engine-managed state.
 
-- **Use engine-owned state**: store important mutable state in instances, properties, attributes, player objects, or server-only containers such as `ServerStorage`.
-- **Treat Lua locals as caches**: locals are fine for derived state, helper lookups, and temporary computation, but not as the only copy of important gameplay state.
-- **Hide private state correctly**: if the state must survive resume but should not be visible to agents, store it in `ServerStorage`, not in public attributes.
-- **Keep constants in code/config**: fixed parameters such as effect durations belong in code or config, not in persistence containers.
-- **Avoid resume heuristics**: world logic should reconstruct exactly from the snapshotted engine state, not from best-effort inference after restart.
+- **Use engine-owned state**: store important mutable state in instances,
+  properties, attributes, player objects, or server-only containers such as
+  `ServerStorage`.
+- **Treat Lua locals as caches**: locals are fine for derived state, helper
+  lookups, and temporary computation, but not as the only copy of important
+  mutable state.
+- **Hide private state correctly**: if the state must survive resume but should
+  not be visible to agents, store it in `ServerStorage`, not in public
+  attributes.
+- **Keep constants in code/config**: fixed parameters such as effect durations
+  belong in code or config.
+- **Avoid resume heuristics**: world logic should reconstruct from snapshotted
+  engine state, not from inference after restart.

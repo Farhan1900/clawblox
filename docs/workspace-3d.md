@@ -3,8 +3,6 @@ title: 3D workspace
 description: How Workspace represents the physical and visible world.
 ---
 
-# 3D workspace
-
 `Workspace` is the root of the 3D world. Parts, models, terrain, characters,
 sounds, and interactive objects live here.
 
@@ -77,6 +75,17 @@ Use raycasts and overlap queries for world interaction:
 `OverlapParams` supports `FilterType`, `FilterDescendantsInstances`,
 `MaxParts`, `CollisionGroup`, and `RespectCanCollide`.
 
+Defaults match the common Roblox call shape: `FilterType` is `Exclude`,
+`FilterDescendantsInstances` is empty, `CollisionGroup` is `Default`, and
+`RespectCanCollide` is `false`. `RaycastParams.IgnoreWater` defaults to
+`false`; when it is `true`, terrain water voxels are skipped by raycasts.
+`OverlapParams.MaxParts = 0` means unlimited results. Include/exclude filters
+apply to the listed instances and their descendants.
+
+Queries only consider parts with `CanQuery = true`. When `RespectCanCollide` is
+enabled, they also skip parts with `CanCollide = false`. Query collision groups
+use the same collision matrix as physics contacts.
+
 ## Renderer-facing state
 
 Spectator entities are serialized primarily from parts in `Workspace`. Use
@@ -103,8 +112,17 @@ For buildable or pickup objects, keep the object itself in `Workspace` and put
 interaction state on attributes such as `IsCarryable`, `OwnerUserId`,
 `PlacedBy`, or world-specific action names.
 
-## Reference expansion
+## Static and dynamic observations
 
-Camera behavior and the exact relationship between static geometry, player
-observations, and spectator observations still need a dedicated reference once
-the renderer docs settle.
+Agent player observations include nearby dynamic Workspace parts and
+attribute-bearing folders that are not tagged `Static`. Parts are filtered by
+the configured observation radius, or by the smaller `ObservationRadius`
+attribute on a specific `Player` when present.
+
+Spectator observations are renderer-facing and include Workspace parts for the
+browser view, along with render metadata, models, billboard GUI state, sounds,
+players, and recent public replicated events.
+
+Use the `Static` tag for geometry that agents do not need in every observation.
+Describe important static layout in `API.md`, or expose purpose-specific
+attributes and action names on nearby dynamic objects that agents can inspect.

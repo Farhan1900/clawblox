@@ -3,8 +3,6 @@ title: Engine API reference
 description: Current supported and partially supported Roblox-like APIs in the Clawblox engine.
 ---
 
-# Engine API reference
-
 This page is the index for the Clawblox engine API surface. It should answer:
 "Does Clawblox support this Roblox class, property, method, event, datatype, or
 enum?"
@@ -18,32 +16,25 @@ Use these labels when expanding this reference:
 - **Compatibility no-op**: accepted so Roblox-like scripts can run, but not
   modeled by the engine
 - **Clawblox-specific**: intentionally not a Roblox API
-- **Reference expansion**: implemented surface that still needs generated
-  argument/default/status tables
+- **Indexed**: implemented surface listed here, with details documented on the
+  topic page or in a later table on this page
 
 ## Classes
 
-Implemented class names:
+`Instance.new(className, parent?)` supports:
 
-- `Instance`
-- `BasePart`
 - `Part`
 - `Model`
 - `Humanoid`
 - `Player`
 - `Folder`
-- `Workspace`
 - `Terrain`
-- `Players`
-- `RunService`
-- `Camera`
 - `Animation`
 - `Animator`
 - `Script`
 - `ModuleScript`
 - `ServerScriptService`
 - `ServerStorage`
-- `ReplicatedStorage`
 - `IntValue`
 - `NumberValue`
 - `BoolValue`
@@ -61,7 +52,6 @@ Implemented class names:
 - `AlignPosition`
 - `AlignOrientation`
 - `BillboardGui`
-- `PlayerGui`
 - `ScreenGui`
 - `Frame`
 - `TextLabel`
@@ -70,6 +60,36 @@ Implemented class names:
 - `ImageButton`
 - `UICorner`
 - `Sound`
+
+The engine also implements service or singleton classes that are not generally
+constructed with `Instance.new`:
+
+- `Instance`
+- `Workspace`
+- `Players`
+- `RunService`
+- `Camera`
+- `PlayerGui`
+- `BasePart`
+- `ReplicatedStorage`
+
+`BasePart` is an inheritance/base-class name for `Part`. Use `Instance.new("Part")`
+when creating physical parts. `PlayerGui` is created for `Player` instances by
+the Players service rather than directly constructed by world code.
+`ReplicatedStorage` is available through `game:GetService("ReplicatedStorage")`.
+
+`IsA` includes these compatibility base classes:
+
+- `Instance`
+- `BasePart`
+- `ValueBase`
+- `Constraint`
+- `BodyMover`
+- `GuiBase2d`
+- `LayerCollector`
+- `GuiObject`
+- `GuiButton`
+- `UIComponent`
 
 ## Services
 
@@ -105,10 +125,12 @@ callbacks are included in Lua VM snapshots.
 `GetAsync`, `SetAsync`, `RemoveAsync`, and `UpdateAsync`.
 `UpdateAsync` uses compare-and-set retry semantics for Roblox-style atomic
 updates. Returning `nil` from the transform callback cancels the update.
+Values are serialized through JSON and require a configured datastore backend.
 
 `DataStoreService:GetOrderedDataStore(name)` returns an ordered store with
 `SetAsync`, `GetSortedAsync`, and `GetAsync`. Ordered store values must include
-a `score` field.
+a `score` field; `GetSortedAsync(ascending, limit)` returns `{ key, value }`
+entries sorted by that score.
 
 `RunService` exposes:
 
@@ -125,6 +147,11 @@ after physics with `(deltaTime)`.
 
 `GetInputs(player)` returns an array of `{ type, data }` entries and clears the
 pending queue for that player.
+
+`InputReceived` fires with `(player, inputType, inputData)`. JSON input values
+are converted into Luau values: objects become tables with string keys, arrays
+become 1-indexed tables, numbers become Lua numbers/integers, booleans become
+booleans, strings become strings, and JSON null becomes `nil`.
 
 `Debris:AddItem(instance, lifetime?)` destroys an instance after an
 engine-time delay. The default lifetime is `10` seconds.
@@ -208,6 +235,11 @@ Important constructors and helpers:
 - `MaxParts`
 - `CollisionGroup`
 - `RespectCanCollide`
+
+Both parameter types default to `FilterType = Enum.RaycastFilterType.Exclude`,
+an empty filter list, `CollisionGroup = "Default"`, and
+`RespectCanCollide = false`. `RaycastParams.IgnoreWater` defaults to `false`.
+`OverlapParams.MaxParts = 0` means unlimited results.
 
 ## Instance fields and methods
 
@@ -322,9 +354,3 @@ Implemented enum families include:
 `BasePart:SetNetworkOwner` and `BasePart:SetNetworkOwnershipAuto` are accepted,
 but Clawblox currently runs server-authoritative simulation, so network
 ownership is not modeled.
-
-## Reference expansion
-
-This page is a manually curated index. The next step for exactness is generated
-tables from the Rust bindings covering every property, method, event, argument
-type, return type, default value, support status, and known Roblox difference.

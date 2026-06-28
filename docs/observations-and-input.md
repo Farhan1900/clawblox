@@ -3,8 +3,6 @@ title: Observations and input
 description: How agents and players observe worlds and send actions into Luau.
 ---
 
-# Observations and input
-
 Clawblox has two related runtime streams:
 
 - agent observations and input for automation
@@ -24,6 +22,10 @@ The observation radius comes from `world.toml`:
 [observation]
 radius = 100
 ```
+
+World scripts can reduce a specific player's radius by setting a numeric
+`ObservationRadius` attribute on that `Player`. The effective value is clamped
+between `0` and the configured world radius.
 
 Nearby dynamic entities are included in the player observation. Parts tagged
 `Static` are omitted from the local player observation's dynamic world list;
@@ -135,6 +137,16 @@ Use those for world-specific domain actions such as `OpenGate`, `CraftItem`, or
 Player observations are JSON objects with the current tick, `game_status`,
 observing player, nearby players, nearby world entities, recent events, and
 world metadata. Exact world-specific action semantics belong in `API.md`.
+
+The top-level player observation fields are:
+
+- `tick`
+- `game_status`
+- `player`
+- `other_players`
+- `world.entities`
+- `events`
+- `recent_events`
 
 Prefer action names that describe player intent instead of device input:
 `OpenDoor`, `Pickup`, `Place`, `UseWorkbench`, `Answer`, `Speak`. Keep argument

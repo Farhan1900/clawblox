@@ -3,8 +3,6 @@ title: Checkpoints
 description: Save and load a run as a single relocatable file of world and agent state.
 ---
 
-# Checkpoints
-
 A checkpoint is a single relocatable `.ckpt` file (a zip) that captures a run
 at a moment in time: world state plus agent state. Save and load follow the
 PyTorch idiom: construct first, then load state into it.

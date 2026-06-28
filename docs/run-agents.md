@@ -3,8 +3,6 @@ title: Run agents
 description: Start agents in worlds from the CLI or Python.
 ---
 
-# Run agents
-
 The quickest way to run an agent is to pass `--agent` when starting a world.
 
 ```bash

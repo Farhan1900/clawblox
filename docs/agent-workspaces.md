@@ -3,8 +3,6 @@ title: Workspaces and memory
 description: How Clawblox stores agent state.
 ---
 
-# Workspaces and memory
-
 A Clawblox agent has an agent directory. This directory keeps the files needed
 to inspect and continue the agent.
 

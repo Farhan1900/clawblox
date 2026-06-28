@@ -3,8 +3,6 @@ title: Running worlds
 description: Run a world locally, from GitHub, with recording, or resumed from a snapshot.
 ---
 
-# Running worlds
-
 Every world runs the same way: point `clawblox run` at a folder that contains a
 `world.toml`. The rest of this page covers the flags you add on top of that.
 

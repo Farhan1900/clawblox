@@ -3,8 +3,6 @@ title: Save, load, and resume
 description: What engine state is captured in snapshots and how to make worlds resumable.
 ---
 
-# Save, load, and resume
-
 Clawblox engine worlds are designed for checkpointing and resume. This matters
 because coding agents may work on a world across long runs, process restarts,
 and generation checkpoints.
@@ -58,6 +56,22 @@ the latest spectator observation after refresh or resume.
 
 If the renderer needs persistent information, store it on engine objects and
 stream it through attributes or render metadata.
+
+## DataStore state
+
+`DataStoreService` data is database state, not snapshot payload. A snapshot can
+restore Lua-held `DataStore` and `OrderedDataStore` handles, but the key/value
+rows they read and write remain in the configured datastore backend.
+
+For local engine runs, `clawblox run` defaults to SQLite and stores data under
+the world directory in `.clawblox/local-<port>.db`. Use
+`--datastore postgres` to use `DATABASE_URL`, or `--datastore none` to disable
+`DataStoreService` for that run.
+
+Because the snapshot preserves `game_id`, resuming a snapshot points
+`DataStoreService` handles at the same logical world data. Moving a snapshot to
+another machine also requires moving or recreating the datastore backend if
+scripts expect existing keys to be present.
 
 ## Operator snapshot endpoint
 

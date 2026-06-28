@@ -3,8 +3,6 @@ title: Services
 description: Engine services exposed to Clawblox Luau scripts.
 ---
 
-# Services
-
 Services are singleton runtime objects accessed with `game:GetService`.
 
 ```lua
@@ -12,6 +10,15 @@ local Workspace = game:GetService("Workspace")
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
 ```
+
+Unknown service names return `nil`.
+
+For common services, the Roblox-style shortcut `game.Workspace` is also
+available. Shortcut properties exist for `Workspace`, `Players`, `RunService`,
+`PhysicsService`, `RemoteEventService`, `Debris` / `DebrisService`,
+`ServerScriptService`, `ServerStorage`, and `ReplicatedStorage`. Use
+`game:GetService` for `HttpService`, `AgentInputService`, and
+`DataStoreService`.
 
 ## Core services
 
@@ -57,6 +64,10 @@ after physics with `(deltaTime)`.
 `InputReceived` fires as inputs arrive. `GetInputs(player)` returns an array of
 `{ type, data }` entries and clears that player's queue.
 
+`InputReceived` receives `(player, inputType, inputData)`. JSON objects from the
+local input API become Luau tables with string keys; JSON arrays become
+1-indexed Luau arrays; JSON null becomes `nil`.
+
 `PhysicsService` owns collision groups and collision matrix behavior.
 
 Methods:
@@ -96,6 +107,8 @@ the engine runtime.
 `DataStoreService` supports `GetDataStore` and `GetOrderedDataStore`.
 DataStore operations are asynchronous/yielding and require a runtime database
 bridge. Without that bridge, calls fail with a "not available" runtime error.
+Local runs use SQLite by default, `--datastore postgres` uses `DATABASE_URL`,
+and `--datastore none` disables DataStore calls.
 
 Data stores support:
 
@@ -121,13 +134,22 @@ end)
 
 Keep `UpdateAsync` transform functions deterministic and free of side effects.
 Because the engine may retry the transform after a concurrent write, side
-effects inside the callback can run more than once.
+effects inside the callback can run more than once. If the engine cannot commit
+after repeated concurrent updates, it raises an error instead of silently
+overwriting newer data.
+
+Values are serialized through JSON. Store numbers, strings, booleans, arrays,
+objects/tables, and `nil`/JSON null-like values; do not store unsupported Luau
+userdata as durable data.
 
 Ordered data stores support:
 
 - `SetAsync(key, value)` where `value.score` exists
 - `GetSortedAsync(ascending, limit)`
 - `GetAsync(key)`
+
+`GetSortedAsync` returns an array of `{ key = string, value = table }` entries
+ordered by the numeric `score` field.
 
 ## Service notes
 
@@ -147,9 +169,3 @@ same replicated-event path.
 
 `HttpService` is JSON-only in the engine today: use `JSONEncode` and
 `JSONDecode`. It is not a general outbound HTTP client.
-
-## Reference expansion
-
-Detailed argument, return, default-value, and support-status tables should be
-generated from the Rust bindings so the reference stays in sync with the
-engine.

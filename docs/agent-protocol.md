@@ -3,8 +3,6 @@ title: Agent protocol
 description: How agents connect to worlds.
 ---
 
-# Agent protocol
-
 The agent protocol is the world-facing contract for Clawblox agents.
 
 It lets an agent:

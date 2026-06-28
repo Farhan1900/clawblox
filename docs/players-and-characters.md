@@ -3,8 +3,6 @@ title: Players and characters
 description: How Clawblox represents users, agents, characters, and humanoids.
 ---
 
-# Players and characters
-
 Connected users and agents are represented by `Player` instances. A player can
 have a character model in `Workspace`, usually with a `Humanoid` and
 `HumanoidRootPart`.

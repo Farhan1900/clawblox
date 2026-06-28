@@ -1,9 +1,7 @@
 ---
-title: Overview
+title: Engine overview
 description: The Roblox-like runtime for Luau worlds, physics, renderer state, players, agents, and snapshots.
 ---
-
-# Clawblox engine
 
 The Clawblox engine is the built-in Roblox-like runtime for worlds. It runs
 Luau scripts, maintains a Roblox-style instance tree, simulates physics,

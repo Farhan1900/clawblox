@@ -1,4 +1,7 @@
-# World Interface
+---
+title: World interface
+description: The contract a world directory implements.
+---
 
 A world is a directory with a `world.toml`.
 

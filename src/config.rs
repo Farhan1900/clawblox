@@ -6,15 +6,15 @@ use std::path::{Path, PathBuf};
 /// Scripts configuration section
 #[derive(Debug, Clone, Deserialize)]
 pub struct ScriptsConfig {
-    /// Main Lua script file (relative to game directory)
+    /// Main Lua script file (relative to world directory)
     pub main: String,
-    /// Optional script tree directory (relative to game directory).
+    /// Optional script tree directory (relative to world directory).
     /// Expected layout uses service roots like:
     /// - scripts/ServerScriptService/**/*.lua
     /// - scripts/Workspace/**/*.lua
     #[serde(default)]
     pub tree: Option<String>,
-    /// Agent API documentation file (relative to game directory).
+    /// Agent API documentation file (relative to world directory).
     ///
     /// Historically this was `SKILL.md`; `API.md` is the preferred name for
     /// new worlds, and legacy `SKILL.md` files remain supported.
@@ -70,13 +70,13 @@ pub struct RendererConfig {
     /// Renderer host mode. Currently "module" or "default".
     #[serde(default = "default_renderer_mode")]
     pub mode: String,
-    /// Renderer API contract version expected by this game.
+    /// Renderer API contract version expected by this world.
     #[serde(default = "default_renderer_api_version")]
     pub api_version: u32,
-    /// Optional renderer module entrypoint relative to game_dir/renderer/.
+    /// Optional renderer module entrypoint relative to world_dir/renderer/.
     #[serde(default)]
     pub entry: Option<String>,
-    /// Optional renderer source entrypoint relative to game_dir/renderer/.
+    /// Optional renderer source entrypoint relative to world_dir/renderer/.
     /// If set, local CLI can bundle this into a runtime-friendly ESM module.
     #[serde(default)]
     pub source: Option<String>,
@@ -235,9 +235,9 @@ fn default_add_deps_lib_to_library_path() -> bool {
 /// World configuration from world.toml
 #[derive(Debug, Clone, Deserialize)]
 pub struct WorldConfig {
-    /// Display name of the game
+    /// Display name of the world.
     pub name: String,
-    /// Description of the game
+    /// Description of the world.
     #[serde(default)]
     pub description: Option<String>,
     /// Maximum number of players per instance
@@ -284,7 +284,7 @@ fn default_afk_timeout() -> u64 {
 }
 
 fn default_renderer_name() -> String {
-    "Game Renderer".to_string()
+    "World Renderer".to_string()
 }
 
 fn default_renderer_mode() -> String {
@@ -319,10 +319,10 @@ impl WorldConfig {
         Ok(cfg)
     }
 
-    /// Load world configuration from a game directory
+    /// Load world configuration from a world directory.
     /// Looks for world.toml in the given directory
-    pub fn from_game_dir(game_dir: &Path) -> Result<Self, WorldConfigError> {
-        let config_path = game_dir.join("world.toml");
+    pub fn from_game_dir(world_dir: &Path) -> Result<Self, WorldConfigError> {
+        let config_path = world_dir.join("world.toml");
         Self::from_file(&config_path)
     }
 

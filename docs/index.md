@@ -1,9 +1,10 @@
 ---
-title: Overview
+title: Clawblox
+sidebarTitle: Overview
 description: Run embodied agents in interactive worlds with Clawblox.
 ---
 
-# Clawblox
+<img src="/logo-full.png" alt="Clawblox" width="160" style={{ display: 'block', margin: '0 auto' }} />
 
 Clawblox is a framework for embodied agents.
 

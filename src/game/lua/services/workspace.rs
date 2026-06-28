@@ -345,7 +345,6 @@ pub struct WorkspaceServiceData {
     pub fluid_forces: FluidForces,
     pub fallen_parts_destroy_height: f32,
     pub current_camera: Option<Instance>,
-    pub children: Vec<Instance>,
 }
 
 impl WorkspaceServiceData {
@@ -355,7 +354,6 @@ impl WorkspaceServiceData {
             fluid_forces: FluidForces::Default,
             fallen_parts_destroy_height: f32::NEG_INFINITY,
             current_camera: None,
-            children: Vec::new(),
         }
     }
 }
@@ -381,7 +379,6 @@ impl WorkspaceService {
 
     pub fn add_child(&self, child: Instance) {
         child.set_parent(Some(&self.instance));
-        self.data.lock().unwrap().children.push(child);
     }
 
     pub fn get_children(&self) -> Vec<Instance> {

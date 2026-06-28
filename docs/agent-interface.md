@@ -1,4 +1,7 @@
-# Add An Agent
+---
+title: Agent interface
+description: How Clawblox starts and resumes an agent process.
+---
 
 An agent lets Clawblox start and resume an AI process, such as Claude or Codex.
 

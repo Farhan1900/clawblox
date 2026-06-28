@@ -3,8 +3,6 @@ title: Rendering and frontend
 description: How Clawblox browser rendering works and how it differs from Roblox UI.
 ---
 
-# Rendering and frontend
-
 Clawblox engine worlds render in the browser. The server owns gameplay state;
 the frontend receives spectator observations and renders them with the default
 viewer or a world-specific renderer package.
@@ -146,6 +144,7 @@ export function createRenderer(ctx) {
 
 `onState(state)` receives a spectator observation. The important fields are:
 
+- `instance_id`
 - `tick`
 - `server_time_ms`
 - `game_status`
@@ -160,6 +159,10 @@ size, shape, render metadata, attributes, optional `model_url`, optional
 
 Players include name, position, health, optional humanoid state, attributes,
 optional GUI state, and active animations.
+
+Sounds include `id`, `stream_id`, `volume`, and `is_playing`. Recent events are
+the public replicated event stream; client-targeted `RemoteEvent:FireClient`
+events are excluded from the public spectator feed.
 
 ## Render metadata
 

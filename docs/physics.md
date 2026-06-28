@@ -3,8 +3,6 @@ title: Physics
 description: How Clawblox simulates parts, terrain, collisions, forces, and actuators.
 ---
 
-# Physics
-
 Clawblox has Roblox-like 3D physics backed by the engine simulation. Luau code
 creates parts, terrain, welds, constraints, forces, and humanoid characters in
 `Workspace`; the engine synchronizes those objects into the physics step.
@@ -181,6 +179,4 @@ worlds rather than the Roblox client/server runtime.
   approximation
 - the physics class/property set is partial; prefer the documented fields and
   methods for portable Clawblox worlds
-
-Exact property tables for each physics class are still useful reference work,
-but the examples above reflect the current implemented behavior.
+- shape support is limited to `Ball`, `Block`, `Cylinder`, `Ring`, and `Wedge`

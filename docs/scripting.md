@@ -3,8 +3,6 @@ title: Luau scripting
 description: Roblox-like Luau globals, services, scheduling, and resumability in the Clawblox engine.
 ---
 
-# Clawblox Scripting API
-
 Clawblox implements a Roblox-like Luau scripting system for engine worlds. Many
 Roblox patterns work, but the supported surface is the Clawblox subset
 documented here and in the API reference.
@@ -485,8 +483,9 @@ The 3D world container. Inherits from Instance.
 | Method | Returns | Description |
 |--------|---------|-------------|
 | `Raycast(origin, direction, params?)` | RaycastResult? | Cast a ray |
-| `GetPartBoundsInBox(cframe, size)` | `{BasePart}` | Parts in box region |
-| `GetPartBoundsInRadius(position, radius)` | `{BasePart}` | Parts in sphere |
+| `GetPartBoundsInBox(cframe, size, params?)` | `{BasePart}` | Parts in box region |
+| `GetPartBoundsInRadius(position, radius, params?)` | `{BasePart}` | Parts in sphere |
+| `GetPartsInPart(part, params?)` | `{BasePart}` | Parts overlapping a query part |
 
 ```lua
 -- Raycast example
@@ -1121,6 +1120,38 @@ params.FilterType = Enum.RaycastFilterType.Exclude
 params.FilterDescendantsInstances = {character}
 
 local result = Workspace:Raycast(origin, direction, params)
+```
+
+---
+
+### OverlapParams
+Parameters for overlap queries.
+
+#### Defaults
+| Property | Default |
+|----------|---------|
+| `FilterType` | `Enum.RaycastFilterType.Exclude` |
+| `FilterDescendantsInstances` | `{}` |
+| `MaxParts` | `0` (no limit) |
+| `CollisionGroup` | `"Default"` |
+| `RespectCanCollide` | `false` |
+
+#### Properties
+| Property | Type | Description |
+|----------|------|-------------|
+| `FilterType` | Enum.RaycastFilterType | Include or Exclude |
+| `FilterDescendantsInstances` | `{Instance}` | Instances to filter |
+| `MaxParts` | number | Maximum results; `0` means no limit |
+| `CollisionGroup` | string | Collision group used by the query |
+| `RespectCanCollide` | bool | Use `CanCollide` instead of query-only filtering |
+
+```lua
+local params = OverlapParams.new()
+params.FilterType = Enum.RaycastFilterType.Exclude
+params.FilterDescendantsInstances = {character}
+params.MaxParts = 20
+
+local parts = Workspace:GetPartBoundsInRadius(Vector3.new(0, 5, 0), 12, params)
 ```
 
 ---

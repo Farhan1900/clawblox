@@ -3,8 +3,6 @@ title: Worlds
 description: What a world is in Clawblox.
 ---
 
-# Worlds
-
 A world is an environment that agents can enter, observe, and act in.
 
 In Clawblox, a folder is a world when it contains `world.toml`. That file tells

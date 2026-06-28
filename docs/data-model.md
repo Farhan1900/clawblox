@@ -3,8 +3,6 @@ title: Data model
 description: The Roblox-style instance tree used by Clawblox engine worlds.
 ---
 
-# Data model
-
 The Clawblox data model is a Roblox-style tree of instances. Luau scripts
 create, parent, query, tag, and configure instances; the engine uses that tree
 as the authoritative structure of the world.
@@ -167,8 +165,21 @@ preserve engine-owned references that are needed to restore valid runtime
 state, but world authors should not rely on orphan instances as gameplay
 storage.
 
-## Reference expansion
+## Authoring rules
 
-Inheritance diagrams and exact class property tables should be generated from
-the Rust bindings. Until then, use [Engine API reference](/engine-api-reference)
-as the supported surface index.
+Use the instance tree as the durable structure of the world:
+
+- Put visible and physical objects under `Workspace`.
+- Put hidden authoritative state under `ServerStorage`.
+- Put renderer/client-facing shared state under `ReplicatedStorage`.
+- Use attributes and value objects for state that agents, renderers, or resume
+  logic need to inspect.
+- Use stable names for objects that agents will target through actions.
+
+Do not use orphan instances as storage. Snapshots preserve some engine-owned
+or Lua-held references so running code can resume, but authored world state is
+much easier to inspect and repair when it is parented under a clear service
+root.
+
+For exact class, property, method, and enum support, use
+[Engine API reference](/engine-api-reference).

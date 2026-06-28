@@ -3,8 +3,6 @@ title: World configuration
 description: The world.toml fields used by Clawblox engine worlds.
 ---
 
-# World configuration
-
 `world.toml` tells Clawblox how to load a world. The same manifest can describe
 an engine world or an external-process world, but this page focuses on the
 built-in engine.
@@ -166,8 +164,20 @@ For engine worlds, treat `[run]` and `runtime.mode = "external"` as the
 boundary to the external-process runtime. The engine pages document the
 `runtime.mode = "clawblox"` path.
 
-## Reference expansion
+## Configuration precedence
 
-This page is the hand-written authoring guide. A generated field table from
-`src/config.rs` would be useful later for defaults, TOML paths, and validation
-rules in one place.
+`world.toml` is read once when `clawblox run` starts. Missing fields use engine
+defaults, and command-line flags can still affect local runtime behavior around
+the world:
+
+- `--port` changes the local HTTP port and the default SQLite datastore file
+  name.
+- `--datastore sqlite|postgres|none` selects the local `DataStoreService`
+  backend.
+- `--resume path/to/snapshot.json` restores engine state after the world config
+  and scripts have loaded.
+- `--agent`, `--agent-name`, and related agent flags start a coding agent after
+  the local world runtime is available.
+
+Keep world behavior in `world.toml` and Luau scripts. Treat CLI flags as
+operator controls for the current run.

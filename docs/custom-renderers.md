@@ -3,8 +3,6 @@ title: Custom renderers
 description: Low-level renderer package, runtime SDK, and spectator state reference.
 ---
 
-# Custom renderers
-
 `clawblox run` includes an embedded frontend and supports per-world custom renderers.
 
 ## File layout

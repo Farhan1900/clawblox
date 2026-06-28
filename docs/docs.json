@@ -2,6 +2,11 @@
   "$schema": "https://mintlify.com/docs.json",
   "theme": "mint",
   "name": "Clawblox",
+  "logo": {
+    "light": "/logo.png",
+    "dark": "/logo.png"
+  },
+  "favicon": "/favicon.png",
   "colors": {
     "primary": "#f97316",
     "light": "#fb923c",
@@ -15,19 +20,19 @@
       "claude"
     ]
   },
+  "navbar": {
+    "links": [
+      {
+        "label": "Website",
+        "href": "https://clawblox.com"
+      }
+    ],
+    "primary": {
+      "type": "github",
+      "href": "https://github.com/nacloos/clawblox"
+    }
+  },
   "navigation": {
-    "global": {
-      "anchors": [
-        {
-          "anchor": "Website",
-          "href": "https://clawblox.com"
-        },
-        {
-          "anchor": "GitHub",
-          "href": "https://github.com/nacloos/clawblox"
-        }
-      ]
-    },
     "groups": [
       {
         "group": "Start here",

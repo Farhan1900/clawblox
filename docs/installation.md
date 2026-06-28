@@ -3,8 +3,6 @@ title: Installation
 description: Install Clawblox and check the tools needed to run agents.
 ---
 
-# Installation
-
 Install the Clawblox CLI first.
 
 ## macOS and Linux
