@@ -97,6 +97,10 @@ Methods:
 - `FireAllClients(name, payload)`
 - `FireAllClientsUnreliable(name, payload)`
 
+Empty event names are ignored. Unreliable events are capped in the engine queue;
+when the queue is under pressure, older unreliable events may be dropped while
+reliable events are preserved.
+
 ## Data and utility services
 
 `HttpService` supports `JSONEncode` and `JSONDecode`.
@@ -165,7 +169,11 @@ replicated event stream consumed by observations and renderers.
 
 `RemoteEvent:FireAllClients(...)` and `RemoteEvent:FireClient(...)` are also
 accepted on `RemoteEvent` instances and serialize their Lua arguments into the
-same replicated-event path.
+same replicated-event path. Instance events use the `RemoteEvent` instance name
+as the event name. With no arguments the payload is `null`; with one argument
+the payload is that value; with multiple arguments the payload is an array.
+`FireClient(player, ...)` targets one player and is excluded from public
+spectator observations.
 
 `HttpService` is JSON-only in the engine today: use `JSONEncode` and
 `JSONDecode`. It is not a general outbound HTTP client.

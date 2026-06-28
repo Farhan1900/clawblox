@@ -138,7 +138,9 @@ renderers.
 - `FireClient`
 
 `FireAllClients` and `FireClient` serialize Lua arguments into JSON-like
-payloads for replicated event streams.
+payloads for replicated event streams. Instance events use the `RemoteEvent`
+instance name as the event name. `FireClient(player, ...)` targets one player;
+public spectator observations include only non-targeted events.
 
 ## Parenting and replication rules
 

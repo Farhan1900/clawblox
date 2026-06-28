@@ -28,6 +28,11 @@ local Players = game:GetService("Players")
 `Players:AddBot(name)` queues a server-side bot player for creation on the next
 tick.
 
+`Players.MaxPlayers` is read-only from Luau and comes from `world.toml`.
+`Players.CharacterAutoLoads` is writable. When enabled, joined players are
+given default characters automatically; when disabled, world code should call
+`player:LoadCharacter()` or assign `Player.Character` manually.
+
 ## Player instances
 
 Player fields include:
@@ -40,6 +45,8 @@ Player fields include:
 - `PlayerGui`
 
 `Player.Character` is writable and fires character transition events.
+`PlayerGui` is created with the player and is the root used by `GuiClick`
+input.
 
 Player methods include:
 
@@ -102,6 +109,15 @@ Humanoid methods include:
 
 Humanoid movement and character controller state are included in snapshots.
 
+`Health` is clamped to `0..MaxHealth`. Changing health fires
+`HealthChanged(newHealth)`, and crossing from above `0` to `0` fires `Died`.
+`TakeDamage(amount)` subtracts health and uses the same events.
+
+`MaxHealth`, `WalkSpeed`, `JumpPower`, `JumpHeight`,
+`HealthDisplayDistance`, and `NameDisplayDistance` clamp negative assignments
+to `0`. Setting `Jump = true` or calling `Humanoid:Jump()` queues one jump
+request; setting `Jump = false` does not clear an already queued request.
+
 ## Movement behavior
 
 `Humanoid:Move(direction, relativeToCamera)` stores the current movement input
@@ -116,7 +132,13 @@ clears that target and causes `MoveToFinished(false)`.
 - `true` when the character reaches the target
 - `false` when the move is canceled or times out while blocked
 
+The current timeout is 8 seconds. Reaching is measured on the horizontal plane
+with a small tolerance. The optional `part` argument is accepted for
+Roblox-like call sites, but Clawblox stores a world-space target position.
+
 `Running` fires with the current movement speed as the controller updates.
+`StateChanged(oldState, newState)` is driven by the character controller and
+uses the supported states listed in [Engine API reference](/engine-api-reference).
 
 ## Character differences from Roblox
 

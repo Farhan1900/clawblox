@@ -82,7 +82,10 @@ translate raw input into clear domain actions.
 
 Input type `GuiClick` with `data.element_id` is handled specially. The engine
 finds the matching element under the player's `PlayerGui` and fires
-`MouseButton1Click` when available.
+`MouseButton1Click` when available. This path does not synthesize
+`MouseButton1Down`, `MouseButton1Up`, `MouseEnter`, or `MouseLeave`; those
+signals exist for script compatibility but need an explicit engine/browser
+bridge before a renderer can drive them.
 
 ## Local HTTP flow
 

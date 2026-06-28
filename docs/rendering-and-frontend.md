@@ -196,7 +196,14 @@ production UI, use the Three.js/browser renderer and send interaction back
 through the input bridge.
 
 `AgentInputService` has special handling for `GuiClick` with `element_id`, which
-fires `MouseButton1Click` on the matching GUI element.
+fires `MouseButton1Click` on the matching GUI element. It does not synthesize
+the other GUI mouse signals. Use the serialized GUI element `id` as the
+`element_id` value when bridging browser UI back into Luau.
+
+`BillboardGui` is the main GUI class meant to influence 3D rendering. It is
+serialized as part metadata for floating labels and markers attached to world
+objects. Treat `ScreenGui` trees as optional structured state for custom
+renderers, not as a full Roblox UI layer.
 
 ## More detail
 

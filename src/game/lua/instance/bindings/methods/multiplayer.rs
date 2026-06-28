@@ -94,16 +94,7 @@ pub(super) fn add_methods<M: UserDataMethods<Instance>>(methods: &mut M) {
             if let Ok(ud) = game_ud {
                 if let Ok(game) = ud.borrow::<Game>() {
                     game.queue_kick(user_id, message.clone());
-                    if let Some(msg) = &message {
-                        eprintln!("[Player] Kick requested for user_id={}: {}", user_id, msg);
-                    } else {
-                        eprintln!("[Player] Kick requested for user_id={}", user_id);
-                    }
-                } else {
-                    eprintln!("[Player] Kick failed: could not borrow Game from UserData");
                 }
-            } else {
-                eprintln!("[Player] Kick failed: game reference not found in Lua globals");
             }
         }
         Ok(())

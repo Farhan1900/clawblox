@@ -162,7 +162,8 @@ engine-time delay. The default lifetime is `10` seconds.
 - `FireAllClientsUnreliable(name, payload)`
 
 Empty event names are ignored. Payloads are converted from Lua values to
-JSON-like values.
+JSON-like values. `FireAllClientsUnreliable` is bounded; older unreliable
+events may be dropped when the queue is full, while reliable events are kept.
 
 `HttpService` exposes `JSONEncode(value)` and `JSONDecode(jsonString)`.
 Invalid JSON decodes to `nil`; the engine does not expose outbound HTTP
@@ -290,9 +291,13 @@ hit position, or `nil` when nothing is hit.
   `AutoRotate`, `HealthDisplayDistance`, `NameDisplayDistance`, `HipHeight`,
   `MoveDirection`, `Died`, `HealthChanged`, `Running`, `MoveToFinished`,
   `StateChanged`
+- methods: `TakeDamage`, `Move`, `MoveTo`, `CancelMoveTo`, `Jump`,
+  `GetState`, `ChangeState`
 
 `Player` exposes `UserId`, `DisplayName`, `Character`, `CharacterAdded`,
 `CharacterRemoving`, and `PlayerGui`.
+
+`Player` methods: `LoadCharacter`, `Kick`.
 
 GUI objects expose Roblox-like layout and visual fields:
 
@@ -325,8 +330,14 @@ Media classes expose:
 
 - `Animation.AnimationId`
 - `Animator:LoadAnimation`, `Animator:GetPlayingAnimationTracks`
+- `Humanoid:LoadAnimation`, which creates or reuses a child `Animator`
 - `Sound.StreamId`, `Volume`, `PlaybackSpeed`, `IsPlaying`, `Ended`,
   `Stopped`, `Play`, `Stop`, `MarkEnded`
+
+`Sound:Play()` requires a non-empty `StreamId`. `Sound:Stop()` is idempotent and
+fires `Stopped` only when transitioning from playing to stopped. `MarkEnded()`
+is Clawblox-specific and lets the renderer/runtime mark playback complete; it
+fires `Ended` and `Stopped` when the sound was playing.
 
 ## Enums
 
