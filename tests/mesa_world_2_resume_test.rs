@@ -1,0 +1,159 @@
+use std::fs;
+use std::path::PathBuf;
+
+use clawblox::game::instance::GameInstance;
+use clawblox::snapshot::{capture_game_instance, restore_game_instance};
+use uuid::Uuid;
+
+fn mesa_world_2_script_path() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("worlds")
+        .join("mesa-world-2")
+        .join("main.lua")
+}
+
+fn workspace_inventory(instance: &GameInstance) -> (i64, i64, i64, i64, i64, i64) {
+    let runtime = instance.lua_runtime.as_ref().expect("runtime missing");
+    runtime
+        .lua()
+        .load(
+            r#"
+            local rockCount = 0
+            local orbCount = 0
+            local blockCount = 0
+            local ballCount = 0
+            local plankCount = 0
+            local ringCount = 0
+
+            for _, child in ipairs(Workspace:GetChildren()) do
+                if string.match(child.Name, "^Rock_%d+$") then
+                    rockCount = rockCount + 1
+                end
+                if string.match(child.Name, "^Orb_%d+$") then
+                    orbCount = orbCount + 1
+                end
+                if string.match(child.Name, "^Block_%d+$") then
+                    blockCount = blockCount + 1
+                end
+                if string.match(child.Name, "^Ball_%d+$") then
+                    ballCount = ballCount + 1
+                end
+                if string.match(child.Name, "^Plank_%d+$") then
+                    plankCount = plankCount + 1
+                end
+                if string.match(child.Name, "^Ring_%d+$") then
+                    ringCount = ringCount + 1
+                end
+            end
+
+            return rockCount, orbCount, blockCount, ballCount, plankCount, ringCount
+        "#,
+        )
+        .eval()
+        .expect("failed to read workspace inventory")
+}
+
+#[test]
+fn mesa_world_2_resume_preserves_existing_player_position() {
+    let mut instance = GameInstance::new(Uuid::new_v4(), None);
+    let source =
+        fs::read_to_string(mesa_world_2_script_path()).expect("failed to read mesa-world-2");
+    instance.load_script(&source);
+
+    let agent_id = Uuid::new_v4();
+    assert!(instance.add_player(agent_id, "ResumeProbe"));
+    let hrp_id = *instance
+        .player_hrp_ids
+        .get(&agent_id)
+        .expect("missing humanoid root part");
+
+    for _ in 0..10 {
+        instance.tick();
+    }
+
+    // Place the player on top of a mesa so the resumed position is stable even after the
+    // world script reapplies its default gravity on startup.
+    let expected = [34.0_f32, 9.0_f32, 30.0_f32];
+    instance.physics.set_character_position(hrp_id, expected);
+
+    for _ in 0..30 {
+        instance.tick();
+    }
+
+    let before_inventory = workspace_inventory(&instance);
+    assert!(
+        before_inventory.0 > 0 && before_inventory.1 > 0,
+        "expected mesa-world-2 to have rocks and orbs before snapshot: {before_inventory:?}"
+    );
+
+    let before_restore: (String, f64, f64, f64) = {
+        let runtime = instance.lua_runtime.as_ref().expect("runtime missing");
+        runtime
+            .lua()
+            .load(
+                r#"
+                local player = game:GetService("Players"):GetPlayers()[1]
+                local hrp = player.Character and player.Character:FindFirstChild("HumanoidRootPart")
+                assert(player ~= nil, "player missing before snapshot")
+                assert(hrp ~= nil, "humanoid root part missing before snapshot")
+                return player.Name, hrp.Position.X, hrp.Position.Y, hrp.Position.Z
+            "#,
+            )
+            .eval()
+            .expect("failed to read player position before snapshot")
+    };
+
+    let snapshot = capture_game_instance(&instance).expect("failed to capture snapshot");
+
+    let mut restored = GameInstance::new(Uuid::new_v4(), None);
+    restored.init_runtime();
+    restore_game_instance(&mut restored, &snapshot).expect("failed to restore snapshot");
+    restored.load_script(&source);
+
+    for _ in 0..10 {
+        restored.tick();
+    }
+
+    let after_inventory = workspace_inventory(&restored);
+    assert_eq!(
+        after_inventory, before_inventory,
+        "workspace inventory changed across restore: before={before_inventory:?} after={after_inventory:?}"
+    );
+
+    let after_restore: (String, f64, f64, f64) = {
+        let runtime = restored.lua_runtime.as_ref().expect("runtime missing");
+        runtime
+            .lua()
+            .load(
+                r#"
+                local player = game:GetService("Players"):GetPlayers()[1]
+                local hrp = player.Character and player.Character:FindFirstChild("HumanoidRootPart")
+                assert(player ~= nil, "player missing after restore")
+                assert(hrp ~= nil, "humanoid root part missing after restore")
+                return player.Name, hrp.Position.X, hrp.Position.Y, hrp.Position.Z
+            "#,
+            )
+            .eval()
+            .expect("failed to read player position after restore")
+    };
+
+    assert_eq!(before_restore.0, "ResumeProbe");
+    assert_eq!(after_restore.0, "ResumeProbe");
+
+    let before_pos = [before_restore.1, before_restore.2, before_restore.3];
+    let after_pos = [after_restore.1, after_restore.2, after_restore.3];
+    for axis in 0..3 {
+        assert!(
+            (before_pos[axis] - after_pos[axis]).abs() < 1e-2,
+            "player position changed across restore on axis {axis}: before={:?} after={:?}",
+            before_pos,
+            after_pos
+        );
+    }
+
+    assert!(
+        (after_restore.1 - 0.0).abs() > 1.0 || (after_restore.2 - 5.0).abs() > 1.0,
+        "resume should not snap the player back to spawn; restored position={:?}",
+        after_pos
+    );
+}

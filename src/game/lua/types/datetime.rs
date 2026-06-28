@@ -55,7 +55,8 @@ impl DateTime {
     }
 
     pub fn format_local_time(&self, format: &str, _locale: &str) -> String {
-        if let Some(dt_utc) = ChronoDateTime::<Utc>::from_timestamp_millis(self.unix_timestamp_millis)
+        if let Some(dt_utc) =
+            ChronoDateTime::<Utc>::from_timestamp_millis(self.unix_timestamp_millis)
         {
             dt_utc.with_timezone(&Local).format(format).to_string()
         } else {
@@ -64,7 +65,8 @@ impl DateTime {
     }
 
     pub fn format_universal_time(&self, format: &str, _locale: &str) -> String {
-        if let Some(dt_utc) = ChronoDateTime::<Utc>::from_timestamp_millis(self.unix_timestamp_millis)
+        if let Some(dt_utc) =
+            ChronoDateTime::<Utc>::from_timestamp_millis(self.unix_timestamp_millis)
         {
             dt_utc.format(format).to_string()
         } else {
@@ -89,13 +91,18 @@ impl FromLua for DateTime {
 impl UserData for DateTime {
     fn add_fields<F: UserDataFields<Self>>(fields: &mut F) {
         fields.add_field_method_get("UnixTimestamp", |_, this| Ok(this.unix_timestamp()));
-        fields.add_field_method_get("UnixTimestampMillis", |_, this| Ok(this.unix_timestamp_millis()));
+        fields.add_field_method_get("UnixTimestampMillis", |_, this| {
+            Ok(this.unix_timestamp_millis())
+        });
     }
 
     fn add_methods<M: UserDataMethods<Self>>(methods: &mut M) {
         methods.add_method("ToIsoDate", |_, this, ()| Ok(this.to_iso_date()));
         methods.add_method("ToLocalTime", |_, this, ()| Ok(this.to_local_time()));
-        methods.add_method("ToUniversalTime", |_, this, ()| Ok(this.to_universal_time()));
+        methods.add_method(
+            "ToUniversalTime",
+            |_, this, ()| Ok(this.to_universal_time()),
+        );
         methods.add_method(
             "FormatLocalTime",
             |_, this, (format, locale): (String, Option<String>)| {
@@ -105,10 +112,7 @@ impl UserData for DateTime {
         methods.add_method(
             "FormatUniversalTime",
             |_, this, (format, locale): (String, Option<String>)| {
-                Ok(this.format_universal_time(
-                    &format,
-                    locale.as_deref().unwrap_or("en-us"),
-                ))
+                Ok(this.format_universal_time(&format, locale.as_deref().unwrap_or("en-us")))
             },
         );
 

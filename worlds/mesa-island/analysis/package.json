@@ -1,0 +1,8 @@
+{
+  "name": "mesa-world-analysis-node",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@mariozechner/pi-ai": "^0.5.32"
+  }
+}

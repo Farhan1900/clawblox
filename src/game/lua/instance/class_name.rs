@@ -8,6 +8,7 @@ pub enum ClassName {
     Player,
     Folder,
     Workspace,
+    Terrain,
     Players,
     RunService,
     Camera,
@@ -16,19 +17,24 @@ pub enum ClassName {
     Script,
     ModuleScript,
     ServerScriptService,
+    ServerStorage,
     ReplicatedStorage,
     IntValue,
     NumberValue,
     BoolValue,
     StringValue,
     ObjectValue,
+    CFrameValue,
     // Constraints
     Weld,
+    WeldConstraint,
     RemoteEvent,
     BodyVelocity,
     BodyForce,
     BodyAngularVelocity,
     Attachment,
+    VectorForce,
+    AlignPosition,
     AlignOrientation,
     // GUI classes
     BillboardGui,
@@ -54,6 +60,7 @@ impl ClassName {
             ClassName::Player => "Player",
             ClassName::Folder => "Folder",
             ClassName::Workspace => "Workspace",
+            ClassName::Terrain => "Terrain",
             ClassName::Players => "Players",
             ClassName::RunService => "RunService",
             ClassName::Camera => "Camera",
@@ -62,18 +69,23 @@ impl ClassName {
             ClassName::Script => "Script",
             ClassName::ModuleScript => "ModuleScript",
             ClassName::ServerScriptService => "ServerScriptService",
+            ClassName::ServerStorage => "ServerStorage",
             ClassName::ReplicatedStorage => "ReplicatedStorage",
             ClassName::IntValue => "IntValue",
             ClassName::NumberValue => "NumberValue",
             ClassName::BoolValue => "BoolValue",
             ClassName::StringValue => "StringValue",
             ClassName::ObjectValue => "ObjectValue",
+            ClassName::CFrameValue => "CFrameValue",
             ClassName::Weld => "Weld",
+            ClassName::WeldConstraint => "WeldConstraint",
             ClassName::RemoteEvent => "RemoteEvent",
             ClassName::BodyVelocity => "BodyVelocity",
             ClassName::BodyForce => "BodyForce",
             ClassName::BodyAngularVelocity => "BodyAngularVelocity",
             ClassName::Attachment => "Attachment",
+            ClassName::VectorForce => "VectorForce",
+            ClassName::AlignPosition => "AlignPosition",
             ClassName::AlignOrientation => "AlignOrientation",
             ClassName::BillboardGui => "BillboardGui",
             ClassName::PlayerGui => "PlayerGui",
@@ -98,6 +110,7 @@ impl ClassName {
             "Player" => matches!(self, ClassName::Player),
             "Folder" => matches!(self, ClassName::Folder),
             "Workspace" => matches!(self, ClassName::Workspace),
+            "Terrain" => matches!(self, ClassName::Terrain),
             "Players" => matches!(self, ClassName::Players),
             "RunService" => matches!(self, ClassName::RunService),
             "Camera" => matches!(self, ClassName::Camera),
@@ -106,12 +119,14 @@ impl ClassName {
             "Script" => matches!(self, ClassName::Script),
             "ModuleScript" => matches!(self, ClassName::ModuleScript),
             "ServerScriptService" => matches!(self, ClassName::ServerScriptService),
+            "ServerStorage" => matches!(self, ClassName::ServerStorage),
             "ReplicatedStorage" => matches!(self, ClassName::ReplicatedStorage),
             "IntValue" => matches!(self, ClassName::IntValue),
             "NumberValue" => matches!(self, ClassName::NumberValue),
             "BoolValue" => matches!(self, ClassName::BoolValue),
             "StringValue" => matches!(self, ClassName::StringValue),
             "ObjectValue" => matches!(self, ClassName::ObjectValue),
+            "CFrameValue" => matches!(self, ClassName::CFrameValue),
             "ValueBase" => matches!(
                 self,
                 ClassName::IntValue
@@ -119,15 +134,26 @@ impl ClassName {
                     | ClassName::BoolValue
                     | ClassName::StringValue
                     | ClassName::ObjectValue
+                    | ClassName::CFrameValue
             ),
             // Constraints
-            "Constraint" => matches!(self, ClassName::Weld),
+            "Constraint" => matches!(
+                self,
+                ClassName::Weld
+                    | ClassName::WeldConstraint
+                    | ClassName::VectorForce
+                    | ClassName::AlignPosition
+                    | ClassName::AlignOrientation
+            ),
             "Weld" => matches!(self, ClassName::Weld),
+            "WeldConstraint" => matches!(self, ClassName::WeldConstraint),
             "RemoteEvent" => matches!(self, ClassName::RemoteEvent),
             "BodyVelocity" => matches!(self, ClassName::BodyVelocity),
             "BodyForce" => matches!(self, ClassName::BodyForce),
             "BodyAngularVelocity" => matches!(self, ClassName::BodyAngularVelocity),
             "Attachment" => matches!(self, ClassName::Attachment),
+            "VectorForce" => matches!(self, ClassName::VectorForce),
+            "AlignPosition" => matches!(self, ClassName::AlignPosition),
             "AlignOrientation" => matches!(self, ClassName::AlignOrientation),
             "BodyMover" => matches!(
                 self,

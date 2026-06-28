@@ -1,7 +1,7 @@
 //! World configuration parsing from world.toml files
 
 use serde::Deserialize;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// Scripts configuration section
 #[derive(Debug, Clone, Deserialize)]
@@ -14,7 +14,10 @@ pub struct ScriptsConfig {
     /// - scripts/Workspace/**/*.lua
     #[serde(default)]
     pub tree: Option<String>,
-    /// Skill definition file (relative to game directory)
+    /// Agent API documentation file (relative to game directory).
+    ///
+    /// Historically this was `SKILL.md`; `API.md` is the preferred name for
+    /// new worlds, and legacy `SKILL.md` files remain supported.
     #[serde(default)]
     pub skill: Option<String>,
 }
@@ -24,9 +27,38 @@ impl Default for ScriptsConfig {
         Self {
             main: "main.lua".to_string(),
             tree: None,
-            skill: Some("SKILL.md".to_string()),
+            skill: Some("API.md".to_string()),
         }
     }
+}
+
+/// Runtime mode for local execution.
+///
+/// - `clawblox` (default): run the built-in Lua simulation.
+/// - `external`: serve frontend/renderer only (no Lua runtime).
+#[derive(Debug, Clone, Deserialize)]
+pub struct RuntimeConfig {
+    #[serde(default = "default_runtime_mode")]
+    pub mode: String,
+}
+
+impl Default for RuntimeConfig {
+    fn default() -> Self {
+        Self {
+            mode: default_runtime_mode(),
+        }
+    }
+}
+
+/// Optional external run command configuration.
+///
+/// When configured, `clawblox run` can delegate process startup to this command.
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct RunConfig {
+    /// Command to execute, argv-style.
+    /// Example: ["node", "play.js"]
+    #[serde(default)]
+    pub command: Option<Vec<String>>,
 }
 
 /// Renderer configuration section.
@@ -69,7 +101,8 @@ impl Default for RendererConfig {
 /// Observation configuration section.
 #[derive(Debug, Clone, Deserialize)]
 pub struct ObservationConfig {
-    /// Maximum distance at which other players are included in observations.
+    /// Maximum distance at which other players and spatial dynamic entities are
+    /// included in observations.
     #[serde(default = "default_observation_radius")]
     pub radius: f32,
 }
@@ -80,6 +113,123 @@ impl Default for ObservationConfig {
             radius: default_observation_radius(),
         }
     }
+}
+
+/// Agent API configuration section.
+#[derive(Debug, Clone, Deserialize)]
+pub struct AgentApiConfig {
+    /// Whether engine reset endpoints are available to agent sessions.
+    #[serde(default)]
+    pub allow_reset: bool,
+}
+
+impl Default for AgentApiConfig {
+    fn default() -> Self {
+        Self { allow_reset: false }
+    }
+}
+
+/// Built-in Clawblox runtime configuration.
+#[derive(Debug, Clone, Deserialize)]
+pub struct ClawbloxConfig {
+    /// Whether player character controllers physically couple to dynamic world objects.
+    #[serde(default = "default_player_object_physics")]
+    pub player_object_physics: bool,
+    /// Rapier physics tuning for the built-in runtime.
+    #[serde(default)]
+    pub physics: PhysicsConfig,
+}
+
+impl Default for ClawbloxConfig {
+    fn default() -> Self {
+        Self {
+            player_object_physics: default_player_object_physics(),
+            physics: PhysicsConfig::default(),
+        }
+    }
+}
+
+fn default_player_object_physics() -> bool {
+    true
+}
+
+/// Built-in physics solver configuration.
+#[derive(Debug, Clone, Deserialize)]
+pub struct PhysicsConfig {
+    /// Number of outer contact-solver iterations per physics step.
+    ///
+    /// Rapier's default is 4. Lower values reduce large awake-island cost but
+    /// make stacked/penetrating contacts softer; higher values favor stability
+    /// at the cost of CPU.
+    #[serde(default = "default_physics_solver_iterations")]
+    pub solver_iterations: usize,
+}
+
+impl Default for PhysicsConfig {
+    fn default() -> Self {
+        Self {
+            solver_iterations: default_physics_solver_iterations(),
+        }
+    }
+}
+
+fn default_physics_solver_iterations() -> usize {
+    4
+}
+
+/// Speech delivery mode.
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum SpeechMode {
+    Global,
+    Proximity,
+}
+
+impl Default for SpeechMode {
+    fn default() -> Self {
+        Self::Global
+    }
+}
+
+/// Speech configuration section.
+#[derive(Debug, Clone, Deserialize)]
+pub struct SpeechConfig {
+    /// How spoken messages are delivered.
+    #[serde(default)]
+    pub mode: SpeechMode,
+    /// Maximum hearing distance for proximity speech.
+    #[serde(default = "default_speech_hearing_radius")]
+    pub hearing_radius: f32,
+}
+
+impl Default for SpeechConfig {
+    fn default() -> Self {
+        Self {
+            mode: SpeechMode::default(),
+            hearing_radius: default_speech_hearing_radius(),
+        }
+    }
+}
+
+/// Agent sandbox configuration.
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct SandboxConfig {
+    /// Enable the Docker-compatible nested sandbox mode.
+    ///
+    /// This is weaker than the standard bubblewrap sandbox and should only be
+    /// enabled when the outer container is part of the isolation boundary.
+    #[serde(default)]
+    pub enable_weaker_nested_sandbox: bool,
+    /// Optional host dependency prefix to mount read-only at /sandbox-deps.
+    #[serde(default)]
+    pub deps_root: Option<PathBuf>,
+    /// Add /sandbox-deps/lib to LD_LIBRARY_PATH when deps_root is set.
+    #[serde(default = "default_add_deps_lib_to_library_path")]
+    pub add_deps_lib_to_library_path: bool,
+}
+
+fn default_add_deps_lib_to_library_path() -> bool {
+    true
 }
 
 /// World configuration from world.toml
@@ -93,26 +243,44 @@ pub struct WorldConfig {
     /// Maximum number of players per instance
     #[serde(default = "default_max_players")]
     pub max_players: u32,
-    /// Game type (e.g., "lua")
-    #[serde(default = "default_game_type")]
-    pub game_type: String,
     /// Scripts configuration
     #[serde(default)]
     pub scripts: ScriptsConfig,
+    /// Runtime mode selection
+    #[serde(default)]
+    pub runtime: RuntimeConfig,
     /// Frontend renderer configuration
     #[serde(default)]
     pub renderer: RendererConfig,
     /// Observation configuration
     #[serde(default)]
     pub observation: ObservationConfig,
+    /// Agent API configuration
+    #[serde(default)]
+    pub agent_api: AgentApiConfig,
+    /// Speech configuration
+    #[serde(default)]
+    pub speech: SpeechConfig,
+    /// Agent sandbox configuration
+    #[serde(default)]
+    pub sandbox: SandboxConfig,
+    /// Built-in Clawblox runtime configuration.
+    #[serde(default)]
+    pub clawblox: ClawbloxConfig,
+    /// AFK timeout in seconds (0 = disabled). Players idle longer than this are kicked.
+    #[serde(default = "default_afk_timeout")]
+    pub afk_timeout: u64,
+    /// Optional external runtime command
+    #[serde(default)]
+    pub run: RunConfig,
 }
 
 fn default_max_players() -> u32 {
     8
 }
 
-fn default_game_type() -> String {
-    "lua".to_string()
+fn default_afk_timeout() -> u64 {
+    300
 }
 
 fn default_renderer_name() -> String {
@@ -129,6 +297,14 @@ fn default_renderer_api_version() -> u32 {
 
 fn default_observation_radius() -> f32 {
     100.0
+}
+
+fn default_speech_hearing_radius() -> f32 {
+    30.0
+}
+
+fn default_runtime_mode() -> String {
+    "clawblox".to_string()
 }
 
 impl WorldConfig {
@@ -155,6 +331,40 @@ impl WorldConfig {
             return Err(WorldConfigError::ValidationError(
                 path.to_path_buf(),
                 "observation.radius must be a finite number > 0".to_string(),
+            ));
+        }
+        if !self.speech.hearing_radius.is_finite() || self.speech.hearing_radius <= 0.0 {
+            return Err(WorldConfigError::ValidationError(
+                path.to_path_buf(),
+                "speech.hearing_radius must be a finite number > 0".to_string(),
+            ));
+        }
+        if let Some(cmd) = self.run.command.as_ref() {
+            if cmd.is_empty() {
+                return Err(WorldConfigError::ValidationError(
+                    path.to_path_buf(),
+                    "run.command must contain at least one token".to_string(),
+                ));
+            }
+            if cmd[0].trim().is_empty() {
+                return Err(WorldConfigError::ValidationError(
+                    path.to_path_buf(),
+                    "run.command[0] must be a non-empty executable".to_string(),
+                ));
+            }
+        }
+        if let Some(root) = self.sandbox.deps_root.as_ref() {
+            if root.as_os_str().is_empty() {
+                return Err(WorldConfigError::ValidationError(
+                    path.to_path_buf(),
+                    "sandbox.deps_root must be a non-empty path".to_string(),
+                ));
+            }
+        }
+        if !(1..=32).contains(&self.clawblox.physics.solver_iterations) {
+            return Err(WorldConfigError::ValidationError(
+                path.to_path_buf(),
+                "clawblox.physics.solver_iterations must be between 1 and 32".to_string(),
             ));
         }
         Ok(())
@@ -199,8 +409,15 @@ mod tests {
         let config: WorldConfig = toml::from_str(toml).unwrap();
         assert_eq!(config.name, "Test Game");
         assert_eq!(config.max_players, 8);
-        assert_eq!(config.game_type, "lua");
+        assert_eq!(config.runtime.mode, "clawblox");
+        assert_eq!(config.scripts.skill, Some("API.md".to_string()));
         assert_eq!(config.observation.radius, 100.0);
+        assert_eq!(config.speech.mode, SpeechMode::Global);
+        assert_eq!(config.speech.hearing_radius, 30.0);
+        assert!(config.clawblox.player_object_physics);
+        assert_eq!(config.clawblox.physics.solver_iterations, 4);
+        assert!(!config.sandbox.enable_weaker_nested_sandbox);
+        assert_eq!(config.sandbox.deps_root, None);
     }
 
     #[test]
@@ -209,7 +426,8 @@ mod tests {
             name = "Test Game"
             description = "A test game"
             max_players = 16
-            game_type = "lua"
+            [runtime]
+            mode = "external"
 
             [scripts]
             main = "main.lua"
@@ -226,11 +444,30 @@ mod tests {
 
             [observation]
             radius = 64
+
+            [speech]
+            mode = "proximity"
+            hearing_radius = 24
+
+            [sandbox]
+            enable_weaker_nested_sandbox = true
+            deps_root = "/opt/conda"
+            add_deps_lib_to_library_path = false
+
+            [clawblox]
+            player_object_physics = false
+
+            [clawblox.physics]
+            solver_iterations = 2
+
+            [run]
+            command = ["custom-runner", "--flag"]
         "#;
         let config: WorldConfig = toml::from_str(toml).unwrap();
         assert_eq!(config.name, "Test Game");
         assert_eq!(config.description, Some("A test game".to_string()));
         assert_eq!(config.max_players, 16);
+        assert_eq!(config.runtime.mode, "external");
         assert_eq!(config.scripts.main, "main.lua");
         assert_eq!(config.scripts.tree, Some("scripts".to_string()));
         assert_eq!(config.renderer.mode, "module");
@@ -238,6 +475,20 @@ mod tests {
         assert_eq!(config.renderer.source.as_deref(), Some("src/index.ts"));
         assert_eq!(config.renderer.api_version, 1);
         assert_eq!(config.observation.radius, 64.0);
+        assert_eq!(config.speech.mode, SpeechMode::Proximity);
+        assert_eq!(config.speech.hearing_radius, 24.0);
+        assert!(!config.clawblox.player_object_physics);
+        assert_eq!(config.clawblox.physics.solver_iterations, 2);
+        assert!(config.sandbox.enable_weaker_nested_sandbox);
+        assert_eq!(
+            config.sandbox.deps_root.as_deref(),
+            Some(Path::new("/opt/conda"))
+        );
+        assert!(!config.sandbox.add_deps_lib_to_library_path);
+        assert_eq!(
+            config.run.command.as_ref().map(|c| c.as_slice()),
+            Some(vec!["custom-runner".to_string(), "--flag".to_string()].as_slice())
+        );
     }
 
     #[test]
@@ -254,5 +505,21 @@ mod tests {
             .validate(std::path::Path::new("world.toml"))
             .unwrap_err();
         assert!(format!("{}", err).contains("observation.radius"));
+    }
+
+    #[test]
+    fn test_invalid_speech_hearing_radius_fails_validation() {
+        let toml = r#"
+            name = "Bad Config"
+
+            [speech]
+            hearing_radius = 0
+        "#;
+
+        let config: WorldConfig = toml::from_str(toml).unwrap();
+        let err = config
+            .validate(std::path::Path::new("world.toml"))
+            .unwrap_err();
+        assert!(format!("{}", err).contains("speech.hearing_radius"));
     }
 }

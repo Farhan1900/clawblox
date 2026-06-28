@@ -45,7 +45,11 @@ impl RemoteEventService {
     ) {
         let mut data = self.data.lock().unwrap();
         if !reliable {
-            let unreliable_count = data.queued_events.iter().filter(|evt| !evt.reliable).count();
+            let unreliable_count = data
+                .queued_events
+                .iter()
+                .filter(|evt| !evt.reliable)
+                .count();
             if unreliable_count >= MAX_QUEUED_UNRELIABLE_EVENTS {
                 if let Some(idx) = data.queued_events.iter().position(|evt| !evt.reliable) {
                     data.queued_events.remove(idx);
@@ -117,7 +121,9 @@ mod tests {
             );
         }
         let drained = svc.drain_events();
-        assert!(drained.iter().any(|evt| evt.reliable && evt.name == "reliable"));
+        assert!(drained
+            .iter()
+            .any(|evt| evt.reliable && evt.name == "reliable"));
     }
 }
 

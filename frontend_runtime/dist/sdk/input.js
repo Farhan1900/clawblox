@@ -1,5 +1,14 @@
 export function createLocalInputClient(options = {}) {
-  const baseUrl = options.baseUrl || ''
+  const derivedBasePath = (() => {
+    try {
+      const url = new URL('../..', import.meta.url)
+      const path = url.pathname.replace(/\/$/, '')
+      return path || ''
+    } catch (_) {
+      return ''
+    }
+  })()
+  const baseUrl = options.baseUrl || derivedBasePath
   const playerName = options.playerName || 'renderer-player'
   let sessionToken = null
   let agentId = null

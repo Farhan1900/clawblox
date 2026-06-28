@@ -5,6 +5,7 @@ pub enum PartType {
     Ball,
     Block,
     Cylinder,
+    Ring,
     Wedge,
 }
 
@@ -14,6 +15,7 @@ impl PartType {
             PartType::Ball => "Ball",
             PartType::Block => "Block",
             PartType::Cylinder => "Cylinder",
+            PartType::Ring => "Ring",
             PartType::Wedge => "Wedge",
         }
     }
@@ -23,7 +25,8 @@ impl PartType {
             PartType::Ball => 0,
             PartType::Block => 1,
             PartType::Cylinder => 2,
-            PartType::Wedge => 3,
+            PartType::Ring => 3,
+            PartType::Wedge => 4,
         }
     }
 }
@@ -59,6 +62,7 @@ impl UserData for PartType {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Material {
+    Air,
     Plastic,
     Wood,
     Metal,
@@ -75,11 +79,119 @@ pub enum Material {
     Slate,
     SmoothPlastic,
     ForceField,
+    Water,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ActuatorRelativeTo {
+    Attachment0,
+    Attachment1,
+    World,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FluidForces {
+    Default,
+    Experimental,
+}
+
+impl FluidForces {
+    pub fn name(&self) -> &'static str {
+        match self {
+            FluidForces::Default => "Default",
+            FluidForces::Experimental => "Experimental",
+        }
+    }
+
+    pub fn value(&self) -> i32 {
+        match self {
+            FluidForces::Default => 0,
+            FluidForces::Experimental => 1,
+        }
+    }
+}
+
+impl FromLua for FluidForces {
+    fn from_lua(value: Value, _lua: &Lua) -> Result<Self> {
+        match value {
+            Value::UserData(ud) => ud.borrow::<FluidForces>().map(|v| *v),
+            _ => Err(mlua::Error::FromLuaConversionError {
+                from: value.type_name(),
+                to: "FluidForces".to_string(),
+                message: Some("expected FluidForces".to_string()),
+            }),
+        }
+    }
+}
+
+impl UserData for FluidForces {
+    fn add_fields<F: UserDataFields<Self>>(fields: &mut F) {
+        fields.add_field_method_get("Name", |_, this| Ok(this.name().to_string()));
+        fields.add_field_method_get("Value", |_, this| Ok(this.value()));
+    }
+
+    fn add_methods<M: UserDataMethods<Self>>(methods: &mut M) {
+        methods.add_meta_method(mlua::MetaMethod::ToString, |_, this, ()| {
+            Ok(format!("Enum.FluidForces.{}", this.name()))
+        });
+        methods.add_meta_method(mlua::MetaMethod::Eq, |_, this, other: FluidForces| {
+            Ok(*this == other)
+        });
+    }
+}
+
+impl ActuatorRelativeTo {
+    pub fn name(&self) -> &'static str {
+        match self {
+            ActuatorRelativeTo::Attachment0 => "Attachment0",
+            ActuatorRelativeTo::Attachment1 => "Attachment1",
+            ActuatorRelativeTo::World => "World",
+        }
+    }
+
+    pub fn value(&self) -> i32 {
+        match self {
+            ActuatorRelativeTo::Attachment0 => 0,
+            ActuatorRelativeTo::Attachment1 => 1,
+            ActuatorRelativeTo::World => 2,
+        }
+    }
+}
+
+impl FromLua for ActuatorRelativeTo {
+    fn from_lua(value: Value, _lua: &Lua) -> Result<Self> {
+        match value {
+            Value::UserData(ud) => ud.borrow::<ActuatorRelativeTo>().map(|v| *v),
+            _ => Err(mlua::Error::FromLuaConversionError {
+                from: value.type_name(),
+                to: "ActuatorRelativeTo".to_string(),
+                message: Some("expected ActuatorRelativeTo".to_string()),
+            }),
+        }
+    }
+}
+
+impl UserData for ActuatorRelativeTo {
+    fn add_fields<F: UserDataFields<Self>>(fields: &mut F) {
+        fields.add_field_method_get("Name", |_, this| Ok(this.name().to_string()));
+        fields.add_field_method_get("Value", |_, this| Ok(this.value()));
+    }
+
+    fn add_methods<M: UserDataMethods<Self>>(methods: &mut M) {
+        methods.add_meta_method(mlua::MetaMethod::ToString, |_, this, ()| {
+            Ok(format!("Enum.ActuatorRelativeTo.{}", this.name()))
+        });
+        methods.add_meta_method(
+            mlua::MetaMethod::Eq,
+            |_, this, other: ActuatorRelativeTo| Ok(*this == other),
+        );
+    }
 }
 
 impl Material {
     pub fn name(&self) -> &'static str {
         match self {
+            Material::Air => "Air",
             Material::Plastic => "Plastic",
             Material::Wood => "Wood",
             Material::Metal => "Metal",
@@ -96,11 +208,13 @@ impl Material {
             Material::Slate => "Slate",
             Material::SmoothPlastic => "SmoothPlastic",
             Material::ForceField => "ForceField",
+            Material::Water => "Water",
         }
     }
 
     pub fn value(&self) -> i32 {
         match self {
+            Material::Air => 1792,
             Material::Plastic => 256,
             Material::Wood => 512,
             Material::Metal => 1040,
@@ -117,6 +231,7 @@ impl Material {
             Material::Slate => 800,
             Material::SmoothPlastic => 272,
             Material::ForceField => 1584,
+            Material::Water => 2048,
         }
     }
 }
@@ -342,6 +457,7 @@ pub fn register_enums(lua: &Lua) -> Result<()> {
     part_type_table.set("Ball", PartType::Ball)?;
     part_type_table.set("Block", PartType::Block)?;
     part_type_table.set("Cylinder", PartType::Cylinder)?;
+    part_type_table.set("Ring", PartType::Ring)?;
     part_type_table.set("Wedge", PartType::Wedge)?;
     enum_table.set("PartType", part_type_table)?;
 
@@ -350,10 +466,12 @@ pub fn register_enums(lua: &Lua) -> Result<()> {
     part_shape_table.set("Ball", PartType::Ball)?;
     part_shape_table.set("Block", PartType::Block)?;
     part_shape_table.set("Cylinder", PartType::Cylinder)?;
+    part_shape_table.set("Ring", PartType::Ring)?;
     part_shape_table.set("Wedge", PartType::Wedge)?;
     enum_table.set("PartShape", part_shape_table)?;
 
     let material_table = lua.create_table()?;
+    material_table.set("Air", Material::Air)?;
     material_table.set("Plastic", Material::Plastic)?;
     material_table.set("Wood", Material::Wood)?;
     material_table.set("Metal", Material::Metal)?;
@@ -370,7 +488,19 @@ pub fn register_enums(lua: &Lua) -> Result<()> {
     material_table.set("Slate", Material::Slate)?;
     material_table.set("SmoothPlastic", Material::SmoothPlastic)?;
     material_table.set("ForceField", Material::ForceField)?;
+    material_table.set("Water", Material::Water)?;
     enum_table.set("Material", material_table)?;
+
+    let actuator_relative_to_table = lua.create_table()?;
+    actuator_relative_to_table.set("Attachment0", ActuatorRelativeTo::Attachment0)?;
+    actuator_relative_to_table.set("Attachment1", ActuatorRelativeTo::Attachment1)?;
+    actuator_relative_to_table.set("World", ActuatorRelativeTo::World)?;
+    enum_table.set("ActuatorRelativeTo", actuator_relative_to_table)?;
+
+    let fluid_forces_table = lua.create_table()?;
+    fluid_forces_table.set("Default", FluidForces::Default)?;
+    fluid_forces_table.set("Experimental", FluidForces::Experimental)?;
+    enum_table.set("FluidForces", fluid_forces_table)?;
 
     let state_type_table = lua.create_table()?;
     state_type_table.set("Running", HumanoidStateType::Running)?;
@@ -391,22 +521,22 @@ pub fn register_enums(lua: &Lua) -> Result<()> {
     enum_table.set("RaycastFilterType", filter_type_table)?;
 
     let text_x_alignment_table = lua.create_table()?;
-    text_x_alignment_table.set("Left", "Left")?;
-    text_x_alignment_table.set("Center", "Center")?;
-    text_x_alignment_table.set("Right", "Right")?;
+    text_x_alignment_table.set("Left", TextXAlignmentEnum::Left)?;
+    text_x_alignment_table.set("Center", TextXAlignmentEnum::Center)?;
+    text_x_alignment_table.set("Right", TextXAlignmentEnum::Right)?;
     enum_table.set("TextXAlignment", text_x_alignment_table)?;
 
     let text_y_alignment_table = lua.create_table()?;
-    text_y_alignment_table.set("Top", "Top")?;
-    text_y_alignment_table.set("Center", "Center")?;
-    text_y_alignment_table.set("Bottom", "Bottom")?;
+    text_y_alignment_table.set("Top", TextYAlignmentEnum::Top)?;
+    text_y_alignment_table.set("Center", TextYAlignmentEnum::Center)?;
+    text_y_alignment_table.set("Bottom", TextYAlignmentEnum::Bottom)?;
     enum_table.set("TextYAlignment", text_y_alignment_table)?;
 
     let font_table = lua.create_table()?;
-    font_table.set("GothamBold", "GothamBold")?;
-    font_table.set("Gotham", "Gotham")?;
-    font_table.set("SourceSans", "SourceSans")?;
-    font_table.set("SourceSansBold", "SourceSansBold")?;
+    font_table.set("GothamBold", FontEnum::GothamBold)?;
+    font_table.set("Gotham", FontEnum::Gotham)?;
+    font_table.set("SourceSans", FontEnum::SourceSans)?;
+    font_table.set("SourceSansBold", FontEnum::SourceSansBold)?;
     enum_table.set("Font", font_table)?;
 
     let surface_type_table = lua.create_table()?;

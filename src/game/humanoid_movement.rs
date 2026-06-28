@@ -23,12 +23,12 @@ pub fn build_motion_plan(
     contact_velocity: Option<[f32; 3]>,
 ) -> MotionPlan {
     let mut new_vertical_velocity = vertical_velocity + gravity * dt;
-    if grounded {
-        if let Some(jump) = jump_power {
-            let max_launch_speed =
-                (2.0 * gravity.abs() * humanoid_consts::DEFAULT_JUMP_HEIGHT).sqrt();
-            new_vertical_velocity = jump.max(0.0).min(max_launch_speed);
-        }
+    if new_vertical_velocity < -physics_consts::CHARACTER_TERMINAL_FALL_SPEED {
+        new_vertical_velocity = -physics_consts::CHARACTER_TERMINAL_FALL_SPEED;
+    }
+    if let Some(jump) = jump_power {
+        let max_launch_speed = (2.0 * gravity.abs() * humanoid_consts::DEFAULT_JUMP_HEIGHT).sqrt();
+        new_vertical_velocity = jump.max(0.0).min(max_launch_speed);
     }
 
     let mut dx = 0.0f32;
@@ -72,6 +72,9 @@ pub fn build_motion_plan(
     }
 
     let mut desired_y = if (grounded || carry_by_platform) && new_vertical_velocity <= 0.0 {
+        // Supported: do not bank gravity. Storing it while the support holds
+        // the capsule in place discharges as a plunge when the support goes.
+        new_vertical_velocity = 0.0;
         0.0
     } else {
         new_vertical_velocity * dt
@@ -112,9 +115,18 @@ pub fn resolve_vertical_velocity_after_move(
     if desired_y > 0.0 && applied_y + 1.0e-4 < desired_y {
         v = 0.0;
     }
+    // Downward motion blocked by a contact is a landing even when the
+    // grounded flag missed it (e.g. resting on a dynamic body's edge).
+    // Without this, vertical velocity keeps integrating gravity while the
+    // capsule is wedged and discharges as a huge plunge or launch the moment
+    // the path frees up.
+    if desired_y < -1.0e-4 && applied_y > desired_y + 1.0e-4 {
+        v = 0.0;
+    }
     v
 }
 use super::constants::humanoid as humanoid_consts;
+use super::constants::physics as physics_consts;
 
 #[cfg(test)]
 mod tests {

@@ -14,6 +14,12 @@ struct DebrisEntry {
     destroy_at_secs: f64,
 }
 
+#[derive(Clone)]
+pub struct DebrisEntrySnapshot {
+    pub instance: Instance,
+    pub destroy_at_secs: f64,
+}
+
 #[derive(Default)]
 struct DebrisServiceData {
     queue: Vec<DebrisEntry>,
@@ -54,6 +60,29 @@ impl DebrisService {
             entry.instance.destroy(lua)?;
         }
         Ok(())
+    }
+
+    pub fn snapshot_queue(&self) -> Vec<DebrisEntrySnapshot> {
+        self.data
+            .lock()
+            .unwrap()
+            .queue
+            .iter()
+            .map(|entry| DebrisEntrySnapshot {
+                instance: entry.instance.clone(),
+                destroy_at_secs: entry.destroy_at_secs,
+            })
+            .collect()
+    }
+
+    pub fn restore_queue(&self, entries: Vec<DebrisEntrySnapshot>) {
+        self.data.lock().unwrap().queue = entries
+            .into_iter()
+            .map(|entry| DebrisEntry {
+                instance: entry.instance,
+                destroy_at_secs: entry.destroy_at_secs,
+            })
+            .collect();
     }
 }
 

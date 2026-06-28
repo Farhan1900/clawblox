@@ -1,0 +1,699 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Mesa Island River Map Editor</title>
+  <style>
+    :root {
+      --bg: #e5c89c;
+      --panel: #f7ecd8;
+      --ink: #1f2328;
+      --muted: #5b6470;
+      --ocean: #78b7d6;
+      --land: #7fe3c3;
+      --mesa: #b98954;
+      --ridge: #8a6038;
+      --river: #2f84c7;
+      --draft: #e94f37;
+      --draft-node: #ffb703;
+      --grid: rgba(31, 35, 40, 0.1);
+      --frame: #c89d64;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    html, body {
+      height: 100%;
+      margin: 0;
+      font-family: "Trebuchet MS", Verdana, sans-serif;
+      color: var(--ink);
+      background:
+        radial-gradient(circle at top, #fff3df 0%, #efd9b4 42%, #d0a26d 100%);
+    }
+
+    body {
+      display: grid;
+      grid-template-columns: minmax(340px, 420px) 1fr;
+      gap: 16px;
+      padding: 16px;
+    }
+
+    .panel,
+    .stage {
+      border: 2px solid var(--frame);
+      border-radius: 18px;
+      background: rgba(247, 236, 216, 0.92);
+      box-shadow: 0 14px 40px rgba(79, 48, 13, 0.16);
+    }
+
+    .panel {
+      padding: 18px;
+      overflow: auto;
+    }
+
+    .stage {
+      padding: 14px;
+      min-height: 0;
+      display: flex;
+      flex-direction: column;
+    }
+
+    h1 {
+      margin: 0 0 6px;
+      font-size: 26px;
+      line-height: 1.1;
+    }
+
+    p,
+    li,
+    label,
+    button,
+    textarea,
+    input {
+      font-size: 14px;
+      line-height: 1.4;
+    }
+
+    .muted {
+      color: var(--muted);
+    }
+
+    .toolbar,
+    .toggles,
+    .stats {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 8px;
+      margin: 14px 0;
+    }
+
+    button {
+      appearance: none;
+      border: 1px solid #a77743;
+      border-radius: 10px;
+      padding: 10px 12px;
+      background: linear-gradient(180deg, #fff7ea 0%, #ecd2ab 100%);
+      color: var(--ink);
+      cursor: pointer;
+      font-weight: 700;
+    }
+
+    button:hover {
+      filter: brightness(1.03);
+    }
+
+    button.active {
+      background: linear-gradient(180deg, #ffd996 0%, #ecac5f 100%);
+    }
+
+    .toggles label {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 8px 10px;
+      border: 1px solid #d3b185;
+      border-radius: 10px;
+      background: rgba(255, 249, 240, 0.75);
+    }
+
+    .legend {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 8px 12px;
+      margin: 14px 0;
+    }
+
+    .legend-item {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .swatch {
+      width: 14px;
+      height: 14px;
+      border-radius: 4px;
+      border: 1px solid rgba(0, 0, 0, 0.2);
+      flex: 0 0 auto;
+    }
+
+    textarea {
+      width: 100%;
+      min-height: 170px;
+      resize: vertical;
+      border-radius: 12px;
+      border: 1px solid #c9a97b;
+      background: #fffaf0;
+      padding: 12px;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    }
+
+    .stage-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: baseline;
+      gap: 12px;
+      margin-bottom: 10px;
+    }
+
+    #map {
+      width: 100%;
+      height: 100%;
+      min-height: 680px;
+      border-radius: 14px;
+      background: linear-gradient(180deg, #8bc4e0 0%, #64a9cb 100%);
+      border: 1px solid #9b7649;
+      display: block;
+      touch-action: none;
+      cursor: crosshair;
+    }
+
+    .coords {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px 18px;
+      margin-top: 10px;
+      color: var(--muted);
+    }
+
+    .small {
+      font-size: 12px;
+    }
+
+    @media (max-width: 960px) {
+      body {
+        grid-template-columns: 1fr;
+      }
+
+      #map {
+        min-height: 60vh;
+      }
+    }
+  </style>
+</head>
+<body>
+  <aside class="panel">
+    <h1>Mesa Island River Editor</h1>
+    <p class="muted">
+      Exact top-down world map from <code>main.lua</code>. Click to add river points, drag points to refine, and export the final coordinates back into Lua.
+    </p>
+
+    <div class="toolbar">
+      <button id="drawModeButton" class="active" type="button">Draw Mode</button>
+      <button id="editModeButton" type="button">Edit Mode</button>
+      <button id="undoButton" type="button">Undo Point</button>
+      <button id="clearButton" type="button">Clear Draft</button>
+      <button id="seedCurrentButton" type="button">Seed Current River</button>
+      <button id="deletePointButton" type="button">Delete Selected</button>
+      <button id="copyLuaButton" type="button">Copy Lua</button>
+      <button id="copyJsonButton" type="button">Copy JSON</button>
+    </div>
+
+    <div class="toggles">
+      <label><input id="showGrid" type="checkbox" checked> Show grid</label>
+      <label><input id="showLabels" type="checkbox" checked> Show labels</label>
+      <label><input id="showCurrentRiver" type="checkbox" checked> Show current river</label>
+      <label><input id="showSpawnPoints" type="checkbox"> Show spawns</label>
+    </div>
+
+    <div class="legend">
+      <div class="legend-item"><span class="swatch" style="background: var(--ocean)"></span> Ocean</div>
+      <div class="legend-item"><span class="swatch" style="background: var(--land)"></span> Ground slabs</div>
+      <div class="legend-item"><span class="swatch" style="background: var(--mesa)"></span> Mesas / platforms</div>
+      <div class="legend-item"><span class="swatch" style="background: var(--river)"></span> Current river</div>
+      <div class="legend-item"><span class="swatch" style="background: var(--draft)"></span> Draft river</div>
+      <div class="legend-item"><span class="swatch" style="background: var(--draft-node)"></span> Draft nodes</div>
+    </div>
+
+    <div class="stats">
+      <div><strong>Draft points:</strong> <span id="pointCount">0</span></div>
+      <div><strong>Selected:</strong> <span id="selectedPoint">none</span></div>
+      <div><strong>Cursor:</strong> <span id="cursorWorld">x 0, z 0</span></div>
+      <div><strong>Segment length:</strong> <span id="segmentLength">0</span></div>
+    </div>
+
+    <label for="exportBox"><strong>Export</strong></label>
+    <textarea id="exportBox" spellcheck="false"></textarea>
+
+    <p class="small muted">
+      Controls: click to add points in Draw Mode. Drag points in Edit Mode. In either mode, click a node to select it.
+    </p>
+  </aside>
+
+  <main class="stage">
+    <div class="stage-header">
+      <div>
+        <strong>Top-Down World Map</strong>
+        <div class="small muted">World coordinates: X east-west, Z north-south</div>
+      </div>
+      <div class="small muted">Bounds: x [-170, 170], z [-150, 150]</div>
+    </div>
+    <canvas id="map" width="1200" height="900"></canvas>
+    <div class="coords">
+      <span>Blue line = current river in code</span>
+      <span>Red line = your draft</span>
+      <span>Drag draft nodes in Edit Mode</span>
+    </div>
+  </main>
+
+  <script>
+    const world = {
+      bounds: { minX: -170, maxX: 170, minZ: -150, maxZ: 150 },
+      groundParts: [
+        { name: "MainBodyA", size: [220, 10, 180], pos: [0, -5, 0] },
+        { name: "MainBodyB", size: [160, 10, 240], pos: [10, -5, 20] },
+        { name: "EastPeninsula", size: [80, 10, 60], pos: [120, -5, 30] },
+        { name: "WestBulge", size: [70, 10, 80], pos: [-110, -5, -20] },
+        { name: "NorthSpit", size: [60, 10, 70], pos: [-20, -5, 120] },
+        { name: "SouthCove", size: [50, 10, 60], pos: [40, -5, -110] },
+      ],
+      mesas: [
+        { name: "CenterHill", size: [30, 8, 30], pos: [0, 4, 0] },
+        { name: "CenterStep", size: [18, 3, 14], pos: [18, 1.5, 10] },
+        { name: "NELedge", size: [35, 5, 25], pos: [60, 2.5, 55] },
+        { name: "NEShelf", size: [22, 10, 18], pos: [72, 5, 70] },
+        { name: "NEPeak", size: [12, 16, 12], pos: [78, 8, 82] },
+        { name: "SWSteppingStone", size: [10, 2.5, 10], pos: [-65, 1.25, -62] },
+        { name: "SWTallMesa", size: [16, 6, 14], pos: [-72, 3, -70] },
+        { name: "SWTowerBase", size: [10, 7, 10], pos: [-75, 3.5, -76] },
+        { name: "SWSummit", size: [8, 10, 8], pos: [-75, 5, -80] },
+        { name: "SWSpire", size: [5, 20, 5], pos: [-77, 10, -83] },
+        { name: "EastRidge", size: [16, 6, 60], pos: [100, 3, 10] },
+        { name: "NWStone1", size: [14, 3, 12], pos: [-50, 1.5, 70] },
+        { name: "NWStone2", size: [10, 4, 10], pos: [-65, 2, 85] },
+      ],
+      spawnPoints: [
+        [25, -20],
+        [40, -55],
+        [-30, 25],
+        [38, 50],
+        [-45, -35],
+        [80, -25],
+        [-35, 55],
+        [20, 85],
+        [25, -90],
+        [130, 25],
+      ],
+      currentRiverPath: [
+        { x: 112, z: 60 },
+        { x: 86, z: 46 },
+        { x: 65, z: -4 },
+        { x: 36, z: -27 },
+        { x: -44, z: -45 },
+        { x: -145, z: -43 },
+      ],
+    };
+
+    const state = {
+      mode: "draw",
+      draftPoints: world.currentRiverPath.map((point) => ({ ...point })),
+      selectedIndex: -1,
+      draggingIndex: -1,
+      hoverWorld: { x: 0, z: 0 },
+    };
+
+    const canvas = document.getElementById("map");
+    const ctx = canvas.getContext("2d");
+    const exportBox = document.getElementById("exportBox");
+    const pointCount = document.getElementById("pointCount");
+    const selectedPoint = document.getElementById("selectedPoint");
+    const cursorWorld = document.getElementById("cursorWorld");
+    const segmentLength = document.getElementById("segmentLength");
+
+    const showGrid = document.getElementById("showGrid");
+    const showLabels = document.getElementById("showLabels");
+    const showCurrentRiver = document.getElementById("showCurrentRiver");
+    const showSpawnPoints = document.getElementById("showSpawnPoints");
+
+    const drawModeButton = document.getElementById("drawModeButton");
+    const editModeButton = document.getElementById("editModeButton");
+    const undoButton = document.getElementById("undoButton");
+    const clearButton = document.getElementById("clearButton");
+    const seedCurrentButton = document.getElementById("seedCurrentButton");
+    const deletePointButton = document.getElementById("deletePointButton");
+    const copyLuaButton = document.getElementById("copyLuaButton");
+    const copyJsonButton = document.getElementById("copyJsonButton");
+
+    function worldToScreen(point) {
+      const { minX, maxX, minZ, maxZ } = world.bounds;
+      const x = ((point.x - minX) / (maxX - minX)) * canvas.width;
+      const y = canvas.height - (((point.z - minZ) / (maxZ - minZ)) * canvas.height);
+      return { x, y };
+    }
+
+    function screenToWorld(point) {
+      const { minX, maxX, minZ, maxZ } = world.bounds;
+      const x = minX + (point.x / canvas.width) * (maxX - minX);
+      const z = minZ + ((canvas.height - point.y) / canvas.height) * (maxZ - minZ);
+      return { x, z };
+    }
+
+    function drawRectEntity(entity, fillStyle, strokeStyle, label) {
+      const [w, , d] = entity.size;
+      const [cx, , cz] = entity.pos;
+      const topLeft = worldToScreen({ x: cx - w / 2, z: cz + d / 2 });
+      const bottomRight = worldToScreen({ x: cx + w / 2, z: cz - d / 2 });
+      const x = topLeft.x;
+      const y = topLeft.y;
+      const width = bottomRight.x - topLeft.x;
+      const height = bottomRight.y - topLeft.y;
+
+      ctx.fillStyle = fillStyle;
+      ctx.strokeStyle = strokeStyle;
+      ctx.lineWidth = 1.5;
+      ctx.fillRect(x, y, width, height);
+      ctx.strokeRect(x, y, width, height);
+
+      if (showLabels.checked && label) {
+        ctx.fillStyle = "rgba(31, 35, 40, 0.82)";
+        ctx.font = "12px Trebuchet MS";
+        ctx.fillText(label, x + 6, y + 16);
+      }
+    }
+
+    function drawGrid() {
+      if (!showGrid.checked) return;
+
+      ctx.save();
+      ctx.strokeStyle = "rgba(31, 35, 40, 0.1)";
+      ctx.lineWidth = 1;
+
+      for (let x = -160; x <= 160; x += 20) {
+        const a = worldToScreen({ x, z: world.bounds.minZ });
+        const b = worldToScreen({ x, z: world.bounds.maxZ });
+        ctx.beginPath();
+        ctx.moveTo(a.x, a.y);
+        ctx.lineTo(b.x, b.y);
+        ctx.stroke();
+      }
+
+      for (let z = -140; z <= 140; z += 20) {
+        const a = worldToScreen({ x: world.bounds.minX, z });
+        const b = worldToScreen({ x: world.bounds.maxX, z });
+        ctx.beginPath();
+        ctx.moveTo(a.x, a.y);
+        ctx.lineTo(b.x, b.y);
+        ctx.stroke();
+      }
+
+      ctx.strokeStyle = "rgba(31, 35, 40, 0.28)";
+      ctx.lineWidth = 2;
+      const xAxisA = worldToScreen({ x: world.bounds.minX, z: 0 });
+      const xAxisB = worldToScreen({ x: world.bounds.maxX, z: 0 });
+      const zAxisA = worldToScreen({ x: 0, z: world.bounds.minZ });
+      const zAxisB = worldToScreen({ x: 0, z: world.bounds.maxZ });
+      ctx.beginPath();
+      ctx.moveTo(xAxisA.x, xAxisA.y);
+      ctx.lineTo(xAxisB.x, xAxisB.y);
+      ctx.moveTo(zAxisA.x, zAxisA.y);
+      ctx.lineTo(zAxisB.x, zAxisB.y);
+      ctx.stroke();
+      ctx.restore();
+    }
+
+    function drawPolyline(points, strokeStyle, width, dashed = false) {
+      if (points.length < 2) return;
+      ctx.save();
+      ctx.strokeStyle = strokeStyle;
+      ctx.lineWidth = width;
+      ctx.lineJoin = "round";
+      ctx.lineCap = "round";
+      if (dashed) ctx.setLineDash([12, 10]);
+      ctx.beginPath();
+      const first = worldToScreen(points[0]);
+      ctx.moveTo(first.x, first.y);
+      for (let i = 1; i < points.length; i += 1) {
+        const point = worldToScreen(points[i]);
+        ctx.lineTo(point.x, point.y);
+      }
+      ctx.stroke();
+      ctx.restore();
+    }
+
+    function drawDraftNodes() {
+      state.draftPoints.forEach((point, index) => {
+        const screen = worldToScreen(point);
+        ctx.beginPath();
+        ctx.fillStyle = index === state.selectedIndex ? "#111111" : "#ffb703";
+        ctx.strokeStyle = "#432818";
+        ctx.lineWidth = 2;
+        ctx.arc(screen.x, screen.y, index === state.selectedIndex ? 8 : 6, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.stroke();
+
+        if (showLabels.checked) {
+          ctx.fillStyle = "rgba(31, 35, 40, 0.85)";
+          ctx.font = "12px Trebuchet MS";
+          ctx.fillText(`${index + 1}`, screen.x + 8, screen.y - 8);
+        }
+      });
+    }
+
+    function drawSpawnMarkers() {
+      if (!showSpawnPoints.checked) return;
+      ctx.save();
+      world.spawnPoints.forEach(([x, z], index) => {
+        const screen = worldToScreen({ x, z });
+        ctx.fillStyle = "#7c3aed";
+        ctx.strokeStyle = "#ffffff";
+        ctx.lineWidth = 1.5;
+        ctx.beginPath();
+        ctx.arc(screen.x, screen.y, 5, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.stroke();
+        if (showLabels.checked) {
+          ctx.fillStyle = "#351c75";
+          ctx.font = "12px Trebuchet MS";
+          ctx.fillText(`S${index + 1}`, screen.x + 8, screen.y + 4);
+        }
+      });
+      ctx.restore();
+    }
+
+    function drawCompass() {
+      ctx.save();
+      ctx.fillStyle = "rgba(31, 35, 40, 0.85)";
+      ctx.font = "bold 16px Trebuchet MS";
+      ctx.fillText("N", canvas.width - 34, 28);
+      ctx.fillText("S", canvas.width - 34, canvas.height - 18);
+      ctx.fillText("W", 18, 28);
+      ctx.fillText("E", canvas.width - 20, canvas.height / 2 + 6);
+      ctx.restore();
+    }
+
+    function drawMap() {
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+      drawGrid();
+
+      world.groundParts.forEach((part) => {
+        drawRectEntity(part, "rgba(127, 227, 195, 0.9)", "rgba(43, 111, 94, 0.55)", part.name);
+      });
+
+      world.mesas.forEach((mesa) => {
+        const fill = mesa.name === "EastRidge" ? "rgba(138, 96, 56, 0.9)" : "rgba(185, 137, 84, 0.95)";
+        drawRectEntity(mesa, fill, "rgba(80, 45, 12, 0.55)", mesa.name);
+      });
+
+      drawSpawnMarkers();
+
+      if (showCurrentRiver.checked) {
+        drawPolyline(world.currentRiverPath, "rgba(47, 132, 199, 0.92)", 8, true);
+      }
+
+      drawPolyline(state.draftPoints, "rgba(233, 79, 55, 0.95)", 7, false);
+      drawDraftNodes();
+      drawCompass();
+    }
+
+    function formatPoint(point) {
+      return `{ x = ${Math.round(point.x)}, z = ${Math.round(point.z)} }`;
+    }
+
+    function updateExport() {
+      const luaLines = state.draftPoints.map((point) => `    ${formatPoint(point)},`);
+      const json = JSON.stringify(state.draftPoints.map((point) => ({
+        x: Math.round(point.x),
+        z: Math.round(point.z),
+      })), null, 2);
+
+      exportBox.value =
+`local riverPath = {
+${luaLines.join("\n")}
+}
+
+-- JSON
+${json}`;
+
+      pointCount.textContent = String(state.draftPoints.length);
+
+      if (state.selectedIndex >= 0 && state.draftPoints[state.selectedIndex]) {
+        const point = state.draftPoints[state.selectedIndex];
+        selectedPoint.textContent = `#${state.selectedIndex + 1} (x ${Math.round(point.x)}, z ${Math.round(point.z)})`;
+      } else {
+        selectedPoint.textContent = "none";
+      }
+
+      if (state.draftPoints.length >= 2) {
+        let total = 0;
+        for (let i = 1; i < state.draftPoints.length; i += 1) {
+          const dx = state.draftPoints[i].x - state.draftPoints[i - 1].x;
+          const dz = state.draftPoints[i].z - state.draftPoints[i - 1].z;
+          total += Math.hypot(dx, dz);
+        }
+        segmentLength.textContent = total.toFixed(1);
+      } else {
+        segmentLength.textContent = "0";
+      }
+    }
+
+    function setMode(mode) {
+      state.mode = mode;
+      drawModeButton.classList.toggle("active", mode === "draw");
+      editModeButton.classList.toggle("active", mode === "edit");
+      canvas.style.cursor = mode === "edit" ? "grab" : "crosshair";
+    }
+
+    function getCanvasPoint(event) {
+      const rect = canvas.getBoundingClientRect();
+      const scaleX = canvas.width / rect.width;
+      const scaleY = canvas.height / rect.height;
+      return {
+        x: (event.clientX - rect.left) * scaleX,
+        y: (event.clientY - rect.top) * scaleY,
+      };
+    }
+
+    function getNearestDraftIndex(worldPoint, radiusPixels = 14) {
+      let bestIndex = -1;
+      let bestDistance = Infinity;
+      state.draftPoints.forEach((point, index) => {
+        const screen = worldToScreen(point);
+        const target = worldToScreen(worldPoint);
+        const distance = Math.hypot(screen.x - target.x, screen.y - target.y);
+        if (distance <= radiusPixels && distance < bestDistance) {
+          bestIndex = index;
+          bestDistance = distance;
+        }
+      });
+      return bestIndex;
+    }
+
+    function copyText(text) {
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        return navigator.clipboard.writeText(text);
+      }
+      exportBox.focus();
+      exportBox.select();
+      document.execCommand("copy");
+      return Promise.resolve();
+    }
+
+    canvas.addEventListener("pointerdown", (event) => {
+      const screen = getCanvasPoint(event);
+      const worldPoint = screenToWorld(screen);
+      state.hoverWorld = worldPoint;
+      const nearestIndex = getNearestDraftIndex(worldPoint);
+
+      if (nearestIndex >= 0) {
+        state.selectedIndex = nearestIndex;
+        if (state.mode === "edit") {
+          state.draggingIndex = nearestIndex;
+          canvas.setPointerCapture(event.pointerId);
+          canvas.style.cursor = "grabbing";
+        }
+      } else if (state.mode === "draw") {
+        state.draftPoints.push({
+          x: Math.round(worldPoint.x),
+          z: Math.round(worldPoint.z),
+        });
+        state.selectedIndex = state.draftPoints.length - 1;
+      } else {
+        state.selectedIndex = -1;
+      }
+
+      updateExport();
+      drawMap();
+    });
+
+    canvas.addEventListener("pointermove", (event) => {
+      const screen = getCanvasPoint(event);
+      const worldPoint = screenToWorld(screen);
+      state.hoverWorld = worldPoint;
+      cursorWorld.textContent = `x ${Math.round(worldPoint.x)}, z ${Math.round(worldPoint.z)}`;
+
+      if (state.draggingIndex >= 0) {
+        state.draftPoints[state.draggingIndex] = {
+          x: Math.round(worldPoint.x),
+          z: Math.round(worldPoint.z),
+        };
+        updateExport();
+        drawMap();
+      }
+    });
+
+    canvas.addEventListener("pointerup", (event) => {
+      if (state.draggingIndex >= 0) {
+        canvas.releasePointerCapture(event.pointerId);
+      }
+      state.draggingIndex = -1;
+      canvas.style.cursor = state.mode === "edit" ? "grab" : "crosshair";
+    });
+
+    drawModeButton.addEventListener("click", () => setMode("draw"));
+    editModeButton.addEventListener("click", () => setMode("edit"));
+
+    undoButton.addEventListener("click", () => {
+      state.draftPoints.pop();
+      state.selectedIndex = Math.min(state.selectedIndex, state.draftPoints.length - 1);
+      updateExport();
+      drawMap();
+    });
+
+    clearButton.addEventListener("click", () => {
+      state.draftPoints = [];
+      state.selectedIndex = -1;
+      updateExport();
+      drawMap();
+    });
+
+    seedCurrentButton.addEventListener("click", () => {
+      state.draftPoints = world.currentRiverPath.map((point) => ({ ...point }));
+      state.selectedIndex = -1;
+      updateExport();
+      drawMap();
+    });
+
+    deletePointButton.addEventListener("click", () => {
+      if (state.selectedIndex < 0) return;
+      state.draftPoints.splice(state.selectedIndex, 1);
+      state.selectedIndex = -1;
+      updateExport();
+      drawMap();
+    });
+
+    copyLuaButton.addEventListener("click", async () => {
+      const luaBlock = `local riverPath = {\n${state.draftPoints.map((point) => `    ${formatPoint(point)},`).join("\n")}\n}`;
+      await copyText(luaBlock);
+    });
+
+    copyJsonButton.addEventListener("click", async () => {
+      const json = JSON.stringify(state.draftPoints.map((point) => ({
+        x: Math.round(point.x),
+        z: Math.round(point.z),
+      })), null, 2);
+      await copyText(json);
+    });
+
+    [showGrid, showLabels, showCurrentRiver, showSpawnPoints].forEach((input) => {
+      input.addEventListener("change", drawMap);
+    });
+
+    updateExport();
+    drawMap();
+  </script>
+</body>
+</html>

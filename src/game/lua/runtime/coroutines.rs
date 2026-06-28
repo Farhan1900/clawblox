@@ -10,6 +10,10 @@ impl LuaRuntime {
         let schedule: mlua::Table = self.lua.globals().get("__clawblox_thread_schedule")?;
         let args_table: mlua::Table = self.lua.globals().get("__clawblox_thread_args")?;
         let cancelled: mlua::Table = self.lua.globals().get("__clawblox_cancelled_threads")?;
+        let signal_waiting: mlua::Table = self
+            .lua
+            .globals()
+            .get("__clawblox_signal_waiting_threads")?;
 
         // Drain all keys upfront so we don't hold a mutable borrow during iteration
         let keys: Vec<RegistryKey> = {
@@ -36,6 +40,7 @@ impl LuaRuntime {
                 cancelled.set(thread.clone(), Value::Nil)?;
                 schedule.set(thread.clone(), Value::Nil)?;
                 args_table.set(thread.clone(), Value::Nil)?;
+                signal_waiting.set(thread.clone(), Value::Nil)?;
                 let _ = self.lua.remove_registry_value(key);
                 continue;
             }
@@ -45,6 +50,12 @@ impl LuaRuntime {
                 schedule.set(thread.clone(), Value::Nil)?;
                 args_table.set(thread.clone(), Value::Nil)?;
                 let _ = self.lua.remove_registry_value(key);
+                continue;
+            }
+
+            let is_waiting_on_signal: bool = signal_waiting.get(thread.clone()).unwrap_or(false);
+            if is_waiting_on_signal {
+                still_pending.push(key);
                 continue;
             }
 

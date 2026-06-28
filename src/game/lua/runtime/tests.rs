@@ -26,8 +26,8 @@ fn test_simple_script() {
         .expect("Failed to load script");
 
     let children = runtime.workspace().get_children();
-    assert_eq!(children.len(), 1);
-    assert_eq!(children[0].name(), "TestPart");
+    assert!(children.iter().any(|child| child.name() == "Terrain"));
+    assert!(children.iter().any(|child| child.name() == "TestPart"));
 }
 
 #[test]
@@ -176,14 +176,14 @@ fn test_gui_enum_and_font_properties_for_hud_compat() {
         .expect("Failed to load script");
 
     let globals = runtime.lua().globals().get::<mlua::Table>("_G").unwrap();
-    let x_align: String = globals.get("xAlign").unwrap();
-    let y_align: String = globals.get("yAlign").unwrap();
-    let font: String = globals.get("font").unwrap();
+    let x_align: mlua::AnyUserData = globals.get("xAlign").unwrap();
+    let y_align: mlua::AnyUserData = globals.get("yAlign").unwrap();
+    let font: mlua::AnyUserData = globals.get("font").unwrap();
     let stroke: f64 = globals.get("stroke").unwrap();
 
-    assert_eq!(x_align, "Left");
-    assert_eq!(y_align, "Top");
-    assert_eq!(font, "GothamBold");
+    assert_eq!(x_align.get::<String>("Name").unwrap(), "Left");
+    assert_eq!(y_align.get::<String>("Name").unwrap(), "Top");
+    assert_eq!(font.get::<String>("Name").unwrap(), "GothamBold");
     assert!((stroke - 0.35).abs() < 1e-6);
 }
 
@@ -287,11 +287,115 @@ fn test_signal_wait_yields_and_resumes() {
 }
 
 #[test]
+fn test_vm_snapshot_restores_pending_task_wait_coroutine() {
+    let mut runtime = test_runtime();
+    runtime
+        .load_script(
+            r#"
+            _G.done = false
+            _G.elapsed = 0
+            task.spawn(function()
+                local elapsed = task.wait(0.2)
+                _G.done = true
+                _G.elapsed = elapsed
+            end)
+        "#,
+        )
+        .expect("Failed to load script");
+
+    runtime.tick(0.1).expect("Failed to tick before snapshot");
+    let snapshot = runtime
+        .capture_vm_snapshot()
+        .expect("Failed to capture VM snapshot");
+
+    let mut restored = test_runtime();
+    restored
+        .restore_vm_snapshot(&snapshot)
+        .expect("Failed to restore VM snapshot");
+
+    {
+        let pending = restored.pending_coroutines.lock().unwrap();
+        assert_eq!(pending.len(), 1);
+        let thread: Thread = restored.lua.registry_value(&pending[0]).unwrap();
+        let schedule: mlua::Table = restored
+            .lua
+            .globals()
+            .get("__clawblox_thread_schedule")
+            .unwrap();
+        let resume_at: Option<f64> = schedule.get(thread).unwrap();
+        assert_eq!(resume_at, Some(0.2));
+    }
+
+    restored
+        .tick(0.05)
+        .expect("Failed to tick restored runtime before scheduled resume");
+    let globals = restored.lua().globals().get::<mlua::Table>("_G").unwrap();
+    let done: bool = globals.get("done").unwrap_or(false);
+    assert!(!done, "task.wait coroutine resumed too early");
+
+    restored
+        .tick(0.1)
+        .expect("Failed to tick restored runtime after scheduled resume");
+    let done: bool = globals.get("done").unwrap();
+    let elapsed: f64 = globals.get("elapsed").unwrap();
+    assert!(done, "task.wait coroutine did not resume after restore");
+    assert!((elapsed - 0.25).abs() < 1e-6);
+}
+
+#[test]
+fn test_vm_snapshot_restores_pending_signal_wait_coroutine() {
+    let mut runtime = test_runtime();
+    runtime
+        .load_script(
+            r#"
+            _G.waitDone = false
+            _G.waitDt = 0
+            task.spawn(function()
+                local dt = RunService.Heartbeat:Wait()
+                _G.waitDt = dt
+                _G.waitDone = true
+            end)
+        "#,
+        )
+        .expect("Failed to load script");
+
+    let globals = runtime.lua().globals().get::<mlua::Table>("_G").unwrap();
+    assert!(!globals.get::<bool>("waitDone").unwrap());
+
+    let snapshot = runtime
+        .capture_vm_snapshot()
+        .expect("Failed to capture VM snapshot");
+
+    let mut restored = test_runtime();
+    restored
+        .restore_vm_snapshot(&snapshot)
+        .expect("Failed to restore VM snapshot");
+
+    restored
+        .tick(0.02)
+        .expect("Failed to tick restored runtime once");
+    let globals = restored.lua().globals().get::<mlua::Table>("_G").unwrap();
+    assert!(
+        !globals.get::<bool>("waitDone").unwrap(),
+        "Signal:Wait should resume on the frame after the restored signal fires"
+    );
+
+    restored
+        .tick(0.03)
+        .expect("Failed to tick restored runtime twice");
+    let globals = restored.lua().globals().get::<mlua::Table>("_G").unwrap();
+    assert!(globals.get::<bool>("waitDone").unwrap());
+    assert!((globals.get::<f64>("waitDt").unwrap() - 0.02).abs() < 1e-6);
+}
+
+#[test]
 fn test_tick_function() {
     let runtime = test_runtime();
     let result: f64 = runtime.lua().load("return tick()").eval().unwrap();
     assert!(result >= 0.0);
-    std::thread::sleep(std::time::Duration::from_millis(50));
+    // The script clock is frame-bound: it advances with simulated frames,
+    // never with host wall time.
+    runtime.tick(1.0 / 60.0).expect("Failed to tick");
     let result2: f64 = runtime.lua().load("return tick()").eval().unwrap();
     assert!(result2 > result);
 }
@@ -301,7 +405,9 @@ fn test_time_function() {
     let runtime = test_runtime();
     let result: f64 = runtime.lua().load("return time()").eval().unwrap();
     assert!(result >= 0.0);
-    std::thread::sleep(std::time::Duration::from_millis(50));
+    // The script clock is frame-bound: it advances with simulated frames,
+    // never with host wall time.
+    runtime.tick(1.0 / 60.0).expect("Failed to tick");
     let result2: f64 = runtime.lua().load("return time()").eval().unwrap();
     assert!(result2 > result);
 }
@@ -520,6 +626,42 @@ fn test_cframe_from_orientation_matches_yxz_and_roundtrips() {
 }
 
 #[test]
+fn test_cframe_lerp_preserves_orthonormal_basis() {
+    let mut runtime = test_runtime();
+    runtime
+        .load_script(
+            r#"
+            local a = CFrame.Angles(0.2, -0.4, 0.1)
+            local b = CFrame.Angles(-0.3, 0.6, 0.5)
+            local cf = a:Lerp(b, 0.5)
+
+            _G.rmag = cf.RightVector.Magnitude
+            _G.umag = cf.UpVector.Magnitude
+            _G.lmag = cf.LookVector.Magnitude
+            _G.ru = math.abs(cf.RightVector:Dot(cf.UpVector))
+            _G.rl = math.abs(cf.RightVector:Dot(cf.LookVector))
+            _G.ul = math.abs(cf.UpVector:Dot(cf.LookVector))
+        "#,
+        )
+        .expect("Failed to load script");
+
+    let globals = runtime.lua().globals().get::<mlua::Table>("_G").unwrap();
+    let rmag: f64 = globals.get("rmag").unwrap();
+    let umag: f64 = globals.get("umag").unwrap();
+    let lmag: f64 = globals.get("lmag").unwrap();
+    let ru: f64 = globals.get("ru").unwrap();
+    let rl: f64 = globals.get("rl").unwrap();
+    let ul: f64 = globals.get("ul").unwrap();
+
+    assert!((rmag - 1.0).abs() < 1e-4);
+    assert!((umag - 1.0).abs() < 1e-4);
+    assert!((lmag - 1.0).abs() < 1e-4);
+    assert!(ru < 1e-4);
+    assert!(rl < 1e-4);
+    assert!(ul < 1e-4);
+}
+
+#[test]
 fn test_workspace_raycast_hits_rotated_thin_part() {
     let mut runtime = test_runtime();
     runtime
@@ -546,6 +688,101 @@ fn test_workspace_raycast_hits_rotated_thin_part() {
         .get("hitName")
         .unwrap();
     assert_eq!(hit_name.as_deref(), Some("ThinBar"));
+}
+
+#[test]
+fn test_workspace_terrain_fillblock_water_raycast_and_ignore_water() {
+    let mut runtime = test_runtime();
+    runtime
+        .load_script(
+            r#"
+            local terrain = Workspace.Terrain
+            terrain:FillBlock(CFrame.new(0, 0, 0), Vector3.new(20, 4, 20), Enum.Material.Water)
+
+            local hit = Workspace:Raycast(Vector3.new(0, 10, 0), Vector3.new(0, -30, 0))
+
+            local params = RaycastParams.new()
+            params.IgnoreWater = true
+            local ignored = Workspace:Raycast(Vector3.new(0, 10, 0), Vector3.new(0, -30, 0), params)
+
+            _G.terrainName = terrain.Name
+            _G.hitName = hit and hit.Instance and hit.Instance.Name or nil
+            _G.hitMaterial = hit and tostring(hit.Material) or nil
+            _G.hitY = hit and hit.Position.Y or nil
+            _G.ignored = ignored == nil
+        "#,
+        )
+        .expect("Failed to load script");
+
+    let globals = runtime.lua().globals().get::<mlua::Table>("_G").unwrap();
+    let terrain_name: String = globals.get("terrainName").unwrap();
+    let hit_name: Option<String> = globals.get("hitName").unwrap();
+    let hit_material: Option<String> = globals.get("hitMaterial").unwrap();
+    let hit_y: Option<f64> = globals.get("hitY").unwrap();
+    let ignored: bool = globals.get("ignored").unwrap();
+
+    assert_eq!(terrain_name, "Terrain");
+    assert_eq!(hit_name.as_deref(), Some("Terrain"));
+    assert_eq!(hit_material.as_deref(), Some("Enum.Material.Water"));
+    assert!(
+        (hit_y.unwrap() - 2.0).abs() < 1e-4,
+        "expected water top surface at y=2"
+    );
+    assert!(
+        ignored,
+        "RaycastParams.IgnoreWater should skip Terrain water"
+    );
+}
+
+#[test]
+fn test_terrain_read_write_voxel_channels_round_trip_liquid_occupancy() {
+    let mut runtime = test_runtime();
+    runtime
+        .load_script(
+            r#"
+            local terrain = Workspace.Terrain
+            local region = Region3.new(Vector3.new(0, 0, 0), Vector3.new(4, 4, 4))
+
+            local materials = {{{Enum.Material.Air}}}
+            local solid = {{{0}}}
+            local liquid = {{{0.75}}}
+
+            terrain:WriteVoxelChannels(region, 4, {
+                SolidMaterial = materials,
+                SolidOccupancy = solid,
+                LiquidOccupancy = liquid,
+            })
+
+            local channels = terrain:ReadVoxelChannels(region, 4, {
+                "SolidMaterial",
+                "SolidOccupancy",
+                "LiquidOccupancy",
+            })
+
+            _G.sizeX = channels.Size.X
+            _G.sizeY = channels.Size.Y
+            _G.sizeZ = channels.Size.Z
+            _G.material = tostring(channels.SolidMaterial[1][1][1])
+            _G.solid = channels.SolidOccupancy[1][1][1]
+            _G.liquid = channels.LiquidOccupancy[1][1][1]
+        "#,
+        )
+        .expect("Failed to load script");
+
+    let globals = runtime.lua().globals().get::<mlua::Table>("_G").unwrap();
+    let size_x: f64 = globals.get("sizeX").unwrap();
+    let size_y: f64 = globals.get("sizeY").unwrap();
+    let size_z: f64 = globals.get("sizeZ").unwrap();
+    let material: String = globals.get("material").unwrap();
+    let solid: f64 = globals.get("solid").unwrap();
+    let liquid: f64 = globals.get("liquid").unwrap();
+
+    assert_eq!(size_x, 1.0);
+    assert_eq!(size_y, 1.0);
+    assert_eq!(size_z, 1.0);
+    assert_eq!(material, "Enum.Material.Air");
+    assert!((solid - 0.0).abs() < 1e-6);
+    assert!((liquid - 0.75).abs() < 1e-6);
 }
 
 #[test]
@@ -668,6 +905,11 @@ fn test_workspace_raycast_collision_group_filters_parts() {
     runtime
         .load_script(
             r#"
+            local PhysicsService = game:GetService("PhysicsService")
+            PhysicsService:RegisterCollisionGroup("Blue")
+            PhysicsService:RegisterCollisionGroup("Red")
+            PhysicsService:CollisionGroupSetCollidable("Blue", "Red", false)
+
             local front = Instance.new("Part")
             front.Name = "FrontBlue"
             front.Size = Vector3.new(4, 4, 4)
@@ -953,7 +1195,12 @@ fn test_get_part_bounds_in_box_overlap_collision_group_filters_parts() {
     let mut runtime = test_runtime();
     runtime
             .load_script(
-                r#"
+            r#"
+            local PhysicsService = game:GetService("PhysicsService")
+            PhysicsService:RegisterCollisionGroup("Blue")
+            PhysicsService:RegisterCollisionGroup("Red")
+            PhysicsService:CollisionGroupSetCollidable("Blue", "Red", false)
+
             local blue = Instance.new("Part")
             blue.Name = "BluePart"
             blue.Anchored = true
@@ -1045,6 +1292,11 @@ fn test_get_parts_in_part_respects_overlap_params() {
     runtime
         .load_script(
             r#"
+            local PhysicsService = game:GetService("PhysicsService")
+            PhysicsService:RegisterCollisionGroup("Blue")
+            PhysicsService:RegisterCollisionGroup("Red")
+            PhysicsService:CollisionGroupSetCollidable("Blue", "Red", false)
+
             local query = Instance.new("Part")
             query.Name = "Query"
             query.Anchored = true
@@ -1089,6 +1341,59 @@ fn test_get_parts_in_part_respects_overlap_params() {
     let hit_blue: bool = globals.get("hitBlue").unwrap();
     assert!(hit_red);
     assert!(!hit_blue);
+}
+
+#[test]
+fn test_get_parts_in_part_uses_exact_ring_shape() {
+    let mut runtime = test_runtime();
+    runtime
+        .load_script(
+            r#"
+            local ring = Instance.new("Part")
+            ring.Name = "RingQuery"
+            ring.Anchored = true
+            ring.Shape = Enum.PartType.Ring
+            ring.Size = Vector3.new(4, 0.4, 4)
+            ring.Position = Vector3.new(0, 0.2, 0)
+            ring.Parent = Workspace
+
+            local centerBall = Instance.new("Part")
+            centerBall.Name = "CenterBall"
+            centerBall.Anchored = true
+            centerBall.Shape = Enum.PartType.Ball
+            centerBall.Size = Vector3.new(0.8, 0.8, 0.8)
+            centerBall.Position = Vector3.new(0, 0.4, 0)
+            centerBall.Parent = Workspace
+
+            local rimBlock = Instance.new("Part")
+            rimBlock.Name = "RimBlock"
+            rimBlock.Anchored = true
+            rimBlock.Size = Vector3.new(0.5, 0.5, 0.5)
+            rimBlock.Position = Vector3.new(1.8, 0.25, 0)
+            rimBlock.Parent = Workspace
+
+            local hits = Workspace:GetPartsInPart(ring)
+            _G.hitCenterBall = false
+            _G.hitRimBlock = false
+            for _, v in ipairs(hits) do
+                if v.Name == "CenterBall" then _G.hitCenterBall = true end
+                if v.Name == "RimBlock" then _G.hitRimBlock = true end
+            end
+        "#,
+        )
+        .expect("Failed to load script");
+
+    let globals = runtime.lua().globals().get::<mlua::Table>("_G").unwrap();
+    let hit_center_ball: bool = globals.get("hitCenterBall").unwrap();
+    let hit_rim_block: bool = globals.get("hitRimBlock").unwrap();
+    assert!(
+        !hit_center_ball,
+        "Objects resting fully inside the ring hole should not count as overlapping"
+    );
+    assert!(
+        hit_rim_block,
+        "Objects touching the ring body should count as overlapping"
+    );
 }
 
 #[test]
@@ -1217,11 +1522,10 @@ fn test_task_delay() {
         .unwrap();
     assert!(!delayed, "task.delay should not fire immediately");
 
-    // Wait for the delay to elapse
-    std::thread::sleep(std::time::Duration::from_millis(60));
-
-    // Tick to trigger resume
-    runtime.tick(1.0 / 60.0).expect("Failed to tick");
+    // 0.05 s of frame-bound time = 4 simulated frames.
+    for _ in 0..4 {
+        runtime.tick(1.0 / 60.0).expect("Failed to tick");
+    }
 
     let delayed: bool = runtime
         .lua()
@@ -1247,8 +1551,10 @@ fn test_task_delay_with_args() {
         )
         .expect("Failed to load script");
 
-    std::thread::sleep(std::time::Duration::from_millis(60));
-    runtime.tick(1.0 / 60.0).expect("Failed to tick");
+    // 0.05 s of frame-bound time = 4 simulated frames.
+    for _ in 0..4 {
+        runtime.tick(1.0 / 60.0).expect("Failed to tick");
+    }
 
     let val: i64 = runtime
         .lua()
@@ -1285,8 +1591,10 @@ fn test_task_wait() {
         .unwrap();
     assert!(!done, "task.wait should yield");
 
-    std::thread::sleep(std::time::Duration::from_millis(60));
-    runtime.tick(1.0 / 60.0).expect("Failed to tick");
+    // 0.05 s of frame-bound time = 4 simulated frames.
+    for _ in 0..4 {
+        runtime.tick(1.0 / 60.0).expect("Failed to tick");
+    }
 
     let done: bool = runtime
         .lua()
@@ -1296,6 +1604,234 @@ fn test_task_wait() {
         .get("waitDone")
         .unwrap();
     assert!(done, "task.wait should resume after delay");
+}
+
+#[test]
+fn test_vm_snapshot_resumes_scheduled_thread_without_rerunning_script() {
+    let mut runtime = test_runtime();
+    runtime
+        .load_script(
+            r#"
+            _G.started = (_G.started or 0) + 1
+            local captured = 41
+            task.delay(0.05, function()
+                _G.done = (_G.done or 0) + 1
+                _G.captured = captured + 1
+            end)
+        "#,
+        )
+        .expect("Failed to load script");
+
+    runtime.tick(0.01).expect("Failed to tick source runtime");
+    let snapshot = runtime
+        .capture_vm_snapshot()
+        .expect("Failed to capture Lua VM snapshot");
+
+    let mut restored = test_runtime();
+    restored
+        .restore_vm_snapshot(&snapshot)
+        .expect("Failed to restore Lua VM snapshot");
+
+    restored
+        .tick(0.02)
+        .expect("Failed to tick restored runtime");
+    let globals = restored.lua().globals().get::<mlua::Table>("_G").unwrap();
+    assert_eq!(globals.get::<Option<i64>>("done").unwrap(), None);
+    assert_eq!(globals.get::<i64>("started").unwrap(), 1);
+
+    restored
+        .tick(0.04)
+        .expect("Failed to tick restored runtime");
+    assert_eq!(globals.get::<i64>("done").unwrap(), 1);
+    assert_eq!(globals.get::<i64>("captured").unwrap(), 42);
+    assert_eq!(
+        globals.get::<i64>("started").unwrap(),
+        1,
+        "restoring VM state must restore globals without re-running the script body"
+    );
+}
+
+#[test]
+fn test_vm_snapshot_resumes_deferred_thread_without_rerunning_script() {
+    let mut runtime = test_runtime();
+    runtime
+        .load_script(
+            r#"
+            _G.started = (_G.started or 0) + 1
+            local captured = 11
+            task.defer(function()
+                _G.deferred = (_G.deferred or 0) + 1
+                _G.deferredCaptured = captured + 1
+            end)
+        "#,
+        )
+        .expect("Failed to load script");
+
+    let snapshot = runtime
+        .capture_vm_snapshot()
+        .expect("Failed to capture Lua VM snapshot");
+
+    let mut restored = test_runtime();
+    restored
+        .restore_vm_snapshot(&snapshot)
+        .expect("Failed to restore Lua VM snapshot");
+
+    let globals = restored.lua().globals().get::<mlua::Table>("_G").unwrap();
+    assert_eq!(globals.get::<Option<i64>>("deferred").unwrap(), None);
+    assert_eq!(globals.get::<i64>("started").unwrap(), 1);
+
+    restored
+        .tick(1.0 / 60.0)
+        .expect("Failed to tick restored runtime");
+    assert_eq!(globals.get::<i64>("deferred").unwrap(), 1);
+    assert_eq!(globals.get::<i64>("deferredCaptured").unwrap(), 12);
+    assert_eq!(
+        globals.get::<i64>("started").unwrap(),
+        1,
+        "restoring deferred VM state must not re-run the script body"
+    );
+}
+
+#[test]
+fn test_vm_snapshot_rejects_instance_missing_from_restored_host_graph() {
+    let mut runtime = test_runtime();
+    runtime
+        .load_script(
+            r#"
+            local part = Instance.new("Part")
+            task.delay(0.05, function()
+                _G.part = part
+            end)
+        "#,
+        )
+        .expect("Failed to load script");
+
+    let snapshot = runtime
+        .capture_vm_snapshot()
+        .expect("Instance userdata should be represented by the host userdata adapter");
+    let mut restored = test_runtime();
+    let err = restored
+        .restore_vm_snapshot(&snapshot)
+        .expect_err("runtime-only restore cannot resolve an unparented source Instance id");
+    assert!(
+        err.contains("unknown Instance id"),
+        "expected unknown Instance id restore error, got: {err}"
+    );
+}
+
+#[test]
+fn test_vm_snapshot_restores_captured_value_userdata() {
+    let mut runtime = test_runtime();
+    runtime
+        .load_script(
+            r#"
+            local position = Vector3.new(1, 2, 3)
+            task.delay(0.05, function()
+                _G.positionX = position.X
+                _G.positionY = position.Y
+                _G.positionZ = position.Z
+            end)
+        "#,
+        )
+        .expect("Failed to load script");
+
+    runtime.tick(0.01).expect("Failed to tick source runtime");
+    let snapshot = runtime
+        .capture_vm_snapshot()
+        .expect("Failed to capture Lua VM snapshot");
+
+    let mut restored = test_runtime();
+    restored
+        .restore_vm_snapshot(&snapshot)
+        .expect("Failed to restore Lua VM snapshot");
+
+    restored
+        .tick(0.06)
+        .expect("Failed to tick restored runtime");
+    let globals = restored.lua().globals().get::<mlua::Table>("_G").unwrap();
+    assert_eq!(globals.get::<f32>("positionX").unwrap(), 1.0);
+    assert_eq!(globals.get::<f32>("positionY").unwrap(), 2.0);
+    assert_eq!(globals.get::<f32>("positionZ").unwrap(), 3.0);
+}
+
+#[test]
+fn test_vm_snapshot_restores_signal_connections() {
+    let mut runtime = test_runtime();
+    runtime
+        .load_script(
+            r#"
+            local count = 5
+            RunService.Heartbeat:Connect(function(dt)
+                count += 1
+                _G.signalCount = count
+                _G.signalDt = dt
+            end)
+        "#,
+        )
+        .expect("Failed to load script");
+
+    runtime.tick(0.01).expect("Failed to tick source runtime");
+    let globals = runtime.lua().globals().get::<mlua::Table>("_G").unwrap();
+    assert_eq!(globals.get::<i64>("signalCount").unwrap(), 6);
+
+    let snapshot = runtime
+        .capture_vm_snapshot()
+        .expect("Failed to capture Lua VM snapshot");
+    let mut restored = test_runtime();
+    restored
+        .restore_vm_snapshot(&snapshot)
+        .expect("Failed to restore Lua VM snapshot");
+
+    restored
+        .tick(0.02)
+        .expect("Failed to tick restored runtime");
+    let globals = restored.lua().globals().get::<mlua::Table>("_G").unwrap();
+    assert_eq!(globals.get::<i64>("signalCount").unwrap(), 7);
+    assert!((globals.get::<f64>("signalDt").unwrap() - 0.02).abs() < 1e-6);
+}
+
+#[test]
+fn test_vm_snapshot_restores_signal_connection_userdata() {
+    let mut runtime = test_runtime();
+    runtime
+        .load_script(
+            r#"
+            local count = 0
+            local connection
+            connection = RunService.Heartbeat:Connect(function()
+                count += 1
+                _G.connectionCount = count
+            end)
+            task.delay(0.05, function()
+                connection:Disconnect()
+                _G.connectionStillConnected = connection.Connected
+            end)
+        "#,
+        )
+        .expect("Failed to load script");
+
+    runtime.tick(0.01).expect("Failed to tick source runtime");
+    let globals = runtime.lua().globals().get::<mlua::Table>("_G").unwrap();
+    assert_eq!(globals.get::<i64>("connectionCount").unwrap(), 1);
+
+    let snapshot = runtime
+        .capture_vm_snapshot()
+        .expect("Failed to capture Lua VM snapshot");
+    let mut restored = test_runtime();
+    restored
+        .restore_vm_snapshot(&snapshot)
+        .expect("Failed to restore Lua VM snapshot");
+
+    restored
+        .tick(0.06)
+        .expect("Failed to tick restored runtime");
+    let globals = restored.lua().globals().get::<mlua::Table>("_G").unwrap();
+    assert_eq!(
+        globals.get::<i64>("connectionCount").unwrap(),
+        1,
+        "captured RBXScriptConnection should disconnect before Heartbeat fires"
+    );
+    assert!(!globals.get::<bool>("connectionStillConnected").unwrap());
 }
 
 #[test]
@@ -1350,8 +1886,10 @@ fn test_task_cancel() {
         )
         .expect("Failed to load script");
 
-    std::thread::sleep(std::time::Duration::from_millis(60));
-    runtime.tick(1.0 / 60.0).expect("Failed to tick");
+    // 0.05 s of frame-bound time = 4 simulated frames.
+    for _ in 0..4 {
+        runtime.tick(1.0 / 60.0).expect("Failed to tick");
+    }
 
     let cancelled: bool = runtime
         .lua()
@@ -1390,8 +1928,10 @@ fn test_global_wait_delegates_to_task_wait() {
         .unwrap();
     assert!(!done, "global wait() should yield");
 
-    std::thread::sleep(std::time::Duration::from_millis(60));
-    runtime.tick(1.0 / 60.0).expect("Failed to tick");
+    // 0.05 s of frame-bound time = 4 simulated frames.
+    for _ in 0..4 {
+        runtime.tick(1.0 / 60.0).expect("Failed to tick");
+    }
 
     let done: bool = runtime
         .lua()
@@ -1529,9 +2069,11 @@ fn test_wait_for_child_returns_child() {
         )
         .expect("Failed to run script");
 
-    std::thread::sleep(std::time::Duration::from_millis(70));
-    runtime.tick(1.0 / 60.0).unwrap();
-    runtime.tick(1.0 / 60.0).unwrap();
+    // The 0.05 s task.delay fires after 4 simulated frames; give
+    // WaitForChild a few more frames to observe the new child.
+    for _ in 0..8 {
+        runtime.tick(1.0 / 60.0).unwrap();
+    }
 
     let globals = runtime.lua().globals().get::<mlua::Table>("_G").unwrap();
     let child_name: String = globals.get("childName").unwrap();
@@ -1614,6 +2156,42 @@ fn test_replicated_storage_and_remote_event_fire_all_clients() {
         serde_json::Value::String("world".to_string())
     );
     assert_eq!(queued[0].payload["n"], serde_json::Value::from(7));
+}
+
+#[test]
+fn test_server_storage_service_exists_and_is_distinct() {
+    let mut runtime = test_runtime();
+    runtime
+        .load_script(
+            r#"
+            local serverStorage = game:GetService("ServerStorage")
+            local replicatedStorage = game:GetService("ReplicatedStorage")
+
+            assert(serverStorage ~= nil, "ServerStorage should exist")
+            assert(replicatedStorage ~= nil, "ReplicatedStorage should exist")
+
+            local hidden = Instance.new("Folder")
+            hidden.Name = "HiddenState"
+            hidden.Parent = serverStorage
+
+            _G.serverStorageName = serverStorage.Name
+            _G.replicatedStorageName = replicatedStorage.Name
+            _G.hiddenParentName = hidden.Parent.Name
+            _G.sharedVisibleFromReplicated = replicatedStorage:FindFirstChild("HiddenState") ~= nil
+        "#,
+        )
+        .expect("Failed to run script");
+
+    let globals = runtime.lua().globals().get::<mlua::Table>("_G").unwrap();
+    let server_storage_name: String = globals.get("serverStorageName").unwrap();
+    let replicated_storage_name: String = globals.get("replicatedStorageName").unwrap();
+    let hidden_parent_name: String = globals.get("hiddenParentName").unwrap();
+    let shared_visible: bool = globals.get("sharedVisibleFromReplicated").unwrap();
+
+    assert_eq!(server_storage_name, "ServerStorage");
+    assert_eq!(replicated_storage_name, "ReplicatedStorage");
+    assert_eq!(hidden_parent_name, "ServerStorage");
+    assert!(!shared_visible);
 }
 
 #[test]
@@ -1934,7 +2512,54 @@ fn test_other_value_base_types() {
 }
 
 #[test]
-fn test_body_velocity_applies_to_parent_part_velocity() {
+fn test_cframe_value_value_and_changed_signal_parity() {
+    let mut runtime = test_runtime();
+    runtime
+        .load_script(
+            r#"
+            local cfv = Instance.new("CFrameValue")
+            _G.className = cfv.ClassName
+            _G.initialType = typeof(cfv.Value)
+            _G.changedType = ""
+            _G.changedX = -1
+
+            cfv.Changed:Connect(function(v)
+                _G.changedType = typeof(v)
+                _G.changedX = v.Position.X
+            end)
+
+            cfv.Value = CFrame.new(5, 6, 7) * CFrame.Angles(0, math.rad(90), 0)
+            _G.valueType = typeof(cfv.Value)
+            _G.valueX = cfv.Value.Position.X
+
+            local ok, _err = pcall(function()
+                cfv.Value = Vector3.new(1, 2, 3)
+            end)
+            _G.invalidOk = ok
+        "#,
+        )
+        .expect("Failed to run script");
+
+    let globals = runtime.lua().globals().get::<mlua::Table>("_G").unwrap();
+    let class_name: String = globals.get("className").unwrap();
+    let initial_type: String = globals.get("initialType").unwrap();
+    let changed_type: String = globals.get("changedType").unwrap();
+    let value_type: String = globals.get("valueType").unwrap();
+    let changed_x: f32 = globals.get("changedX").unwrap();
+    let value_x: f32 = globals.get("valueX").unwrap();
+    let invalid_ok: bool = globals.get("invalidOk").unwrap();
+
+    assert_eq!(class_name, "CFrameValue");
+    assert_eq!(initial_type, "CFrame");
+    assert_eq!(changed_type, "CFrame");
+    assert_eq!(value_type, "CFrame");
+    assert!((changed_x - 5.0).abs() < 1e-4);
+    assert!((value_x - 5.0).abs() < 1e-4);
+    assert!(!invalid_ok);
+}
+
+#[test]
+fn test_body_velocity_class_properties_and_defaults() {
     let mut runtime = test_runtime();
     runtime
         .load_script(
@@ -1943,18 +2568,35 @@ fn test_body_velocity_applies_to_parent_part_velocity() {
             p.Parent = Workspace
 
             local bv = Instance.new("BodyVelocity")
+            _G.defaultVelocityY = bv.Velocity.Y
+            _G.defaultMaxForceX = bv.MaxForce.X
+            _G.defaultP = bv.P
+
             bv.MaxForce = Vector3.new(100000, 0, 100000)
+            bv.P = 500
             bv.Velocity = Vector3.new(0, 0, -70)
             bv.Parent = p
 
-            _G.vz = p.Velocity.Z
+            _G.vz = bv.Velocity.Z
+            _G.maxForceX = bv.MaxForce.X
+            _G.p = bv.P
         "#,
         )
         .expect("Failed to run script");
 
     let globals = runtime.lua().globals().get::<mlua::Table>("_G").unwrap();
     let vz: f32 = globals.get("vz").unwrap();
+    let max_force_x: f32 = globals.get("maxForceX").unwrap();
+    let p: f32 = globals.get("p").unwrap();
+    let default_velocity_y: f32 = globals.get("defaultVelocityY").unwrap();
+    let default_max_force_x: f32 = globals.get("defaultMaxForceX").unwrap();
+    let default_p: f32 = globals.get("defaultP").unwrap();
     assert!((vz + 70.0).abs() < 0.001);
+    assert!((max_force_x - 100000.0).abs() < 0.001);
+    assert!((p - 500.0).abs() < 0.001);
+    assert!((default_velocity_y - 2.0).abs() < 0.001);
+    assert!((default_max_force_x - 4000.0).abs() < 0.001);
+    assert!((default_p - 1250.0).abs() < 0.001);
 }
 
 #[test]
@@ -2002,6 +2644,78 @@ fn test_basepart_assembly_velocity_properties_are_writable() {
     assert!((ang_x - 0.5).abs() < 1e-6);
     assert!((ang_y - 1.5).abs() < 1e-6);
     assert!((ang_z + 2.5).abs() < 1e-6);
+}
+
+#[test]
+fn test_basepart_assembly_velocity_write_updates_welded_assembly() {
+    let mut instance = crate::game::instance::GameInstance::new(Uuid::new_v4(), None);
+    instance.load_script(
+        r#"
+        Workspace.Gravity = 0
+
+        local root = Instance.new("Part")
+        root.Name = "AssemblyVelocityRoot"
+        root.Size = Vector3.new(2, 2, 2)
+        root.Position = Vector3.new(0, 10, 0)
+        root.CanCollide = false
+        root.Parent = Workspace
+
+        local child = Instance.new("Part")
+        child.Name = "AssemblyVelocityChild"
+        child.Size = Vector3.new(2, 2, 2)
+        child.Position = Vector3.new(3, 10, 0)
+        child.CanCollide = false
+        child.Parent = Workspace
+
+        local weld = Instance.new("WeldConstraint")
+        weld.Part0 = root
+        weld.Part1 = child
+        weld.Parent = Workspace
+
+        child.AssemblyLinearVelocity = Vector3.new(12, 0, 0)
+        child.AssemblyAngularVelocity = Vector3.new(0, 0, 0)
+
+        _G.root = root
+        _G.child = child
+        _G.immediateRootVelocity = root.AssemblyLinearVelocity.X
+    "#,
+    );
+
+    for _ in 0..5 {
+        instance.tick();
+    }
+
+    let runtime = instance.lua_runtime.as_ref().unwrap();
+    let (immediate_root_velocity, root_velocity, child_velocity, angular): (f64, f64, f64, f64) =
+        runtime
+            .lua()
+            .load(
+                r#"
+                return _G.immediateRootVelocity,
+                    _G.root.AssemblyLinearVelocity.X,
+                    _G.child.AssemblyLinearVelocity.X,
+                    _G.root.AssemblyAngularVelocity.Magnitude
+            "#,
+            )
+            .eval()
+            .unwrap();
+
+    assert!(
+        (immediate_root_velocity - 12.0).abs() < 0.001,
+        "assembly velocity setter should update connected members immediately"
+    );
+    assert!(
+        (root_velocity - 12.0).abs() < 0.05,
+        "expected root assembly velocity ~= 12, got {root_velocity}"
+    );
+    assert!(
+        (child_velocity - 12.0).abs() < 0.05,
+        "expected child assembly velocity ~= 12, got {child_velocity}"
+    );
+    assert!(
+        angular < 0.05,
+        "pure assembly velocity write should not spin assembly: {angular}"
+    );
 }
 
 #[test]
@@ -2142,6 +2856,86 @@ fn test_part_massless_property_and_get_mass_parity() {
 }
 
 #[test]
+fn test_fluid_forces_api_surface_parity() {
+    let mut runtime = test_runtime();
+    runtime
+        .load_script(
+            r#"
+            local p = Instance.new("Part")
+
+            _G.defaultEnable = p.EnableFluidForces
+            p.EnableFluidForces = true
+            _G.afterEnable = p.EnableFluidForces
+
+            _G.defaultWorkspace = tostring(Workspace.FluidForces)
+            _G.defaultWorkspaceName = Workspace.FluidForces.Name
+            _G.defaultWorkspaceValue = Workspace.FluidForces.Value
+            Workspace.FluidForces = Enum.FluidForces.Experimental
+            _G.afterWorkspace = tostring(Workspace.FluidForces)
+            _G.afterWorkspaceName = Workspace.FluidForces.Name
+            _G.experimentalValue = Enum.FluidForces.Experimental.Value
+        "#,
+        )
+        .expect("Failed to run script");
+
+    let globals = runtime.lua().globals().get::<mlua::Table>("_G").unwrap();
+    let default_enable: bool = globals.get("defaultEnable").unwrap();
+    let after_enable: bool = globals.get("afterEnable").unwrap();
+    let default_workspace: String = globals.get("defaultWorkspace").unwrap();
+    let default_workspace_name: String = globals.get("defaultWorkspaceName").unwrap();
+    let default_workspace_value: i64 = globals.get("defaultWorkspaceValue").unwrap();
+    let after_workspace: String = globals.get("afterWorkspace").unwrap();
+    let after_workspace_name: String = globals.get("afterWorkspaceName").unwrap();
+    let experimental_value: i64 = globals.get("experimentalValue").unwrap();
+
+    assert!(!default_enable);
+    assert!(after_enable);
+    assert_eq!(default_workspace, "Enum.FluidForces.Default");
+    assert_eq!(default_workspace_name, "Default");
+    assert_eq!(default_workspace_value, 0);
+    assert_eq!(after_workspace, "Enum.FluidForces.Experimental");
+    assert_eq!(after_workspace_name, "Experimental");
+    assert_eq!(experimental_value, 1);
+}
+
+#[test]
+fn test_specific_gravity_tracks_current_density() {
+    let mut runtime = test_runtime();
+    runtime
+        .load_script(
+            r#"
+            local p = Instance.new("Part")
+            p.Material = Enum.Material.Wood
+            _G.woodSpecificGravity = p.SpecificGravity
+
+            p.CustomPhysicalProperties = PhysicalProperties.new(1.25, 0.3, 0.5, 1, 1)
+            _G.customSpecificGravity = p.SpecificGravity
+
+            local ok = pcall(function()
+                p.SpecificGravity = 2
+            end)
+            _G.setOk = ok
+            _G.afterSetAttempt = p.SpecificGravity
+        "#,
+        )
+        .expect("Failed to run script");
+
+    let globals = runtime.lua().globals().get::<mlua::Table>("_G").unwrap();
+    let wood_specific_gravity: f32 = globals.get("woodSpecificGravity").unwrap();
+    let custom_specific_gravity: f32 = globals.get("customSpecificGravity").unwrap();
+    let set_ok: bool = globals.get("setOk").unwrap();
+    let after_set_attempt: f32 = globals.get("afterSetAttempt").unwrap();
+
+    assert!((wood_specific_gravity - 0.35).abs() < 1e-4);
+    assert!((custom_specific_gravity - 1.25).abs() < 1e-4);
+    assert!(
+        !set_ok,
+        "SpecificGravity is a read-only compatibility property"
+    );
+    assert!((after_set_attempt - 1.25).abs() < 1e-4);
+}
+
+#[test]
 fn test_brickcolor_and_surfacetype_parity_basics() {
     let mut runtime = test_runtime();
     runtime
@@ -2184,6 +2978,24 @@ fn test_enum_partshape_alias_maps_to_part_type() {
     let globals = runtime.lua().globals().get::<mlua::Table>("_G").unwrap();
     let shape_name: String = globals.get("shapeName").unwrap();
     assert_eq!(shape_name, "Ball");
+}
+
+#[test]
+fn test_enum_parttype_ring_exists() {
+    let mut runtime = test_runtime();
+    runtime
+        .load_script(
+            r#"
+            local p = Instance.new("Part")
+            p.Shape = Enum.PartType.Ring
+            _G.shapeName = p.Shape.Name
+        "#,
+        )
+        .expect("Failed to run script");
+
+    let globals = runtime.lua().globals().get::<mlua::Table>("_G").unwrap();
+    let shape_name: String = globals.get("shapeName").unwrap();
+    assert_eq!(shape_name, "Ring");
 }
 
 #[test]
@@ -2248,13 +3060,26 @@ fn test_constraint_shim_classes_can_be_created_and_configured() {
             align.RigidityEnabled = true
             align.Parent = p
 
+            local alignPos = Instance.new("AlignPosition")
+            alignPos.Attachment0 = a0
+            alignPos.Attachment1 = a1
+            alignPos.Position = Vector3.new(1, 2, 3)
+            alignPos.MaxForce = 1234
+            alignPos.Parent = p
+
             local bav = Instance.new("BodyAngularVelocity")
             bav.AngularVelocity = Vector3.new(0, 1, 0)
             bav.MaxTorque = Vector3.new(0, 999, 0)
             bav.Parent = p
 
+            a0.Position = Vector3.new(0.5, 1.0, 0.0)
+
             _G.responsive = align.Responsiveness
             _G.rigid = align.RigidityEnabled
+            _G.posX = alignPos.Position.X
+            _G.maxForce = alignPos.MaxForce
+            _G.worldAttachmentX = a0.WorldPosition.X
+            _G.worldAttachmentY = a0.WorldPosition.Y
             _G.maxTorqueY = bav.MaxTorque.Y
         "#,
         )
@@ -2263,9 +3088,17 @@ fn test_constraint_shim_classes_can_be_created_and_configured() {
     let globals = runtime.lua().globals().get::<mlua::Table>("_G").unwrap();
     let responsive: f64 = globals.get("responsive").unwrap();
     let rigid: bool = globals.get("rigid").unwrap();
+    let pos_x: f64 = globals.get("posX").unwrap();
+    let max_force: f64 = globals.get("maxForce").unwrap();
+    let world_attachment_x: f64 = globals.get("worldAttachmentX").unwrap();
+    let world_attachment_y: f64 = globals.get("worldAttachmentY").unwrap();
     let max_torque_y: f64 = globals.get("maxTorqueY").unwrap();
     assert!((responsive - 200.0).abs() < 1e-6);
     assert!(rigid);
+    assert!((pos_x - 1.0).abs() < 1e-6);
+    assert!((max_force - 1234.0).abs() < 1e-6);
+    assert!((world_attachment_x - 0.5).abs() < 1e-6);
+    assert!((world_attachment_y - 1.0).abs() < 1e-6);
     assert!((max_torque_y - 999.0).abs() < 1e-6);
 }
 
@@ -2339,7 +3172,97 @@ fn test_physics_service_api_exists() {
             PhysicsService:RegisterCollisionGroup("Players")
             PhysicsService:CollisionGroupSetCollidable("Players", "Players", true)
             PhysicsService:SetPartCollisionGroup(p, "Players")
-            _G.ok = PhysicsService ~= nil and p.CollisionGroup == "Players"
+            _G.ok = PhysicsService ~= nil
+                and p.CollisionGroup == "Players"
+                and PhysicsService:GetMaxCollisionGroups() == 32
+                and PhysicsService:IsCollisionGroupRegistered("Default") == true
+                and PhysicsService:IsCollisionGroupRegistered("Players") == true
+                and PhysicsService:CollisionGroupsAreCollidable("Players", "Players") == true
+                and PhysicsService:CollisionGroupsAreCollidable("Players", "MissingGroup") == true
+
+            local defaultOk = pcall(function()
+                PhysicsService:RegisterCollisionGroup("Default")
+            end)
+            local missingPairOk = pcall(function()
+                PhysicsService:CollisionGroupSetCollidable("Players", "MissingGroup", false)
+            end)
+            local missingPartOk = pcall(function()
+                PhysicsService:SetPartCollisionGroup(p, "MissingGroup")
+            end)
+
+            _G.ok = _G.ok
+                and defaultOk == false
+                and missingPairOk == false
+                and missingPartOk == false
+                and p.CollisionGroup == "Players"
+        "#,
+        )
+        .expect("Failed to run script");
+
+    let globals = runtime.lua().globals().get::<mlua::Table>("_G").unwrap();
+    let ok: bool = globals.get("ok").unwrap();
+    assert!(ok);
+}
+
+#[test]
+fn test_physics_service_collision_group_lifecycle_parity() {
+    let mut runtime = test_runtime();
+    runtime
+        .load_script(
+            r#"
+            local PhysicsService = game:GetService("PhysicsService")
+
+            PhysicsService:RegisterCollisionGroup("Players")
+            PhysicsService:RegisterCollisionGroup("Ground")
+            local playersId = PhysicsService:GetCollisionGroupId("Players")
+            local createdId = PhysicsService:CreateCollisionGroup("Triggers")
+
+            local p = Instance.new("Part")
+            p.CollisionGroup = "Players"
+
+            PhysicsService:CollisionGroupSetCollidable("Players", "Ground", false)
+            PhysicsService:RenameCollisionGroup("Players", "Characters")
+
+            local registered = PhysicsService:GetRegisteredCollisionGroups()
+            local legacy = PhysicsService:GetCollisionGroups()
+            local sawCharacters = false
+            local sawLegacyId = false
+            for _, group in ipairs(registered) do
+                if group.name == "Characters" and group.mask then
+                    sawCharacters = true
+                end
+            end
+            for _, group in ipairs(legacy) do
+                if group.name == "Triggers" and group.id == createdId and group.mask then
+                    sawLegacyId = true
+                end
+            end
+
+            local removeDefaultOk = pcall(function()
+                PhysicsService:UnregisterCollisionGroup("Default")
+            end)
+            local renameDefaultOk = pcall(function()
+                PhysicsService:RenameCollisionGroup("Default", "Base")
+            end)
+            local duplicateRenameOk = pcall(function()
+                PhysicsService:RenameCollisionGroup("Characters", "Ground")
+            end)
+
+            PhysicsService:RemoveCollisionGroup("Triggers")
+
+            _G.ok = playersId == PhysicsService:GetCollisionGroupId("Characters")
+                and PhysicsService:GetCollisionGroupName(playersId) == "Characters"
+                and PhysicsService:IsCollisionGroupRegistered("Players") == false
+                and PhysicsService:IsCollisionGroupRegistered("Characters") == true
+                and p.CollisionGroup == "Players"
+                and PhysicsService:IsCollisionGroupRegistered("Triggers") == false
+                and PhysicsService:CollisionGroupsAreCollidable("Characters", "Ground") == false
+                and PhysicsService:CollisionGroupsAreCollidable("Triggers", "Ground") == true
+                and sawCharacters == true
+                and sawLegacyId == true
+                and removeDefaultOk == false
+                and renameDefaultOk == false
+                and duplicateRenameOk == false
         "#,
         )
         .expect("Failed to run script");
@@ -2514,6 +3437,80 @@ fn test_ancestry_changed_signal_exists_and_fires() {
 }
 
 #[test]
+fn test_descendant_added_signal_exists_and_fires_for_nested_instances() {
+    let mut runtime = test_runtime();
+    runtime
+        .load_script(
+            r#"
+            local model = Instance.new("Model")
+            local child = Instance.new("Part")
+            local nested = Instance.new("Part")
+            nested.Name = "Nested"
+            child.Name = "Child"
+            model.Name = "Model"
+
+            _G.modelAdded = {}
+            _G.workspaceAdded = {}
+            model.DescendantAdded:Connect(function(inst)
+                table.insert(_G.modelAdded, inst.Name)
+            end)
+            Workspace.DescendantAdded:Connect(function(inst)
+                table.insert(_G.workspaceAdded, inst.Name)
+            end)
+
+            child.Parent = model
+            nested.Parent = child
+            model.Parent = Workspace
+        "#,
+        )
+        .expect("Failed to run script");
+
+    let globals = runtime.lua().globals().get::<mlua::Table>("_G").unwrap();
+    let model_added: mlua::Table = globals.get("modelAdded").unwrap();
+    let workspace_added: mlua::Table = globals.get("workspaceAdded").unwrap();
+
+    assert_eq!(model_added.get::<String>(1).unwrap(), "Child");
+    assert_eq!(model_added.get::<String>(2).unwrap(), "Nested");
+    assert_eq!(workspace_added.get::<String>(1).unwrap(), "Model");
+    assert_eq!(workspace_added.get::<String>(2).unwrap(), "Child");
+    assert_eq!(workspace_added.get::<String>(3).unwrap(), "Nested");
+}
+
+#[test]
+fn test_descendant_removing_signal_fires_before_parent_is_cleared() {
+    let mut runtime = test_runtime();
+    runtime
+        .load_script(
+            r#"
+            local model = Instance.new("Model")
+            model.Name = "Model"
+            model.Parent = Workspace
+
+            local child = Instance.new("Part")
+            child.Name = "Child"
+            child.Parent = model
+
+            _G.removingName = nil
+            _G.parentAtRemoving = nil
+            model.DescendantRemoving:Connect(function(inst)
+                _G.removingName = inst.Name
+                _G.parentAtRemoving = inst.Parent and inst.Parent.Name or "nil"
+            end)
+
+            child.Parent = nil
+        "#,
+        )
+        .expect("Failed to run script");
+
+    let globals = runtime.lua().globals().get::<mlua::Table>("_G").unwrap();
+    let removing_name: String = globals.get("removingName").unwrap();
+    let parent_at_removing: String = globals.get("parentAtRemoving").unwrap();
+
+    assert_eq!(removing_name, "Child");
+    assert_eq!(parent_at_removing, "Model");
+}
+
+#[test]
 fn test_legacy_ray_api_find_part_on_ray_with_ignore_list() {
     let mut runtime = test_runtime();
     runtime
@@ -2657,8 +3654,14 @@ fn test_sound_instance_new_and_properties() {
 
     let volume_high: f32 = globals.get("volumeHigh").unwrap();
     let volume_low: f32 = globals.get("volumeLow").unwrap();
-    assert!((volume_high - 1.0).abs() < 1e-6, "Volume should clamp to 1.0");
-    assert!((volume_low - 0.0).abs() < 1e-6, "Volume should clamp to 0.0");
+    assert!(
+        (volume_high - 1.0).abs() < 1e-6,
+        "Volume should clamp to 1.0"
+    );
+    assert!(
+        (volume_low - 0.0).abs() < 1e-6,
+        "Volume should clamp to 0.0"
+    );
 }
 
 #[test]
@@ -2879,4 +3882,175 @@ fn test_sound_ended_via_agent_input() {
         turn_released,
         "Ended signal should fire after AudioEnded agent input triggers MarkEnded"
     );
+}
+
+#[test]
+fn test_get_connected_parts_matches_weld_graph() {
+    let mut runtime = test_runtime();
+    runtime
+        .load_script(
+            r#"
+            local a = Instance.new("Part")
+            a.Name = "A"
+            a.Position = Vector3.new(0, 0, 0)
+            a.Parent = Workspace
+
+            local b = Instance.new("Part")
+            b.Name = "B"
+            b.Position = Vector3.new(2, 0, 0)
+            b.Parent = Workspace
+
+            local c = Instance.new("Part")
+            c.Name = "C"
+            c.Position = Vector3.new(4, 0, 0)
+            c.Parent = Workspace
+
+            local ab = Instance.new("WeldConstraint")
+            ab.Part0 = a
+            ab.Part1 = b
+            ab.Parent = Workspace
+
+            local bc = Instance.new("WeldConstraint")
+            bc.Part0 = b
+            bc.Part1 = c
+            bc.Parent = Workspace
+
+            local direct = a:GetConnectedParts()
+            local recursive = a:GetConnectedParts(true)
+
+            table.sort(direct, function(left, right)
+                return left.Name < right.Name
+            end)
+            table.sort(recursive, function(left, right)
+                return left.Name < right.Name
+            end)
+
+            _G.directCount = #direct
+            _G.directFirst = direct[1] and direct[1].Name or ""
+            _G.recursiveCount = #recursive
+            _G.recursiveFirst = recursive[1] and recursive[1].Name or ""
+            _G.recursiveSecond = recursive[2] and recursive[2].Name or ""
+        "#,
+        )
+        .expect("Failed to load script");
+
+    let globals = runtime.lua().globals().get::<mlua::Table>("_G").unwrap();
+    let direct_count: i64 = globals.get("directCount").unwrap();
+    let direct_first: String = globals.get("directFirst").unwrap();
+    let recursive_count: i64 = globals.get("recursiveCount").unwrap();
+    let recursive_first: String = globals.get("recursiveFirst").unwrap();
+    let recursive_second: String = globals.get("recursiveSecond").unwrap();
+
+    assert_eq!(direct_count, 1);
+    assert_eq!(direct_first, "B");
+    assert_eq!(recursive_count, 2);
+    assert_eq!(recursive_first, "B");
+    assert_eq!(recursive_second, "C");
+}
+
+#[test]
+fn test_model_pivot_to_moves_descendant_parts_using_primary_part() {
+    let mut runtime = test_runtime();
+    runtime
+        .load_script(
+            r#"
+            local model = Instance.new("Model")
+            model.Name = "Rig"
+            model.Parent = Workspace
+
+            local root = Instance.new("Part")
+            root.Name = "Root"
+            root.Position = Vector3.new(0, 1, 0)
+            root.Parent = model
+
+            local child = Instance.new("Part")
+            child.Name = "Child"
+            child.Position = Vector3.new(2, 1, 0)
+            child.Parent = model
+
+            model.PrimaryPart = root
+            model:PivotTo(CFrame.new(10, 5, 0))
+
+            _G.rootPos = root.Position
+            _G.childPos = child.Position
+            _G.pivotPos = model:GetPivot().Position
+
+            model:SetPrimaryPartCFrame(CFrame.new(20, 6, 1))
+            _G.rootPos2 = root.Position
+            _G.childPos2 = child.Position
+            _G.pivotPos2 = model:GetPivot().Position
+        "#,
+        )
+        .expect("Failed to load script");
+
+    let globals = runtime.lua().globals().get::<mlua::Table>("_G").unwrap();
+    let root_pos: crate::game::lua::types::Vector3 = globals.get("rootPos").unwrap();
+    let child_pos: crate::game::lua::types::Vector3 = globals.get("childPos").unwrap();
+    let pivot_pos: crate::game::lua::types::Vector3 = globals.get("pivotPos").unwrap();
+    let root_pos2: crate::game::lua::types::Vector3 = globals.get("rootPos2").unwrap();
+    let child_pos2: crate::game::lua::types::Vector3 = globals.get("childPos2").unwrap();
+    let pivot_pos2: crate::game::lua::types::Vector3 = globals.get("pivotPos2").unwrap();
+
+    assert!((root_pos.x - 10.0).abs() < 1e-6 && (root_pos.y - 5.0).abs() < 1e-6);
+    assert!((child_pos.x - 12.0).abs() < 1e-6 && (child_pos.y - 5.0).abs() < 1e-6);
+    assert!((pivot_pos.x - 10.0).abs() < 1e-6 && (pivot_pos.y - 5.0).abs() < 1e-6);
+
+    assert!((root_pos2.x - 20.0).abs() < 1e-6 && (root_pos2.y - 6.0).abs() < 1e-6);
+    assert!((child_pos2.x - 22.0).abs() < 1e-6 && (child_pos2.y - 6.0).abs() < 1e-6);
+    assert!((pivot_pos2.x - 20.0).abs() < 1e-6 && (pivot_pos2.y - 6.0).abs() < 1e-6);
+}
+
+#[test]
+fn test_model_repeated_pivot_to_preserves_rigid_part_basis() {
+    let mut runtime = test_runtime();
+    runtime
+        .load_script(
+            r#"
+            local model = Instance.new("Model")
+            model.Name = "Rig"
+            model.Parent = Workspace
+
+            local root = Instance.new("Part")
+            root.Name = "Root"
+            root.Size = Vector3.new(0.75, 0.75, 0.75)
+            root.CFrame = CFrame.new(0, 1, 0) * CFrame.fromOrientation(0.05, 0.2, -0.1)
+            root.Parent = model
+
+            local child = Instance.new("Part")
+            child.Name = "Child"
+            child.Size = Vector3.new(0.75, 0.75, 0.75)
+            child.CFrame = CFrame.new(0.8, 1.75, 0.0) * CFrame.fromOrientation(0.05, 0.2, -0.1)
+            child.Parent = model
+
+            model.PrimaryPart = root
+
+            for i = 1, 120 do
+                local rx, ry, rz = root.CFrame:ToOrientation()
+                model:PivotTo(CFrame.new(i * 0.05, 5, 0) * CFrame.fromOrientation(rx, ry, rz))
+            end
+
+            _G.rmag = root.CFrame.RightVector.Magnitude
+            _G.umag = root.CFrame.UpVector.Magnitude
+            _G.lmag = root.CFrame.LookVector.Magnitude
+            _G.ru = math.abs(root.CFrame.RightVector:Dot(root.CFrame.UpVector))
+            _G.rl = math.abs(root.CFrame.RightVector:Dot(root.CFrame.LookVector))
+            _G.ul = math.abs(root.CFrame.UpVector:Dot(root.CFrame.LookVector))
+        "#,
+        )
+        .expect("Failed to load script");
+
+    let globals = runtime.lua().globals().get::<mlua::Table>("_G").unwrap();
+    let rmag: f64 = globals.get("rmag").unwrap();
+    let umag: f64 = globals.get("umag").unwrap();
+    let lmag: f64 = globals.get("lmag").unwrap();
+    let ru: f64 = globals.get("ru").unwrap();
+    let rl: f64 = globals.get("rl").unwrap();
+    let ul: f64 = globals.get("ul").unwrap();
+
+    assert!((rmag - 1.0).abs() < 1e-3);
+    assert!((umag - 1.0).abs() < 1e-3);
+    assert!((lmag - 1.0).abs() < 1e-3);
+    assert!(ru < 1e-3);
+    assert!(rl < 1e-3);
+    assert!(ul < 1e-3);
 }

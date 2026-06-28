@@ -5,6 +5,7 @@ pub mod datetime;
 pub mod enums;
 pub mod physical_properties;
 pub mod ray;
+pub mod region3;
 pub mod udim;
 pub mod udim2;
 pub mod vector2;
@@ -13,9 +14,12 @@ pub mod vector3;
 pub use cframe::CFrame;
 pub use color3::Color3;
 pub use datetime::DateTime;
-pub use enums::{HumanoidStateType, Material, PartType, RaycastFilterType};
+pub use enums::{
+    ActuatorRelativeTo, FluidForces, HumanoidStateType, Material, PartType, RaycastFilterType,
+};
 pub use physical_properties::PhysicalProperties;
 pub use ray::Ray;
+pub use region3::Region3;
 pub use udim::UDim;
 pub use udim2::UDim2;
 pub use vector2::Vector2;
@@ -33,6 +37,7 @@ pub fn register_all_types(lua: &Lua) -> Result<()> {
     enums::register_enums(lua)?;
     physical_properties::register_physical_properties(lua)?;
     ray::register_ray(lua)?;
+    region3::register_region3(lua)?;
     udim::register_udim(lua)?;
     udim2::register_udim2(lua)?;
     Ok(())

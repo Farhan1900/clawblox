@@ -4,29 +4,165 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Clawblox Local Runtime</title>
-    <link rel="stylesheet" href="/ui/styles.css" />
+    <script>
+      if (new URLSearchParams(window.location.search).get('viewport') === '1') {
+        document.documentElement.classList.add('runtime-viewport-only')
+      }
+    </script>
+    <link rel="stylesheet" href="ui/styles.css" />
     <script type="importmap">
       {
         "imports": {
           "three": "https://esm.sh/three@0.160.0",
-          "three/": "https://esm.sh/three@0.160.0/"
+          "three/": "https://esm.sh/three@0.160.0/",
+          "lucide": "https://esm.sh/lucide@0.468.0"
         }
       }
     </script>
   </head>
   <body>
     <div id="app">
-      <header class="topbar">
-        <div>
-          <h1>Clawblox Local Runtime</h1>
-          <p id="status">Connecting...</p>
-        </div>
-        <div id="meta"></div>
-      </header>
-      <main class="stage-wrap">
+      <main class="stage-wrap" aria-label="Game viewport">
         <canvas id="stage" aria-label="Game renderer canvas"></canvas>
+        <div class="hud-layer" aria-hidden="false">
+          <button
+            id="chat-toggle"
+            class="hud-icon-button chat-toggle"
+            type="button"
+            aria-label="Open chat"
+            title="Chat"
+          >
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M5 6.5A3.5 3.5 0 0 1 8.5 3h7A3.5 3.5 0 0 1 19 6.5v5A3.5 3.5 0 0 1 15.5 15H10l-4.25 3.3a.5.5 0 0 1-.8-.4V15.3A3.5 3.5 0 0 1 5 11.5z"/>
+            </svg>
+          </button>
+
+          <button
+            id="agent-log-toggle"
+            class="hud-icon-button agent-log-toggle"
+            type="button"
+            aria-label="Open agent messages"
+            aria-expanded="false"
+            title="Agent messages"
+            hidden
+          >
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M4 5.5A1.5 1.5 0 0 1 5.5 4h13A1.5 1.5 0 0 1 20 5.5v13a1.5 1.5 0 0 1-1.5 1.5h-13A1.5 1.5 0 0 1 4 18.5zm3 2.5v2h10V8zm0 4v2h10v-2z"/>
+            </svg>
+          </button>
+
+          <section id="chat-panel" class="chat-panel" aria-label="Chat">
+            <div class="chat-panel__header">
+              <span>Chat</span>
+            </div>
+            <div id="chat-feed" class="chat-feed" role="log" aria-live="polite" aria-relevant="additions"></div>
+            <form id="chat-form" class="chat-input-row" autocomplete="off">
+              <input
+                id="chat-input"
+                class="chat-input"
+                type="text"
+                maxlength="500"
+                placeholder="Press / to chat"
+                aria-label="Chat message"
+              />
+              <button id="chat-send" class="chat-send" type="submit">Send</button>
+            </form>
+            <div id="chat-local-status" class="chat-local-status">Read-only until you send a message.</div>
+          </section>
+
+          <aside id="player-list" class="player-list" aria-label="Connected players">
+            <div class="player-list__header">
+              <span>Players</span>
+              <span id="player-list-count" class="player-list__count">0</span>
+            </div>
+            <div id="player-list-body" class="player-list__body"></div>
+          </aside>
+
+          <section id="agent-log-panel" class="agent-log-panel" aria-label="Agent messages" hidden>
+            <div class="agent-log-panel__header">
+              <div class="agent-log-tabs" role="tablist" aria-label="Replay side panel">
+                <button id="agent-log-tab-messages" class="agent-log-tab is-active" type="button" role="tab" aria-selected="true">Messages</button>
+                <button id="agent-log-tab-workspace" class="agent-log-tab" type="button" role="tab" aria-selected="false">Workspace</button>
+              </div>
+              <span id="agent-log-status" class="agent-log-panel__status">Syncing...</span>
+            </div>
+            <div id="agent-log-feed" class="agent-log-feed" role="log" aria-live="polite"></div>
+            <div id="workspace-feed" class="workspace-feed" hidden></div>
+          </section>
+
+          <section id="behavior-panel" class="behavior-panel" aria-label="Replay behaviors" hidden>
+            <div id="behavior-timeline-shell" class="behavior-timeline-shell">
+              <div id="behavior-ruler" class="behavior-ruler"></div>
+              <div id="behavior-tracks" class="behavior-tracks"></div>
+              <div id="behavior-global-playhead" class="behavior-global-playhead" aria-hidden="true"></div>
+            </div>
+            <div id="behavior-details" class="behavior-details"></div>
+          </section>
+
+          <section id="replay-panel" class="replay-panel" aria-label="Replay controls" hidden>
+            <button
+              id="replay-play-toggle"
+              class="replay-button replay-button--icon"
+              type="button"
+              aria-label="Pause replay"
+              title="Pause replay"
+            >
+              <svg id="replay-play-icon" viewBox="0 0 24 24" aria-hidden="true">
+                <path d="M7 5h3v14H7zm7 0h3v14h-3z"/>
+              </svg>
+            </button>
+            <div class="replay-timeline">
+              <input
+                id="replay-slider"
+                class="replay-slider"
+                type="range"
+                min="0"
+                max="1"
+                value="0"
+                step="1"
+                aria-label="Replay timeline"
+              />
+              <div class="replay-time-row">
+                <span id="replay-time-current">0:00</span>
+                <span id="replay-time-total">0:00</span>
+              </div>
+            </div>
+            <label class="replay-speed-label" for="replay-speed">Speed</label>
+            <select id="replay-speed" class="replay-speed" aria-label="Replay speed">
+              <option value="0.25">0.25x</option>
+              <option value="0.5">0.5x</option>
+              <option value="1" selected>1x</option>
+              <option value="1.5">1.5x</option>
+              <option value="2">2x</option>
+              <option value="4">4x</option>
+              <option value="8">8x</option>
+              <option value="16">16x</option>
+              <option value="32">32x</option>
+            </select>
+            <label class="replay-toggle" for="replay-skip-idle">
+              <input id="replay-skip-idle" type="checkbox" />
+              <span>Skip idle time</span>
+            </label>
+            <button
+              id="behavior-panel-toggle"
+              class="replay-button replay-button--label"
+              type="button"
+              aria-label="Show behaviors"
+              title="Show behaviors"
+              hidden
+            >
+              Behaviors
+            </button>
+          </section>
+
+          <div class="runtime-meta-sr" aria-hidden="true">
+            <p id="status">Connecting...</p>
+            <div id="meta"></div>
+          </div>
+
+        </div>
       </main>
     </div>
-    <script type="module" src="/ui/main.js"></script>
+    <script type="module" src="ui/main.js"></script>
   </body>
 </html>

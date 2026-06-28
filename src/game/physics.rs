@@ -1,18 +1,60 @@
-use nalgebra::UnitQuaternion;
-use rapier3d::control::{
-    CharacterAutostep, CharacterLength, EffectiveCharacterMovement, KinematicCharacterController,
-};
+use nalgebra::{Translation3, UnitQuaternion};
 use rapier3d::prelude::*;
 use std::collections::{HashMap, HashSet};
+use std::num::NonZeroUsize;
 
-use super::constants::humanoid as humanoid_consts;
 use super::constants::physics as consts;
-use super::lua::types::{PartType, PhysicalProperties};
+use super::lua::services::physics_service::CollisionGroupMask;
+use super::lua::types::{CFrame, PartType, PhysicalProperties, Vector3};
+use super::profiling::record_values;
+
+mod align_motors;
+mod assemblies;
+mod characters;
+mod parts;
+
+pub use align_motors::{AlignKind, AlignMotorSpec, AlignTarget};
+pub use characters::{CharacterControllerState, GroundKinematicSupport};
+use parts::build_collider_with_physical_properties;
+
+/// Large enough for normal worlds, small enough to keep Rapier broad-phase keys
+/// away from overflow and floating-point precision collapse.
+pub const PHYSICS_WORLD_ENVELOPE: f32 = 50_000.0;
+pub const PHYSICS_VELOCITY_ENVELOPE: f32 = 10_000.0;
+
+fn finite_vec3(values: [f32; 3]) -> bool {
+    values.iter().all(|v| v.is_finite())
+}
+
+fn within_abs_envelope(values: [f32; 3], envelope: f32) -> bool {
+    values.iter().all(|v| v.abs() <= envelope)
+}
+
+pub fn transform_within_physics_envelope(position: [f32; 3]) -> bool {
+    finite_vec3(position) && within_abs_envelope(position, PHYSICS_WORLD_ENVELOPE)
+}
+
+pub fn velocity_within_physics_envelope(velocity: [f32; 3]) -> bool {
+    finite_vec3(velocity) && within_abs_envelope(velocity, PHYSICS_VELOCITY_ENVELOPE)
+}
+
+fn rotation_matrix_is_finite(rotation: &[[f32; 3]; 3]) -> bool {
+    rotation.iter().flatten().all(|v| v.is_finite())
+}
 
 /// Converts a 3x3 rotation matrix to a UnitQuaternion (Shepperd's method).
 pub fn rotation_matrix_to_quaternion(m: &[[f32; 3]; 3]) -> UnitQuaternion<f32> {
+    // Roblox CFrames are rigid transforms: their 3x3 component is orientation,
+    // not scale or shear. Normalize here before handing the matrix to Rapier so
+    // a bad script/runtime edge cannot turn a part into a scaled physics frame.
+    let basis = CFrame {
+        position: Vector3::zero(),
+        rotation: *m,
+    }
+    .orthonormalized();
+    let r = basis.rotation;
     let rot = nalgebra::Matrix3::new(
-        m[0][0], m[0][1], m[0][2], m[1][0], m[1][1], m[1][2], m[2][0], m[2][1], m[2][2],
+        r[0][0], r[0][1], r[0][2], r[1][0], r[1][1], r[1][2], r[2][0], r[2][1], r[2][2],
     );
     let rotation = nalgebra::Rotation3::from_matrix_unchecked(rot);
     UnitQuaternion::from_rotation_matrix(&rotation)
@@ -29,34 +71,50 @@ pub fn quaternion_to_rotation_matrix(q: &UnitQuaternion<f32>) -> [[f32; 3]; 3] {
     ]
 }
 
-// Collision groups for Roblox-style physics behavior
-// Characters don't collide with each other, only with static geometry
-// Note: rapier3d uses InteractionGroups (not CollisionGroups like bevy_rapier)
-const GROUP_STATIC: Group = Group::GROUP_1; // Walls, floors, obstacles
-const GROUP_CHARACTER: Group = Group::GROUP_2; // Player characters
-
-/// State for a character controller (player or NPC)
-pub struct CharacterControllerState {
-    pub controller: KinematicCharacterController,
-    pub collider_handle: ColliderHandle,
-    pub body_handle: RigidBodyHandle,
-    pub vertical_velocity: f32,
-    pub target_position: Option<[f32; 3]>,
-    pub walk_speed: f32,
-    pub jump_power: f32,
-    pub jump_requested: bool,
-    pub jump_buffer_remaining: f32,
-    pub jump_cooldown_remaining: f32,
-    /// Seconds elapsed since current MoveTo target was set.
-    pub move_to_elapsed: f32,
-    pub grounded: bool,
-    pub horizontal_velocity: [f32; 2],
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PartInteractionState {
+    pub can_collide: bool,
+    pub can_touch: bool,
+    pub can_query: bool,
+    pub collision_group: CollisionGroupMask,
 }
 
-#[derive(Debug, Clone, Copy)]
-pub struct GroundKinematicSupport {
+impl PartInteractionState {
+    fn collider_enabled(self) -> bool {
+        self.can_collide || self.can_touch || self.can_query
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct PhysicsAssemblyPart {
+    pub lua_id: u64,
+    pub position: [f32; 3],
+    pub rotation: [[f32; 3]; 3],
+    pub size: [f32; 3],
+    pub anchored: bool,
+    pub can_collide: bool,
+    pub can_touch: bool,
+    pub can_query: bool,
+    pub collision_group: CollisionGroupMask,
+    pub shape: PartType,
+    pub physical_properties: Option<PhysicalProperties>,
     pub velocity: [f32; 3],
-    pub distance: f32,
+    pub angular_velocity: [f32; 3],
+    pub position_dirty: bool,
+    pub cframe_dirty: bool,
+    pub size_dirty: bool,
+    pub anchored_dirty: bool,
+    pub interaction_dirty: bool,
+    pub velocity_dirty: bool,
+    pub angular_velocity_dirty: bool,
+    pub shape_dirty: bool,
+    pub custom_physical_properties_dirty: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct PhysicsAssemblySpec {
+    pub root_id: u64,
+    pub parts: Vec<PhysicsAssemblyPart>,
 }
 
 /// Wrapper around Rapier3D physics world for game physics simulation.
@@ -83,60 +141,478 @@ pub struct PhysicsWorld {
     pub lua_to_shape: HashMap<u64, PartType>,
     /// Maps Lua instance ID to current collider physical properties.
     pub lua_to_physical_properties: HashMap<u64, Option<PhysicalProperties>>,
+    /// Maps Lua instance ID to current interaction flags used to configure colliders.
+    pub lua_to_interactions: HashMap<u64, PartInteractionState>,
     /// Character controllers for player movement
     pub character_controllers: HashMap<u64, CharacterControllerState>,
     /// Maps Rapier collider handle to Lua instance ID (for touch detection)
     pub collider_to_lua: HashMap<ColliderHandle, u64>,
+    /// Maps Lua part IDs to their collider handles. Multiple Lua parts can
+    /// share one rigid body when rigid welds form a Roblox-style assembly.
+    pub lua_to_collider: HashMap<u64, ColliderHandle>,
+    /// Body-local transform for each Lua part collider within its physical assembly.
+    pub lua_to_local_frame: HashMap<u64, Isometry<Real>>,
+    /// Maps a Rapier body to all Lua parts represented by its colliders.
+    pub body_to_luas: HashMap<RigidBodyHandle, Vec<u64>>,
+    /// Stable structural signatures for physical assemblies. Matching signatures
+    /// allow us to preserve Rapier bodies so sleeping and warmstarting work.
+    assembly_signatures: HashMap<u64, String>,
     /// Script-driven kinematic linear velocity sampled from per-tick target translation.
     pub kinematic_linear_velocities: HashMap<RigidBodyHandle, [f32; 3]>,
+    /// Bodies queued for removal after the current physics step finishes.
+    pending_body_removals: Vec<RigidBodyHandle>,
+    /// Fixed joints mirroring Lua weld constraints across distinct bodies.
+    /// Rebuilt from Lua every tick (see `clear_weld_joints`).
+    weld_joint_handles: Vec<ImpulseJointHandle>,
+    /// Persistent motor joints backing AlignPosition/AlignOrientation, keyed
+    /// by the constraint instance's Lua ID. Kept across ticks so the solver
+    /// retains warm-start impulses; recreated only when the involved bodies
+    /// change (e.g. an assembly rebuild).
+    align_joints: HashMap<u64, align_motors::AlignJointEntry>,
+    /// Lazily created fixed body that world-space align targets attach to.
+    world_anchor_body: Option<RigidBodyHandle>,
 }
 
-/// Builds a collider with the correct shape for a given PartType and size.
-fn build_collider(size: [f32; 3], shape: PartType, can_collide: bool) -> Collider {
-    let [sx, sy, sz] = size;
-    let shared_shape = match shape {
-        PartType::Block => SharedShape::cuboid(sx / 2.0, sy / 2.0, sz / 2.0),
-        PartType::Ball => SharedShape::ball(sx / 2.0),
-        PartType::Cylinder => SharedShape::cylinder(sy / 2.0, sx / 2.0),
-        PartType::Wedge => {
-            // Triangular prism: flat bottom, slope rises from +X to -X
-            // 6 vertices matching Roblox wedge convention
-            let hx = sx / 2.0;
-            let hy = sy / 2.0;
-            let hz = sz / 2.0;
-            let points = [
-                point![-hx, -hy, -hz], // bottom-left-back
-                point![hx, -hy, -hz],  // bottom-right-back
-                point![-hx, -hy, hz],  // bottom-left-front
-                point![hx, -hy, hz],   // bottom-right-front
-                point![-hx, hy, -hz],  // top-left-back
-                point![-hx, hy, hz],   // top-left-front
-            ];
-            SharedShape::convex_hull(&points)
-                .expect("Wedge convex hull should always succeed with 6 valid vertices")
-        }
-    };
-    ColliderBuilder::new(shared_shape)
-        .sensor(!can_collide)
-        .collision_groups(InteractionGroups::new(GROUP_STATIC, Group::ALL))
-        .build()
-}
-
-fn build_collider_with_physical_properties(
-    size: [f32; 3],
-    shape: PartType,
-    can_collide: bool,
-    physical_properties: Option<PhysicalProperties>,
-) -> Collider {
-    let props = physical_properties.unwrap_or(PhysicalProperties::new(0.7, 0.3, 0.5, 1.0, 1.0));
-    let mut collider = build_collider(size, shape, can_collide);
-    collider.set_friction(props.friction.max(0.0));
-    collider.set_restitution(props.elasticity.max(0.0));
-    collider.set_density(props.density.max(0.0));
-    collider
+fn part_isometry(position: [f32; 3], rotation: &[[f32; 3]; 3]) -> Isometry<Real> {
+    Isometry::from_parts(
+        Translation3::new(position[0], position[1], position[2]),
+        rotation_matrix_to_quaternion(rotation),
+    )
 }
 
 impl PhysicsWorld {
+    fn record_profile_metrics(&self) {
+        let mut dynamic_bodies = 0usize;
+        let mut sleeping_dynamic_bodies = 0usize;
+        let mut kinematic_bodies = 0usize;
+        let mut fixed_bodies = 0usize;
+        let mut body_index = HashMap::new();
+        let mut dynamic_handles = Vec::new();
+        let mut active_dynamic_handles = HashSet::new();
+
+        for (handle, body) in self.rigid_body_set.iter() {
+            if body.is_dynamic() {
+                body_index.insert(handle, dynamic_bodies);
+                dynamic_handles.push(handle);
+                dynamic_bodies += 1;
+                if body.is_sleeping() {
+                    sleeping_dynamic_bodies += 1;
+                }
+            } else if body.is_kinematic() {
+                kinematic_bodies += 1;
+            } else {
+                fixed_bodies += 1;
+            }
+        }
+        active_dynamic_handles.extend(self.island_manager.active_dynamic_bodies().iter().copied());
+
+        let mut parent: Vec<usize> = (0..dynamic_bodies).collect();
+        let mut size = vec![1usize; dynamic_bodies];
+
+        fn find(parent: &mut [usize], mut index: usize) -> usize {
+            while parent[index] != index {
+                parent[index] = parent[parent[index]];
+                index = parent[index];
+            }
+            index
+        }
+
+        fn union(parent: &mut [usize], size: &mut [usize], a: usize, b: usize) {
+            let mut root_a = find(parent, a);
+            let mut root_b = find(parent, b);
+            if root_a == root_b {
+                return;
+            }
+            if size[root_a] < size[root_b] {
+                std::mem::swap(&mut root_a, &mut root_b);
+            }
+            parent[root_b] = root_a;
+            size[root_a] += size[root_b];
+        }
+
+        let mut contact_pairs = 0usize;
+        let mut active_contact_pairs = 0usize;
+        let mut active_contact_points = 0usize;
+        let mut active_dynamic_dynamic_pairs = 0usize;
+        let mut active_dynamic_static_pairs = 0usize;
+
+        for pair in self.narrow_phase.contact_pairs() {
+            contact_pairs += 1;
+            if !pair.has_any_active_contact {
+                continue;
+            }
+            active_contact_pairs += 1;
+            active_contact_points += pair
+                .manifolds
+                .iter()
+                .map(|manifold| manifold.data.num_active_contacts())
+                .sum::<usize>();
+
+            let body1 = self
+                .collider_set
+                .get(pair.collider1)
+                .and_then(|collider| collider.parent());
+            let body2 = self
+                .collider_set
+                .get(pair.collider2)
+                .and_then(|collider| collider.parent());
+            let Some(body1) = body1 else {
+                continue;
+            };
+            let Some(body2) = body2 else {
+                continue;
+            };
+
+            match (
+                body_index.get(&body1).copied(),
+                body_index.get(&body2).copied(),
+            ) {
+                (Some(a), Some(b)) => {
+                    active_dynamic_dynamic_pairs += 1;
+                    union(&mut parent, &mut size, a, b);
+                }
+                (Some(_), None) | (None, Some(_)) => {
+                    active_dynamic_static_pairs += 1;
+                }
+                (None, None) => {}
+            }
+        }
+
+        let mut component_sizes = HashMap::<usize, usize>::new();
+        for index in 0..dynamic_bodies {
+            let root = find(&mut parent, index);
+            *component_sizes.entry(root).or_default() += 1;
+        }
+        let dynamic_components = component_sizes.len();
+        let largest_dynamic_component = component_sizes.values().copied().max().unwrap_or(0);
+        let awake_dynamic_bodies = dynamic_bodies.saturating_sub(sleeping_dynamic_bodies);
+        let largest_component_root = component_sizes
+            .iter()
+            .max_by_key(|(_, component_size)| **component_size)
+            .map(|(root, _)| *root);
+        let counters = &self.physics_pipeline.counters;
+        let length_unit = self.integration_parameters.length_unit;
+        let mut above_linear_sleep_threshold = 0usize;
+        let mut above_angular_sleep_threshold = 0usize;
+        let mut above_any_sleep_threshold = 0usize;
+        let mut below_sleep_threshold = 0usize;
+        let mut sleep_timer_ready = 0usize;
+        let mut max_linear_speed = 0.0f32;
+        let mut max_angular_speed = 0.0f32;
+
+        #[derive(Clone, Copy, Default)]
+        struct ComponentProfile {
+            bodies: usize,
+            awake: usize,
+            active: usize,
+            above_any_sleep_threshold: usize,
+            sleep_timer_ready: usize,
+        }
+
+        let mut component_profiles = HashMap::<usize, ComponentProfile>::new();
+        for (index, handle) in dynamic_handles.iter().copied().enumerate() {
+            let root = find(&mut parent, index);
+            let Some(body) = self.rigid_body_set.get(handle) else {
+                continue;
+            };
+            let lin_speed = body.linvel().norm();
+            let ang_speed = body.angvel().norm();
+            max_linear_speed = max_linear_speed.max(lin_speed);
+            max_angular_speed = max_angular_speed.max(ang_speed);
+
+            let activation = body.activation();
+            let linear_threshold = activation.normalized_linear_threshold * length_unit;
+            let above_linear = lin_speed * lin_speed >= linear_threshold * linear_threshold.abs();
+            let above_angular = ang_speed * ang_speed
+                >= activation.angular_threshold * activation.angular_threshold.abs();
+            let above_any = above_linear || above_angular;
+            if above_linear {
+                above_linear_sleep_threshold += 1;
+            }
+            if above_angular {
+                above_angular_sleep_threshold += 1;
+            }
+            if above_any {
+                above_any_sleep_threshold += 1;
+            } else {
+                below_sleep_threshold += 1;
+            }
+            if activation.time_since_can_sleep >= activation.time_until_sleep {
+                sleep_timer_ready += 1;
+            }
+
+            let profile = component_profiles.entry(root).or_default();
+            profile.bodies += 1;
+            if !body.is_sleeping() {
+                profile.awake += 1;
+            }
+            if active_dynamic_handles.contains(&handle) {
+                profile.active += 1;
+            }
+            if above_any {
+                profile.above_any_sleep_threshold += 1;
+            }
+            if activation.time_since_can_sleep >= activation.time_until_sleep {
+                profile.sleep_timer_ready += 1;
+            }
+        }
+
+        let largest_component_profile = component_profiles
+            .values()
+            .max_by_key(|profile| profile.bodies)
+            .copied()
+            .unwrap_or_default();
+        let mut active_kinematic_bodies = 0usize;
+        let mut moving_active_kinematic_bodies = 0usize;
+        let mut moving_kinematic_largest_component_contacts = 0usize;
+        let mut moving_character_largest_component_contacts = 0usize;
+        let mut moving_non_character_largest_component_contacts = 0usize;
+        let mut max_moving_kinematic_linear_speed = 0.0f32;
+        for handle in self
+            .island_manager
+            .active_kinematic_bodies()
+            .iter()
+            .copied()
+        {
+            let Some(body) = self.rigid_body_set.get(handle) else {
+                continue;
+            };
+            active_kinematic_bodies += 1;
+            let moving = body.linvel().norm_squared() > f32::EPSILON
+                || body.angvel().norm_squared() > f32::EPSILON;
+            if moving {
+                moving_active_kinematic_bodies += 1;
+                max_moving_kinematic_linear_speed =
+                    max_moving_kinematic_linear_speed.max(body.linvel().norm());
+            }
+            if !moving {
+                continue;
+            }
+            let is_character = self
+                .character_controllers
+                .values()
+                .any(|state| state.body_handle == handle);
+            for collider_handle in body.colliders() {
+                for pair in self.narrow_phase.contact_pairs_with(*collider_handle) {
+                    if !pair.has_any_active_contact {
+                        continue;
+                    }
+                    let other_collider = if pair.collider1 == *collider_handle {
+                        pair.collider2
+                    } else {
+                        pair.collider1
+                    };
+                    let Some(other_body) = self
+                        .collider_set
+                        .get(other_collider)
+                        .and_then(|collider| collider.parent())
+                    else {
+                        continue;
+                    };
+                    let Some(other_index) = body_index.get(&other_body).copied() else {
+                        continue;
+                    };
+                    let other_root = find(&mut parent, other_index);
+                    if Some(other_root) == largest_component_root {
+                        moving_kinematic_largest_component_contacts += 1;
+                        if is_character {
+                            moving_character_largest_component_contacts += 1;
+                        } else {
+                            moving_non_character_largest_component_contacts += 1;
+                        }
+                    }
+                }
+            }
+        }
+
+        record_values(
+            "physics.world",
+            &[
+                ("rigid_bodies", self.rigid_body_set.len() as f64),
+                ("colliders", self.collider_set.len() as f64),
+                ("dynamic_bodies", dynamic_bodies as f64),
+                ("awake_dynamic_bodies", awake_dynamic_bodies as f64),
+                ("sleeping_dynamic_bodies", sleeping_dynamic_bodies as f64),
+                (
+                    "active_dynamic_bodies",
+                    self.island_manager.active_dynamic_bodies().len() as f64,
+                ),
+                ("kinematic_bodies", kinematic_bodies as f64),
+                ("fixed_bodies", fixed_bodies as f64),
+                ("contact_pairs", contact_pairs as f64),
+                ("active_contact_pairs", active_contact_pairs as f64),
+                ("active_contact_points", active_contact_points as f64),
+                (
+                    "active_dynamic_dynamic_pairs",
+                    active_dynamic_dynamic_pairs as f64,
+                ),
+                (
+                    "active_dynamic_static_pairs",
+                    active_dynamic_static_pairs as f64,
+                ),
+                ("dynamic_contact_components", dynamic_components as f64),
+                (
+                    "largest_dynamic_contact_component",
+                    largest_dynamic_component as f64,
+                ),
+                (
+                    "largest_component_awake_bodies",
+                    largest_component_profile.awake as f64,
+                ),
+                (
+                    "largest_component_active_bodies",
+                    largest_component_profile.active as f64,
+                ),
+                (
+                    "largest_component_above_sleep_threshold",
+                    largest_component_profile.above_any_sleep_threshold as f64,
+                ),
+                (
+                    "largest_component_sleep_timer_ready",
+                    largest_component_profile.sleep_timer_ready as f64,
+                ),
+                ("active_kinematic_bodies", active_kinematic_bodies as f64),
+                (
+                    "moving_active_kinematic_bodies",
+                    moving_active_kinematic_bodies as f64,
+                ),
+                (
+                    "moving_kinematic_largest_component_contacts",
+                    moving_kinematic_largest_component_contacts as f64,
+                ),
+                (
+                    "moving_character_largest_component_contacts",
+                    moving_character_largest_component_contacts as f64,
+                ),
+                (
+                    "moving_non_character_largest_component_contacts",
+                    moving_non_character_largest_component_contacts as f64,
+                ),
+                (
+                    "max_moving_kinematic_linear_speed",
+                    max_moving_kinematic_linear_speed as f64,
+                ),
+                (
+                    "above_linear_sleep_threshold",
+                    above_linear_sleep_threshold as f64,
+                ),
+                (
+                    "above_angular_sleep_threshold",
+                    above_angular_sleep_threshold as f64,
+                ),
+                (
+                    "above_any_sleep_threshold",
+                    above_any_sleep_threshold as f64,
+                ),
+                ("below_sleep_threshold", below_sleep_threshold as f64),
+                ("sleep_timer_ready", sleep_timer_ready as f64),
+                ("max_linear_speed", max_linear_speed as f64),
+                ("max_angular_speed", max_angular_speed as f64),
+                ("rapier_step_ms", counters.step_time_ms()),
+                (
+                    "rapier_collision_detection_ms",
+                    counters.collision_detection_time_ms(),
+                ),
+                ("rapier_broad_phase_ms", counters.broad_phase_time_ms()),
+                ("rapier_narrow_phase_ms", counters.narrow_phase_time_ms()),
+                (
+                    "rapier_island_construction_ms",
+                    counters.island_construction_time_ms(),
+                ),
+                ("rapier_update_ms", counters.update_time_ms()),
+                ("rapier_solver_ms", counters.solver_time_ms()),
+                ("rapier_velocity_assembly_ms", counters.assembly_time_ms()),
+                (
+                    "rapier_velocity_resolution_ms",
+                    counters.velocity_resolution_time_ms(),
+                ),
+                (
+                    "rapier_velocity_update_ms",
+                    counters.velocity_update_time_ms(),
+                ),
+            ],
+        );
+    }
+
+    fn body_is_within_physics_envelope(&self, handle: RigidBodyHandle) -> bool {
+        let Some(body) = self.rigid_body_set.get(handle) else {
+            return true;
+        };
+        let pos = body.translation();
+        let linvel = body.linvel();
+        let angvel = body.angvel();
+        let position = [pos.x, pos.y, pos.z];
+        let linear_velocity = [linvel.x, linvel.y, linvel.z];
+        let angular_velocity = [angvel.x, angvel.y, angvel.z];
+
+        transform_within_physics_envelope(position)
+            && velocity_within_physics_envelope(linear_velocity)
+            && velocity_within_physics_envelope(angular_velocity)
+    }
+
+    fn remove_body_mappings(&mut self, body_handle: RigidBodyHandle) {
+        let root_id = self.body_to_lua.remove(&body_handle);
+        if let Some(root_id) = root_id {
+            self.assembly_signatures.remove(&root_id);
+        }
+
+        let lua_ids = self
+            .body_to_luas
+            .remove(&body_handle)
+            .or_else(|| root_id.map(|id| vec![id]))
+            .unwrap_or_default();
+        for lua_id in lua_ids {
+            self.lua_to_body.remove(&lua_id);
+            self.lua_to_collider.remove(&lua_id);
+            self.lua_to_local_frame.remove(&lua_id);
+            self.lua_to_shape.remove(&lua_id);
+            self.lua_to_physical_properties.remove(&lua_id);
+            self.lua_to_interactions.remove(&lua_id);
+        }
+
+        self.kinematic_linear_velocities.remove(&body_handle);
+        if let Some(body) = self.rigid_body_set.get(body_handle) {
+            for &collider_handle in body.colliders() {
+                self.collider_to_lua.remove(&collider_handle);
+            }
+        }
+    }
+
+    /// Removes bodies whose transforms or velocities have left the finite range
+    /// Rapier can robustly simulate. Roblox similarly prevents fallen/far-origin
+    /// parts from living forever; this keeps one bad dynamic body from halting
+    /// the whole server.
+    pub fn purge_invalid_bodies(&mut self) -> usize {
+        let handles: Vec<_> = self
+            .rigid_body_set
+            .iter()
+            .filter_map(|(handle, _)| {
+                if self.body_is_within_physics_envelope(handle) {
+                    None
+                } else {
+                    Some(handle)
+                }
+            })
+            .collect();
+
+        let removed = handles.len();
+        for handle in handles {
+            self.remove_body_mappings(handle);
+            self.queue_body_removal(handle);
+        }
+        removed
+    }
+
+    fn queryable_collider_predicate(&self) -> impl Fn(ColliderHandle, &Collider) -> bool + '_ {
+        move |handle, _collider| {
+            self.collider_to_lua
+                .get(&handle)
+                .and_then(|lua_id| self.lua_to_interactions.get(lua_id))
+                .map(|state| state.can_query)
+                .unwrap_or(true)
+        }
+    }
+
     /// Creates a new physics world with default gravity
     pub fn new() -> Self {
         Self {
@@ -156,9 +632,18 @@ impl PhysicsWorld {
             body_to_lua: HashMap::new(),
             lua_to_shape: HashMap::new(),
             lua_to_physical_properties: HashMap::new(),
+            lua_to_interactions: HashMap::new(),
             character_controllers: HashMap::new(),
             collider_to_lua: HashMap::new(),
+            lua_to_collider: HashMap::new(),
+            lua_to_local_frame: HashMap::new(),
+            body_to_luas: HashMap::new(),
+            assembly_signatures: HashMap::new(),
             kinematic_linear_velocities: HashMap::new(),
+            weld_joint_handles: Vec::new(),
+            align_joints: HashMap::new(),
+            world_anchor_body: None,
+            pending_body_removals: Vec::new(),
         }
     }
 
@@ -167,8 +652,19 @@ impl PhysicsWorld {
         self.gravity = vector![0.0, -gravity_y, 0.0];
     }
 
+    /// Sets the number of outer contact-solver iterations per physics step.
+    ///
+    /// This is a global Rapier integration parameter. Lower values reduce CPU
+    /// on large awake islands; higher values improve contact convergence.
+    pub fn set_solver_iterations(&mut self, iterations: usize) {
+        let iterations = iterations.max(1);
+        self.integration_parameters.num_solver_iterations =
+            NonZeroUsize::new(iterations).expect("iterations is clamped to at least one");
+    }
+
     /// Steps the physics simulation forward by dt seconds
     pub fn step(&mut self, dt: f32) {
+        self.purge_invalid_bodies();
         self.integration_parameters.dt = dt;
         self.physics_pipeline.step(
             &self.gravity,
@@ -185,6 +681,33 @@ impl PhysicsWorld {
             &(),
             &(),
         );
+        self.purge_invalid_bodies();
+        self.record_profile_metrics();
+    }
+
+    /// Removes the weld-mirror joints. Weld constraints are rebuilt from Lua
+    /// every tick; align motor joints are persistent and managed separately.
+    pub fn clear_weld_joints(&mut self) {
+        for handle in std::mem::take(&mut self.weld_joint_handles) {
+            self.impulse_joint_set.remove(handle, true);
+        }
+    }
+
+    /// Inserts a fixed joint between two rigid bodies using body-local joint frames.
+    pub fn insert_fixed_joint(
+        &mut self,
+        body1: RigidBodyHandle,
+        body2: RigidBodyHandle,
+        local_frame1: Isometry<Real>,
+        local_frame2: Isometry<Real>,
+    ) -> ImpulseJointHandle {
+        let joint = FixedJointBuilder::new()
+            .contacts_enabled(false)
+            .local_frame1(local_frame1)
+            .local_frame2(local_frame2);
+        let handle = self.impulse_joint_set.insert(body1, body2, joint, true);
+        self.weld_joint_handles.push(handle);
+        handle
     }
 
     /// Adds a part to the physics world
@@ -198,6 +721,8 @@ impl PhysicsWorld {
         size: [f32; 3],
         anchored: bool,
         can_collide: bool,
+        can_touch: bool,
+        can_query: bool,
         shape: PartType,
         physical_properties: Option<PhysicalProperties>,
     ) -> RigidBodyHandle {
@@ -215,11 +740,18 @@ impl PhysicsWorld {
 
         let handle = self.rigid_body_set.insert(body);
 
+        let interaction_state = PartInteractionState {
+            can_collide,
+            can_touch,
+            can_query,
+            collision_group: CollisionGroupMask::default(),
+        };
+
         // Create collider with correct shape
         let collider = build_collider_with_physical_properties(
             size,
             shape,
-            can_collide,
+            interaction_state,
             physical_properties,
         );
 
@@ -230,9 +762,13 @@ impl PhysicsWorld {
         // Store mappings
         self.lua_to_body.insert(lua_id, handle);
         self.body_to_lua.insert(handle, lua_id);
+        self.body_to_luas.insert(handle, vec![lua_id]);
+        self.lua_to_collider.insert(lua_id, collider_handle);
+        self.lua_to_local_frame.insert(lua_id, Isometry::identity());
         self.lua_to_shape.insert(lua_id, shape);
         self.lua_to_physical_properties
             .insert(lua_id, physical_properties);
+        self.lua_to_interactions.insert(lua_id, interaction_state);
         self.collider_to_lua.insert(collider_handle, lua_id);
 
         handle
@@ -240,18 +776,66 @@ impl PhysicsWorld {
 
     /// Removes a part from the physics world
     pub fn remove_part(&mut self, lua_id: u64) -> bool {
-        if let Some(handle) = self.lua_to_body.remove(&lua_id) {
-            self.body_to_lua.remove(&handle);
+        // If this lua_id is a character HRP, clean up the character controller
+        // to avoid stale handles that would panic in rapier during step/move.
+        if let Some(state) = self.character_controllers.remove(&lua_id) {
+            self.lua_to_body.remove(&lua_id);
+            self.body_to_lua.remove(&state.body_handle);
+            self.body_to_luas.remove(&state.body_handle);
+            self.lua_to_collider.remove(&lua_id);
+            self.lua_to_local_frame.remove(&lua_id);
+            self.collider_to_lua.remove(&state.collider_handle);
+            self.kinematic_linear_velocities.remove(&state.body_handle);
+            self.queue_body_removal(state.body_handle);
+            return true;
+        }
+
+        if let Some(&handle) = self.lua_to_body.get(&lua_id) {
+            if let Some(root_id) = self.body_to_lua.get(&handle).copied() {
+                self.remove_assembly_by_root(root_id);
+                return true;
+            }
+            self.lua_to_body.remove(&lua_id);
             self.lua_to_shape.remove(&lua_id);
             self.lua_to_physical_properties.remove(&lua_id);
+            self.lua_to_interactions.remove(&lua_id);
+            self.lua_to_collider.remove(&lua_id);
+            self.lua_to_local_frame.remove(&lua_id);
             self.kinematic_linear_velocities.remove(&handle);
-            // Remove collider->lua mappings before destroying the body
+            // Remove collider->lua mappings before disabling and queuing the body.
             if let Some(body) = self.rigid_body_set.get(handle) {
                 for &ch in body.colliders() {
                     self.collider_to_lua.remove(&ch);
                 }
             }
-            self.rigid_body_set.remove(
+            self.queue_body_removal(handle);
+            true
+        } else {
+            false
+        }
+    }
+
+    fn queue_body_removal(&mut self, handle: RigidBodyHandle) {
+        if let Some(body) = self.rigid_body_set.get_mut(handle) {
+            body.set_enabled(false);
+            let colliders: Vec<_> = body.colliders().iter().copied().collect();
+            for collider_handle in colliders {
+                if let Some(collider) = self.collider_set.get_mut(collider_handle) {
+                    collider.set_enabled(false);
+                }
+            }
+        }
+
+        if !self.pending_body_removals.contains(&handle) {
+            self.pending_body_removals.push(handle);
+        }
+    }
+
+    /// Finalize body removals that were deferred until after the physics step.
+    pub fn flush_pending_removals(&mut self) {
+        let pending = std::mem::take(&mut self.pending_body_removals);
+        for handle in pending {
+            let _ = self.rigid_body_set.remove(
                 handle,
                 &mut self.island_manager,
                 &mut self.collider_set,
@@ -259,10 +843,9 @@ impl PhysicsWorld {
                 &mut self.multibody_joint_set,
                 true,
             );
-            true
-        } else {
-            false
         }
+        self.island_manager
+            .cleanup_removed_rigid_bodies(&mut self.rigid_body_set);
     }
 
     /// Updates the position of an anchored (kinematic) part
@@ -272,6 +855,11 @@ impl PhysicsWorld {
         position: [f32; 3],
         dt: f32,
     ) {
+        if !transform_within_physics_envelope(position) {
+            self.remove_body_mappings(handle);
+            self.queue_body_removal(handle);
+            return;
+        }
         if let Some(body) = self.rigid_body_set.get_mut(handle) {
             if body.is_kinematic() {
                 let cur = body.translation();
@@ -296,6 +884,11 @@ impl PhysicsWorld {
 
     /// Updates the rotation of an anchored (kinematic) part from a 3x3 rotation matrix
     pub fn set_kinematic_rotation(&mut self, handle: RigidBodyHandle, rotation: &[[f32; 3]; 3]) {
+        if !rotation_matrix_is_finite(rotation) {
+            self.remove_body_mappings(handle);
+            self.queue_body_removal(handle);
+            return;
+        }
         if let Some(body) = self.rigid_body_set.get_mut(handle) {
             if body.is_kinematic() {
                 let quat = rotation_matrix_to_quaternion(rotation);
@@ -306,6 +899,11 @@ impl PhysicsWorld {
 
     /// Teleports a dynamic body to a world position.
     pub fn set_dynamic_position(&mut self, handle: RigidBodyHandle, position: [f32; 3]) {
+        if !transform_within_physics_envelope(position) {
+            self.remove_body_mappings(handle);
+            self.queue_body_removal(handle);
+            return;
+        }
         if let Some(body) = self.rigid_body_set.get_mut(handle) {
             if body.is_dynamic() {
                 body.set_translation(vector![position[0], position[1], position[2]], true);
@@ -315,6 +913,11 @@ impl PhysicsWorld {
 
     /// Sets a dynamic body's world orientation from a 3x3 rotation matrix.
     pub fn set_dynamic_rotation(&mut self, handle: RigidBodyHandle, rotation: &[[f32; 3]; 3]) {
+        if !rotation_matrix_is_finite(rotation) {
+            self.remove_body_mappings(handle);
+            self.queue_body_removal(handle);
+            return;
+        }
         if let Some(body) = self.rigid_body_set.get_mut(handle) {
             if body.is_dynamic() {
                 let quat = rotation_matrix_to_quaternion(rotation);
@@ -325,6 +928,11 @@ impl PhysicsWorld {
 
     /// Sets the velocity of a dynamic part
     pub fn set_velocity(&mut self, handle: RigidBodyHandle, velocity: [f32; 3]) {
+        if !velocity_within_physics_envelope(velocity) {
+            self.remove_body_mappings(handle);
+            self.queue_body_removal(handle);
+            return;
+        }
         if let Some(body) = self.rigid_body_set.get_mut(handle) {
             if body.is_dynamic() {
                 body.set_linvel(vector![velocity[0], velocity[1], velocity[2]], true);
@@ -334,10 +942,19 @@ impl PhysicsWorld {
 
     /// Sets the angular velocity of a dynamic part
     pub fn set_angular_velocity(&mut self, handle: RigidBodyHandle, angular_velocity: [f32; 3]) {
+        if !velocity_within_physics_envelope(angular_velocity) {
+            self.remove_body_mappings(handle);
+            self.queue_body_removal(handle);
+            return;
+        }
         if let Some(body) = self.rigid_body_set.get_mut(handle) {
             if body.is_dynamic() {
                 body.set_angvel(
-                    vector![angular_velocity[0], angular_velocity[1], angular_velocity[2]],
+                    vector![
+                        angular_velocity[0],
+                        angular_velocity[1],
+                        angular_velocity[2]
+                    ],
                     true,
                 );
             }
@@ -367,6 +984,85 @@ impl PhysicsWorld {
             .map(|body| quaternion_to_rotation_matrix(body.rotation()))
     }
 
+    fn get_part_world_isometry(&self, lua_id: u64) -> Option<Isometry<Real>> {
+        let body_handle = *self.lua_to_body.get(&lua_id)?;
+        let body = self.rigid_body_set.get(body_handle)?;
+        let local = self
+            .lua_to_local_frame
+            .get(&lua_id)
+            .copied()
+            .unwrap_or_else(Isometry::identity);
+        Some(*body.position() * local)
+    }
+
+    /// Projects a Roblox-style CFrame write to one member of a welded assembly
+    /// across every Lua part represented by the same physical body.
+    ///
+    /// Setting BasePart.CFrame on a welded member moves the assembly so that the
+    /// written member reaches the requested frame while all weld offsets are
+    /// preserved. This helper returns the resulting world frames for every Lua
+    /// part in the current physical assembly.
+    pub fn project_assembly_cframe_write(
+        &self,
+        lua_id: u64,
+        position: [f32; 3],
+        rotation: &[[f32; 3]; 3],
+    ) -> Option<HashMap<u64, ([f32; 3], [[f32; 3]; 3])>> {
+        let body_handle = *self.lua_to_body.get(&lua_id)?;
+        let local = self
+            .lua_to_local_frame
+            .get(&lua_id)
+            .copied()
+            .unwrap_or_else(Isometry::identity);
+        let target_member_iso = part_isometry(position, rotation);
+        let target_body_iso = target_member_iso * local.inverse();
+        let lua_ids = self.body_to_luas.get(&body_handle)?;
+
+        let mut out = HashMap::with_capacity(lua_ids.len());
+        for part_id in lua_ids {
+            let part_local = self
+                .lua_to_local_frame
+                .get(part_id)
+                .copied()
+                .unwrap_or_else(Isometry::identity);
+            let part_iso = target_body_iso * part_local;
+            let pos = part_iso.translation.vector;
+            out.insert(
+                *part_id,
+                (
+                    [pos.x, pos.y, pos.z],
+                    quaternion_to_rotation_matrix(&part_iso.rotation),
+                ),
+            );
+        }
+        Some(out)
+    }
+
+    pub fn get_part_position(&self, lua_id: u64) -> Option<[f32; 3]> {
+        self.get_part_world_isometry(lua_id).map(|iso| {
+            let pos = iso.translation.vector;
+            [pos.x, pos.y, pos.z]
+        })
+    }
+
+    pub fn get_part_rotation_matrix(&self, lua_id: u64) -> Option<[[f32; 3]; 3]> {
+        self.get_part_world_isometry(lua_id)
+            .map(|iso| quaternion_to_rotation_matrix(&iso.rotation))
+    }
+
+    pub fn get_part_velocity(&self, lua_id: u64) -> Option<[f32; 3]> {
+        let body_handle = *self.lua_to_body.get(&lua_id)?;
+        let body = self.rigid_body_set.get(body_handle)?;
+        let part_iso = self.get_part_world_isometry(lua_id)?;
+        let point = point![
+            part_iso.translation.vector.x,
+            part_iso.translation.vector.y,
+            part_iso.translation.vector.z
+        ];
+        let vel = body.velocity_at_point(&point);
+        Some([vel.x, vel.y, vel.z])
+    }
+
     /// Gets the velocity of a rigid body
     pub fn get_velocity(&self, handle: RigidBodyHandle) -> Option<[f32; 3]> {
         self.rigid_body_set.get(handle).map(|body| {
@@ -393,9 +1089,52 @@ impl PhysicsWorld {
         self.lua_to_body.keys().copied().collect()
     }
 
+    pub fn has_exact_part_ids<I>(&self, ids: I, count: usize) -> bool
+    where
+        I: IntoIterator<Item = u64>,
+    {
+        self.lua_to_body.len() == count
+            && ids.into_iter().all(|id| self.lua_to_body.contains_key(&id))
+    }
+
+    pub fn all_assemblies_are_single_part(&self) -> bool {
+        self.body_to_luas.values().all(|lua_ids| lua_ids.len() == 1)
+    }
+
     /// Gets the handle for a Lua instance
     pub fn get_handle(&self, lua_id: u64) -> Option<RigidBodyHandle> {
         self.lua_to_body.get(&lua_id).copied()
+    }
+
+    pub fn dynamic_body_count(&self) -> usize {
+        self.rigid_body_set
+            .iter()
+            .filter(|(_, body)| body.is_dynamic())
+            .count()
+    }
+
+    pub fn awake_dynamic_body_count(&self) -> usize {
+        self.rigid_body_set
+            .iter()
+            .filter(|(_, body)| body.is_dynamic() && !body.is_sleeping())
+            .count()
+    }
+
+    pub fn is_dynamic_body(&self, handle: RigidBodyHandle) -> bool {
+        self.rigid_body_set
+            .get(handle)
+            .map(|body| body.is_dynamic())
+            .unwrap_or(false)
+    }
+
+    pub fn is_part_sleeping(&self, lua_id: u64) -> bool {
+        let Some(&handle) = self.lua_to_body.get(&lua_id) else {
+            return false;
+        };
+        self.rigid_body_set
+            .get(handle)
+            .map(|body| body.is_dynamic() && body.is_sleeping())
+            .unwrap_or(false)
     }
 
     /// Updates whether a part is anchored or dynamic
@@ -412,352 +1151,6 @@ impl PhysicsWorld {
                 }
             }
         }
-    }
-
-    /// Updates the size of a part's collider
-    pub fn set_size(&mut self, lua_id: u64, size: [f32; 3]) {
-        let shape = self
-            .lua_to_shape
-            .get(&lua_id)
-            .copied()
-            .unwrap_or(PartType::Block);
-        let physical_properties = self
-            .lua_to_physical_properties
-            .get(&lua_id)
-            .copied()
-            .unwrap_or(None);
-        if let Some(&handle) = self.lua_to_body.get(&lua_id) {
-            if let Some(body) = self.rigid_body_set.get(handle) {
-                let colliders: Vec<_> = body.colliders().iter().cloned().collect();
-
-                // Read can_collide from existing collider before removing
-                let can_collide = colliders
-                    .first()
-                    .and_then(|&ch| self.collider_set.get(ch))
-                    .map(|c| !c.is_sensor())
-                    .unwrap_or(true);
-
-                for collider_handle in colliders {
-                    self.collider_to_lua.remove(&collider_handle);
-                    self.collider_set.remove(
-                        collider_handle,
-                        &mut self.island_manager,
-                        &mut self.rigid_body_set,
-                        true,
-                    );
-                }
-
-                let collider = build_collider_with_physical_properties(
-                    size,
-                    shape,
-                    can_collide,
-                    physical_properties,
-                );
-                let new_ch = self.collider_set.insert_with_parent(
-                    collider,
-                    handle,
-                    &mut self.rigid_body_set,
-                );
-                self.collider_to_lua.insert(new_ch, lua_id);
-            }
-        }
-    }
-
-    /// Toggles collider sensor mode (can_collide=false -> sensor, can_collide=true -> solid)
-    pub fn set_can_collide(&mut self, lua_id: u64, can_collide: bool) {
-        if let Some(&handle) = self.lua_to_body.get(&lua_id) {
-            if let Some(body) = self.rigid_body_set.get(handle) {
-                let colliders: Vec<_> = body.colliders().iter().cloned().collect();
-                for collider_handle in colliders {
-                    if let Some(collider) = self.collider_set.get_mut(collider_handle) {
-                        collider.set_sensor(!can_collide);
-                    }
-                }
-            }
-        }
-    }
-
-    /// Updates the shape of a part's collider, rebuilding it with the current size
-    pub fn set_shape(&mut self, lua_id: u64, shape: PartType, size: [f32; 3]) {
-        self.lua_to_shape.insert(lua_id, shape);
-        let physical_properties = self
-            .lua_to_physical_properties
-            .get(&lua_id)
-            .copied()
-            .unwrap_or(None);
-        if let Some(&handle) = self.lua_to_body.get(&lua_id) {
-            if let Some(body) = self.rigid_body_set.get(handle) {
-                let colliders: Vec<_> = body.colliders().iter().cloned().collect();
-
-                let can_collide = colliders
-                    .first()
-                    .and_then(|&ch| self.collider_set.get(ch))
-                    .map(|c| !c.is_sensor())
-                    .unwrap_or(true);
-
-                for collider_handle in colliders {
-                    self.collider_to_lua.remove(&collider_handle);
-                    self.collider_set.remove(
-                        collider_handle,
-                        &mut self.island_manager,
-                        &mut self.rigid_body_set,
-                        true,
-                    );
-                }
-
-                let collider = build_collider_with_physical_properties(
-                    size,
-                    shape,
-                    can_collide,
-                    physical_properties,
-                );
-                let new_ch = self.collider_set.insert_with_parent(
-                    collider,
-                    handle,
-                    &mut self.rigid_body_set,
-                );
-                self.collider_to_lua.insert(new_ch, lua_id);
-            }
-        }
-    }
-
-    /// Updates collider physical properties for a Lua part.
-    pub fn set_physical_properties(
-        &mut self,
-        lua_id: u64,
-        physical_properties: Option<PhysicalProperties>,
-    ) {
-        self.lua_to_physical_properties
-            .insert(lua_id, physical_properties);
-        if let Some(&handle) = self.lua_to_body.get(&lua_id) {
-            if let Some(body) = self.rigid_body_set.get(handle) {
-                let props = physical_properties
-                    .unwrap_or(PhysicalProperties::new(0.7, 0.3, 0.5, 1.0, 1.0));
-                let colliders: Vec<_> = body.colliders().iter().cloned().collect();
-                for collider_handle in colliders {
-                    if let Some(collider) = self.collider_set.get_mut(collider_handle) {
-                        collider.set_friction(props.friction.max(0.0));
-                        collider.set_restitution(props.elasticity.max(0.0));
-                        collider.set_density(props.density.max(0.0));
-                    }
-                }
-            }
-        }
-    }
-
-    /// Adds a character controller for player movement
-    /// Uses a capsule shape for smooth collisions with environment
-    pub fn add_character(
-        &mut self,
-        lua_id: u64,
-        position: [f32; 3],
-        radius: f32,
-        height: f32,
-    ) -> RigidBodyHandle {
-        // Create kinematic body for character
-        let body = RigidBodyBuilder::kinematic_position_based()
-            .translation(vector![position[0], position[1], position[2]])
-            .build();
-        let body_handle = self.rigid_body_set.insert(body);
-
-        // Create capsule collider (half-height is the cylinder part, total height = 2*half_height + 2*radius)
-        // Characters only collide with static geometry, not other characters (Roblox FPS style)
-        let half_height = (height - 2.0 * radius).max(0.0) / 2.0;
-        let collider = ColliderBuilder::capsule_y(half_height, radius)
-            .collision_groups(InteractionGroups::new(GROUP_CHARACTER, GROUP_STATIC))
-            .build();
-        let collider_handle =
-            self.collider_set
-                .insert_with_parent(collider, body_handle, &mut self.rigid_body_set);
-
-        // Create character controller with consistent settings (same as move_character)
-        let mut controller = KinematicCharacterController::default();
-        controller.autostep = Some(CharacterAutostep {
-            max_height: CharacterLength::Absolute(consts::AUTOSTEP_MAX_HEIGHT),
-            min_width: CharacterLength::Absolute(consts::AUTOSTEP_MIN_WIDTH),
-            include_dynamic_bodies: true,
-        });
-        controller.max_slope_climb_angle = 45.0_f32.to_radians();
-        controller.min_slope_slide_angle = 30.0_f32.to_radians();
-        controller.snap_to_ground = Some(CharacterLength::Absolute(consts::SNAP_TO_GROUND));
-
-        let state = CharacterControllerState {
-            controller,
-            collider_handle,
-            body_handle,
-            vertical_velocity: 0.0,
-            target_position: None,
-            walk_speed: consts::WALK_SPEED,
-            jump_power: humanoid_consts::DEFAULT_JUMP_POWER,
-            jump_requested: false,
-            jump_buffer_remaining: 0.0,
-            jump_cooldown_remaining: 0.0,
-            move_to_elapsed: 0.0,
-            grounded: false,
-            horizontal_velocity: [0.0, 0.0],
-        };
-
-        self.character_controllers.insert(lua_id, state);
-        self.lua_to_body.insert(lua_id, body_handle);
-        self.body_to_lua.insert(body_handle, lua_id);
-        self.collider_to_lua.insert(collider_handle, lua_id);
-
-        body_handle
-    }
-
-    /// Sets the target position for a character (for Goto action)
-    pub fn set_character_target(&mut self, lua_id: u64, target: Option<[f32; 3]>) {
-        if let Some(state) = self.character_controllers.get_mut(&lua_id) {
-            state.target_position = target;
-            state.move_to_elapsed = 0.0;
-        }
-    }
-
-    /// Sets locomotion walk speed for a character controller.
-    pub fn set_character_walk_speed(&mut self, lua_id: u64, walk_speed: f32) {
-        if let Some(state) = self.character_controllers.get_mut(&lua_id) {
-            state.walk_speed = walk_speed.max(0.0);
-        }
-    }
-
-    /// Requests a jump using the provided jump power.
-    pub fn request_character_jump(&mut self, lua_id: u64, jump_power: f32) {
-        if let Some(state) = self.character_controllers.get_mut(&lua_id) {
-            state.jump_power = jump_power.max(0.0);
-            state.jump_requested = true;
-            state.jump_buffer_remaining = humanoid_consts::JUMP_BUFFER_SECS;
-        }
-    }
-
-    /// Advance jump buffer timer and clear stale buffered jumps.
-    pub fn tick_character_jump_buffer(&mut self, lua_id: u64, dt: f32) {
-        if let Some(state) = self.character_controllers.get_mut(&lua_id) {
-            state.jump_cooldown_remaining = (state.jump_cooldown_remaining - dt).max(0.0);
-            if state.jump_requested {
-                state.jump_buffer_remaining = (state.jump_buffer_remaining - dt).max(0.0);
-                if state.jump_buffer_remaining <= 0.0 {
-                    state.jump_requested = false;
-                }
-            }
-        }
-    }
-
-    /// Consumes one pending jump request, returning jump power if requested.
-    pub fn try_consume_character_jump(
-        &mut self,
-        lua_id: u64,
-        can_jump: bool,
-        vertical_velocity: f32,
-    ) -> Option<f32> {
-        let state = self.character_controllers.get_mut(&lua_id)?;
-        if !state.jump_requested || !can_jump {
-            return None;
-        }
-        if state.jump_cooldown_remaining > 0.0 {
-            return None;
-        }
-        // Prevent repeat impulse while already traveling upward.
-        if vertical_velocity > 0.0 {
-            return None;
-        }
-        state.jump_cooldown_remaining = 0.18;
-        if state.jump_requested {
-            state.jump_requested = false;
-            state.jump_buffer_remaining = 0.0;
-            Some(state.jump_power)
-        } else {
-            None
-        }
-    }
-
-    /// Gets current locomotion walk speed for a character controller.
-    pub fn get_character_walk_speed(&self, lua_id: u64) -> Option<f32> {
-        self.character_controllers
-            .get(&lua_id)
-            .map(|s| s.walk_speed)
-    }
-
-    /// Teleports a character to a specific position (clears target + vertical velocity)
-    pub fn set_character_position(&mut self, lua_id: u64, position: [f32; 3]) {
-        if let Some(state) = self.character_controllers.get_mut(&lua_id) {
-            if let Some(body) = self.rigid_body_set.get_mut(state.body_handle) {
-                body.set_translation(vector![position[0], position[1], position[2]], true);
-            }
-            state.target_position = None;
-            state.vertical_velocity = 0.0;
-            state.jump_requested = false;
-            state.jump_buffer_remaining = 0.0;
-            state.jump_cooldown_remaining = 0.0;
-            state.move_to_elapsed = 0.0;
-            state.horizontal_velocity = [0.0, 0.0];
-        }
-    }
-
-    /// Gets the current position of a character
-    pub fn get_character_position(&self, lua_id: u64) -> Option<[f32; 3]> {
-        let state = self.character_controllers.get(&lua_id)?;
-        let body = self.rigid_body_set.get(state.body_handle)?;
-        let pos = body.translation();
-        Some([pos.x, pos.y, pos.z])
-    }
-
-    /// Gets current linear velocity of a character controller body.
-    pub fn get_character_velocity(&self, lua_id: u64) -> Option<[f32; 3]> {
-        let state = self.character_controllers.get(&lua_id)?;
-        let body = self.rigid_body_set.get(state.body_handle)?;
-        let vel = body.linvel();
-        Some([vel.x, vel.y, vel.z])
-    }
-
-    /// Sets the facing yaw for a character controller body.
-    pub fn set_character_yaw(&mut self, lua_id: u64, yaw: f32) -> bool {
-        let Some(state) = self.character_controllers.get(&lua_id) else {
-            return false;
-        };
-        let Some(body) = self.rigid_body_set.get_mut(state.body_handle) else {
-            return false;
-        };
-        let rot = UnitQuaternion::from_euler_angles(0.0, yaw, 0.0);
-        body.set_next_kinematic_rotation(rot);
-        true
-    }
-
-    /// Gets the character controller state (for checking grounded, target, etc.)
-    pub fn get_character_state(&self, lua_id: u64) -> Option<&CharacterControllerState> {
-        self.character_controllers.get(&lua_id)
-    }
-
-    /// Gets mutable character controller state
-    pub fn get_character_state_mut(
-        &mut self,
-        lua_id: u64,
-    ) -> Option<&mut CharacterControllerState> {
-        self.character_controllers.get_mut(&lua_id)
-    }
-
-    /// Removes a character controller
-    pub fn remove_character(&mut self, lua_id: u64) -> bool {
-        if let Some(state) = self.character_controllers.remove(&lua_id) {
-            self.lua_to_body.remove(&lua_id);
-            self.body_to_lua.remove(&state.body_handle);
-            self.collider_to_lua.remove(&state.collider_handle);
-            self.rigid_body_set.remove(
-                state.body_handle,
-                &mut self.island_manager,
-                &mut self.collider_set,
-                &mut self.impulse_joint_set,
-                &mut self.multibody_joint_set,
-                true,
-            );
-            true
-        } else {
-            false
-        }
-    }
-
-    /// Checks if a Lua instance has a character controller
-    pub fn has_character(&self, lua_id: u64) -> bool {
-        self.character_controllers.contains_key(&lua_id)
     }
 
     /// Checks if there is a clear line of sight between two positions
@@ -779,11 +1172,13 @@ impl PhysicsWorld {
         let normalized = direction / max_dist;
         let ray = Ray::new(point![from[0], from[1], from[2]], normalized);
 
+        let can_query = self.queryable_collider_predicate();
         let filter = if let Some(body_handle) = exclude_body {
             QueryFilter::default().exclude_rigid_body(body_handle)
         } else {
             QueryFilter::default()
-        };
+        }
+        .predicate(&can_query);
 
         // Cast ray and check if we hit something before reaching the target.
         // For Roblox-style LOS we consider the target visible when the first hit
@@ -816,50 +1211,96 @@ impl PhysicsWorld {
     pub fn detect_overlaps(&self) -> HashSet<(u64, u64)> {
         let mut overlaps = HashSet::new();
 
-        for (&lua_id, &body_handle) in &self.lua_to_body {
-            let Some(body) = self.rigid_body_set.get(body_handle) else {
+        for (&ch, &lua_id) in &self.collider_to_lua {
+            let Some(collider) = self.collider_set.get(ch) else {
                 continue;
             };
+            let parent_body = collider.parent();
+            let shape = collider.shape();
+            let pos = collider.position();
 
-            // Get the collider shape and position for this body
-            let collider_handles: Vec<_> = body.colliders().iter().cloned().collect();
-            for ch in collider_handles {
-                let Some(collider) = self.collider_set.get(ch) else {
-                    continue;
-                };
+            let filter = QueryFilter::default().exclude_collider(ch);
 
-                let shape = collider.shape();
-                let pos = collider.position();
-
-                // Query all intersecting colliders, excluding self
-                let filter = QueryFilter::default().exclude_rigid_body(body_handle);
-
-                self.query_pipeline.intersections_with_shape(
-                    &self.rigid_body_set,
-                    &self.collider_set,
-                    pos,
-                    shape,
-                    filter,
-                    |other_collider_handle| {
-                        if let Some(&other_lua_id) =
-                            self.collider_to_lua.get(&other_collider_handle)
-                        {
-                            if other_lua_id != lua_id {
-                                let pair = if lua_id < other_lua_id {
-                                    (lua_id, other_lua_id)
-                                } else {
-                                    (other_lua_id, lua_id)
-                                };
-                                overlaps.insert(pair);
-                            }
+            self.query_pipeline.intersections_with_shape(
+                &self.rigid_body_set,
+                &self.collider_set,
+                pos,
+                shape,
+                filter,
+                |other_collider_handle| {
+                    let Some(&other_lua_id) = self.collider_to_lua.get(&other_collider_handle)
+                    else {
+                        return true;
+                    };
+                    if other_lua_id == lua_id {
+                        return true;
+                    }
+                    if let Some(other_collider) = self.collider_set.get(other_collider_handle) {
+                        if other_collider.parent() == parent_body {
+                            return true;
                         }
-                        true // continue searching
-                    },
-                );
-            }
+                    }
+                    let pair = if lua_id < other_lua_id {
+                        (lua_id, other_lua_id)
+                    } else {
+                        (other_lua_id, lua_id)
+                    };
+                    overlaps.insert(pair);
+                    true
+                },
+            );
         }
 
         overlaps
+    }
+
+    /// Returns active contact/intersection pairs already computed by Rapier's
+    /// narrow phase during the physics step. This is the Roblox-like hot path
+    /// for Touched/TouchEnded: consume contact state produced by simulation
+    /// instead of polling every collider against the whole world each frame.
+    pub fn detect_narrow_phase_touches(&self) -> HashSet<(u64, u64)> {
+        let mut touches = HashSet::new();
+
+        let mut insert_pair = |collider_a, collider_b| {
+            let Some(&lua_a) = self.collider_to_lua.get(&collider_a) else {
+                return;
+            };
+            let Some(&lua_b) = self.collider_to_lua.get(&collider_b) else {
+                return;
+            };
+            if lua_a == lua_b {
+                return;
+            }
+
+            if let (Some(a), Some(b)) = (
+                self.collider_set.get(collider_a),
+                self.collider_set.get(collider_b),
+            ) {
+                if a.parent().is_some() && a.parent() == b.parent() {
+                    return;
+                }
+            }
+
+            if lua_a < lua_b {
+                touches.insert((lua_a, lua_b));
+            } else {
+                touches.insert((lua_b, lua_a));
+            }
+        };
+
+        for pair in self.narrow_phase.contact_pairs() {
+            if pair.has_any_active_contact {
+                insert_pair(pair.collider1, pair.collider2);
+            }
+        }
+
+        for (collider_a, collider_b, intersecting) in self.narrow_phase.intersection_pairs() {
+            if intersecting {
+                insert_pair(collider_a, collider_b);
+            }
+        }
+
+        touches
     }
 
     /// Casts a ray downward from a position to detect ground
@@ -875,11 +1316,13 @@ impl PhysicsWorld {
             vector![0.0, -1.0, 0.0],
         );
 
+        let can_query = self.queryable_collider_predicate();
         let filter = if let Some(body_handle) = exclude_body {
             QueryFilter::default().exclude_rigid_body(body_handle)
         } else {
             QueryFilter::default()
-        };
+        }
+        .predicate(&can_query);
 
         if let Some((_, hit)) = self.query_pipeline.cast_ray(
             &self.rigid_body_set,
@@ -895,190 +1338,6 @@ impl PhysicsWorld {
             None
         }
     }
-
-    /// Returns the linear velocity of the kinematic body directly supporting this character.
-    /// Used for Roblox-like moving platform carry behavior.
-    pub fn get_ground_kinematic_velocity(
-        &self,
-        lua_id: u64,
-        max_distance: f32,
-    ) -> Option<[f32; 3]> {
-        self.get_ground_kinematic_support(lua_id, max_distance)
-            .map(|support| support.velocity)
-    }
-
-    /// Returns kinematic support data for the surface directly below this character.
-    pub fn get_ground_kinematic_support(
-        &self,
-        lua_id: u64,
-        max_distance: f32,
-    ) -> Option<GroundKinematicSupport> {
-        let state = self.character_controllers.get(&lua_id)?;
-        let body = self.rigid_body_set.get(state.body_handle)?;
-        let origin = body.translation();
-
-        let ray = Ray::new(
-            point![origin.x, origin.y, origin.z],
-            vector![0.0, -1.0, 0.0],
-        );
-
-        let filter = QueryFilter::default()
-            .exclude_rigid_body(state.body_handle)
-            .exclude_sensors()
-            .groups(InteractionGroups::new(GROUP_CHARACTER, GROUP_STATIC));
-
-        let (hit_collider, toi) = self.query_pipeline.cast_ray(
-            &self.rigid_body_set,
-            &self.collider_set,
-            &ray,
-            max_distance,
-            true,
-            filter,
-        )?;
-
-        let collider = self.collider_set.get(hit_collider)?;
-        let parent = collider.parent()?;
-        let ground_body = self.rigid_body_set.get(parent)?;
-        if !ground_body.is_kinematic() {
-            return None;
-        }
-
-        let v = ground_body.linvel();
-        let sampled_v = self
-            .kinematic_linear_velocities
-            .get(&parent)
-            .copied()
-            .unwrap_or([v.x, v.y, v.z]);
-        Some(GroundKinematicSupport {
-            velocity: sampled_v,
-            distance: toi,
-        })
-    }
-
-    /// Returns the strongest horizontal contact velocity from overlapping kinematic bodies.
-    /// This captures side pushes from moving/rotating anchored obstacles (e.g. spinners).
-    pub fn get_character_contact_kinematic_velocity(&self, lua_id: u64) -> Option<[f32; 3]> {
-        let state = self.character_controllers.get(&lua_id)?;
-        let body = self.rigid_body_set.get(state.body_handle)?;
-        let collider = self.collider_set.get(state.collider_handle)?;
-        let shape = collider.shape();
-        let pos = body.position();
-        let center = pos.translation.vector;
-
-        let filter = QueryFilter::default()
-            .exclude_rigid_body(state.body_handle)
-            .exclude_sensors()
-            .groups(InteractionGroups::new(GROUP_CHARACTER, GROUP_STATIC));
-
-        let mut best: Option<[f32; 3]> = None;
-        let mut best_horiz_speed_sq = 0.0_f32;
-
-        self.query_pipeline.intersections_with_shape(
-            &self.rigid_body_set,
-            &self.collider_set,
-            pos,
-            shape,
-            filter,
-            |other_collider_handle| {
-                let Some(other_collider) = self.collider_set.get(other_collider_handle) else {
-                    return true;
-                };
-                let Some(parent) = other_collider.parent() else {
-                    return true;
-                };
-                let Some(other_body) = self.rigid_body_set.get(parent) else {
-                    return true;
-                };
-                if !other_body.is_kinematic() {
-                    return true;
-                }
-
-                let point_velocity =
-                    other_body.velocity_at_point(&point![center.x, center.y, center.z]);
-                let horiz_speed_sq =
-                    point_velocity.x * point_velocity.x + point_velocity.z * point_velocity.z;
-                if horiz_speed_sq > best_horiz_speed_sq {
-                    best_horiz_speed_sq = horiz_speed_sq;
-                    best = Some([point_velocity.x, point_velocity.y, point_velocity.z]);
-                }
-                true
-            },
-        );
-
-        best.filter(|v| (v[0] * v[0] + v[2] * v[2]) > consts::EPSILON * consts::EPSILON)
-    }
-
-    /// Moves a character using the kinematic controller for full 3D translation.
-    pub fn move_character(
-        &mut self,
-        lua_id: u64,
-        desired_translation: [f32; 3],
-        dt: f32,
-    ) -> Option<EffectiveCharacterMovement> {
-        let state = self.character_controllers.get(&lua_id)?;
-        let body_handle = state.body_handle;
-        let collider_handle = state.collider_handle;
-
-        let body = self.rigid_body_set.get(body_handle)?;
-        let collider = self.collider_set.get(collider_handle)?;
-        let shape = collider.shape();
-
-        // Use full position (translation + rotation) like physics-world
-        let current_pos = *body.position();
-
-        // Create fresh controller each step (like physics-world)
-        let controller = KinematicCharacterController {
-            // Larger offset prevents getting stuck when sliding against surfaces
-            offset: CharacterLength::Absolute(0.05),
-            autostep: Some(CharacterAutostep {
-                max_height: CharacterLength::Absolute(consts::AUTOSTEP_MAX_HEIGHT),
-                min_width: CharacterLength::Absolute(consts::AUTOSTEP_MIN_WIDTH),
-                include_dynamic_bodies: true,
-            }),
-            max_slope_climb_angle: 45.0_f32.to_radians(),
-            min_slope_slide_angle: 30.0_f32.to_radians(),
-            snap_to_ground: Some(CharacterLength::Absolute(consts::SNAP_TO_GROUND)),
-            ..Default::default()
-        };
-
-        // Match physics-world's collision filter: collide with all except other characters
-        let desired = vector![
-            desired_translation[0],
-            desired_translation[1],
-            desired_translation[2]
-        ];
-        let filter = QueryFilter::default()
-            .exclude_rigid_body(body_handle)
-            .exclude_sensors()
-            .groups(InteractionGroups::new(
-                GROUP_STATIC,
-                Group::ALL & !GROUP_CHARACTER,
-            ));
-
-        let movement = controller.move_shape(
-            dt,
-            &self.rigid_body_set,
-            &self.collider_set,
-            &self.query_pipeline,
-            shape,
-            &current_pos,
-            desired,
-            filter,
-            |_collision| {},
-        );
-
-        // Use set_next_kinematic_translation like physics-world
-        // This schedules the movement for the next physics step
-        let new_pos = current_pos.translation.vector + movement.translation;
-
-        let body = self.rigid_body_set.get_mut(body_handle)?;
-        body.set_next_kinematic_translation(new_pos);
-
-        if let Some(state) = self.character_controllers.get_mut(&lua_id) {
-            state.grounded = movement.grounded;
-        }
-        Some(movement)
-    }
 }
 
 impl Default for PhysicsWorld {
@@ -1088,612 +1347,4 @@ impl Default for PhysicsWorld {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_physics_world_creation() {
-        let world = PhysicsWorld::new();
-        assert_eq!(world.gravity.y, -consts::DEFAULT_GRAVITY);
-    }
-
-    #[test]
-    fn test_add_anchored_part() {
-        let mut world = PhysicsWorld::new();
-
-        let handle = world.add_part(
-            1,
-            [0.0, 10.0, 0.0],
-            &[[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
-            [4.0, 1.0, 2.0],
-            true, // anchored
-            true, // can_collide
-            PartType::Block,
-            None,
-        );
-
-        assert!(world.has_part(1));
-        let pos = world.get_position(handle).unwrap();
-        assert_eq!(pos, [0.0, 10.0, 0.0]);
-    }
-
-    #[test]
-    fn test_dynamic_part_falls() {
-        let mut world = PhysicsWorld::new();
-
-        let handle = world.add_part(
-            1,
-            [0.0, 10.0, 0.0],
-            &[[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
-            [1.0, 1.0, 1.0],
-            false, // not anchored - should fall
-            true,
-            PartType::Block,
-            None,
-        );
-
-        let initial_pos = world.get_position(handle).unwrap();
-
-        // Step physics a few times
-        for _ in 0..10 {
-            world.step(1.0 / 60.0);
-        }
-
-        let final_pos = world.get_position(handle).unwrap();
-
-        // Y position should be lower due to gravity
-        assert!(final_pos[1] < initial_pos[1]);
-    }
-
-    #[test]
-    fn test_character_raycast_and_move() {
-        let mut world = PhysicsWorld::new();
-
-        // Add a floor
-        world.add_part(
-            1,
-            [0.0, 0.0, 0.0],
-            &[[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
-            [100.0, 1.0, 100.0],
-            true,
-            true,
-            PartType::Block,
-            None,
-        );
-
-        // Add character above floor
-        let char_id = 100;
-        world.add_character(char_id, [0.0, 6.0, 0.0], 1.0, 5.0);
-
-        world.step(1.0 / 60.0);
-        world.query_pipeline.update(&world.collider_set);
-
-        // Test raycast finds ground
-        let pos = world.get_character_position(char_id).unwrap();
-        let state = world.get_character_state(char_id).unwrap();
-        let hit = world.raycast_down(pos, 10.0, Some(state.body_handle));
-        assert!(hit.is_some(), "Should detect floor");
-
-        let (distance, ground_y) = hit.unwrap();
-        // Character at Y=6, floor top at Y=0.5, distance = 5.5
-        assert!(
-            distance > 5.0 && distance < 6.0,
-            "Distance to floor should be ~5.5, got {}",
-            distance
-        );
-        assert!(
-            (ground_y - 0.5).abs() < 0.1,
-            "Ground Y should be ~0.5 (floor top), got {}",
-            ground_y
-        );
-
-        // Test movement with controller translation (should not suppress horizontal)
-        if let Some(state) = world.get_character_state_mut(char_id) {
-            state.grounded = true;
-        }
-        let movement = world
-            .move_character(char_id, [1.0, -0.05, 0.0], 1.0 / 60.0)
-            .unwrap();
-        world.step(1.0 / 60.0);
-
-        let final_pos = world.get_character_position(char_id).unwrap();
-        assert!(
-            movement.translation.x.abs() > 0.0,
-            "Horizontal movement should be applied"
-        );
-        assert!(final_pos[0] > 0.5, "Should have moved in X");
-    }
-
-    #[test]
-    fn test_character_horizontal_movement_when_grounded() {
-        let mut world = PhysicsWorld::new();
-
-        world.add_part(
-            1,
-            [0.0, 0.0, 0.0],
-            &[[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
-            [100.0, 1.0, 100.0],
-            true,
-            true,
-            PartType::Block,
-            None,
-        );
-
-        let char_id = 200;
-        world.add_character(char_id, [0.0, 3.0, 0.0], 1.0, 5.0);
-        if let Some(state) = world.get_character_state_mut(char_id) {
-            state.grounded = true;
-        }
-
-        let movement = world
-            .move_character(char_id, [1.0, -0.05, 0.0], 1.0 / 60.0)
-            .unwrap();
-        assert!(
-            movement.translation.x.abs() > 0.0 || movement.translation.z.abs() > 0.0,
-            "Horizontal movement should not be suppressed when grounded"
-        );
-    }
-
-    #[test]
-    fn test_character_ignores_sensor_colliders() {
-        let mut world = PhysicsWorld::new();
-
-        // Floor so the character can move while grounded.
-        world.add_part(
-            1,
-            [0.0, -0.5, 0.0],
-            &[[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
-            [100.0, 1.0, 100.0],
-            true,
-            true,
-            PartType::Block,
-            None,
-        );
-
-        // Non-collidable "trigger" directly in the movement path.
-        world.add_part(
-            2,
-            [0.0, 1.0, -8.0],
-            &[[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
-            [8.0, 2.0, 8.0],
-            true,
-            false, // sensor
-            PartType::Block,
-            None,
-        );
-
-        let char_id = 300;
-        world.add_character(char_id, [0.0, 2.6, 8.0], 1.0, 5.0);
-
-        let dt = 1.0 / 60.0;
-        for _ in 0..120 {
-            world.query_pipeline.update(&world.collider_set);
-            world.move_character(char_id, [0.0, 0.0, -0.3], dt).unwrap();
-            world.step(dt);
-        }
-
-        let final_pos = world.get_character_position(char_id).unwrap();
-        assert!(
-            final_pos[2] < -6.0,
-            "Character should pass through CanCollide=false sensor. Final z={}",
-            final_pos[2]
-        );
-    }
-
-    #[test]
-    fn test_get_ground_kinematic_velocity() {
-        let mut world = PhysicsWorld::new();
-
-        // Moving platform under the character.
-        let platform = world.add_part(
-            1,
-            [0.0, 0.0, 0.0],
-            &[[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
-            [10.0, 1.0, 10.0],
-            true,
-            true,
-            PartType::Block,
-            None,
-        );
-
-        let char_id = 301;
-        world.add_character(char_id, [0.0, 2.6, 0.0], 1.0, 5.0);
-
-        let dt = 1.0 / 60.0;
-        world.step(dt);
-        world.query_pipeline.update(&world.collider_set);
-
-        // Move the kinematic platform upward one step.
-        world.set_kinematic_position(platform, [0.0, 0.2, 0.0]);
-        world.step(dt);
-        world.query_pipeline.update(&world.collider_set);
-
-        let v = world
-            .get_ground_kinematic_velocity(char_id, 4.0)
-            .expect("Expected supporting kinematic velocity");
-        assert!(
-            v[1] > 0.0,
-            "Platform upward velocity should be positive, got {:?}",
-            v
-        );
-    }
-
-    #[test]
-    fn test_get_character_contact_kinematic_velocity_for_rotating_body() {
-        let mut world = PhysicsWorld::new();
-
-        let spinner = world.add_part(
-            1,
-            [0.0, 2.0, 0.0],
-            &[[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
-            [16.0, 4.0, 3.0],
-            true,
-            true,
-            PartType::Block,
-            None,
-        );
-
-        let char_id = 302;
-        world.add_character(char_id, [0.0, 2.0, 2.0], 1.0, 5.0);
-
-        let dt = 1.0 / 60.0;
-        world.step(dt);
-        world.query_pipeline.update(&world.collider_set);
-
-        let theta = 0.5_f32;
-        let c = theta.cos();
-        let s = theta.sin();
-        let rot_y = [[c, 0.0, s], [0.0, 1.0, 0.0], [-s, 0.0, c]];
-        world.set_kinematic_rotation(spinner, &rot_y);
-        world.step(dt);
-        world.query_pipeline.update(&world.collider_set);
-
-        let v = world
-            .get_character_contact_kinematic_velocity(char_id)
-            .expect("Expected contact velocity from rotating kinematic body");
-        let horiz = (v[0] * v[0] + v[2] * v[2]).sqrt();
-        assert!(
-            horiz > 0.1,
-            "Expected meaningful horizontal contact velocity, got {:?}",
-            v
-        );
-    }
-
-    #[test]
-    fn test_character_movement_after_landing_on_thin_platform() {
-        let mut world = PhysicsWorld::new();
-
-        // Floor at Y=0 (like the game)
-        world.add_part(
-            1,
-            [0.0, -1.0, 0.0], // center at Y=-1
-            &[[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
-            [100.0, 2.0, 100.0], // top at Y=0
-            true,
-            true,
-            PartType::Block,
-            None,
-        );
-
-        // Thin platform at Y=0.1 (like base platform in tsunami game)
-        world.add_part(
-            2,
-            [0.0, 0.1, 0.0], // center at Y=0.1
-            &[[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
-            [30.0, 0.2, 30.0], // top at Y=0.2
-            true,
-            true,
-            PartType::Block,
-            None,
-        );
-
-        // Character spawns at Y=3 (above platform)
-        let char_id = 100;
-        world.add_character(char_id, [0.0, 3.0, 0.0], 1.0, 5.0);
-
-        // Simulate falling (like the game does)
-        let dt = 1.0 / 60.0;
-        for _ in 0..30 {
-            // About 0.5 seconds of falling
-            world.query_pipeline.update(&world.collider_set);
-            let gravity_movement: f32 = -196.2 * dt * dt; // Gravity acceleration
-            world.move_character(char_id, [0.0, gravity_movement.max(-0.2), 0.0], dt);
-            world.step(dt);
-        }
-
-        // Character should now be grounded
-        let pos_after_landing = world.get_character_position(char_id).unwrap();
-        println!("Position after landing: {:?}", pos_after_landing);
-
-        // Try horizontal movement (like the game does)
-        world.query_pipeline.update(&world.collider_set);
-        let movement = world
-            .move_character(char_id, [0.26, -0.02, 0.0], dt)
-            .unwrap();
-
-        println!("Movement result: {:?}", movement.translation);
-
-        // This should NOT be blocked
-        assert!(
-            movement.translation.x.abs() > 0.1,
-            "Horizontal movement should work after landing. Got: {:?}",
-            movement.translation
-        );
-    }
-
-    #[test]
-    fn test_character_direction_reversal() {
-        let mut world = PhysicsWorld::new();
-
-        // Floor at Y=0 (top surface)
-        world.add_part(
-            1,
-            [0.0, -1.0, 0.0],
-            &[[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
-            [200.0, 2.0, 200.0],
-            true,
-            true,
-            PartType::Block,
-            None,
-        );
-
-        // Character with radius=1.0, height=5.0 (same as game)
-        // Capsule: half_height=1.5, radius=1.0
-        // Bottom of capsule is at Y = center - 1.5 - 1.0 = center - 2.5
-        // For bottom to be at Y=0 (floor top), center should be at Y=2.5
-        // Add small margin: Y=2.6
-        let char_id = 100;
-        world.add_character(char_id, [0.0, 2.6, 0.0], 1.0, 5.0);
-
-        let dt = 1.0 / 60.0;
-
-        // Just update the query pipeline, don't fall
-        world.step(dt);
-        world.query_pipeline.update(&world.collider_set);
-
-        let pos_after_landing = world.get_character_position(char_id).unwrap();
-        println!("After landing: {:?}", pos_after_landing);
-
-        // Move +X for 20 frames
-        // When grounded, desired_y should be 0 (game logic zeros it)
-        println!("\n=== Moving +X ===");
-        let mut grounded = false;
-        for i in 0..20 {
-            world.query_pipeline.update(&world.collider_set);
-            // When grounded, zero vertical like the game does
-            let desired_y = if grounded { 0.0 } else { -0.008 };
-            let movement = world
-                .move_character(char_id, [0.2, desired_y, 0.0], dt)
-                .unwrap();
-            grounded = movement.grounded;
-            world.step(dt);
-            if i < 5 || movement.translation.x.abs() < 0.01 {
-                let pos = world.get_character_position(char_id).unwrap();
-                println!(
-                    "  Frame {}: pos={:.2} applied_x={:.3} grounded={}",
-                    i, pos[0], movement.translation.x, movement.grounded
-                );
-            }
-        }
-
-        let pos_after_plus_x = world.get_character_position(char_id).unwrap();
-        println!("After +X: {:?}", pos_after_plus_x);
-        assert!(pos_after_plus_x[0] > 2.0, "+X movement should work");
-
-        // Now reverse: move -X for 20 frames
-        println!("\n=== Moving -X (reversal) ===");
-        let mut stuck_count = 0;
-        for i in 0..20 {
-            world.query_pipeline.update(&world.collider_set);
-            // When grounded, zero vertical like the game does
-            let desired_y = if grounded { 0.0 } else { -0.008 };
-            let movement = world
-                .move_character(char_id, [-0.2, desired_y, 0.0], dt)
-                .unwrap();
-            grounded = movement.grounded;
-            world.step(dt);
-            let pos = world.get_character_position(char_id).unwrap();
-            println!(
-                "  Frame {}: pos={:.2} applied_x={:.3} grounded={}",
-                i, pos[0], movement.translation.x, movement.grounded
-            );
-            if movement.translation.x.abs() < 0.01 {
-                stuck_count += 1;
-            }
-        }
-
-        let pos_after_minus_x = world.get_character_position(char_id).unwrap();
-        println!("After -X: {:?}", pos_after_minus_x);
-
-        // Should have moved back toward 0
-        assert!(
-            pos_after_minus_x[0] < pos_after_plus_x[0] - 1.0,
-            "Direction reversal should work! pos_after_plus_x={} pos_after_minus_x={} stuck_frames={}",
-            pos_after_plus_x[0], pos_after_minus_x[0], stuck_count
-        );
-    }
-
-    #[test]
-    fn test_character_autostep_over_small_obstacle() {
-        let mut world = PhysicsWorld::new();
-
-        // Floor
-        world.add_part(
-            1,
-            [0.0, -0.5, 0.0],
-            &[[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
-            [100.0, 1.0, 100.0], // top at Y=0
-            true,
-            true,
-            PartType::Block,
-            None,
-        );
-
-        // Small obstacle (0.3 studs tall, should be steppable with max_height=0.5)
-        world.add_part(
-            2,
-            [5.0, 0.15, 0.0], // center at Y=0.15
-            &[[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
-            [1.0, 0.3, 4.0], // top at Y=0.3
-            true,
-            true,
-            PartType::Block,
-            None,
-        );
-
-        // Character starts at X=0, grounded
-        let char_id = 100;
-        world.add_character(char_id, [0.0, 2.6, 0.0], 1.0, 5.0);
-
-        let dt = 1.0 / 60.0;
-        world.step(dt);
-        world.query_pipeline.update(&world.collider_set);
-
-        let start_pos = world.get_character_position(char_id).unwrap();
-        println!("Start: {:?}", start_pos);
-
-        // Move toward and over the obstacle
-        for i in 0..60 {
-            world.query_pipeline.update(&world.collider_set);
-            let movement = world.move_character(char_id, [0.2, 0.0, 0.0], dt).unwrap();
-            world.step(dt);
-
-            let pos = world.get_character_position(char_id).unwrap();
-            if i % 10 == 0 || (pos[0] > 4.0 && pos[0] < 6.0) {
-                println!(
-                    "Frame {}: pos=({:.2}, {:.2}, {:.2}) grounded={}",
-                    i, pos[0], pos[1], pos[2], movement.grounded
-                );
-            }
-        }
-
-        let final_pos = world.get_character_position(char_id).unwrap();
-        println!("Final: {:?}", final_pos);
-
-        // Character should have moved past the obstacle (X > 6)
-        assert!(
-            final_pos[0] > 6.0,
-            "Character should autostep over 0.3 stud obstacle. Final X={:.2}",
-            final_pos[0]
-        );
-    }
-
-    #[test]
-    fn test_character_blocked_by_tall_obstacle() {
-        let mut world = PhysicsWorld::new();
-
-        // Floor
-        world.add_part(
-            1,
-            [0.0, -0.5, 0.0],
-            &[[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
-            [100.0, 1.0, 100.0],
-            true,
-            true,
-            PartType::Block,
-            None,
-        );
-
-        // Tall obstacle (1.0 stud tall, should block with max_height=0.5)
-        world.add_part(
-            2,
-            [5.0, 0.5, 0.0],
-            &[[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
-            [1.0, 1.0, 4.0], // top at Y=1.0
-            true,
-            true,
-            PartType::Block,
-            None,
-        );
-
-        let char_id = 100;
-        world.add_character(char_id, [0.0, 2.6, 0.0], 1.0, 5.0);
-
-        let dt = 1.0 / 60.0;
-        world.step(dt);
-        world.query_pipeline.update(&world.collider_set);
-
-        // Move toward the obstacle
-        for _ in 0..60 {
-            world.query_pipeline.update(&world.collider_set);
-            world.move_character(char_id, [0.2, 0.0, 0.0], dt);
-            world.step(dt);
-        }
-
-        let final_pos = world.get_character_position(char_id).unwrap();
-        println!("Final pos with tall obstacle: {:?}", final_pos);
-
-        // Character should be blocked (X < 5, can't step over 1.0 stud obstacle)
-        assert!(
-            final_pos[0] < 5.0,
-            "Character should be blocked by 1.0 stud obstacle. Final X={:.2}",
-            final_pos[0]
-        );
-    }
-
-    #[test]
-    fn test_character_step_up_onto_platform() {
-        // Mimics tsunami scenario: ground + raised platform
-        let mut world = PhysicsWorld::new();
-
-        // Ground (lower level) - extends UNDER the platform to avoid seam
-        world.add_part(
-            1,
-            [0.0, -0.5, 0.0], // center
-            &[[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
-            [200.0, 1.0, 100.0], // top at Y=0, extends from X=-100 to X=100
-            true,
-            true,
-            PartType::Block,
-            None,
-        );
-
-        // Raised platform (like tsunami base) - sits ON TOP of ground
-        world.add_part(
-            2,
-            [50.0, 0.1, 0.0], // center at Y=0.1
-            &[[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
-            [100.0, 0.2, 100.0], // top at Y=0.2, bottom at Y=0, X from 0 to 100
-            true,
-            true,
-            PartType::Block,
-            None,
-        );
-
-        // Character starts on ground (left side), will try to step up onto platform
-        let char_id = 100;
-        world.add_character(char_id, [-5.0, 2.6, 0.0], 1.0, 5.0);
-
-        let dt = 1.0 / 60.0;
-        world.step(dt);
-        world.query_pipeline.update(&world.collider_set);
-
-        let start_pos = world.get_character_position(char_id).unwrap();
-        println!("Start (on ground): {:?}", start_pos);
-
-        // Move +X toward and onto the platform
-        for i in 0..40 {
-            world.query_pipeline.update(&world.collider_set);
-            let movement = world.move_character(char_id, [0.2, 0.0, 0.0], dt).unwrap();
-            world.step(dt);
-
-            let pos = world.get_character_position(char_id).unwrap();
-            if i % 5 == 0 || (pos[0] > -2.0 && pos[0] < 5.0) {
-                println!(
-                    "Frame {}: pos=({:.2}, {:.2}, {:.2}) grounded={}",
-                    i, pos[0], pos[1], pos[2], movement.grounded
-                );
-            }
-        }
-
-        let final_pos = world.get_character_position(char_id).unwrap();
-        println!("Final: {:?}", final_pos);
-
-        // Character should step up onto platform (X > 2, past the edge at X=0)
-        assert!(
-            final_pos[0] > 2.0,
-            "Character should step UP onto 0.2 stud platform. Final X={:.2}",
-            final_pos[0]
-        );
-    }
-}
+mod tests;

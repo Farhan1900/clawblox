@@ -1,0 +1,397 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ENV_FILE="${CLAWBLOX_WATCHDOG_ENV_FILE:-$ROOT_DIR/.env}"
+STATE_DIR="${CLAWBLOX_WATCHDOG_STATE_DIR:-$ROOT_DIR/.clawblox-watchdog}"
+INTERVAL_SECONDS="${CLAWBLOX_WATCHDOG_INTERVAL_SECONDS:-120}"
+STARTUP_GRACE_SECONDS="${CLAWBLOX_WATCHDOG_STARTUP_GRACE_SECONDS:-300}"
+STALE_LOG_SECONDS="${CLAWBLOX_WATCHDOG_STALE_LOG_SECONDS:-900}"
+HOSTNAME_FQDN="$(hostname -f 2>/dev/null || hostname)"
+
+usage() {
+  cat <<'EOF'
+Usage:
+  scripts/clawblox-watchdog [--once]
+  scripts/clawblox-watchdog --notify-only MESSAGE
+
+Monitors live multi-run sessions discovered from .clawblox-multi/*.env.
+Slack notifications are sent only for starts, clean stops, and failures when
+CLAWBLOX_SLACK_WEBHOOK_URL is defined in .env or the environment.
+EOF
+}
+
+load_env() {
+  if [[ -f "$ENV_FILE" ]]; then
+    set -a
+    # shellcheck disable=SC1090
+    source "$ENV_FILE"
+    set +a
+  fi
+}
+
+utc_now() {
+  date -u +%Y-%m-%dT%H:%M:%SZ
+}
+
+epoch_now() {
+  date +%s
+}
+
+sanitize_name() {
+  printf '%s' "$1" | tr -c 'A-Za-z0-9._-' '_'
+}
+
+json_escape() {
+  python3 -c 'import json,sys; print(json.dumps(sys.stdin.read()))'
+}
+
+slack_post() {
+  local text="$1"
+  [[ -n "${CLAWBLOX_SLACK_WEBHOOK_URL:-}" ]] || return 0
+  local escaped
+  escaped="$(printf '%s' "$text" | json_escape)"
+  curl -fsS -X POST -H 'Content-Type: application/json' \
+    --data "{\"text\":${escaped}}" \
+    "$CLAWBLOX_SLACK_WEBHOOK_URL" >/dev/null
+}
+
+notify() {
+  local message="$1"
+  printf '%s %s\n' "$(utc_now)" "$message" | tee -a "$STATE_DIR/watchdog.log" >/dev/null
+  if slack_post "$message"; then
+    printf '%s slack delivery ok\n' "$(utc_now)" >>"$STATE_DIR/watchdog.log"
+  else
+    printf '%s slack delivery failed\n' "$(utc_now)" >>"$STATE_DIR/watchdog.log"
+  fi
+}
+
+log_local() {
+  printf '%s %s\n' "$(utc_now)" "$1" >>"$STATE_DIR/watchdog.log"
+}
+
+load_run_metadata() {
+  local meta_file="$1"
+  bash -lc '
+    set -euo pipefail
+    # shellcheck disable=SC1090
+    source "$1"
+    printf "%s\t%s\t%s\t%s\t%s\t%s\n" \
+      "${RUN_ID:-}" \
+      "${RUN_DIR:-}" \
+      "${TMUX_SESSION:-}" \
+      "${BASE_PORT:-}" \
+      "${NUM_WORLDS:-1}" \
+      "${AUTO_STOP_PID:-}"
+  ' _ "$meta_file"
+}
+
+tmux_prefix_for_session() {
+  local session="$1"
+  if [[ "$session" =~ -g[0-9][0-9][0-9]$ ]]; then
+    printf '%s' "${session%-g[0-9][0-9][0-9]}"
+  else
+    printf '%s' "$session"
+  fi
+}
+
+check_http() {
+  local url="$1"
+  curl -fsS --max-time 5 "$url" >/dev/null 2>&1
+}
+
+check_proxy() {
+  local agent_dir="$1"
+  local port_file="$agent_dir/runtime/world_proxy_port.txt"
+  local session_file="$agent_dir/world_session.txt"
+  [[ -s "$port_file" ]] || return 1
+  [[ -s "$session_file" ]] || return 1
+  local proxy_port
+  local session_token
+  proxy_port="$(tr -d '[:space:]' < "$port_file")"
+  session_token="$(tr -d '[:space:]' < "$session_file")"
+  [[ "$proxy_port" =~ ^[0-9]+$ ]] || return 1
+  [[ -n "$session_token" ]] || return 1
+  curl -fsS --max-time 5 \
+    -H "X-Session: $session_token" \
+    --proxy "http://127.0.0.1:${proxy_port}" \
+    "http://world/api.md" >/dev/null 2>&1
+}
+
+file_mtime_epoch() {
+  local path="$1"
+  stat -c %Y "$path" 2>/dev/null || printf '0'
+}
+
+latest_generation_count() {
+  local run_dir="$1"
+  local exp_dir
+  exp_dir="$(cd "$(dirname "$run_dir")/.." 2>/dev/null && pwd || true)"
+  local csv="$exp_dir/generation_chain.csv"
+  if [[ -f "$csv" ]]; then
+    awk 'NR > 1 && NF { n++ } END { print n + 0 }' "$csv"
+  else
+    printf '0'
+  fi
+}
+
+summarize_run() {
+  local run_id="$1" run_dir="$2" tmux_session="$3" base_port="$4" status="$5" detail="$6"
+  local completed
+  completed="$(latest_generation_count "$run_dir")"
+  printf 'run=%s session=%s port=%s completed_generations=%s status=%s detail=%s' \
+    "$run_id" "$tmux_session" "$base_port" "$completed" "$status" "$detail"
+}
+
+short_summary() {
+  local run_id="$1" run_dir="$2" tmux_session="$3"
+  local completed
+  completed="$(latest_generation_count "$run_dir")"
+  printf 'host=%s run=%s session=%s gens=%s' \
+    "$HOSTNAME_FQDN" "$run_id" "$tmux_session" "$completed"
+}
+
+failure_summary() {
+  local run_id="$1" run_dir="$2" tmux_session="$3" reason="$4"
+  printf '%s reason=%s' "$(short_summary "$run_id" "$run_dir" "$tmux_session")" "$reason"
+}
+
+save_run_summary() {
+  local key="$1" run_id="$2" run_dir="$3" tmux_session="$4" base_port="$5"
+  {
+    printf 'RUN_ID=%q\n' "$run_id"
+    printf 'RUN_DIR=%q\n' "$run_dir"
+    printf 'TMUX_SESSION=%q\n' "$tmux_session"
+    printf 'BASE_PORT=%q\n' "$base_port"
+  } >"$STATE_DIR/$key.summary"
+}
+
+active_run_metadata_exists() {
+  local run_id="$1"
+  local meta_file metadata meta_run_id rest
+  while IFS= read -r -d '' meta_file; do
+    metadata="$(load_run_metadata "$meta_file" 2>/dev/null || true)"
+    [[ -n "$metadata" ]] || continue
+    IFS=$'\t' read -r meta_run_id rest <<<"$metadata"
+    if [[ "$meta_run_id" == "$run_id" ]]; then
+      return 0
+    fi
+  done < <(find "$ROOT_DIR/.clawblox-multi" -maxdepth 1 -type f -name '*.env' -print0 2>/dev/null)
+  return 1
+}
+
+notify_stopped_runs() {
+  local status_file key prev_status summary_file run_id run_dir tmux_session base_port stop_key stop_marker
+  while IFS= read -r -d '' status_file; do
+    key="$(basename "$status_file" .status)"
+    prev_status="$(cat "$status_file" 2>/dev/null || true)"
+    [[ "$prev_status" == "ok" || "$prev_status" == "starting" ]] || continue
+    [[ -f "$STATE_DIR/$key.seen" ]] || continue
+
+    summary_file="$STATE_DIR/$key.summary"
+    [[ -f "$summary_file" ]] || continue
+    run_id=""
+    run_dir=""
+    tmux_session=""
+    base_port=""
+    RUN_ID=""
+    RUN_DIR=""
+    TMUX_SESSION=""
+    BASE_PORT=""
+    # shellcheck disable=SC1090
+    source "$summary_file"
+    run_id="$RUN_ID"
+    run_dir="$RUN_DIR"
+    tmux_session="$TMUX_SESSION"
+    base_port="$BASE_PORT"
+    [[ -n "$tmux_session" ]] || continue
+
+    if tmux has-session -t "$tmux_session" 2>/dev/null; then
+      continue
+    fi
+    if active_run_metadata_exists "$run_id"; then
+      continue
+    fi
+
+    stop_key="$(sanitize_name "$run_id")"
+    stop_marker="$STATE_DIR/$stop_key.stopped_notified"
+    if [[ -f "$stop_marker" ]]; then
+      printf '%s\n' "stopped" >"$status_file"
+      continue
+    fi
+    printf '%s\n' "$(utc_now)" >"$stop_marker"
+    notify ":white_circle: stopped $(short_summary "$run_id" "$run_dir" "$tmux_session")"
+    printf '%s\n' "stopped" >"$status_file"
+  done < <(find "$STATE_DIR" -maxdepth 1 -type f -name '*.status' -print0 2>/dev/null)
+}
+
+check_run() {
+  local meta_file="$1"
+  local metadata run_id run_dir tmux_session base_port num_worlds auto_stop_pid
+  metadata="$(load_run_metadata "$meta_file" 2>/dev/null || true)"
+  [[ -n "$metadata" ]] || return 0
+  IFS=$'\t' read -r run_id run_dir tmux_session base_port num_worlds auto_stop_pid <<<"$metadata"
+  [[ -n "$run_id" && -n "$run_dir" && -n "$tmux_session" && -n "$base_port" ]] || return 0
+
+  local key state_file prev_status status detail now first_seen_file first_seen last_seen_file
+  key="$(sanitize_name "${tmux_session}_${run_id}")"
+  state_file="$STATE_DIR/$key.status"
+  first_seen_file="$STATE_DIR/$key.first_seen"
+  last_seen_file="$STATE_DIR/$key.seen"
+  prev_status="$(cat "$state_file" 2>/dev/null || true)"
+  now="$(epoch_now)"
+
+  if ! tmux has-session -t "$tmux_session" 2>/dev/null; then
+    # Old metadata files are common. A run is monitorable only after tmux exists.
+    if [[ -f "$last_seen_file" && "$prev_status" == "ok" ]]; then
+      status="fail"
+      detail="tmux session missing"
+    else
+      return 0
+    fi
+  else
+    status="ok"
+    detail="healthy"
+  fi
+
+  if [[ "$status" == "ok" && ! -d "$run_dir" ]]; then
+    status="fail"
+    detail="run directory missing"
+  elif [[ "$status" == "ok" ]] && ! check_http "http://localhost:${base_port}/api.md"; then
+    status="fail"
+    detail="world port ${base_port} unhealthy"
+  elif [[ "$status" == "ok" ]]; then
+    local prefix cache_file krenew_pid_file agents_root agent_dir agent_log log_mtime age latest_file latest_run
+    prefix="$(tmux_prefix_for_session "$tmux_session")"
+    cache_file="/storage/${USER}/.krb5/longrun/krb5cc_${UID}_${prefix}"
+    krenew_pid_file="/storage/${USER}/.krb5/longrun/krenew_${UID}_${prefix}.pid"
+    if [[ -f "$cache_file" ]] && ! KRB5CCNAME="FILE:$cache_file" klist -s >/dev/null 2>&1; then
+      status="fail"
+      detail="Kerberos cache invalid for $prefix"
+    elif [[ -s "$krenew_pid_file" ]] && ! kill -0 "$(tr -d '[:space:]' < "$krenew_pid_file")" 2>/dev/null; then
+      status="fail"
+      detail="krenew pid is not running for $prefix"
+    else
+      latest_file="$(dirname "$run_dir")/latest_run.txt"
+      latest_run="$(cat "$latest_file" 2>/dev/null || true)"
+      if [[ -f "$latest_file" && "$latest_run" != "$run_dir" ]]; then
+        status="fail"
+        detail="latest_run mismatch"
+      else
+        agents_root="$run_dir/worlds/world-0/agents"
+        agent_dir="$(find "$agents_root" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | sort | head -n 1 || true)"
+        if [[ -z "$agent_dir" ]]; then
+          status="fail"
+          detail="agent directory missing"
+        elif [[ ! -d "$agent_dir/workspace" || ! -d "$agent_dir/runtime" ]]; then
+          status="fail"
+          detail="agent workspace/runtime missing"
+        elif ! check_proxy "$agent_dir"; then
+          status="fail"
+          detail="agent world proxy unhealthy"
+        else
+          agent_log="$agent_dir/logs/agent.log"
+          if [[ -f "$agent_log" ]]; then
+            log_mtime="$(file_mtime_epoch "$agent_log")"
+            age=$((now - log_mtime))
+            if ((age > STALE_LOG_SECONDS)); then
+              status="warn"
+              detail="agent log stale ${age}s"
+            fi
+          fi
+        fi
+      fi
+    fi
+  fi
+
+  mkdir -p "$STATE_DIR"
+  first_seen="$(cat "$first_seen_file" 2>/dev/null || true)"
+  if [[ ! "$first_seen" =~ ^[0-9]+$ ]]; then
+    first_seen="$now"
+    printf '%s\n' "$first_seen" >"$first_seen_file"
+  fi
+  save_run_summary "$key" "$run_id" "$run_dir" "$tmux_session" "$base_port"
+
+  if [[ ! -f "$last_seen_file" ]]; then
+    notify ":large_green_circle: started $(short_summary "$run_id" "$run_dir" "$tmux_session")"
+    if [[ "$status" == "fail" && $((now - first_seen)) -ge "$STARTUP_GRACE_SECONDS" ]]; then
+      notify ":red_circle: failed startup $(failure_summary "$run_id" "$run_dir" "$tmux_session" "$detail")"
+    elif [[ "$status" == "fail" ]]; then
+      log_local "live run still in startup grace: $(summarize_run "$run_id" "$run_dir" "$tmux_session" "$base_port" "$status" "$detail")"
+      printf '%s\n' "starting" >"$state_file"
+      printf '%s\n' "$now" >"$last_seen_file"
+      return 0
+    fi
+  elif [[ "$prev_status" == "starting" && "$status" == "ok" ]]; then
+    log_local "startup became healthy: $(summarize_run "$run_id" "$run_dir" "$tmux_session" "$base_port" "$status" "$detail")"
+  elif [[ "$prev_status" == "starting" && "$status" == "fail" && $((now - first_seen)) -ge "$STARTUP_GRACE_SECONDS" ]]; then
+    notify ":red_circle: failed startup $(failure_summary "$run_id" "$run_dir" "$tmux_session" "$detail")"
+  elif [[ "$prev_status" == "starting" && "$status" == "fail" ]]; then
+    log_local "live run still in startup grace: $(summarize_run "$run_id" "$run_dir" "$tmux_session" "$base_port" "$status" "$detail")"
+    printf '%s\n' "starting" >"$state_file"
+    printf '%s\n' "$now" >"$last_seen_file"
+    return 0
+  elif [[ "$prev_status" == "ok" && "$status" == "fail" ]]; then
+    notify ":red_circle: failed $(failure_summary "$run_id" "$run_dir" "$tmux_session" "$detail")"
+  elif [[ "$prev_status" != "$status" ]]; then
+    log_local "status changed without Slack: $(summarize_run "$run_id" "$run_dir" "$tmux_session" "$base_port" "$status" "$detail")"
+  fi
+
+  printf '%s\n' "$status" >"$state_file"
+  printf '%s\n' "$now" >"$last_seen_file"
+}
+
+watch_once() {
+  mkdir -p "$STATE_DIR"
+  local found=0 meta_file
+  while IFS= read -r -d '' meta_file; do
+    found=1
+    check_run "$meta_file"
+  done < <(find "$ROOT_DIR/.clawblox-multi" -maxdepth 1 -type f -name '*.env' -print0 2>/dev/null)
+  if ((found == 0)); then
+    log_local "no run metadata found"
+  fi
+  notify_stopped_runs
+}
+
+main() {
+  local once=0 notify_only=""
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --once) once=1; shift ;;
+      --notify-only)
+        [[ $# -ge 2 ]] || { usage; exit 1; }
+        notify_only="$2"
+        shift 2
+        ;;
+      --help|-h) usage; exit 0 ;;
+      *) echo "Unknown option: $1" >&2; usage; exit 1 ;;
+    esac
+  done
+
+  load_env
+  mkdir -p "$STATE_DIR"
+  chmod 700 "$STATE_DIR"
+
+  if [[ -n "$notify_only" ]]; then
+    notify "$notify_only"
+    exit 0
+  fi
+
+  if [[ -z "${CLAWBLOX_SLACK_WEBHOOK_URL:-}" ]]; then
+    echo "Warning: CLAWBLOX_SLACK_WEBHOOK_URL is not set; logging only." >&2
+  fi
+
+  if ((once == 1)); then
+    watch_once
+    exit 0
+  fi
+
+  log_local "watchdog started on $HOSTNAME_FQDN"
+  while true; do
+    watch_once
+    sleep "$INTERVAL_SECONDS"
+  done
+}
+
+main "$@"

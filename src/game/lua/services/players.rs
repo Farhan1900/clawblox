@@ -1,4 +1,5 @@
 use mlua::{UserData, UserDataFields, UserDataMethods, Value};
+use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 
 use crate::game::lua::events::create_signal;
@@ -12,6 +13,8 @@ pub struct PlayersServiceData {
     pub character_auto_loads: bool,
     pub player_added: RBXScriptSignal,
     pub player_removing: RBXScriptSignal,
+    /// Names queued by Players:AddBot() — drained by GameInstance::tick().
+    pub pending_bots: VecDeque<String>,
 }
 
 impl PlayersServiceData {
@@ -27,6 +30,7 @@ impl PlayersServiceData {
             character_auto_loads: true,
             player_added: create_signal("PlayerAdded"),
             player_removing: create_signal("PlayerRemoving"),
+            pending_bots: VecDeque::new(),
         }
     }
 }
@@ -133,8 +137,11 @@ impl PlayersService {
 
 impl UserData for PlayersService {
     fn add_fields<F: UserDataFields<Self>>(fields: &mut F) {
-        fields.add_field_method_get("LocalPlayer", |_, this| {
-            Ok(this.data.lock().unwrap().local_player.clone())
+        fields.add_field_method_get("LocalPlayer", |lua, this| {
+            Instance::optional_cached_userdata_value(
+                lua,
+                this.data.lock().unwrap().local_player.clone(),
+            )
         });
 
         fields.add_field_method_get("MaxPlayers", |_, this| {
@@ -161,7 +168,9 @@ impl UserData for PlayersService {
     }
 
     fn add_methods<M: UserDataMethods<Self>>(methods: &mut M) {
-        methods.add_method("GetPlayers", |_, this, ()| Ok(this.get_players()));
+        methods.add_method("GetPlayers", |lua, this, ()| {
+            Instance::cached_userdata_sequence(lua, this.get_players())
+        });
 
         methods.add_method("GetPlayerByUserId", |lua, this, user_id: u64| {
             if let Some(player) = this.get_player_by_user_id(user_id) {
@@ -171,17 +180,37 @@ impl UserData for PlayersService {
             }
         });
 
-        methods.add_method("GetPlayerFromCharacter", |_, this, character: Instance| {
-            Ok(this.get_player_from_character(&character))
-        });
+        methods.add_method(
+            "GetPlayerFromCharacter",
+            |lua, this, character: Instance| {
+                Instance::optional_cached_userdata_value(
+                    lua,
+                    this.get_player_from_character(&character),
+                )
+            },
+        );
 
-        methods.add_method("GetChildren", |_, this, ()| Ok(this.get_players()));
+        methods.add_method("GetChildren", |lua, this, ()| {
+            Instance::cached_userdata_sequence(lua, this.get_players())
+        });
 
         methods.add_method(
             "FindFirstChild",
-            |_, this, (name, _recursive): (String, Option<bool>)| {
-                Ok(this.get_players().into_iter().find(|p| p.name() == name))
+            |lua, this, (name, _recursive): (String, Option<bool>)| {
+                Instance::optional_cached_userdata_value(
+                    lua,
+                    this.get_players().into_iter().find(|p| p.name() == name),
+                )
             },
         );
+
+        // Players:AddBot(name) — queues a server-side bot player for creation.
+        // The bot is created at the start of the next tick; Players.PlayerAdded
+        // fires with the real Player instance at that point.
+        // This is the Clawblox equivalent of Roblox Studio's "Play Solo" player.
+        methods.add_method("AddBot", |_, this, name: String| {
+            this.data.lock().unwrap().pending_bots.push_back(name);
+            Ok(())
+        });
     }
 }

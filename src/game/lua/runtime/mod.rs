@@ -1,273 +1,64 @@
 use mlua::{
-    Function, Lua, MultiValue, ObjectLike, RegistryKey, Result, Thread, ThreadStatus, UserData,
-    UserDataMethods, Value,
+    Function, Lua, MultiValue, ObjectLike, RegistryKey, Result, Thread, ThreadStatus, Value,
 };
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
 use uuid::Uuid;
 
 use crate::game::instance::ErrorMode;
 
 use super::animation::AnimationScheduler;
+use super::events::RBXScriptSignal;
 use super::instance::{AttributeValue, Instance, InstanceData};
 use super::services::{
     register_overlap_params, register_raycast_params, AgentInput, AgentInputService,
-    DataStoreService, DebrisService, HttpService, PhysicsService, PlayersService,
-    RemoteEventService, RunService, WorkspaceService,
+    PlayersService, RunService, WorkspaceService,
 };
 use super::types::register_all_types;
 use crate::game::async_bridge::AsyncBridge;
 
 mod coroutines;
-mod engine;
+mod data_model;
 mod frame_events;
+mod script_runtime;
+mod vm_snapshot;
 
-/// A request to kick a player from the game
-#[derive(Debug, Clone)]
-pub struct KickRequest {
-    pub user_id: u64,
-    pub message: Option<String>,
-}
+use data_model::BindToCloseCallbacks;
+pub use data_model::{Game, GameDataModel, KickRequest, PhysicsCommand};
+pub use vm_snapshot::LuaVmSnapshot;
 
-#[derive(Default)]
-struct BindToCloseCallbacks {
-    callbacks: Vec<RegistryKey>,
-}
+const DEFAULT_PLAYER_MODEL_URL: &str = "asset://player.glb";
 
+/// Simulation clock for script-visible time (`time()`, `task.wait`,
+/// `task.delay`, Debris lifetimes). Purely tick-driven: it advances only
+/// with simulated frames, never with the host's wall clock. Mixing in wall
+/// time makes every script timer depend on host load (a deadline stamped
+/// during a slow script load lands beyond the frames that should expire
+/// it) and breaks deterministic replay of recorded sessions.
 #[derive(Clone)]
 struct RuntimeClock {
-    start_time: Instant,
     now_secs: Arc<Mutex<f64>>,
 }
 
 impl RuntimeClock {
     fn new() -> Self {
         Self {
-            start_time: Instant::now(),
             now_secs: Arc::new(Mutex::new(0.0)),
         }
     }
 
-    fn wall_secs(&self) -> f64 {
-        self.start_time.elapsed().as_secs_f64()
-    }
-
     fn now(&self) -> f64 {
-        let sim = *self.now_secs.lock().unwrap();
-        sim.max(self.wall_secs())
+        *self.now_secs.lock().unwrap()
     }
 
     fn advance(&self, dt_secs: f64) -> f64 {
         let mut now = self.now_secs.lock().unwrap();
         *now += dt_secs.max(0.0);
-        (*now).max(self.wall_secs())
-    }
-}
-
-pub struct GameDataModel {
-    pub workspace: WorkspaceService,
-    pub players: PlayersService,
-    pub run_service: RunService,
-    pub agent_input_service: AgentInputService,
-    pub data_store_service: DataStoreService,
-    pub debris_service: DebrisService,
-    pub physics_service: PhysicsService,
-    pub remote_event_service: RemoteEventService,
-    pub server_script_service: Instance,
-    pub replicated_storage: Instance,
-    /// Queue of pending kick requests from Lua scripts
-    pub kick_requests: Vec<KickRequest>,
-}
-
-const DEFAULT_PLAYER_MODEL_URL: &str = "asset://player.glb";
-
-impl GameDataModel {
-    pub fn new(game_id: Uuid, async_bridge: Option<Arc<AsyncBridge>>) -> Self {
-        Self::with_config(game_id, 100, async_bridge)
+        *now
     }
 
-    pub fn with_config(
-        game_id: Uuid,
-        max_players: u32,
-        async_bridge: Option<Arc<AsyncBridge>>,
-    ) -> Self {
-        Self {
-            workspace: WorkspaceService::new(),
-            players: PlayersService::with_max_players(max_players),
-            run_service: RunService::new(true),
-            agent_input_service: AgentInputService::new(),
-            data_store_service: DataStoreService::new(game_id, async_bridge),
-            debris_service: DebrisService::new(),
-            physics_service: PhysicsService::new(),
-            remote_event_service: RemoteEventService::new(),
-            server_script_service: Instance::from_data(InstanceData::new_server_script_service()),
-            replicated_storage: Instance::from_data(InstanceData::new_replicated_storage()),
-            kick_requests: Vec::new(),
-        }
-    }
-}
-
-#[derive(Clone)]
-pub struct Game {
-    pub data_model: Arc<Mutex<GameDataModel>>,
-}
-
-impl Game {
-    pub fn new(game_id: Uuid, async_bridge: Option<Arc<AsyncBridge>>) -> Self {
-        Self::with_config(game_id, 100, async_bridge)
-    }
-
-    pub fn with_config(
-        game_id: Uuid,
-        max_players: u32,
-        async_bridge: Option<Arc<AsyncBridge>>,
-    ) -> Self {
-        Self {
-            data_model: Arc::new(Mutex::new(GameDataModel::with_config(
-                game_id,
-                max_players,
-                async_bridge,
-            ))),
-        }
-    }
-
-    pub fn workspace(&self) -> WorkspaceService {
-        self.data_model.lock().unwrap().workspace.clone()
-    }
-
-    pub fn players(&self) -> PlayersService {
-        self.data_model.lock().unwrap().players.clone()
-    }
-
-    pub fn run_service(&self) -> RunService {
-        self.data_model.lock().unwrap().run_service.clone()
-    }
-
-    pub fn agent_input_service(&self) -> AgentInputService {
-        self.data_model.lock().unwrap().agent_input_service.clone()
-    }
-
-    pub fn data_store_service(&self) -> DataStoreService {
-        self.data_model.lock().unwrap().data_store_service.clone()
-    }
-
-    pub fn remote_event_service(&self) -> RemoteEventService {
-        self.data_model.lock().unwrap().remote_event_service.clone()
-    }
-
-    pub fn debris_service(&self) -> DebrisService {
-        self.data_model.lock().unwrap().debris_service.clone()
-    }
-
-    pub fn physics_service(&self) -> PhysicsService {
-        self.data_model.lock().unwrap().physics_service.clone()
-    }
-
-    pub fn server_script_service(&self) -> Instance {
-        self.data_model
-            .lock()
-            .unwrap()
-            .server_script_service
-            .clone()
-    }
-
-    pub fn replicated_storage(&self) -> Instance {
-        self.data_model.lock().unwrap().replicated_storage.clone()
-    }
-
-    /// Queue a kick request for a player (called from Lua Player:Kick())
-    pub fn queue_kick(&self, user_id: u64, message: Option<String>) {
-        self.data_model
-            .lock()
-            .unwrap()
-            .kick_requests
-            .push(KickRequest { user_id, message });
-    }
-
-    /// Drain all pending kick requests (called from GameInstance tick)
-    pub fn drain_kick_requests(&self) -> Vec<KickRequest> {
-        std::mem::take(&mut self.data_model.lock().unwrap().kick_requests)
-    }
-}
-
-impl UserData for Game {
-    fn add_methods<M: UserDataMethods<Self>>(methods: &mut M) {
-        methods.add_method("GetService", |lua, this, name: String| {
-            let dm = this.data_model.lock().unwrap();
-            match name.as_str() {
-                "Workspace" => Ok(Value::UserData(lua.create_userdata(dm.workspace.clone())?)),
-                "Players" => Ok(Value::UserData(lua.create_userdata(dm.players.clone())?)),
-                "RunService" => Ok(Value::UserData(
-                    lua.create_userdata(dm.run_service.clone())?,
-                )),
-                "AgentInputService" => Ok(Value::UserData(
-                    lua.create_userdata(dm.agent_input_service.clone())?,
-                )),
-                "DataStoreService" => Ok(Value::UserData(
-                    lua.create_userdata(dm.data_store_service.clone())?,
-                )),
-                "Debris" | "DebrisService" => Ok(Value::UserData(
-                    lua.create_userdata(dm.debris_service.clone())?,
-                )),
-                "PhysicsService" => Ok(Value::UserData(
-                    lua.create_userdata(dm.physics_service.clone())?,
-                )),
-                "RemoteEventService" => Ok(Value::UserData(
-                    lua.create_userdata(dm.remote_event_service.clone())?,
-                )),
-                "ServerScriptService" => Ok(Value::UserData(
-                    lua.create_userdata(dm.server_script_service.clone())?,
-                )),
-                "ReplicatedStorage" => Ok(Value::UserData(
-                    lua.create_userdata(dm.replicated_storage.clone())?,
-                )),
-                "HttpService" => {
-                    drop(dm); // Release lock before creating userdata
-                    Ok(Value::UserData(lua.create_userdata(HttpService::new())?))
-                }
-                _ => Ok(Value::Nil),
-            }
-        });
-
-        methods.add_meta_method(mlua::MetaMethod::Index, |lua, this, key: String| {
-            let dm = this.data_model.lock().unwrap();
-            match key.as_str() {
-                "Workspace" => Ok(Value::UserData(lua.create_userdata(dm.workspace.clone())?)),
-                "Players" => Ok(Value::UserData(lua.create_userdata(dm.players.clone())?)),
-                "RunService" => Ok(Value::UserData(
-                    lua.create_userdata(dm.run_service.clone())?,
-                )),
-                "PhysicsService" => Ok(Value::UserData(
-                    lua.create_userdata(dm.physics_service.clone())?,
-                )),
-                "RemoteEventService" => Ok(Value::UserData(
-                    lua.create_userdata(dm.remote_event_service.clone())?,
-                )),
-                "Debris" | "DebrisService" => Ok(Value::UserData(
-                    lua.create_userdata(dm.debris_service.clone())?,
-                )),
-                "ServerScriptService" => Ok(Value::UserData(
-                    lua.create_userdata(dm.server_script_service.clone())?,
-                )),
-                "ReplicatedStorage" => Ok(Value::UserData(
-                    lua.create_userdata(dm.replicated_storage.clone())?,
-                )),
-                _ => Ok(Value::Nil),
-            }
-        });
-
-        methods.add_method("BindToClose", |lua, _this, callback: Function| {
-            let key = lua.create_registry_value(callback)?;
-            if let Some(mut existing) = lua.app_data_mut::<BindToCloseCallbacks>() {
-                existing.callbacks.push(key);
-            } else {
-                lua.set_app_data(BindToCloseCallbacks {
-                    callbacks: vec![key],
-                });
-            }
-            Ok(())
-        });
+    fn set(&self, now_secs: f64) {
+        *self.now_secs.lock().unwrap() = now_secs.max(0.0);
     }
 }
 
@@ -406,12 +197,23 @@ impl LuaRuntime {
         lua.globals().set("RunService", game.run_service())?;
         lua.globals()
             .set("PhysicsService", game.physics_service())?;
-        lua.globals()
-            .set("ReplicatedStorage", game.replicated_storage())?;
+        lua.globals().set(
+            "ReplicatedStorage",
+            Value::UserData(Instance::cached_userdata(&lua, &game.replicated_storage())?),
+        )?;
         lua.globals()
             .set("RemoteEventService", game.remote_event_service())?;
-        lua.globals()
-            .set("ServerScriptService", game.server_script_service())?;
+        lua.globals().set(
+            "ServerScriptService",
+            Value::UserData(Instance::cached_userdata(
+                &lua,
+                &game.server_script_service(),
+            )?),
+        )?;
+        let server_storage =
+            Value::UserData(Instance::cached_userdata(&lua, &game.server_storage())?);
+        lua.globals().set("ServerStorage", server_storage.clone())?;
+        lua.globals().set("serverStorage", server_storage)?;
 
         let print_fn = lua.create_function(|_, args: MultiValue| {
             let msg: Vec<String> = args
@@ -529,6 +331,9 @@ impl LuaRuntime {
         let cancelled_table = lua.create_table()?;
         lua.globals()
             .set("__clawblox_cancelled_threads", cancelled_table)?;
+        let signal_waiting_table = lua.create_table()?;
+        lua.globals()
+            .set("__clawblox_signal_waiting_threads", signal_waiting_table)?;
 
         // --- task library ---
         // Rust helper: __clawblox_schedule_wait(seconds) — schedules current thread to resume after delay
@@ -633,6 +438,7 @@ impl LuaRuntime {
                 __clawblox_cancelled_threads[thread] = true
                 __clawblox_thread_schedule[thread] = nil
                 __clawblox_thread_args[thread] = nil
+                __clawblox_signal_waiting_threads[thread] = nil
             end
 
             -- Fix global wait() to use task.wait()
@@ -692,18 +498,36 @@ impl LuaRuntime {
         })?;
         lua.globals().set("__clawblox_track_thread", track_fn)?;
 
+        let signal_wait_register =
+            lua.create_function(|lua, (signal, thread): (mlua::AnyUserData, Thread)| {
+                let signal = signal.borrow::<RBXScriptSignal>()?;
+                signal.wait(lua, thread)
+            })?;
+        lua.globals()
+            .set("__clawblox_signal_wait_register", signal_wait_register)?;
+        lua.load(
+            r#"
+            function __clawblox_signal_wait_impl(signal)
+                local thread = coroutine.running()
+                __clawblox_signal_waiting_threads[thread] = true
+                __clawblox_signal_wait_register(signal, thread)
+                return coroutine.yield()
+            end
+        "#,
+        )
+        .exec()?;
+
         let executed_scripts = Arc::new(Mutex::new(HashSet::new()));
-        let module_cache = Arc::new(Mutex::new(HashMap::new()));
-        let loading_modules = Arc::new(Mutex::new(HashSet::new()));
+        lua.globals()
+            .set("__clawblox_module_cache", lua.create_table()?)?;
+        lua.globals()
+            .set("__clawblox_loading_modules", lua.create_table()?)?;
         lua.set_app_data(AnimationScheduler::default());
         lua.set_app_data(BindToCloseCallbacks::default());
+        lua.set_app_data(crate::game::replication::SharedWorldReplicationState::default());
 
-        Self::register_require(
-            &lua,
-            module_cache.clone(),
-            loading_modules.clone(),
-            pending_coroutines.clone(),
-        )?;
+        Self::register_require(&lua, pending_coroutines.clone())?;
+        vm_snapshot::initialize_global_baseline(&lua)?;
 
         Ok(Self {
             lua,
@@ -862,7 +686,12 @@ impl LuaRuntime {
         for (player, inputs) in to_process {
             for input in &inputs {
                 if input.input_type == "Jump" {
-                    let conn_count = agent_input_service.data.lock().unwrap().input_received.connection_count();
+                    let conn_count = agent_input_service
+                        .data
+                        .lock()
+                        .unwrap()
+                        .input_received
+                        .connection_count();
                     eprintln!("[InputFire] Firing Jump event (connections={})", conn_count);
                 }
             }

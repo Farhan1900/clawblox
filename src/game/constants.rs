@@ -27,6 +27,10 @@ pub mod physics {
     /// Character controller autostep min width (very small for platform edges)
     pub const AUTOSTEP_MIN_WIDTH: f32 = 0.01;
 
+    /// Multiplier applied to world gravity for character controllers.
+    /// Characters feel heavier than dynamic objects (blocks) at the same gravity.
+    pub const CHARACTER_GRAVITY_MULTIPLIER: f32 = 20.0;
+
     /// Character controller snap to ground distance
     pub const SNAP_TO_GROUND: f32 = 0.2;
 
@@ -35,6 +39,24 @@ pub mod physics {
 
     /// Max support gap for "sticky" moving-platform carry when briefly not grounded.
     pub const CHARACTER_PLATFORM_STICK_DISTANCE: f32 = 0.6;
+
+    /// Effective character mass used to push dynamic bodies out of the
+    /// walking path. Light debris gets shoved aside, heavy objects still
+    /// block the way.
+    pub const CHARACTER_PUSH_MASS: f32 = 12.0;
+
+    /// Per-tick cap on the speed a dynamic body may GAIN while in contact
+    /// with a character capsule (studs/s). The capsule is kinematic, so the
+    /// solver grants its contacts unlimited authority; without a governor a
+    /// body that cannot clear the path (wedged, trapped, stood upon) is
+    /// pumped a little faster every tick and discharges as a launch.
+    pub const CHARACTER_CONTACT_SPEED_GAIN_CAP: f32 = 24.0;
+
+    /// Terminal fall speed for character controllers (studs/s). Without a
+    /// cap, a character falling through open space (e.g. water, which has no
+    /// character interaction) integrates 20x gravity indefinitely and reaches
+    /// thousands of studs/s within seconds.
+    pub const CHARACTER_TERMINAL_FALL_SPEED: f32 = 100.0;
 
     /// Small epsilon for float comparisons
     pub const EPSILON: f32 = 0.001;
@@ -51,9 +73,8 @@ pub mod humanoid {
     /// Default walk speed (studs/second)
     pub const DEFAULT_WALK_SPEED: f32 = 16.0;
 
-    /// Default jump power tuned for `physics::DEFAULT_GRAVITY` (30 studs/s²).
-    /// This yields roughly `DEFAULT_JUMP_HEIGHT` of vertical travel.
-    pub const DEFAULT_JUMP_POWER: f32 = 20.8;
+    /// Default jump power (Roblox-compatible).
+    pub const DEFAULT_JUMP_POWER: f32 = 50.0;
 
     /// Default jump height
     pub const DEFAULT_JUMP_HEIGHT: f32 = 7.2;

@@ -1,0 +1,15 @@
+[package]
+name = "clawblox-python"
+version = "0.1.1"
+edition = "2021"
+
+[lib]
+name = "_clawblox"
+crate-type = ["cdylib"]
+
+[dependencies]
+chrono = "0.4"
+clawblox = { path = "../.." }
+pyo3 = { version = "0.22", features = ["extension-module"] }
+serde_json = "1"
+toml = "0.8"
