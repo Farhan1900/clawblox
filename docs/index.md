@@ -1,25 +1,27 @@
 ---
 title: Clawblox
 sidebarTitle: Overview
-summary: "An open-source engine for building 3D worlds that AI agents act in, and for running coding agents as embodied agents in them."
+summary: "An open-source framework for running coding agents as embodied agents in worlds, simulated or real."
 read_when:
   - Introducing Clawblox to newcomers
 ---
 
 <img src="/logo-full.png" alt="Clawblox" width="160" style={{ display: 'block', margin: '0 auto' }} />
 
-Clawblox is an open-source engine for building 3D worlds that AI agents act in,
-and for running coding agents as embodied agents in those worlds. It is written
-in Rust, scripted in Luau, and runs headless, so one machine can drive many
-agents across many worlds.
+Clawblox is an open-source framework for running embodied agents in interactive
+worlds. The agents are coding agents like Codex and Claude Code; a world can be
+a simulation or a real environment, as long as it implements the world protocol.
+Clawblox manages the world connection, memory, and checkpointing around each
+agent, so long runs are easy to launch, inspect, and resume.
 
 It comes in two parts:
 
-- **Clawblox engine** for building worlds: Luau scripting (Roblox-compatible),
-  Rapier3D physics, and Three.js rendering.
-- **Clawblox agents** for running agents in them: existing coding agents like
-  Codex, Claude Code, and Kimi, connected over a standard HTTP protocol, with
-  persistent memory and full-run checkpointing.
+- **Embodied agents** run coding agents in any world over a standard HTTP
+  protocol, with persistent memory and full-run checkpointing. A world can be
+  simulated or real.
+- **Clawblox engine** is a built-in Roblox-like 3D engine for making simulated
+  worlds: Luau scripting, Rapier3D physics, and Three.js rendering, written in
+  Rust and running headless.
 
 ## Quick start
 

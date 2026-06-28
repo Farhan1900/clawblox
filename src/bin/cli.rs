@@ -647,7 +647,7 @@ max_players = 8
 
 [scripts]
 main = "main.lua"
-skill = "API.md"
+api = "API.md"
 
 [renderer]
 name = "Default World Renderer"
@@ -961,7 +961,7 @@ export function createRenderer(ctx) {
 fn read_agent_api_doc(world_dir: &Path, config: &clawblox::config::WorldConfig) -> Option<String> {
     let mut candidates: Vec<&str> = Vec::new();
 
-    match config.scripts.skill.as_deref().map(str::trim) {
+    match config.scripts.api.as_deref().map(str::trim) {
         Some("") => {}
         Some(DEFAULT_AGENT_API_DOC) => {
             candidates.push(DEFAULT_AGENT_API_DOC);

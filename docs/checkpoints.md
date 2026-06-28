@@ -89,17 +89,3 @@ checkpointed is like telling a network it is being `torch.save`d:
   payloads. Known residual channel: the agent can compare its own `date`
   with pre-crash memory; closing that fully requires VM-level time
   virtualization and is out of scope here.
-
-## Generation chains
-
-`run_agent_generations.py` (research harness) integrates checkpoints:
-
-- `CHECKPOINT_EVERY` (seconds, default 900, `0` disables) checkpoints each
-  running generation in `runs/<run_id>/checkpoints/`, with the latest pointer
-  in the experiment's `checkpoint.json`.
-- `--resume-from <ckpt>` resumes a generation that crashed mid-flight: the
-  remaining generation duration is computed from the checkpoint's
-  `elapsed_seconds`, and the chain continues into subsequent generations
-  normally. The chain CSV records `template_in` as `checkpoint:<path>`.
-- Failed run directories that contain checkpoints are preserved (renamed
-  `*.failed-<stamp>`), never deleted by the retry loop.

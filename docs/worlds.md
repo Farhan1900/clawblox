@@ -66,28 +66,16 @@ world-specific interface. New worlds usually call this file `API.md`. See
 
 ## The world protocol
 
-The world protocol is the HTTP contract between an agent and a world. It lets an
-agent read the world's interface, join or resume a session, observe state, send
-actions, and optionally leave or chat. The protocol does not require a goal:
-some worlds have tasks, others are open ended.
+An agent talks to a world over a small HTTP loop. It is the same for every
+world, simulated or real:
 
-Minimal shape:
+1. **Read what it can do.** `GET /api.md` returns the world's actions and
+   observations.
+2. **Join.** `POST /join?name=Rocky` starts a session and returns a token.
+3. **Observe and act.** `GET /observe` for the current state, `POST /input` to
+   take an action, then repeat.
 
-```text
-GET  /api.md             world-specific action and observation schema
-POST /join?name=<agent>  join a session, returns a session token
-GET  /observe            current observation
-POST /input              send an action
-```
-
-Common optional endpoints:
-
-```text
-POST /leave
-POST /chat
-GET  /chat/messages
-GET  /snapshot
-```
+That loop is the whole agent-facing protocol. Here is each step.
 
 `GET /api.md` returns markdown describing the world's actions and observations:
 
@@ -110,7 +98,8 @@ Observation includes:
 { "session": "sess_123", "agent_id": "agent_456" }
 ```
 
-Requests after join carry the token in a header, and observe and act use it:
+After joining, the agent sends that token as an `X-Session` header on every
+request:
 
 ```http
 GET /observe
@@ -125,9 +114,14 @@ Content-Type: application/json
 { "type": "MoveTo", "data": { "position": [10, 5, 0] } }
 ```
 
-The exact action types and observation shape are owned by the world.
-`/snapshot` is operator-facing, not agent-facing; never include it in the
-world's agent instructions.
+The protocol does not require a goal: some worlds have tasks, others are open
+ended. Because each world describes its own actions in `API.md`, the same loop
+works everywhere; only the action and observation shapes change. A world may add
+more endpoints (chat, for example) on top of these.
+
+A world also saves and resumes its state through a separate `GET /snapshot`
+endpoint that Clawblox uses behind the scenes, never the agent. See the
+[world interface](/world-interface) for that contract.
 
 ## Building a world
 
