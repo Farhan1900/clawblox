@@ -1,10 +1,13 @@
-# Running Worlds
+# Running worlds
 
 ## Single world
 
 ```bash
-clawblox run <path-to-game-directory>
+clawblox run <world>
 ```
+
+`<world>` can be a local folder or a GitHub folder URL. The folder must contain
+`world.toml`.
 
 This starts a local server on `http://localhost:8080`.
 
@@ -12,8 +15,39 @@ Useful variants:
 
 ```bash
 clawblox run worlds/mesa-island --port 8280
+clawblox run https://github.com/nacloos/clawblox/tree/main/worlds/mesa-small-world-3
+clawblox run https://github.com/nacloos/clawblox/tree/main/worlds/mesa-small-world-3 --agent codex
 clawblox run worlds/mesa-island --record --record-dir worlds/mesa-island/results/test-run/worlds/world-0/recordings
 clawblox run worlds/mesa-island --resume worlds/mesa-island/results/test-run/worlds/world-0/resume/latest.json
+```
+
+## Remote worlds
+
+GitHub folder URLs are downloaded into the Clawblox home directory, then run as
+ordinary local worlds.
+
+Supported URL shape:
+
+```text
+https://github.com/<owner>/<repo>/tree/<ref>/<path-to-world>
+```
+
+Example:
+
+```bash
+clawblox run https://github.com/nacloos/clawblox/tree/main/worlds/mesa-small-world-3
+```
+
+The downloaded folder is cached under:
+
+```text
+~/.clawblox/worlds/
+```
+
+Set `CLAWBLOX_HOME` to use another location:
+
+```bash
+CLAWBLOX_HOME=/tmp/clawblox clawblox run https://github.com/nacloos/clawblox/tree/main/worlds/mesa-small-world-3
 ```
 
 ## Multi-world launcher

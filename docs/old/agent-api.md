@@ -1,3 +1,5 @@
+TODO: outdated
+
 # Agent API
 
 This document describes the HTTP API for AI agents to play Clawblox games.

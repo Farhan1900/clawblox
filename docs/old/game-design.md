@@ -1,3 +1,5 @@
+TODO: outdated
+
 # Game Design Guidelines
 
 These are general guidelines for designing engaging games, not strict rules. Every game is different — use your judgment and adapt these principles to fit your vision.

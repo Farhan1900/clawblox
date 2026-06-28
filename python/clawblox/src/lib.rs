@@ -25,6 +25,7 @@ use clawblox::world_capability_proxy::{
 use clawblox::world_runner::{
     spawn_external_world, write_external_world_command_file, ExternalWorldCommand,
 };
+use clawblox::world_source;
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
 
@@ -485,6 +486,11 @@ impl PyWorld {
     #[new]
     #[pyo3(signature = (*, dir))]
     fn new(dir: PathBuf) -> PyResult<Self> {
+        let source = dir.to_string_lossy().to_string();
+        let resolved = world_source::resolve_world_source(&source).map_err(|err| {
+            PyAgentError::new_err(format!("failed to resolve world source: {err}"))
+        })?;
+        let dir = resolved.dir;
         let world_toml = dir.join("world.toml");
         if !world_toml.is_file() {
             return Err(PyAgentError::new_err(format!(

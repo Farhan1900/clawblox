@@ -20,36 +20,43 @@
     },
     "groups": [
       {
-        "group": "Get started",
+        "group": "Start here",
         "pages": [
           "index",
-          "running",
-          "game-design",
-          "resources"
+          "running"
         ]
       },
       {
-        "group": "Build worlds",
+        "group": "Clawblox agents",
         "pages": [
+          "agents",
+          "worlds",
+          "agent-protocol",
+          "run-agents",
+          "agent-workspaces",
+          "drivers",
+          "checkpoints"
+        ]
+      },
+      {
+        "group": "Clawblox engine",
+        "pages": [
+          "engine",
           "scripting",
           "custom-renderers",
-          "streaming-sound"
-        ]
-      },
-      {
-        "group": "Agents",
-        "pages": [
-          "agent-api",
-          "agent-interface",
-          "world-interface"
-        ]
-      },
-      {
-        "group": "Operations",
-        "pages": [
-          "checkpoints",
-          "manifest",
+          "streaming-sound",
           "replication-rendering-performance"
+        ]
+      },
+      {
+        "group": "Reference",
+        "pages": [
+          "world-interface",
+          "agent-interface",
+          "manifest",
+          "old/agent-api",
+          "old/game-design",
+          "old/resources"
         ]
       }
     ]

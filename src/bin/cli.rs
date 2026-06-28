@@ -14,6 +14,7 @@ use clap::{Parser, Subcommand, ValueEnum};
 use dashmap::DashMap;
 use flate2::{write::GzEncoder, Compression};
 use futures_util::{SinkExt, StreamExt};
+use indicatif::{ProgressBar, ProgressStyle};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs::OpenOptions;
@@ -21,7 +22,10 @@ use std::io::{BufRead, Write};
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::{Arc, Mutex};
+use std::sync::{
+    atomic::{AtomicUsize, Ordering},
+    Arc, Mutex,
+};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::sync::{broadcast, watch};
@@ -57,13 +61,14 @@ use clawblox::{
         script_bundle::load_world_and_entry_script,
         GameManager, GameManagerHandle,
     },
-    manifest, recording, replay,
+    manifest, paths as clawblox_paths, recording, replay,
     replay_agent_log::{
         load_agent_timeline, ReplayAgentMessage, ReplayAgentTimeline, ReplayTickAnchor,
     },
     replay_metadata::{self, ReplayMetadata},
     snapshot::GameInstanceSnapshot,
     world_runner::{run_external_world_blocking, ExternalWorldCommand},
+    world_source::{self, WorldSourceReporter},
 };
 
 static DOCS_DIR: Dir = include_dir!("$CARGO_MANIFEST_DIR/docs");
@@ -73,6 +78,66 @@ const LEGACY_AGENT_SKILL_DOC: &str = "SKILL.md";
 
 #[path = "../app_browser.rs"]
 mod app_browser;
+
+struct CliWorldSourceReporter {
+    spinner: ProgressBar,
+    files: AtomicUsize,
+}
+
+impl CliWorldSourceReporter {
+    fn new() -> Self {
+        let spinner = ProgressBar::new_spinner();
+        spinner.set_style(
+            ProgressStyle::with_template("{spinner:.orange} {msg}")
+                .unwrap_or_else(|_| ProgressStyle::default_spinner()),
+        );
+        spinner.enable_steady_tick(Duration::from_millis(80));
+        Self {
+            spinner,
+            files: AtomicUsize::new(0),
+        }
+    }
+}
+
+impl WorldSourceReporter for CliWorldSourceReporter {
+    fn resolving(&self, source: &str) {
+        self.spinner
+            .set_message(format!("Resolving world {source}"));
+    }
+
+    fn using_cached_world(&self, dir: &Path) {
+        self.spinner
+            .set_message(format!("Using cached world {}", dir.display()));
+    }
+
+    fn downloading_github_world(&self, source: &str, dir: &Path) {
+        self.files.store(0, Ordering::Relaxed);
+        self.spinner.set_message(format!("Downloading {source}"));
+        eprintln!("Caching world in {}", dir.display());
+    }
+
+    fn downloading_archive(&self, path: &str) {
+        self.spinner
+            .set_message(format!("Downloading GitHub archive {path}"));
+    }
+
+    fn downloaded_file(&self, path: &str, _bytes: u64) {
+        let count = self.files.fetch_add(1, Ordering::Relaxed) + 1;
+        self.spinner
+            .set_message(format!("Downloaded {count} files ({path})"));
+    }
+
+    fn ready(&self, dir: &Path) {
+        let count = self.files.load(Ordering::Relaxed);
+        if count > 0 {
+            self.spinner
+                .finish_with_message(format!("World ready: {} ({count} files)", dir.display()));
+        } else {
+            self.spinner
+                .finish_with_message(format!("World ready: {}", dir.display()));
+        }
+    }
+}
 
 #[derive(Copy, Clone, Debug, ValueEnum)]
 enum LocalDatastore {
@@ -126,7 +191,7 @@ enum Commands {
     },
     /// Run a game locally
     Run {
-        /// Path to game directory (default: current directory)
+        /// World directory or GitHub folder URL (default: current directory)
         #[arg(default_value = ".")]
         path: PathBuf,
         /// Port to run the server on
@@ -214,7 +279,7 @@ enum Commands {
     },
     /// Start a game locally in background (daemon mode)
     Start {
-        /// Path to game directory (default: current directory)
+        /// World directory or GitHub folder URL (default: current directory)
         #[arg(default_value = ".")]
         path: PathBuf,
         /// Port to run the server on
@@ -929,8 +994,10 @@ struct Credentials {
 }
 
 fn credentials_path() -> PathBuf {
-    let home = home::home_dir().expect("Failed to get home directory");
-    home.join(".clawblox/credentials.toml")
+    clawblox_paths::credentials_path().unwrap_or_else(|err| {
+        eprintln!("Error: {err}");
+        std::process::exit(1);
+    })
 }
 
 fn load_credentials() -> Option<Credentials> {
@@ -1260,8 +1327,10 @@ fn flock_exclusive(_file: &std::fs::File) -> std::io::Result<()> {
 // =============================================================================
 
 fn pid_dir() -> PathBuf {
-    let home = home::home_dir().expect("Failed to get home directory");
-    home.join(".local/share/clawblox/run")
+    clawblox_paths::pid_dir().unwrap_or_else(|err| {
+        eprintln!("Error: {err}");
+        std::process::exit(1);
+    })
 }
 
 fn pid_path(port: u16) -> PathBuf {
@@ -1780,10 +1849,14 @@ fn run_game(
     agent_options: Option<AgentRunnerOptions>,
 ) {
     let base_path = normalize_base_path(base_path);
-    let path = std::fs::canonicalize(&path).unwrap_or_else(|_| {
-        eprintln!("Error: Path '{}' does not exist", path.display());
-        std::process::exit(1);
-    });
+    let source = path.to_string_lossy().to_string();
+    let reporter = CliWorldSourceReporter::new();
+    let resolved = world_source::resolve_world_source_with_reporter(&source, &reporter)
+        .unwrap_or_else(|err| {
+            eprintln!("Error: {err}");
+            std::process::exit(1);
+        });
+    let path = resolved.dir;
 
     let world_cfg = clawblox::config::WorldConfig::from_game_dir(&path).unwrap_or_else(|e| {
         eprintln!("{}", e);
@@ -3461,10 +3534,14 @@ fn run_external_world_command(
 
 fn start_game(path: PathBuf, port: u16, base_path: &str, datastore: LocalDatastore) {
     let base_path = normalize_base_path(base_path);
-    let path = std::fs::canonicalize(&path).unwrap_or_else(|_| {
-        eprintln!("Error: Path '{}' does not exist", path.display());
-        std::process::exit(1);
-    });
+    let source = path.to_string_lossy().to_string();
+    let reporter = CliWorldSourceReporter::new();
+    let resolved = world_source::resolve_world_source_with_reporter(&source, &reporter)
+        .unwrap_or_else(|err| {
+            eprintln!("Error: {err}");
+            std::process::exit(1);
+        });
+    let path = resolved.dir;
 
     let world_cfg = clawblox::config::WorldConfig::from_game_dir(&path).unwrap_or_else(|e| {
         eprintln!("{}", e);
