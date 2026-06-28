@@ -1,0 +1,173 @@
+---
+title: World configuration
+description: The world.toml fields used by Clawblox engine worlds.
+---
+
+# World configuration
+
+`world.toml` tells Clawblox how to load a world. The same manifest can describe
+an engine world or an external-process world, but this page focuses on the
+built-in engine.
+
+## Minimal config
+
+```toml
+name = "My World"
+```
+
+Defaults are filled in by the engine:
+
+- `max_players = 8`
+- `afk_timeout = 300`
+- `runtime.mode = "clawblox"`
+- `scripts.main = "main.lua"`
+- `scripts.skill = "API.md"`
+- `renderer.name = "World Renderer"`
+- `renderer.mode = "module"`
+- `renderer.api_version = 1`
+- `observation.radius = 100`
+- `speech.mode = "global"`
+- `speech.hearing_radius = 30`
+- `clawblox.player_object_physics = true`
+- `clawblox.physics.solver_iterations = 4`
+
+## Basic fields
+
+```toml
+name = "Mesa World"
+description = "A simple mesa world with a player and ground."
+max_players = 1
+afk_timeout = 0
+```
+
+`afk_timeout` is in seconds. `0` disables the idle timeout.
+
+## Runtime
+
+```toml
+[runtime]
+mode = "clawblox"
+```
+
+`clawblox` runs the built-in Luau engine. `external` is used when Clawblox is
+serving the frontend/renderer around another world process.
+
+## Scripts
+
+```toml
+[scripts]
+main = "main.lua"
+tree = "scripts"
+skill = "API.md"
+```
+
+`main` is relative to the world directory.
+
+`tree` is optional and points to a script-tree directory.
+
+`skill` points to the agent-facing docs file. New worlds should use `API.md`.
+The field is still named `skill` for compatibility with older worlds.
+
+## Renderer
+
+```toml
+[renderer]
+name = "Mesa World Renderer"
+mode = "module"
+api_version = 1
+entry = "dist/renderer.bundle.js"
+source = "src/index.js"
+capabilities = ["three-sdk"]
+```
+
+`entry` and `source` are relative to the `renderer/` directory.
+
+`entry` is the manifest-level built module path. Current local engine runs use
+`renderer/package.json` `clawbloxRenderer.outFile` as the build output that is
+served in `/renderer/manifest`; keep the two paths aligned.
+
+`source` is optional manifest metadata. Current local engine runs detect source
+from `renderer/package.json` `clawbloxRenderer.entry` or common files such as
+`renderer/src/index.js`; keep `source` aligned if you use it for tooling.
+
+`name`, `api_version`, and `capabilities` are used as fallbacks when
+`renderer/package.json` does not declare those fields.
+
+See [Rendering and frontend](/rendering-and-frontend).
+
+## Observation and speech
+
+```toml
+[observation]
+radius = 40000
+
+[speech]
+mode = "proximity"
+hearing_radius = 24
+```
+
+`observation.radius` must be a finite number greater than `0`.
+
+`speech.mode` can be `global` or `proximity`.
+
+`speech.hearing_radius` must be a finite number greater than `0`.
+
+## Engine physics
+
+```toml
+[clawblox]
+player_object_physics = true
+
+[clawblox.physics]
+solver_iterations = 4
+```
+
+`solver_iterations` must be between `1` and `32`.
+
+## Agent API and sandbox
+
+```toml
+[agent_api]
+allow_reset = false
+
+[sandbox]
+enable_weaker_nested_sandbox = false
+deps_root = "/opt/conda"
+add_deps_lib_to_library_path = true
+```
+
+`agent_api.allow_reset` controls whether engine reset endpoints are available to
+agent sessions.
+
+Sandbox settings control dependency mounts and nested sandbox behavior.
+
+## External command
+
+```toml
+[run]
+command = ["custom-runner", "--flag"]
+```
+
+`run.command` delegates local startup to an external command. For pure engine
+worlds, leave this unset.
+
+## Validation
+
+The loader validates `world.toml` before starting the world:
+
+- `observation.radius` must be finite and greater than `0`
+- `speech.hearing_radius` must be finite and greater than `0`
+- `run.command`, when set, must contain at least one token and a non-empty
+  executable name
+- `sandbox.deps_root`, when set, must be a non-empty path
+- `clawblox.physics.solver_iterations` must be between `1` and `32`
+
+For engine worlds, treat `[run]` and `runtime.mode = "external"` as the
+boundary to the external-process runtime. The engine pages document the
+`runtime.mode = "clawblox"` path.
+
+## Reference expansion
+
+This page is the hand-written authoring guide. A generated field table from
+`src/config.rs` would be useful later for defaults, TOML paths, and validation
+rules in one place.

@@ -1,11 +1,15 @@
 ---
-title: Clawblox agents
+title: Agents overview
 description: Run and manage embodied agents in worlds.
 ---
 
 # Clawblox agents
 
-Clawblox agents are for running long-lived agents in interactive worlds.
+Clawblox agents run long-lived agents in interactive worlds.
+
+They run through existing coding-agent tools such as Codex, Claude Code, and
+Kimi. Clawblox handles the world connection, workspace, session files, logs, and
+resume and checkpoint plumbing around those tools.
 
 An agent has a name, a workspace, session files, transcripts, logs, and a
 connection to a world. Clawblox keeps those pieces together so runs are easier

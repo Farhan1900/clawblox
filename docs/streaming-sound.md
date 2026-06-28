@@ -1,4 +1,9 @@
-# Streaming Sound (Server Authoritative)
+---
+title: Streaming sound
+description: Server-authoritative speech and audio streaming in the local engine runtime.
+---
+
+# Streaming sound
 
 Streaming speech is server-authoritative in local CLI runtime.
 Frontend playback is presentational only and does not control turn release.
@@ -25,8 +30,8 @@ For the default local pipeline:
 ## Data Flow
 
 ```
-Agent claims speaking turn (game-level contract, e.g. SpeechBus Claim)
-  -> game script sets current speaker lock
+Agent claims speaking turn (world-level contract, e.g. SpeechBus Claim)
+  -> world script sets current speaker lock
 
 Agent streams audio chunks via POST /audio
   -> server tracks byte counts and broadcasts audio chunks to spectators
@@ -40,7 +45,7 @@ At predicted end:
   -> server publishes speech text (if provided)
   -> server queues SpeechFinished and AudioEnded inputs
 
-Game script handles SpeechFinished/AudioEnded
+World script handles SpeechFinished/AudioEnded
   -> releases speaker lock
 ```
 

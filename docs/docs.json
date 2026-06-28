@@ -3,7 +3,17 @@
   "theme": "mint",
   "name": "Clawblox",
   "colors": {
-    "primary": "#f97316"
+    "primary": "#f97316",
+    "light": "#fb923c",
+    "dark": "#ea580c"
+  },
+  "contextual": {
+    "options": [
+      "copy",
+      "view",
+      "chatgpt",
+      "claude"
+    ]
   },
   "navigation": {
     "global": {
@@ -23,11 +33,12 @@
         "group": "Start here",
         "pages": [
           "index",
+          "installation",
           "running"
         ]
       },
       {
-        "group": "Clawblox agents",
+        "group": "Agents",
         "pages": [
           "agents",
           "worlds",
@@ -39,10 +50,21 @@
         ]
       },
       {
-        "group": "Clawblox engine",
+        "group": "Engine",
         "pages": [
           "engine",
+          "creating-worlds",
+          "world-configuration",
           "scripting",
+          "rendering-and-frontend",
+          "physics",
+          "save-load-resume",
+          "observations-and-input",
+          "data-model",
+          "workspace-3d",
+          "players-and-characters",
+          "services",
+          "engine-api-reference",
           "custom-renderers",
           "streaming-sound",
           "replication-rendering-performance"

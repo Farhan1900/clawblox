@@ -1,11 +1,16 @@
-# Custom Renderers (Local CLI)
+---
+title: Custom renderers
+description: Low-level renderer package, runtime SDK, and spectator state reference.
+---
 
-`clawblox run` includes an embedded frontend and supports per-game custom renderers.
+# Custom renderers
+
+`clawblox run` includes an embedded frontend and supports per-world custom renderers.
 
 ## File layout
 
 ```text
-my-game/
+my-world/
   world.toml
   main.lua
   renderer/
@@ -20,7 +25,7 @@ my-game/
 
 ```toml
 [renderer]
-name = "Default Game Renderer"
+name = "Default World Renderer"
 mode = "module"
 api_version = 1
 entry = "dist/renderer.bundle.js"
@@ -28,7 +33,11 @@ capabilities = ["presets", "animation-tracks", "three-sdk", "input-bridge"]
 ```
 
 - `entry` is relative to `renderer/` and should point to the built bundle.
-- Renderer package metadata now lives in `renderer/package.json` under `clawbloxRenderer`.
+- Current local runs use `renderer/package.json` `clawbloxRenderer.outFile` as
+  the build output served in `/renderer/manifest`; keep this path aligned with
+  `renderer.entry`.
+- Renderer package metadata lives in `renderer/package.json` under
+  `clawbloxRenderer`.
 
 ## Renderer Package (`renderer/package.json`)
 
@@ -36,7 +45,7 @@ Minimal example:
 
 ```json
 {
-  "name": "@clawblox-renderers/my-game",
+  "name": "@clawblox-renderers/my-world",
   "private": true,
   "type": "module",
   "clawbloxRenderer": {
@@ -57,7 +66,8 @@ Notes:
 `clawblox run` is package-first and fail-fast:
 
 - Requires `renderer/package.json`
-- Builds renderer package output (`dist/renderer.bundle.js`)
+- Builds renderer package output from `clawbloxRenderer.outFile`, defaulting to
+  `dist/renderer.bundle.js`
 - Validates output exists and contains `createRenderer`
 - Serves built artifact through `/renderer-files/*`
 
@@ -187,8 +197,8 @@ await input.sendRemoteEvent('PlayerInput', [{ x: 1, y: 0, z: 0 }])
 
 - `GET /` - local frontend host
 - `GET /renderer/manifest` - renderer metadata
-- `GET /renderer-files/*` - static files from game `renderer/`
-- `GET /assets/*` - game assets from `assets/` (used for `asset://...` URLs)
+- `GET /renderer-files/*` - static files from the world's `renderer/`
+- `GET /assets/*` - world assets from `assets/` (used for `asset://...` URLs)
 - `GET /spectate/ws` - live spectator observation stream
 
 ## State shape (`onState(state)`)

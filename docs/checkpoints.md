@@ -1,8 +1,13 @@
+---
+title: Checkpoints
+description: Save and load a run as a single relocatable file of world and agent state.
+---
+
 # Checkpoints
 
 A checkpoint is a single relocatable `.ckpt` file (a zip) that captures a run
 at a moment in time: world state plus agent state. Save and load follow the
-PyTorch idiom — construct first, then load state into it.
+PyTorch idiom: construct first, then load state into it.
 
 ```python
 from clawblox import World, save_checkpoint, load_checkpoint
@@ -39,28 +44,28 @@ gen001-t000900.ckpt
 
 All paths inside the archive are relative; a checkpoint can be copied to
 another machine and loaded there, given the same world directory and
-clawblox version (state travels, code does not — like a `state_dict`
+clawblox version (state travels, code does not, like a `state_dict`
 without the model class).
 
 ## Tiers
 
-- **world** — the snapshot document. Exact restore is the world's
+- **world**: the snapshot document. Exact restore is the world's
   responsibility (see `world-interface.md`).
-- **workspace** — agent-authored files. Backend-agnostic, the unit of
+- **workspace**: agent-authored files. Backend-agnostic, the unit of
   generational inheritance, and the shareable artifact. Reconstructable
   artifacts (`.venv`, caches) are excluded.
-- **session** — provider continuation state (conversation transcripts),
+- **session**: provider continuation state (conversation transcripts),
   selected by a per-backend **allowlist** (`claude-code-v1`, `codex-v1`).
   Needed only to resume the exact conversation. `workspace_only=True`
-  omits it — that is the safe default for sharing.
+  omits it. That is the safe default for sharing.
 
 ## Safety model
 
 State loads, policy doesn't:
 
 - Credentials and capability config (`.credentials.json`, `.claude.json`,
-  `settings.json`, permission files) are never written to an archive — the
-  session tier is an allowlist, so unknown files stay out — and never
+  `settings.json`, permission files) are never written to an archive (the
+  session tier is an allowlist, so unknown files stay out) and never
   extracted from one, even if a malicious archive contains them.
 - A secret scan runs over every file at save time and refuses to produce an
   archive containing credential-shaped content (`CheckpointSecretError`).
@@ -70,7 +75,7 @@ State loads, policy doesn't:
 
 ## Invisibility
 
-Checkpoints must be invisible to agents — telling an agent it is being
+Checkpoints must be invisible to agents. Telling an agent it is being
 checkpointed is like telling a network it is being `torch.save`d:
 
 - Nothing is sent to the agent at save time; agent state is archived from
@@ -78,7 +83,7 @@ checkpointed is like telling a network it is being `torch.save`d:
   mid-turn snapshot resumes from the last completed message).
 - On resume, the world restores the same session ids, the agent's original
   system prompt still applies, and the resume nudge uses the standard
-  auto-continue prompt — indistinguishable from a routine idle nudge.
+  auto-continue prompt, indistinguishable from a routine idle nudge.
 - Worlds expose sim time only (never host wall time) in agent-visible
   payloads. Known residual channel: the agent can compare its own `date`
   with pre-crash memory; closing that fully requires VM-level time

@@ -1,4 +1,12 @@
+---
+title: Running worlds
+description: Run a world locally, from GitHub, with recording, or resumed from a snapshot.
+---
+
 # Running worlds
+
+Every world runs the same way: point `clawblox run` at a folder that contains a
+`world.toml`. The rest of this page covers the flags you add on top of that.
 
 ## Single world
 
@@ -7,18 +15,22 @@ clawblox run <world>
 ```
 
 `<world>` can be a local folder or a GitHub folder URL. The folder must contain
-`world.toml`.
-
-This starts a local server on `http://localhost:8080`.
-
-Useful variants:
+`world.toml`. Run it from inside the folder to use the current directory:
 
 ```bash
-clawblox run worlds/mesa-island --port 8280
-clawblox run https://github.com/nacloos/clawblox/tree/main/worlds/mesa-small-world-3
-clawblox run https://github.com/nacloos/clawblox/tree/main/worlds/mesa-small-world-3 --agent codex
-clawblox run worlds/mesa-island --record --record-dir worlds/mesa-island/results/test-run/worlds/world-0/recordings
-clawblox run worlds/mesa-island --resume worlds/mesa-island/results/test-run/worlds/world-0/resume/latest.json
+cd my-world
+clawblox run
+```
+
+Either way, this starts a local server on `http://localhost:8080`.
+
+Common flags:
+
+```bash
+clawblox run <world> --port 8280
+clawblox run <world> --agent codex
+clawblox run <world> --record --record-dir runs/r001/recordings
+clawblox run <world> --resume runs/r001/resume/latest.json
 ```
 
 ## Remote worlds

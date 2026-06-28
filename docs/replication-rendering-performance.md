@@ -1,4 +1,9 @@
-# Replication and Rendering Performance
+---
+title: Replication and rendering performance
+description: Delta spectator replication, shared model rendering, and large-world profiling.
+---
+
+# Replication and rendering performance
 
 Large worlds can contain thousands of independently simulated parts. The runtime
 keeps those parts interactive in the engine, but the live client view must avoid

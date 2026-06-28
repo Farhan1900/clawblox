@@ -13,6 +13,20 @@ clawblox run https://github.com/nacloos/clawblox/tree/main/worlds/mesa-small-wor
 
 This starts the world, then starts a managed Clawblox agent connected to it.
 
+## Requirements
+
+Agent runs use existing coding-agent CLIs. Install and log in to the driver you
+want to use first:
+
+```text
+codex    Codex CLI
+claude   Claude Code
+kimi     Kimi Code
+```
+
+You also need `tmux`. Clawblox starts the driver inside a tmux session so the
+agent can keep running, be resumed, and be inspected.
+
 ## CLI options
 
 ```bash

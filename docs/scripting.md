@@ -1,11 +1,18 @@
+---
+title: Luau scripting
+description: Roblox-like Luau globals, services, scheduling, and resumability in the Clawblox engine.
+---
+
 # Clawblox Scripting API
 
-Clawblox implements a Roblox-compatible Luau scripting system. Scripts written for Roblox should work on Clawblox with minimal changes.
+Clawblox implements a Roblox-like Luau scripting system for engine worlds. Many
+Roblox patterns work, but the supported surface is the Clawblox subset
+documented here and in the API reference.
 
 ## Global Objects
 
 ### game
-The root of the game hierarchy.
+The Roblox-style root object for the world data model.
 
 ```lua
 local Workspace = game:GetService("Workspace")
@@ -25,7 +32,7 @@ Global reference to `game:GetService("ServerStorage")`.
 
 `ServerStorage` is server-only state. It is not part of agent observations, but it is part of the engine-owned world state and is included in resume snapshots.
 
-Use it for authoritative hidden game state that must survive resume but should not be visible to agents.
+Use it for authoritative hidden world state that must survive resume but should not be visible to agents.
 
 Examples:
 
@@ -38,7 +45,9 @@ Do not use `ServerStorage` for static design-time constants. Put fixed parameter
 
 ## Resumability Contract
 
-Clawblox resume is engine-level and strict. The engine snapshots and restores authoritative state that lives in engine-managed APIs.
+Clawblox resume is engine-level and strict. The engine snapshots authoritative
+state that lives in engine-managed APIs, and it also captures Lua VM state for
+supported runtime objects.
 
 Resumable by contract:
 
@@ -51,13 +60,18 @@ Resumable by contract:
 - player objects and character state
 - physics state attached to engine objects
 - documented engine service state
+- pending Lua coroutines, `task.wait` schedules, yielded signal callbacks,
+  `RunService` connections, module cache, animation tracks, and
+  `BindToClose` callbacks
+- supported Clawblox userdata such as instances, services, `RaycastParams`,
+  `OverlapParams`, `RaycastResult`, animation tracks, and DataStore handles
 
-Not resumable by contract:
+Do not make these the only source of durable gameplay truth:
 
-- arbitrary Lua locals
-- closure-captured side tables
-- userdata-keyed caches that are the only copy of important state
-- hidden state that exists only in script memory
+- browser-only renderer state
+- external files, network side effects, or process-local handles
+- unsupported host userdata
+- hidden Lua tables that are difficult for agents to inspect or repair
 
 Authoring rule:
 
@@ -85,7 +99,7 @@ local nextSpawnIndex = 12 -- only copy of authoritative state
 ## Global Functions
 
 ### tick()
-Returns the time in seconds since the game started. Used for timing and animations.
+Returns the time in seconds since the world started. Used for timing and animations.
 
 ```lua
 local startTime = tick()
@@ -94,7 +108,7 @@ local elapsed = tick() - startTime
 print("Elapsed:", elapsed, "seconds")
 ```
 
-**Note:** Unlike Roblox's `tick()` which returns Unix epoch time, Clawblox returns time since game start for simplicity.
+**Note:** Unlike Roblox's `tick()` which returns Unix epoch time, Clawblox returns time since world start for simplicity.
 
 ### wait(seconds?)
 Yields the current thread for the specified duration (default: 0 seconds / 1 frame).
@@ -107,14 +121,14 @@ wait()   -- Wait 1 frame
 Delegates to `task.wait()`. Returns the actual elapsed time.
 
 ### print(...)
-Outputs to the game console.
+Outputs to the world console.
 
 ```lua
 print("Hello", "World", 42)  -- Output: Hello	World	42
 ```
 
 ### warn(...)
-Outputs a warning to the game console.
+Outputs a warning to the world console.
 
 ```lua
 warn("Something unexpected happened")
@@ -186,7 +200,7 @@ task.cancel(t)
 ## Classes
 
 ### Instance
-Base class for all objects in the game hierarchy.
+Base class for all objects in the world data model.
 
 #### Properties
 | Property | Type | Description |
@@ -397,7 +411,7 @@ Represents a connected player. Inherits from Instance.
 | Method | Returns | Description |
 |--------|---------|-------------|
 | `LoadCharacter()` | void | Spawns/respawns character |
-| `Kick(message?)` | void | Removes player from game |
+| `Kick(message?)` | void | Removes player from the world |
 
 #### Events
 | Event | Parameters | Description |
@@ -488,7 +502,7 @@ end
 ---
 
 ### RunService
-Game loop and timing.
+Frame loop and timing.
 
 #### Properties
 | Property | Type | Description |
@@ -588,9 +602,10 @@ end
 
 ### AgentInputService
 
-**Clawblox extension** - Handles input from AI agents via the HTTP API.
+**Clawblox extension** - Handles input from AI agents via the local runtime API.
 
-Games should support both human players (UserInputService, future) and AI agents (AgentInputService) to work with all player types.
+Worlds should support both renderer-driven player input and AI agent input
+through `AgentInputService` so the same Luau code works for all player types.
 
 #### Events
 | Event | Parameters | Description |
@@ -606,7 +621,7 @@ Games should support both human players (UserInputService, future) and AI agents
 #### Input Flow
 
 ```
-Agent (HTTP API)  →  POST /games/{id}/input  →  AgentInputService  →  InputReceived event  →  Game Script
+Agent or renderer  →  POST /input  →  AgentInputService  →  InputReceived event  →  World script
 ```
 
 #### Usage
@@ -811,57 +826,99 @@ end)
 
 ---
 
-## Agent API Docs
+## Agent API docs
 
-Games define their controls and rules in an `API.md` file. AI agents read this file to learn how to play the game. Legacy `SKILL.md` files are still supported.
+Worlds define their controls and rules in an `API.md` file. AI agents read
+this file to learn how to operate the world. The path is configured by
+`scripts.skill` in `world.toml`; new worlds should use `API.md`.
 
-**Location**: `games/{game-name}/API.md`
+**Location**: `API.md` in the world directory.
 
-The API.md file includes:
-- YAML frontmatter with name and description
-- Available inputs and their data format
-- Observation format (what the agent sees)
-- Game rules and mechanics
-- Strategy tips
+The API.md file should include:
+
+- available input types and their data format
+- observation fields the agent should rely on
+- world rules and mechanics
+- success/failure conditions for actions
+- strategy or examples when useful
 
 ### Example Structure
 
-```
-games/
-  arsenal/
-    API.md         # Agent-readable game instructions
-    game.lua       # Game logic
+```text
+mesa-world/
+  world.toml
+  API.md
+  main.lua
 ```
 
 ### Observation Format
 
-Observations are returned by `GET /games/{id}/observe` and include:
+Local observations are returned by `GET /observe` with the `X-Session` header
+returned by `POST /join?name=...`. `POST /input` also returns a fresh
+observation after the next input-processing tick.
 
 ```json
 {
   "tick": 1234,
-  "game_status": "active",
+  "game_status": "playing",
   "player": {
     "id": "uuid",
     "position": [x, y, z],
     "health": 100,
-    "attributes": { ... }  // Game-specific data set via SetAttribute
+    "attributes": { ... }  // World-specific data set via SetAttribute
   },
   "other_players": [ ... ],
   "world": {
     "entities": [ ... ]  // Dynamic (non-static) workspace entities
   },
-  "events": [ ... ]
+  "events": [],
+  "recent_events": [ ... ]
 }
 ```
 
-The `attributes` field contains whatever the game script sets via `player:SetAttribute()`. This keeps the engine generic while allowing games to define their own data.
+The `attributes` field contains whatever the world script sets via
+`player:SetAttribute()`. This keeps the engine generic while allowing worlds to
+define their own data.
 
-The `world` field contains dynamic workspace entities — parts and folders that do **not** have the `"Static"` tag. This includes projectiles, pickups, game-state folders with attributes, and other entities that change each tick. Static map geometry (tagged `"Static"`) is fetched once via `GET /games/{id}/map`.
+The `world` field contains nearby dynamic workspace entities: parts and
+attribute-bearing folders that do **not** have the `"Static"` tag. Parts are
+filtered by the configured observation radius. Static geometry should be
+documented in `API.md` when agents need to reason about it, or exposed through
+world-specific attributes/actions. Browser spectator rendering uses a separate
+spectator observation stream.
 
 ---
 
 ## Data Types
+
+### Vector2
+2D vector.
+
+#### Constructors
+```lua
+Vector2.new(x, y)
+Vector2.zero         -- (0, 0)
+Vector2.one          -- (1, 1)
+Vector2.xAxis        -- (1, 0)
+Vector2.yAxis        -- (0, 1)
+```
+
+#### Properties
+| Property | Type | Description |
+|----------|------|-------------|
+| `X` | number | X component |
+| `Y` | number | Y component |
+| `Magnitude` | number | Length |
+| `Unit` | Vector2 | Normalized vector |
+
+#### Methods
+| Method | Returns | Description |
+|--------|---------|-------------|
+| `Dot(other)` | number | Dot product |
+| `Lerp(goal, alpha)` | Vector2 | Linear interpolation |
+| `Unit()` | Vector2 | Normalized vector |
+
+---
 
 ### Vector3
 3D vector.
@@ -1042,6 +1099,7 @@ Returned by Workspace:Raycast().
 | `Position` | Vector3 | Hit position |
 | `Normal` | Vector3 | Surface normal |
 | `Distance` | number | Distance to hit |
+| `Material` | Enum.Material | Hit material |
 
 ---
 
@@ -1055,6 +1113,7 @@ Parameters for raycasting.
 | `FilterDescendantsInstances` | `{Instance}` | Instances to filter |
 | `IgnoreWater` | bool | Ignore water |
 | `CollisionGroup` | string | Collision group |
+| `RespectCanCollide` | bool | Use `CanCollide` instead of query-only filtering |
 
 ```lua
 local params = RaycastParams.new()
@@ -1073,33 +1132,74 @@ local result = Workspace:Raycast(origin, direction, params)
 Enum.PartType.Ball
 Enum.PartType.Block
 Enum.PartType.Cylinder
+Enum.PartType.Ring
 Enum.PartType.Wedge
 ```
 
+`Enum.PartShape` is also available as a legacy alias with the same values.
+
 ### Enum.Material
 ```lua
+Enum.Material.Air
 Enum.Material.Plastic
 Enum.Material.Wood
 Enum.Material.Metal
 Enum.Material.Glass
 Enum.Material.Neon
 Enum.Material.Concrete
--- ... many more
+Enum.Material.Brick
+Enum.Material.Granite
+Enum.Material.Grass
+Enum.Material.Ice
+Enum.Material.Sand
+Enum.Material.Fabric
+Enum.Material.Marble
+Enum.Material.Slate
+Enum.Material.SmoothPlastic
+Enum.Material.ForceField
+Enum.Material.Water
 ```
 
 ### Enum.HumanoidStateType
 ```lua
 Enum.HumanoidStateType.Running
+Enum.HumanoidStateType.Landed
 Enum.HumanoidStateType.Jumping
 Enum.HumanoidStateType.Freefall
 Enum.HumanoidStateType.Dead
 Enum.HumanoidStateType.Physics
+Enum.HumanoidStateType.None
 ```
 
 ### Enum.RaycastFilterType
 ```lua
 Enum.RaycastFilterType.Include
 Enum.RaycastFilterType.Exclude
+Enum.RaycastFilterType.Whitelist  -- alias for Include
+Enum.RaycastFilterType.Blacklist  -- alias for Exclude
+```
+
+### GUI and physics enums
+```lua
+Enum.ActuatorRelativeTo.Attachment0
+Enum.ActuatorRelativeTo.Attachment1
+Enum.ActuatorRelativeTo.World
+
+Enum.FluidForces.Default
+Enum.FluidForces.Experimental
+
+Enum.TextXAlignment.Left
+Enum.TextXAlignment.Center
+Enum.TextXAlignment.Right
+
+Enum.TextYAlignment.Top
+Enum.TextYAlignment.Center
+Enum.TextYAlignment.Bottom
+
+Enum.Font.GothamBold
+Enum.Font.Gotham
+Enum.Font.SourceSans
+Enum.Font.SourceSansBold
 ```
 
 ---
@@ -1124,27 +1224,28 @@ end)
 
 ---
 
-## 3D Models (GLB) and Assets
+## 3D models (GLB) and assets
 
 You can render a 3D model (`.glb` file) on a Part instead of the default primitive shape by setting the `ModelUrl` attribute.
 
 ### Asset Protocol (`asset://`)
 
-Place game assets (models, images, audio) in the `assets/` directory and reference them using the `asset://` protocol:
+Place world assets (models, images, audio) in the `assets/` directory and reference them using the `asset://` protocol:
 
 ```lua
 part:SetAttribute("ModelUrl", "asset://models/tree.glb")
 ```
 
-The engine automatically resolves `asset://` URLs:
-- **Local development** (`clawblox run`): resolved to `/assets/models/tree.glb` (served from your local `assets/` directory)
-- **Production** (`clawblox deploy`): resolved to the CDN URL (assets are uploaded to cloud storage on deploy)
+The local runtime resolves `asset://` URLs to `/assets/...`, served from the
+world's `assets/` directory.
 
-Game developers never need to deal with server paths or CDN URLs — just use `asset://`.
+World authors should normally use `asset://` rather than hard-coded runtime
+paths.
 
 **Allowed file types:** `.glb`, `.gltf`, `.png`, `.jpg`, `.jpeg`, `.wav`, `.mp3`, `.ogg`
 
-Assets are automatically uploaded when you run `clawblox deploy` if an `assets/` directory exists.
+When using deployment flows, assets under `assets/` are the intended portable
+asset source.
 
 ### Legacy: Static Files
 
@@ -1154,7 +1255,8 @@ For backwards compatibility, URLs starting with `/static/` are still supported. 
 part:SetAttribute("ModelUrl", "/static/models/knight.glb")
 ```
 
-Note: `/static/` files are **not** uploaded to cloud storage on deploy. Use `asset://` for new projects.
+Use `asset://` for new worlds unless you specifically need compatibility with
+older `/static/` references.
 
 ### Skeletal Animations
 
@@ -1174,10 +1276,10 @@ character.Parent = Workspace
 
 ---
 
-## Example: Complete Game
+## Example: Complete world
 
 ```lua
--- Chase game: Zombies chase players
+-- Chase world: zombies chase players
 
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
@@ -1232,7 +1334,7 @@ local function getNearestPlayer(position)
     return nearest, nearestDist
 end
 
--- Main game loop
+-- Main world loop
 RunService.Heartbeat:Connect(function(dt)
     -- Spawn zombies periodically
     lastSpawn = lastSpawn + dt
@@ -1273,7 +1375,7 @@ end)
 
 -- Handle player joining
 Players.PlayerAdded:Connect(function(player)
-    print(player.Name .. " joined the game!")
+    print(player.Name .. " joined the world!")
 end)
 
 print("Zombie Chase loaded!")

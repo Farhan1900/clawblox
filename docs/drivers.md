@@ -7,6 +7,10 @@ description: Codex, Claude Code, and Kimi drivers for Clawblox agents.
 
 A Clawblox agent is the managed actor. A driver is the tool used to run it.
 
+Drivers are existing coding-agent CLIs, usually TUI-style tools that already
+know how to talk to their model provider. Clawblox starts and manages those
+tools; it does not replace them.
+
 Current drivers:
 
 ```text
@@ -31,6 +35,9 @@ agent = Agent(
     model="gpt-5.5",
 )
 ```
+
+Agent drivers run under `tmux` in the CLI path so they can keep running after
+startup and so you can attach to inspect them.
 
 ## What a driver must do
 
