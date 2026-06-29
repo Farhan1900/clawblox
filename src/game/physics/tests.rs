@@ -102,7 +102,7 @@ fn floor_spec() -> PhysicsAssemblySpec {
 }
 
 #[test]
-fn test_supported_zero_velocity_unanchor_starts_sleeping() {
+fn test_supported_zero_velocity_unanchor_starts_awake() {
     let mut world = PhysicsWorld::new();
 
     world.sync_assemblies(vec![floor_spec()], 1.0 / 60.0);
@@ -125,10 +125,14 @@ fn test_supported_zero_velocity_unanchor_starts_sleeping() {
         1.0 / 60.0,
     );
 
-    assert!(world.is_part_sleeping(2));
+    assert!(!world.is_part_sleeping(2));
     let before = world.get_part_position(2).unwrap();
     world.step(1.0 / 60.0);
-    assert_eq!(world.get_part_position(2).unwrap(), before);
+    let after = world.get_part_position(2).unwrap();
+    assert!(
+        after[1] <= before[1],
+        "newly unanchored supported body should simulate naturally, before={before:?}, after={after:?}"
+    );
 }
 
 #[test]
@@ -138,8 +142,8 @@ fn test_zero_velocity_unanchor_with_small_air_gap_falls() {
     world.sync_assemblies(vec![floor_spec()], 1.0 / 60.0);
     world.query_pipeline.update(&world.collider_set);
 
-    // Floor top is y=0.5. This block's bottom is y=0.55: close enough
-    // for the release support probe, but not actually touching.
+    // Floor top is y=0.5. This block's bottom is y=0.55: close to the
+    // floor, but not actually touching.
     world.sync_assemblies(
         vec![
             floor_spec(),
