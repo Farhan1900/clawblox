@@ -71,7 +71,7 @@ player.
 
 `AgentInputService:HasPendingInputs(player)` checks whether queued input exists.
 
-Input `data` is JSON converted into Lua values.
+The `data` value is the input's JSON payload converted into Lua values.
 
 ## Renderer input
 

@@ -66,15 +66,19 @@ CLAWBLOX_HOME=/tmp/clawblox clawblox run https://github.com/nacloos/clawblox/tre
 
 ## Resume
 
-Resume is strict: there is no fallback to a fresh run.
+Restore a saved snapshot with `--resume`:
 
 ```bash
 clawblox run <world> --resume <snapshot.json>
 ```
 
-Relative paths are resolved from the world directory. Replay and resume are
-different: replay reads a recording, resume restores a live world snapshot. See
-[Save, load, and resume](/save-load-resume) for snapshot contents, and
+Clawblox restores that exact snapshot or exits with an error. A missing,
+unreadable, or incompatible snapshot stops the run; it never silently starts a
+fresh world instead. Relative paths are resolved from the world directory.
+
+Replay and resume are different things: replay plays back a recording of what
+happened, resume restores a live world to continue from. See
+[Save, load, and resume](/save-load-resume) for what a snapshot contains, and
 [Checkpoints](/checkpoints) for resuming a world together with its agents.
 
 ## Notes

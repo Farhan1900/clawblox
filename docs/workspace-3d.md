@@ -9,7 +9,8 @@ read_when:
 `Workspace` is the root of the 3D world. Parts, models, terrain, characters,
 sounds, and interactive objects live here.
 
-Workspace membership is the normal instance tree. Parenting an instance to
+Belonging to `Workspace` is just ordinary instance parenting; there is no
+separate membership system. Parenting an instance to
 `Workspace` makes it a Workspace child; setting `Parent = nil` or destroying the
 instance removes it. `Workspace:GetChildren()` and
 `Workspace:GetDescendants()` read that tree directly.

@@ -97,7 +97,8 @@ add_deps_lib_to_library_path = true
 
 `deps_root` is mounted read-only at `/sandbox-deps` for sandboxed agents.
 Absolute dependency prefixes are also mounted read-only at their original path,
-so console scripts with absolute shebangs keep working. When
+so console scripts whose `#!` line points to an absolute interpreter path keep
+working. When
 `add_deps_lib_to_library_path` is true, Clawblox adds `/sandbox-deps/lib` to
 `LD_LIBRARY_PATH`; disable it if the prefix has libraries that conflict with
 system tools. `enable_weaker_nested_sandbox` is only for unprivileged
@@ -151,6 +152,6 @@ EPISODIC_MEMORY.md
 World-specific templates can seed these files. `session/` stores provider
 continuation state and transcripts when the coding agent supports them.
 
-The workspace is the backend-agnostic part of agent state and the safest part to
-share. See [Checkpoints](/checkpoints) to package world and agent state together,
+The workspace does not depend on which coding agent you used, which makes it the
+safest part of an agent's state to share. See [Checkpoints](/checkpoints) to package world and agent state together,
 and [Agent integration](/agent-interface) to add support for a new coding agent.

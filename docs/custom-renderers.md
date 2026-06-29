@@ -64,7 +64,8 @@ Notes:
 
 ## Build and Load Behavior
 
-`clawblox run` is package-first and fail-fast:
+`clawblox run` requires a renderer package, and it stops with an error instead
+of falling back to a default renderer:
 
 - Requires `renderer/package.json`
 - Builds renderer package output from `clawbloxRenderer.outFile`, defaulting to

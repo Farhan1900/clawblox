@@ -52,9 +52,10 @@ without the model class).
 
 - **world**: the snapshot document. Exact restore is the world's
   responsibility (see `world-interface.md`).
-- **workspace**: agent-authored files. Backend-agnostic, the unit of
-  generational inheritance, and the shareable artifact. Reconstructable
-  artifacts (`.venv`, caches) are excluded.
+- **workspace**: agent-authored files. They do not depend on which coding agent
+  produced them, they are what carries over from one agent generation to the
+  next, and they are the safe thing to share. Reconstructable artifacts
+  (`.venv`, caches) are excluded.
 - **session**: provider continuation state (conversation transcripts),
   selected by a per-backend **allowlist** (`claude-code-v1`, `codex-v1`).
   Needed only to resume the exact conversation. `workspace_only=True`
@@ -85,7 +86,8 @@ checkpointed is like telling a network it is being `torch.save`d:
 - On resume, the world restores the same session ids, the agent's original
   system prompt still applies, and the resume nudge uses the standard
   auto-continue prompt, indistinguishable from a routine idle nudge.
-- Worlds expose sim time only (never host wall time) in agent-visible
-  payloads. Known residual channel: the agent can compare its own `date`
-  with pre-crash memory; closing that fully requires VM-level time
-  virtualization and is out of scope here.
+- Worlds expose sim time only (never the host machine's real clock) in
+  agent-visible payloads. One leftover way an agent could still notice: it can
+  compare its own `date` reading against what it remembers from before the
+  crash. Closing that gap completely would require virtualizing time at the VM
+  level, which is out of scope here.

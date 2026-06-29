@@ -65,7 +65,8 @@ groups, registered and made collidable through methods such as
 `SetPartCollisionGroup`. See the [engine API reference](/engine-api-reference)
 for the full collision group method list.
 
-Collision groups affect real contacts in the physics layer.
+Collision group settings control which parts actually collide during physics
+simulation, not just what spatial queries return.
 
 ## Forces and constraints
 

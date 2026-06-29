@@ -110,10 +110,10 @@ public spectator observations include only non-targeted events.
 
 ## Parenting and replication rules
 
-Parenting is the main ownership operation. Use `instance.Parent = target` or
-`instance:set_parent`-equivalent APIs exposed through Clawblox internals by
-setting `Parent` from Luau. Moving an instance updates the tree immediately and
-fires ancestry/child/descendant signals.
+Parenting is the main ownership operation. From Luau you set an instance's
+parent by assigning `instance.Parent = target` (internally this calls the
+engine's set-parent operation). Moving an instance updates the tree immediately
+and fires ancestry/child/descendant signals.
 
 Important roots:
 

@@ -82,7 +82,7 @@ paths.
 
 ## Schema Direction
 
-The existing schema stays valid.
+The current `world.toml` schema keeps working as is.
 
 Today, `world.toml` can configure the built-in Clawblox engine or delegate
 startup with:
@@ -111,8 +111,8 @@ line flags should still override environment defaults. `CLAWBLOX_BIN` is
 namespaced because it points back to the Clawblox executable rather than to a
 world runtime setting.
 
-If we add schema, it should be justified by engine-agnostic needs that the
-current schema cannot express clearly:
+Any new fields should serve needs that are common to all runtimes, not just the
+Clawblox engine, and that the current schema cannot already express clearly:
 
 ```text
 how to start one instance
@@ -122,9 +122,9 @@ how an agent obtains API access
 optional recording and renderer commands
 ```
 
-The reason to add this is not aesthetics. It lets external servers and built-in
-Clawblox worlds use the same `World` interface without pretending they all use
-the Clawblox Lua engine.
+Such fields would exist for a practical reason, not for tidiness: they let
+external servers and built-in Clawblox worlds use the same `World` interface
+without assuming every world runs the Clawblox Lua engine.
 
 ## Save / Load
 
@@ -186,9 +186,10 @@ Semantic requirements for a conforming world:
   format `world-snapshot`.
 - Snapshots should identify their world content (for example a scene hash)
   and refuse to restore into a mismatched world.
-- Agent-visible payloads expose simulation time only, never host wall-clock
-  time. Wall time both leaks the host and makes restores observable; the
-  save/load design keeps checkpoints invisible to agents.
+- Agent-visible payloads expose simulation time only, never the host's
+  real-world clock time. Real clock time would reveal details about the host
+  machine and let an agent notice that a restore had happened, so the save/load
+  design keeps checkpoints invisible to agents.
 
 Recordings answer "what happened"; snapshots answer "where were we". Keep
 history in the recording protocol and state in the snapshot. A snapshot
@@ -196,8 +197,8 @@ should not embed event history.
 
 Large-state worlds: the v1 protocol returns state inline from `GET
 /snapshot`. If a world's state is too large for that, a future revision may
-let the endpoint return a file reference instead; do not invent a private
-variant.
+let the endpoint return a file reference instead; until then, do not invent your
+own nonstandard format.
 
 ## Debugging Contract
 

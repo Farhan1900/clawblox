@@ -87,8 +87,8 @@ request; setting `Jump = false` does not clear an already queued request.
 ## Movement behavior
 
 `Humanoid:Move(direction, relativeToCamera)` stores the current movement input
-direction. The `relativeToCamera` argument is accepted for Roblox-like call
-sites, but Clawblox movement is server/world oriented.
+direction. The `relativeToCamera` argument is accepted so that code written for
+Roblox still runs, but Clawblox movement is server/world oriented.
 
 `Humanoid:MoveTo(position, part)` starts a goal-directed move. `CancelMoveTo()`
 clears that target and causes `MoveToFinished(false)`.
@@ -99,8 +99,8 @@ clears that target and causes `MoveToFinished(false)`.
 - `false` when the move is canceled or times out while blocked
 
 The current timeout is 8 seconds. Reaching is measured on the horizontal plane
-with a small tolerance. The optional `part` argument is accepted for
-Roblox-like call sites, but Clawblox stores a world-space target position.
+with a small tolerance. The optional `part` argument is accepted so that code
+written for Roblox still runs, but Clawblox stores a world-space target position.
 
 `Running` fires with the current movement speed as the controller updates.
 `StateChanged(oldState, newState)` is driven by the character controller and

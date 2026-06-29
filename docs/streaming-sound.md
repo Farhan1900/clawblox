@@ -6,7 +6,8 @@ read_when:
 ---
 
 Streaming speech is server-authoritative in local CLI runtime.
-Frontend playback is presentational only and does not control turn release.
+Frontend playback is presentational only: it plays the audio but does not decide
+when a speaking turn ends.
 
 ## Overview
 
@@ -14,7 +15,8 @@ Frontend playback is presentational only and does not control turn release.
 - The server tracks per-stream metadata (`stream_id`, speaker, bytes, format, done flag).
 - On final chunk, the server computes expected playback duration from PCM metadata.
 - The server schedules completion and queues `SpeechFinished` / `AudioEnded` itself.
-- Frontend no longer sends `audio_done` for authority.
+- The frontend no longer signals completion with `audio_done`; the server alone
+  decides when playback is finished.
 
 ## Duration Math
 

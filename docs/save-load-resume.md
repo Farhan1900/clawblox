@@ -98,9 +98,10 @@ The local runtime snapshot wraps:
 - joined local sessions
 - local chat state
 
-The engine instance snapshot has its own schema version. Restore is strict:
-snapshots whose engine schema version does not match the running binary are
-rejected with `unsupported snapshot schema version ...`. The embedded Lua VM
+Restore either succeeds exactly or fails; it never falls back to a fresh world.
+The engine instance snapshot has its own schema version, and a snapshot whose
+version does not match the running binary is rejected with
+`unsupported snapshot schema version ...`. The embedded Lua VM
 snapshot also has a format version and is rejected if it does not match.
 
 ## Persistence boundaries
