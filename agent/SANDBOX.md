@@ -49,7 +49,7 @@ Then launch with the env active so `bwrap` is on PATH:
 
 ```bash
 conda activate sandbox-deps
-bash agent/launch_multi_claude.sh --world-dir worlds/mesa-world --sandbox
+clawblox run worlds/mesa-world --agent claude --sandbox
 ```
 
 For new worlds, prefer `world.toml` over environment variables for sandbox
@@ -118,21 +118,22 @@ confirmed fixed.
 
 ### Retest before unpinning
 
-Before removing or changing the pin, run the dedicated TUI/native-sandbox repro
-against the candidate Claude Code binary:
+Before removing or changing the pin, run a sandboxed Claude agent with the
+candidate Claude Code binary and verify multiple Bash tool calls inside the same
+session:
 
 ```bash
 CLAWBLOX_CLAUDE_BIN=/path/to/candidate/claude \
-  bash agent/repro_claude_tui_native_sandbox_bash.sh
+  clawblox run worlds/mesa-world --agent claude --sandbox
 ```
 
 Expected outcomes:
 
-- `PASS`: the second Bash call completed; the candidate is not showing the known
+- `PASS`: repeated Bash calls complete; the candidate is not showing the known
   fd-backed Bash failure.
-- `FAIL`: the candidate reproduced `/proc/self/fd/3: Permission denied`; keep
+- `FAIL`: the candidate reproduces `/proc/self/fd/3: Permission denied`; keep
   the pin.
-- `UNKNOWN`: inspect the printed `typescript.log`; the run did not reach the
+- `UNKNOWN`: inspect the agent log; the run did not reach the
   known pass/fail markers.
 
 Only unpin sandboxed TUI runs after the candidate returns `PASS` and a normal
