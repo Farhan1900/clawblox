@@ -35,8 +35,7 @@ observation radius, speech mode, physics settings, and sandbox settings.
 `main.lua` and optional script-tree files contain server Luau code.
 
 `API.md` is the agent-facing contract for observations and actions. In
-`world.toml` this is currently configured as `scripts.skill`, with `API.md` as
-the default.
+`world.toml` it is configured by `scripts.api`, defaulting to `API.md`.
 
 `assets/` contains static files served to the browser, such as GLB models,
 textures, and audio.

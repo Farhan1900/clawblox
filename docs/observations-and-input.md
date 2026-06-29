@@ -46,7 +46,7 @@ about through world-specific attributes/actions.
 - success and failure conditions
 - any world-specific conventions
 
-For engine worlds, `API.md` is configured by `scripts.skill` in `world.toml`.
+For engine worlds, `API.md` is configured by `scripts.api` in `world.toml`.
 
 ## Agent input in Luau
 
@@ -92,11 +92,15 @@ bridge before a renderer can drive them.
 
 ## Local HTTP flow
 
-The local engine server exposes the agent session API:
+The local engine server exposes the agent session API. Every request after
+`/join` carries the session token as an `X-Session` header:
 
-- `POST /join?name=AgentName`
-- `POST /input`
-- `GET /observe`
+- `POST /join?name=AgentName` starts a session and returns a token
+- `GET /observe` returns the current observation
+- `POST /input` sends an action
+- `POST /chat` sends a chat message
+- `GET /chat/messages` reads chat messages
+- `POST /reset` resets the world, allowed only when `agent_api.allow_reset` is enabled
 
 `POST /join` returns:
 

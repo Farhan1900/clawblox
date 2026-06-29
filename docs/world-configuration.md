@@ -22,7 +22,7 @@ Defaults are filled in by the engine:
 - `afk_timeout = 300`
 - `runtime.mode = "clawblox"`
 - `scripts.main = "main.lua"`
-- `scripts.skill = "API.md"`
+- `scripts.api = "API.md"`
 - `renderer.name = "World Renderer"`
 - `renderer.mode = "module"`
 - `renderer.api_version = 1`
@@ -59,15 +59,14 @@ serving the frontend/renderer around another world process.
 [scripts]
 main = "main.lua"
 tree = "scripts"
-skill = "API.md"
+api = "API.md"
 ```
 
 `main` is relative to the world directory.
 
 `tree` is optional and points to a script-tree directory.
 
-`skill` points to the agent-facing docs file. New worlds should use `API.md`.
-The field is still named `skill` for compatibility with older worlds.
+`api` points to the agent-facing docs file, usually `API.md`.
 
 ## Renderer
 

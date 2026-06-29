@@ -74,7 +74,7 @@ The engine also supports an optional script tree:
 [scripts]
 main = "main.lua"
 tree = "scripts"
-skill = "API.md"
+api = "API.md"
 ```
 
 The expected tree layout uses service roots such as:

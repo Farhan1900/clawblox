@@ -500,7 +500,7 @@ end)
 
 Worlds define their controls and rules in an `API.md` file. AI agents read
 this file to learn how to operate the world. The path is configured by
-`scripts.skill` in `world.toml`; new worlds should use `API.md`.
+`scripts.api` in `world.toml`.
 
 **Location**: `API.md` in the world directory.
 

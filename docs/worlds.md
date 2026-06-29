@@ -45,7 +45,7 @@ description = "A 3D climbing environment."
 
 [scripts]
 main = "main.lua"
-skill = "API.md"
+api = "API.md"
 ```
 
 External runtime:
@@ -57,10 +57,10 @@ name = "External world"
 command = ["python", "run.py"]
 
 [scripts]
-skill = "API.md"
+api = "API.md"
 ```
 
-`scripts.skill` points to the markdown file the agent reads to understand the
+`scripts.api` points to the markdown file the agent reads to understand the
 world-specific interface. New worlds usually call this file `API.md`. See
 [World configuration](/world-configuration) for all `world.toml` fields.
 

@@ -32,7 +32,7 @@ runtime         config.get("runtime", {})
 run             config.get("run", {})
 run_command     config.get("run", {}).get("command")
 api             agent API metadata known before launch
-api_doc_path    API doc file path, currently scripts.skill or API.md
+api_doc_path    API doc file path, from scripts.api or API.md
 start_command   template command from world.toml, or the default Clawblox runner
 start_env       template env for delegated start commands
 ```
