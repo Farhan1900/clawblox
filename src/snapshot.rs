@@ -3669,6 +3669,162 @@ mod tests {
     }
 
     #[test]
+    fn roundtrip_restores_lua_held_player_character_userdata() {
+        let game_id = Uuid::new_v4();
+        let mut instance = GameInstance::new(game_id, None);
+        instance.init_runtime();
+        let agent_id = Uuid::new_v4();
+        assert!(instance.add_player(agent_id, "CharacterPlayer"));
+
+        let runtime = instance.lua_runtime.as_ref().unwrap();
+        runtime
+            .lua()
+            .load(
+                r#"
+                local player = Players:GetPlayers()[1]
+                local character = player.Character
+                local humanoid = character and character:FindFirstChild("Humanoid")
+                local hrp = character and character:FindFirstChild("HumanoidRootPart")
+
+                assert(character ~= nil, "character missing before snapshot")
+                assert(humanoid ~= nil, "humanoid missing before snapshot")
+                assert(hrp ~= nil, "humanoid root part missing before snapshot")
+
+                _G.player = player
+                _G.character = character
+                _G.humanoid = humanoid
+                _G.hrp = hrp
+                "#,
+            )
+            .exec()
+            .unwrap();
+
+        let snapshot = capture_game_instance(&instance).unwrap();
+
+        let mut restored = GameInstance::new(game_id, None);
+        restored.init_runtime();
+        restore_game_instance(&mut restored, &snapshot).unwrap();
+
+        let runtime = restored.lua_runtime.as_ref().unwrap();
+        runtime
+            .lua()
+            .load(
+                r#"
+                local player = Players:GetPlayers()[1]
+                local character = player.Character
+                local humanoid = character and character:FindFirstChild("Humanoid")
+                local hrp = character and character:FindFirstChild("HumanoidRootPart")
+
+                _G.samePlayer = _G.player == player
+                _G.sameCharacter = _G.character == character
+                _G.sameHumanoid = _G.humanoid == humanoid
+                _G.sameHrp = _G.hrp == hrp
+                _G.restoredHumanoidName = humanoid and humanoid.Name or nil
+                _G.restoredHrpName = hrp and hrp.Name or nil
+                "#,
+            )
+            .exec()
+            .unwrap();
+
+        let globals = runtime.lua().globals().get::<mlua::Table>("_G").unwrap();
+        assert!(globals.get::<bool>("samePlayer").unwrap());
+        assert!(globals.get::<bool>("sameCharacter").unwrap());
+        assert!(globals.get::<bool>("sameHumanoid").unwrap());
+        assert!(globals.get::<bool>("sameHrp").unwrap());
+        assert_eq!(
+            globals.get::<String>("restoredHumanoidName").unwrap(),
+            "Humanoid"
+        );
+        assert_eq!(
+            globals.get::<String>("restoredHrpName").unwrap(),
+            "HumanoidRootPart"
+        );
+    }
+
+    #[test]
+    fn roundtrip_restores_input_received_player_character_lookup() {
+        let game_id = Uuid::new_v4();
+        let mut instance = GameInstance::new(game_id, None);
+        instance.init_runtime();
+        let agent_id = Uuid::new_v4();
+        assert!(instance.add_player(agent_id, "InputPlayer"));
+        let user_id = GameInstance::user_id_from_agent_id(agent_id);
+
+        let runtime = instance.lua_runtime.as_ref().unwrap();
+        runtime
+            .lua()
+            .load(
+                r#"
+                local AgentInputService = game:GetService("AgentInputService")
+
+                _G.inputHumanoidFound = nil
+                _G.inputMoveToAccepted = false
+
+                AgentInputService.InputReceived:Connect(function(player, inputType, inputData)
+                    local character = player.Character
+                    local humanoid = character and character:FindFirstChild("Humanoid")
+                    _G.inputPlayerName = player.Name
+                    _G.inputType = inputType
+                    _G.inputHumanoidFound = humanoid ~= nil
+                    _G.inputHumanoidName = humanoid and humanoid.Name or nil
+
+                    if humanoid and inputType == "MoveTo" then
+                        humanoid:MoveTo(Vector3.new(12, 0, -4))
+                        _G.inputMoveToAccepted = true
+                    end
+                end)
+                "#,
+            )
+            .exec()
+            .unwrap();
+
+        let snapshot = capture_game_instance(&instance).unwrap();
+
+        let mut restored = GameInstance::new(game_id, None);
+        restored.init_runtime();
+        restore_game_instance(&mut restored, &snapshot).unwrap();
+
+        restored.queue_agent_input(
+            user_id,
+            "MoveTo".to_string(),
+            serde_json::json!({ "position": [12, 0, -4] }),
+        );
+        restored
+            .lua_runtime
+            .as_ref()
+            .unwrap()
+            .process_agent_inputs()
+            .unwrap();
+
+        let runtime = restored.lua_runtime.as_ref().unwrap();
+        let globals = runtime.lua().globals().get::<mlua::Table>("_G").unwrap();
+        assert_eq!(
+            globals.get::<String>("inputPlayerName").unwrap(),
+            "InputPlayer"
+        );
+        assert_eq!(globals.get::<String>("inputType").unwrap(), "MoveTo");
+        assert!(globals.get::<bool>("inputHumanoidFound").unwrap());
+        assert_eq!(
+            globals.get::<String>("inputHumanoidName").unwrap(),
+            "Humanoid"
+        );
+        assert!(globals.get::<bool>("inputMoveToAccepted").unwrap());
+
+        restored.tick();
+
+        let restored_hrp_id = restored
+            .player_hrp_ids
+            .get(&agent_id)
+            .copied()
+            .expect("missing restored humanoid root part");
+        let state = restored
+            .physics
+            .get_character_state(restored_hrp_id)
+            .expect("missing restored character controller state");
+        assert_eq!(state.target_position, Some([12.0, 0.0, -4.0]));
+    }
+
+    #[test]
     fn roundtrip_restores_player_afk_timers() {
         let game_id = Uuid::new_v4();
         let mut instance = GameInstance::new(game_id, None);
