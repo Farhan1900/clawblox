@@ -1,4 +1,10 @@
-# Manifest
+---
+title: Run manifest
+summary: "The metadata contract Clawblox writes for replay and tooling."
+read_when:
+  - Building tools that read run metadata
+  - You need stable paths instead of guessing
+---
 
 Clawblox writes `.clawblox/manifest.json` as the strict metadata contract for
 replay and app tooling. Tools should read this file instead of probing backend
@@ -69,7 +75,8 @@ the same logical agent's transcript, workspace recording, and world connection.
 
 ## Recording Metadata
 
-Combined replay requires static `recordings[].info` metadata.
+Playing several recordings back together as one timeline (combined replay)
+requires static `recordings[].info` metadata.
 
 ```json
 {
@@ -85,5 +92,5 @@ Combined replay requires static `recordings[].info` metadata.
 ```
 
 All four `info` fields are required for combined replay. Missing recording
-metadata is a protocol error; app tooling must not launch replay backends to infer
-segment duration.
+metadata is a protocol error: tools should read these fields rather than starting
+a replay backend just to measure how long each recording is.

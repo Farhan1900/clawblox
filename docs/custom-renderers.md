@@ -1,11 +1,17 @@
-# Custom Renderers (Local CLI)
+---
+title: Custom renderers
+summary: "Build a per-world Three.js renderer against the spectator state."
+read_when:
+  - Customizing how a world looks in the browser
+  - You need the renderer SDK and spectator-state reference
+---
 
-`clawblox run` includes an embedded frontend and supports per-game custom renderers.
+`clawblox run` includes an embedded frontend and supports per-world custom renderers.
 
 ## File layout
 
 ```text
-my-game/
+my-world/
   world.toml
   main.lua
   renderer/
@@ -20,7 +26,7 @@ my-game/
 
 ```toml
 [renderer]
-name = "Default Game Renderer"
+name = "Default World Renderer"
 mode = "module"
 api_version = 1
 entry = "dist/renderer.bundle.js"
@@ -28,7 +34,11 @@ capabilities = ["presets", "animation-tracks", "three-sdk", "input-bridge"]
 ```
 
 - `entry` is relative to `renderer/` and should point to the built bundle.
-- Renderer package metadata now lives in `renderer/package.json` under `clawbloxRenderer`.
+- Current local runs use `renderer/package.json` `clawbloxRenderer.outFile` as
+  the build output served in `/renderer/manifest`; keep this path aligned with
+  `renderer.entry`.
+- Renderer package metadata lives in `renderer/package.json` under
+  `clawbloxRenderer`.
 
 ## Renderer Package (`renderer/package.json`)
 
@@ -36,7 +46,7 @@ Minimal example:
 
 ```json
 {
-  "name": "@clawblox-renderers/my-game",
+  "name": "@clawblox-renderers/my-world",
   "private": true,
   "type": "module",
   "clawbloxRenderer": {
@@ -54,14 +64,29 @@ Notes:
 
 ## Build and Load Behavior
 
-`clawblox run` is package-first and fail-fast:
+`clawblox run` requires a renderer package, and it stops with an error instead
+of falling back to a default renderer:
 
 - Requires `renderer/package.json`
-- Builds renderer package output (`dist/renderer.bundle.js`)
+- Builds renderer package output from `clawbloxRenderer.outFile`, defaulting to
+  `dist/renderer.bundle.js`
 - Validates output exists and contains `createRenderer`
 - Serves built artifact through `/renderer-files/*`
 
 No fallback renderer is used in this flow. If package build/validation fails, `clawblox run` exits with an error.
+
+The runtime exposes the final renderer manifest at `GET /renderer/manifest`:
+
+```json
+{
+  "schema_version": 1,
+  "api_version": 1,
+  "name": "Renderer name",
+  "mode": "module",
+  "entry_url": "/renderer-files/dist/renderer.bundle.js",
+  "capabilities": ["three-sdk"]
+}
+```
 
 ## Import compatibility tips
 
@@ -83,6 +108,52 @@ export function createRenderer(ctx) {
     unmount() {},
     onResize({ width, height, dpr }) {},
     onState(state) {},
+  }
+}
+```
+
+## Minimal renderer
+
+```js
+import * as THREE from "https://esm.sh/three@0.160.0"
+
+export function createRenderer(ctx) {
+  const scene = new THREE.Scene()
+  const camera = new THREE.PerspectiveCamera(70, 1, 0.1, 500)
+  const renderer = new THREE.WebGLRenderer({ canvas: ctx.canvas, antialias: true })
+  const entities = ctx.runtime.three.createEntityStore(scene)
+
+  scene.add(new THREE.AmbientLight(0xffffff, 0.8))
+  camera.position.set(0, 20, 30)
+  camera.lookAt(0, 0, 0)
+
+  return {
+    onResize({ width, height }) {
+      camera.aspect = width / Math.max(1, height)
+      camera.updateProjectionMatrix()
+      renderer.setSize(width, height, false)
+    },
+
+    onState(state) {
+      const activeIds = new Set()
+
+      for (const entity of state.entities || []) {
+        activeIds.add(entity.id)
+        entities.upsert(
+          entity,
+          (next) => ctx.runtime.three.buildEntityMesh(THREE, next),
+          (mesh, next) => ctx.runtime.three.applyEntityTransform(THREE, mesh, next),
+        )
+      }
+
+      entities.prune(activeIds)
+      renderer.render(scene, camera)
+    },
+
+    unmount() {
+      entities.clear()
+      renderer.dispose()
+    },
   }
 }
 ```
@@ -187,8 +258,8 @@ await input.sendRemoteEvent('PlayerInput', [{ x: 1, y: 0, z: 0 }])
 
 - `GET /` - local frontend host
 - `GET /renderer/manifest` - renderer metadata
-- `GET /renderer-files/*` - static files from game `renderer/`
-- `GET /assets/*` - game assets from `assets/` (used for `asset://...` URLs)
+- `GET /renderer-files/*` - static files from the world's `renderer/`
+- `GET /assets/*` - world assets from `assets/` (used for `asset://...` URLs)
 - `GET /spectate/ws` - live spectator observation stream
 
 ## State shape (`onState(state)`)
@@ -213,10 +284,13 @@ type SpectatorObservation = {
 - `id`, `name`, `position`, `health`
 - optional: `root_part_id`, `humanoid_state`, `attributes`, `gui`, `active_animations`
 
+Entities are serialized from parts in `Workspace`, and each one keeps a stable
+instance id (`id`).
+
 ### `entities[*]` fields
 
 - `id`, `type`, `position`
-- optional: `rotation`, `size`, `health`, `pickup_type`, `model_url`, `model_yaw_offset_deg`, `billboard_gui`
+- optional: `rotation`, `size`, `health`, `pickup_type`, `attributes`, `model_url`, `model_yaw_offset_deg`, `billboard_gui`
 - always includes `render`:
 
 ```ts
@@ -245,6 +319,15 @@ rotation?: [[number, number, number], [number, number, number], [number, number,
 ```
 
 This matches `runtime.three.applyEntityTransform`.
+
+### `sounds[*]` fields
+
+- `id`, `stream_id`, `volume`, `is_playing`
+
+### `recent_events`
+
+`recent_events` is the public replicated event stream. Client-targeted
+`RemoteEvent:FireClient` events are excluded from the public spectator feed.
 
 ## Render metadata from Lua attributes
 

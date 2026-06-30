@@ -34,6 +34,14 @@ pub enum AsyncRequest {
         value: serde_json::Value,
         response_tx: oneshot::Sender<Result<(), String>>,
     },
+    DataStoreCompareSet {
+        game_id: Uuid,
+        store_name: String,
+        key: String,
+        expected: Option<serde_json::Value>,
+        value: serde_json::Value,
+        response_tx: oneshot::Sender<Result<bool, String>>,
+    },
     /// Get sorted entries from an OrderedDataStore (for leaderboards)
     DataStoreGetSorted {
         game_id: Uuid,
@@ -128,6 +136,26 @@ impl AsyncBridge {
                         response_tx,
                     } => {
                         let result = Self::db_set(&db, game_id, &store_name, &key, &value).await;
+                        // Ignore send error - receiver may have been dropped (coroutine cancelled)
+                        let _ = response_tx.send(result);
+                    }
+                    AsyncRequest::DataStoreCompareSet {
+                        game_id,
+                        store_name,
+                        key,
+                        expected,
+                        value,
+                        response_tx,
+                    } => {
+                        let result = Self::db_compare_set(
+                            &db,
+                            game_id,
+                            &store_name,
+                            &key,
+                            expected.as_ref(),
+                            &value,
+                        )
+                        .await;
                         // Ignore send error - receiver may have been dropped (coroutine cancelled)
                         let _ = response_tx.send(result);
                     }
@@ -251,6 +279,99 @@ impl AsyncBridge {
         }
 
         Ok(())
+    }
+
+    /// Performs an atomic compare-and-set for DataStore:UpdateAsync.
+    async fn db_compare_set(
+        db: &DataStoreDb,
+        game_id: Uuid,
+        store_name: &str,
+        key: &str,
+        expected: Option<&serde_json::Value>,
+        value: &serde_json::Value,
+    ) -> Result<bool, String> {
+        match db {
+            DataStoreDb::Postgres(pool) => {
+                let rows_affected = if let Some(expected) = expected {
+                    sqlx::query(
+                        r#"
+                        UPDATE data_stores
+                        SET value = $4, updated_at = NOW()
+                        WHERE game_id = $1 AND store_name = $2 AND key = $3 AND value = $5
+                        "#,
+                    )
+                    .bind(game_id)
+                    .bind(store_name)
+                    .bind(key)
+                    .bind(value)
+                    .bind(expected)
+                    .execute(pool.as_ref())
+                    .await
+                    .map_err(|e| format!("Database error in UpdateAsync compare-set: {}", e))?
+                    .rows_affected()
+                } else {
+                    sqlx::query(
+                        r#"
+                        INSERT INTO data_stores (game_id, store_name, key, value)
+                        VALUES ($1, $2, $3, $4)
+                        ON CONFLICT (game_id, store_name, key) DO NOTHING
+                        "#,
+                    )
+                    .bind(game_id)
+                    .bind(store_name)
+                    .bind(key)
+                    .bind(value)
+                    .execute(pool.as_ref())
+                    .await
+                    .map_err(|e| format!("Database error in UpdateAsync compare-set: {}", e))?
+                    .rows_affected()
+                };
+                Ok(rows_affected == 1)
+            }
+            DataStoreDb::Sqlite(pool) => {
+                let value_text = serde_json::to_string(value).map_err(|e| {
+                    format!("Failed to serialize value for sqlite datastore: {}", e)
+                })?;
+                let rows_affected = if let Some(expected) = expected {
+                    let expected_text = serde_json::to_string(expected).map_err(|e| {
+                        format!("Failed to serialize expected sqlite datastore value: {}", e)
+                    })?;
+                    sqlx::query(
+                        r#"
+                        UPDATE data_stores
+                        SET value = ?4, updated_at = datetime('now')
+                        WHERE game_id = ?1 AND store_name = ?2 AND key = ?3 AND value = ?5
+                        "#,
+                    )
+                    .bind(game_id.to_string())
+                    .bind(store_name)
+                    .bind(key)
+                    .bind(value_text)
+                    .bind(expected_text)
+                    .execute(pool.as_ref())
+                    .await
+                    .map_err(|e| format!("Database error in UpdateAsync compare-set: {}", e))?
+                    .rows_affected()
+                } else {
+                    sqlx::query(
+                        r#"
+                        INSERT INTO data_stores (game_id, store_name, key, value)
+                        VALUES (?1, ?2, ?3, ?4)
+                        ON CONFLICT (game_id, store_name, key) DO NOTHING
+                        "#,
+                    )
+                    .bind(game_id.to_string())
+                    .bind(store_name)
+                    .bind(key)
+                    .bind(value_text)
+                    .execute(pool.as_ref())
+                    .await
+                    .map_err(|e| format!("Database error in UpdateAsync compare-set: {}", e))?
+                    .rows_affected()
+                };
+                Ok(rows_affected == 1)
+            }
+        }
     }
 
     /// Performs the actual database GET SORTED operation (for OrderedDataStore leaderboards)

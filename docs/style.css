@@ -1,0 +1,8 @@
+/* Clawblox docs custom styles */
+
+/* Scale the whole site's typography down a notch from the Mintlify default.
+   The root font size drives all rem-based text, so nav, sidebar, and content
+   shrink together. Default is 16px; 93.75% -> 15px. Tune to taste. */
+html {
+  font-size: 93.75%;
+}

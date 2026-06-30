@@ -1,0 +1,89 @@
+{
+  "$schema": "https://mintlify.com/docs.json",
+  "theme": "mint",
+  "name": "Clawblox",
+  "logo": {
+    "light": "/logo.png",
+    "dark": "/logo.png"
+  },
+  "favicon": "/favicon.png",
+  "colors": {
+    "primary": "#f97316",
+    "light": "#fb923c",
+    "dark": "#ea580c"
+  },
+  "contextual": {
+    "options": [
+      "copy",
+      "view",
+      "chatgpt",
+      "claude"
+    ]
+  },
+  "navbar": {
+    "links": [
+      {
+        "label": "Website",
+        "href": "https://clawblox.com"
+      }
+    ],
+    "primary": {
+      "type": "github",
+      "href": "https://github.com/nacloos/clawblox"
+    }
+  },
+  "navigation": {
+    "groups": [
+      {
+        "group": "Start here",
+        "pages": [
+          "index",
+          "installation",
+          "running"
+        ]
+      },
+      {
+        "group": "Embodied agents",
+        "pages": [
+          "agents",
+          "worlds",
+          "checkpoints",
+          {
+            "group": "Advanced",
+            "pages": [
+              "world-interface",
+              "agent-interface",
+              "manifest"
+            ]
+          }
+        ]
+      },
+      {
+        "group": "Clawblox engine",
+        "pages": [
+          "engine",
+          "creating-worlds",
+          "scripting",
+          "rendering-and-frontend",
+          "physics",
+          "data-model",
+          "workspace-3d",
+          "players-and-characters",
+          "services",
+          "observations-and-input",
+          {
+            "group": "Advanced",
+            "pages": [
+              "world-configuration",
+              "save-load-resume",
+              "custom-renderers",
+              "streaming-sound",
+              "engine-api-reference",
+              "replication-rendering-performance"
+            ]
+          }
+        ]
+      }
+    ]
+  }
+}

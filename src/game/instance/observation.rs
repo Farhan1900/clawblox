@@ -345,7 +345,8 @@ pub(super) fn build_player_observation(
         profile.mark("other_players");
     }
 
-    // Get dynamic world entities only (static entities fetched via /map endpoint)
+    // Get dynamic world entities only; static world knowledge belongs in API.md
+    // or in explicit world-authored attributes/actions.
     let world = instance.get_dynamic_world_info(position, observation_radius);
     if let Some(profile) = profile.as_mut() {
         profile.mark("dynamic_world");

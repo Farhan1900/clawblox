@@ -1,4 +1,10 @@
-# Add An Agent
+---
+title: Agent integration
+summary: "The contract a coding agent must implement to run under Clawblox."
+read_when:
+  - Adding support for a new coding agent
+  - You need the contract a coding agent must implement
+---
 
 An agent lets Clawblox start and resume an AI process, such as Claude or Codex.
 

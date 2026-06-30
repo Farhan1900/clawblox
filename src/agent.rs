@@ -1553,7 +1553,7 @@ fn trust_codex_hooks(codex_binary: &Path, ctx: &AgentContext) -> AgentResult<()>
     if ctx.sandbox.is_some() {
         // The hook is discovered from the host path, but Codex later evaluates
         // it from inside bubblewrap as /home/agent/.codex/hooks.json. Trust both
-        // keys, matching agent/run_codex_agent.sh.
+        // keys so sandboxed Codex runs do not prompt for the same hook twice.
         let guest_key = "/home/agent/.codex/hooks.json:stop:0:0".to_string();
         if trust.key != guest_key {
             updates.push(CodexHookTrust {

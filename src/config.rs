@@ -6,20 +6,20 @@ use std::path::{Path, PathBuf};
 /// Scripts configuration section
 #[derive(Debug, Clone, Deserialize)]
 pub struct ScriptsConfig {
-    /// Main Lua script file (relative to game directory)
+    /// Main Lua script file (relative to world directory)
     pub main: String,
-    /// Optional script tree directory (relative to game directory).
+    /// Optional script tree directory (relative to world directory).
     /// Expected layout uses service roots like:
     /// - scripts/ServerScriptService/**/*.lua
     /// - scripts/Workspace/**/*.lua
     #[serde(default)]
     pub tree: Option<String>,
-    /// Agent API documentation file (relative to game directory).
+    /// Agent API documentation file (relative to world directory).
     ///
-    /// Historically this was `SKILL.md`; `API.md` is the preferred name for
-    /// new worlds, and legacy `SKILL.md` files remain supported.
-    #[serde(default)]
-    pub skill: Option<String>,
+    /// `API.md` is the preferred name. The legacy `skill` field name and
+    /// `SKILL.md` file name remain supported as aliases.
+    #[serde(default, alias = "skill")]
+    pub api: Option<String>,
 }
 
 impl Default for ScriptsConfig {
@@ -27,7 +27,7 @@ impl Default for ScriptsConfig {
         Self {
             main: "main.lua".to_string(),
             tree: None,
-            skill: Some("API.md".to_string()),
+            api: Some("API.md".to_string()),
         }
     }
 }
@@ -70,13 +70,13 @@ pub struct RendererConfig {
     /// Renderer host mode. Currently "module" or "default".
     #[serde(default = "default_renderer_mode")]
     pub mode: String,
-    /// Renderer API contract version expected by this game.
+    /// Renderer API contract version expected by this world.
     #[serde(default = "default_renderer_api_version")]
     pub api_version: u32,
-    /// Optional renderer module entrypoint relative to game_dir/renderer/.
+    /// Optional renderer module entrypoint relative to world_dir/renderer/.
     #[serde(default)]
     pub entry: Option<String>,
-    /// Optional renderer source entrypoint relative to game_dir/renderer/.
+    /// Optional renderer source entrypoint relative to world_dir/renderer/.
     /// If set, local CLI can bundle this into a runtime-friendly ESM module.
     #[serde(default)]
     pub source: Option<String>,
@@ -235,9 +235,9 @@ fn default_add_deps_lib_to_library_path() -> bool {
 /// World configuration from world.toml
 #[derive(Debug, Clone, Deserialize)]
 pub struct WorldConfig {
-    /// Display name of the game
+    /// Display name of the world.
     pub name: String,
-    /// Description of the game
+    /// Description of the world.
     #[serde(default)]
     pub description: Option<String>,
     /// Maximum number of players per instance
@@ -284,7 +284,7 @@ fn default_afk_timeout() -> u64 {
 }
 
 fn default_renderer_name() -> String {
-    "Game Renderer".to_string()
+    "World Renderer".to_string()
 }
 
 fn default_renderer_mode() -> String {
@@ -319,10 +319,10 @@ impl WorldConfig {
         Ok(cfg)
     }
 
-    /// Load world configuration from a game directory
+    /// Load world configuration from a world directory.
     /// Looks for world.toml in the given directory
-    pub fn from_game_dir(game_dir: &Path) -> Result<Self, WorldConfigError> {
-        let config_path = game_dir.join("world.toml");
+    pub fn from_game_dir(world_dir: &Path) -> Result<Self, WorldConfigError> {
+        let config_path = world_dir.join("world.toml");
         Self::from_file(&config_path)
     }
 
@@ -410,7 +410,7 @@ mod tests {
         assert_eq!(config.name, "Test Game");
         assert_eq!(config.max_players, 8);
         assert_eq!(config.runtime.mode, "clawblox");
-        assert_eq!(config.scripts.skill, Some("API.md".to_string()));
+        assert_eq!(config.scripts.api, Some("API.md".to_string()));
         assert_eq!(config.observation.radius, 100.0);
         assert_eq!(config.speech.mode, SpeechMode::Global);
         assert_eq!(config.speech.hearing_radius, 30.0);

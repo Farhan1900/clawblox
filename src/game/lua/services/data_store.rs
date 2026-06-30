@@ -20,6 +20,8 @@ use uuid::Uuid;
 
 use crate::game::async_bridge::{AsyncBridge, AsyncRequest};
 
+const UPDATE_ASYNC_MAX_RETRIES: usize = 32;
+
 /// The DataStoreService - entry point for getting named data stores
 #[derive(Clone)]
 pub struct DataStoreService {
@@ -230,7 +232,7 @@ impl UserData for DataStore {
         // UpdateAsync(key, transformFunction) - atomically updates a value
         //
         // The transformFunction receives the current value (or nil if not exists)
-        // and should return the new value to store.
+        // and should return the new value to store. Returning nil cancels the update.
         // Yields until DB operation completes.
         methods.add_async_method(
             "UpdateAsync",
@@ -251,59 +253,71 @@ impl UserData for DataStore {
                         )
                     })?;
 
-                    // First, get the current value
-                    let (get_tx, get_rx) = tokio::sync::oneshot::channel();
+                    for _ in 0..UPDATE_ASYNC_MAX_RETRIES {
+                        let (get_tx, get_rx) = tokio::sync::oneshot::channel();
 
-                    bridge
-                        .send(AsyncRequest::DataStoreGet {
-                            game_id,
-                            store_name: store_name.clone(),
-                            key: key.clone(),
-                            response_tx: get_tx,
-                        })
-                        .map_err(mlua::Error::RuntimeError)?;
+                        bridge
+                            .send(AsyncRequest::DataStoreGet {
+                                game_id,
+                                store_name: store_name.clone(),
+                                key: key.clone(),
+                                response_tx: get_tx,
+                            })
+                            .map_err(mlua::Error::RuntimeError)?;
 
-                    let current_result = get_rx.await.map_err(|_| {
-                        mlua::Error::RuntimeError("DataStore operation cancelled".into())
-                    })?;
+                        let current_result = get_rx.await.map_err(|_| {
+                            mlua::Error::RuntimeError("DataStore operation cancelled".into())
+                        })?;
 
-                    let current_value: Value = match current_result {
-                        Ok(Some(json_value)) => lua.to_value(&json_value)?,
-                        Ok(None) => Value::Nil,
-                        Err(e) => return Err(mlua::Error::RuntimeError(e)),
-                    };
+                        let current_json = match current_result {
+                            Ok(value) => value,
+                            Err(e) => return Err(mlua::Error::RuntimeError(e)),
+                        };
+                        let current_value = match current_json.as_ref() {
+                            Some(json_value) => lua.to_value(json_value)?,
+                            None => Value::Nil,
+                        };
 
-                    // Call the transform function
-                    let transform: mlua::Function = lua.registry_value(&transform_key)?;
-                    let new_value: Value = transform.call(current_value)?;
+                        let transform: mlua::Function = lua.registry_value(&transform_key)?;
+                        let new_value: Value = transform.call(current_value)?;
 
-                    // Clean up the registry key
-                    lua.remove_registry_value(transform_key)?;
+                        if matches!(new_value, Value::Nil) {
+                            lua.remove_registry_value(transform_key)?;
+                            return Ok(Value::Nil);
+                        }
 
-                    // Serialize the new value
-                    let json_value: serde_json::Value = lua.from_value(new_value.clone())?;
+                        let new_json: serde_json::Value = lua.from_value(new_value.clone())?;
+                        let (set_tx, set_rx) = tokio::sync::oneshot::channel();
 
-                    // Set the new value
-                    let (set_tx, set_rx) = tokio::sync::oneshot::channel();
+                        bridge
+                            .send(AsyncRequest::DataStoreCompareSet {
+                                game_id,
+                                store_name: store_name.clone(),
+                                key: key.clone(),
+                                expected: current_json,
+                                value: new_json,
+                                response_tx: set_tx,
+                            })
+                            .map_err(mlua::Error::RuntimeError)?;
 
-                    bridge
-                        .send(AsyncRequest::DataStoreSet {
-                            game_id,
-                            store_name,
-                            key,
-                            value: json_value,
-                            response_tx: set_tx,
-                        })
-                        .map_err(mlua::Error::RuntimeError)?;
+                        let set_result = set_rx.await.map_err(|_| {
+                            mlua::Error::RuntimeError("DataStore operation cancelled".into())
+                        })?;
 
-                    let set_result = set_rx.await.map_err(|_| {
-                        mlua::Error::RuntimeError("DataStore operation cancelled".into())
-                    })?;
-
-                    match set_result {
-                        Ok(()) => Ok(new_value),
-                        Err(e) => Err(mlua::Error::RuntimeError(e)),
+                        match set_result {
+                            Ok(true) => {
+                                lua.remove_registry_value(transform_key)?;
+                                return Ok(new_value);
+                            }
+                            Ok(false) => continue,
+                            Err(e) => return Err(mlua::Error::RuntimeError(e)),
+                        }
                     }
+
+                    lua.remove_registry_value(transform_key)?;
+                    Err(mlua::Error::RuntimeError(
+                        "UpdateAsync failed after too many concurrent updates".into(),
+                    ))
                 }
             },
         );

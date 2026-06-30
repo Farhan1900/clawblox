@@ -1,4 +1,4 @@
-//! Clawblox CLI - init and run games from anywhere
+//! Clawblox CLI - init and run worlds from anywhere
 
 use axum::{
     extract::{
@@ -14,6 +14,7 @@ use clap::{Parser, Subcommand, ValueEnum};
 use dashmap::DashMap;
 use flate2::{write::GzEncoder, Compression};
 use futures_util::{SinkExt, StreamExt};
+use indicatif::{ProgressBar, ProgressStyle};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs::OpenOptions;
@@ -21,7 +22,10 @@ use std::io::{BufRead, Write};
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::{Arc, Mutex};
+use std::sync::{
+    atomic::{AtomicUsize, Ordering},
+    Arc, Mutex,
+};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::sync::{broadcast, watch};
@@ -57,13 +61,14 @@ use clawblox::{
         script_bundle::load_world_and_entry_script,
         GameManager, GameManagerHandle,
     },
-    manifest, recording, replay,
+    manifest, paths as clawblox_paths, recording, replay,
     replay_agent_log::{
         load_agent_timeline, ReplayAgentMessage, ReplayAgentTimeline, ReplayTickAnchor,
     },
     replay_metadata::{self, ReplayMetadata},
     snapshot::GameInstanceSnapshot,
     world_runner::{run_external_world_blocking, ExternalWorldCommand},
+    world_source::{self, WorldSourceReporter},
 };
 
 static DOCS_DIR: Dir = include_dir!("$CARGO_MANIFEST_DIR/docs");
@@ -73,6 +78,66 @@ const LEGACY_AGENT_SKILL_DOC: &str = "SKILL.md";
 
 #[path = "../app_browser.rs"]
 mod app_browser;
+
+struct CliWorldSourceReporter {
+    spinner: ProgressBar,
+    files: AtomicUsize,
+}
+
+impl CliWorldSourceReporter {
+    fn new() -> Self {
+        let spinner = ProgressBar::new_spinner();
+        spinner.set_style(
+            ProgressStyle::with_template("{spinner:.orange} {msg}")
+                .unwrap_or_else(|_| ProgressStyle::default_spinner()),
+        );
+        spinner.enable_steady_tick(Duration::from_millis(80));
+        Self {
+            spinner,
+            files: AtomicUsize::new(0),
+        }
+    }
+}
+
+impl WorldSourceReporter for CliWorldSourceReporter {
+    fn resolving(&self, source: &str) {
+        self.spinner
+            .set_message(format!("Resolving world {source}"));
+    }
+
+    fn using_cached_world(&self, dir: &Path) {
+        self.spinner
+            .set_message(format!("Using cached world {}", dir.display()));
+    }
+
+    fn downloading_github_world(&self, source: &str, dir: &Path) {
+        self.files.store(0, Ordering::Relaxed);
+        self.spinner.set_message(format!("Downloading {source}"));
+        eprintln!("Caching world in {}", dir.display());
+    }
+
+    fn downloading_archive(&self, path: &str) {
+        self.spinner
+            .set_message(format!("Downloading GitHub archive {path}"));
+    }
+
+    fn downloaded_file(&self, path: &str, _bytes: u64) {
+        let count = self.files.fetch_add(1, Ordering::Relaxed) + 1;
+        self.spinner
+            .set_message(format!("Downloaded {count} files ({path})"));
+    }
+
+    fn ready(&self, dir: &Path) {
+        let count = self.files.load(Ordering::Relaxed);
+        if count > 0 {
+            self.spinner
+                .finish_with_message(format!("World ready: {} ({count} files)", dir.display()));
+        } else {
+            self.spinner
+                .finish_with_message(format!("World ready: {}", dir.display()));
+        }
+    }
+}
 
 #[derive(Copy, Clone, Debug, ValueEnum)]
 enum LocalDatastore {
@@ -111,7 +176,7 @@ impl CliAgentKind {
 
 #[derive(Parser)]
 #[command(name = "clawblox")]
-#[command(about = "Clawblox game engine CLI", long_about = None, version)]
+#[command(about = "Clawblox world engine CLI", long_about = None, version)]
 struct Cli {
     #[command(subcommand)]
     command: Commands,
@@ -119,14 +184,14 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Initialize a new game project
+    /// Initialize a new world
     Init {
-        /// Name for the new project (creates subdirectory). Omit to init in current directory.
+        /// Name for the new world (creates subdirectory). Omit to init in current directory.
         name: Option<String>,
     },
-    /// Run a game locally
+    /// Run a world locally
     Run {
-        /// Path to game directory (default: current directory)
+        /// World directory or GitHub folder URL (default: current directory)
         #[arg(default_value = ".")]
         path: PathBuf,
         /// Port to run the server on
@@ -200,9 +265,9 @@ enum Commands {
     },
     /// Serve .clawrec data through the backend-agnostic replay adapter protocol
     ReplayAdapter,
-    /// Browse project recordings and open them in the replay UI
+    /// Browse world recordings and open them in the replay UI
     App {
-        /// Path to project directory
+        /// Path to world directory
         #[arg(default_value = ".")]
         path: PathBuf,
         /// Port to run the app server on
@@ -212,9 +277,9 @@ enum Commands {
         #[arg(long, default_value = "/")]
         base_path: String,
     },
-    /// Start a game locally in background (daemon mode)
+    /// Start a world locally in background (daemon mode)
     Start {
-        /// Path to game directory (default: current directory)
+        /// World directory or GitHub folder URL (default: current directory)
         #[arg(default_value = ".")]
         path: PathBuf,
         /// Port to run the server on
@@ -227,7 +292,7 @@ enum Commands {
         #[arg(long, value_enum, default_value_t = LocalDatastore::Sqlite)]
         datastore: LocalDatastore,
     },
-    /// Stop a background game server started with `clawblox start`
+    /// Stop a background world server started with `clawblox start`
     Stop {
         /// Port of the server to stop
         #[arg(short, long, default_value = "8080")]
@@ -244,9 +309,9 @@ enum Commands {
         #[arg(long, default_value = "https://clawblox.com")]
         server: String,
     },
-    /// Deploy a game to clawblox.com
+    /// Deploy a world to clawblox.com
     Deploy {
-        /// Path to game directory
+        /// Path to world directory
         #[arg(default_value = ".")]
         path: PathBuf,
         /// API key (overrides stored credentials)
@@ -577,15 +642,15 @@ fn init_project(name: Option<String>) {
     let world_toml = format!(
         r#"# {} - World Configuration
 name = "{}"
-description = "A new Clawblox game"
+description = "A new Clawblox world"
 max_players = 8
 
 [scripts]
 main = "main.lua"
-skill = "API.md"
+api = "API.md"
 
 [renderer]
-name = "Default Game Renderer"
+name = "Default World Renderer"
 mode = "module"
 api_version = 1
 entry = "dist/renderer.bundle.js"
@@ -600,7 +665,7 @@ radius = 100
         .expect("Failed to create world.toml");
 
     // Create main.lua
-    let main_lua = r#"-- Game entry point
+    let main_lua = r#"-- World entry point
 local RunService = game:GetService("RunService")
 local Players = game:GetService("Players")
 local AgentInputService = game:GetService("AgentInputService")
@@ -612,7 +677,7 @@ local AgentInputService = game:GetService("AgentInputService")
 local MAP_SIZE = 100
 
 --------------------------------------------------------------------------------
--- GAME STATE
+-- WORLD STATE
 --------------------------------------------------------------------------------
 
 local playerData = {}
@@ -694,7 +759,7 @@ if AgentInputService then
 end
 
 --------------------------------------------------------------------------------
--- GAME LOOP
+-- WORLD LOOP
 --------------------------------------------------------------------------------
 
 Players.PlayerAdded:Connect(setupPlayer)
@@ -707,10 +772,10 @@ end
 createMap()
 
 RunService.Heartbeat:Connect(function(dt)
-    -- Game logic here
+    -- World logic here
 end)
 
-print("Game initialized")
+print("World initialized")
 "#;
     std::fs::write(project_dir.join("main.lua"), main_lua).expect("Failed to create main.lua");
 
@@ -718,7 +783,7 @@ print("Game initialized")
     let api_md = format!(
         r#"# {}
 
-A new Clawblox game.
+A new Clawblox world.
 
 ## Actions
 
@@ -754,10 +819,10 @@ Move to a position on the map.
         }
     }
 
-    // Create assets/ directory for game assets (GLB models, images, audio)
+    // Create assets/ directory for world assets (GLB models, images, audio)
     std::fs::create_dir_all(project_dir.join("assets")).expect("Failed to create assets directory");
 
-    // Create renderer/ package for game-specific frontend modules
+    // Create renderer/ package for world-specific frontend modules
     let renderer_dir = project_dir.join("renderer");
     std::fs::create_dir_all(renderer_dir.join("src")).expect("Failed to create renderer directory");
     let renderer_package_json = format!(
@@ -885,7 +950,7 @@ export function createRenderer(ctx) {
         std::fs::write(&gitignore_path, gitignore).expect("Failed to create .gitignore");
     }
 
-    println!("Created new game project: {}", project_name);
+    println!("Created new world: {}", project_name);
     println!();
     if project_dir != std::env::current_dir().unwrap_or_default() {
         println!("  cd {}", project_name);
@@ -896,7 +961,7 @@ export function createRenderer(ctx) {
 fn read_agent_api_doc(world_dir: &Path, config: &clawblox::config::WorldConfig) -> Option<String> {
     let mut candidates: Vec<&str> = Vec::new();
 
-    match config.scripts.skill.as_deref().map(str::trim) {
+    match config.scripts.api.as_deref().map(str::trim) {
         Some("") => {}
         Some(DEFAULT_AGENT_API_DOC) => {
             candidates.push(DEFAULT_AGENT_API_DOC);
@@ -929,8 +994,10 @@ struct Credentials {
 }
 
 fn credentials_path() -> PathBuf {
-    let home = home::home_dir().expect("Failed to get home directory");
-    home.join(".clawblox/credentials.toml")
+    clawblox_paths::credentials_path().unwrap_or_else(|err| {
+        eprintln!("Error: {err}");
+        std::process::exit(1);
+    })
 }
 
 fn load_credentials() -> Option<Credentials> {
@@ -978,7 +1045,7 @@ fn login(name: Option<String>, api_key: Option<String>, server: String) {
             .post(&url)
             .json(&serde_json::json!({
                 "name": name,
-                "description": format!("{}'s game developer account", name),
+                "description": format!("{}'s world developer account", name),
             }))
             .send()
             .await
@@ -1102,8 +1169,8 @@ fn deploy_game(path: PathBuf, api_key_override: Option<String>, server_override:
         let client = reqwest::Client::new();
 
         let game_id = if let Some(id) = existing_game_id {
-            // Update existing game
-            println!("Updating game {}...", id);
+            // Update existing world.
+            println!("Updating world {}...", id);
             let url = format!("{}/api/v1/games/{}", server, id);
             let resp = client
                 .put(&url)
@@ -1133,8 +1200,8 @@ fn deploy_game(path: PathBuf, api_key_override: Option<String>, server_override:
 
             id
         } else {
-            // Create new game
-            println!("Creating new game...");
+            // Create new world.
+            println!("Creating new world...");
             let url = format!("{}/api/v1/games", server);
             let resp = client
                 .post(&url)
@@ -1231,7 +1298,7 @@ fn deploy_game(path: PathBuf, api_key_override: Option<String>, server_override:
             }
         }
 
-        println!("Game deployed: {}/game/{}", server, game_id);
+        println!("World deployed: {}/game/{}", server, game_id);
     });
 }
 
@@ -1260,8 +1327,10 @@ fn flock_exclusive(_file: &std::fs::File) -> std::io::Result<()> {
 // =============================================================================
 
 fn pid_dir() -> PathBuf {
-    let home = home::home_dir().expect("Failed to get home directory");
-    home.join(".local/share/clawblox/run")
+    clawblox_paths::pid_dir().unwrap_or_else(|err| {
+        eprintln!("Error: {err}");
+        std::process::exit(1);
+    })
 }
 
 fn pid_path(port: u16) -> PathBuf {
@@ -1780,10 +1849,14 @@ fn run_game(
     agent_options: Option<AgentRunnerOptions>,
 ) {
     let base_path = normalize_base_path(base_path);
-    let path = std::fs::canonicalize(&path).unwrap_or_else(|_| {
-        eprintln!("Error: Path '{}' does not exist", path.display());
-        std::process::exit(1);
-    });
+    let source = path.to_string_lossy().to_string();
+    let reporter = CliWorldSourceReporter::new();
+    let resolved = world_source::resolve_world_source_with_reporter(&source, &reporter)
+        .unwrap_or_else(|err| {
+            eprintln!("Error: {err}");
+            std::process::exit(1);
+        });
+    let path = resolved.dir;
 
     let world_cfg = clawblox::config::WorldConfig::from_game_dir(&path).unwrap_or_else(|e| {
         eprintln!("{}", e);
@@ -2322,7 +2395,7 @@ fn run_game(
         println!();
         println!("Endpoints:");
         println!("  GET  /              - Embedded local frontend");
-        println!("  POST /join?name=X  - Join game, returns session token");
+        println!("  POST /join?name=X  - Join world, returns session token");
         println!("  POST /input        - Send input (requires X-Session header)");
         println!("  GET  /observe      - Player observation (requires X-Session header)");
         println!("  POST /reset        - Engine-level full reset (requires X-Session header)");
@@ -3461,10 +3534,14 @@ fn run_external_world_command(
 
 fn start_game(path: PathBuf, port: u16, base_path: &str, datastore: LocalDatastore) {
     let base_path = normalize_base_path(base_path);
-    let path = std::fs::canonicalize(&path).unwrap_or_else(|_| {
-        eprintln!("Error: Path '{}' does not exist", path.display());
-        std::process::exit(1);
-    });
+    let source = path.to_string_lossy().to_string();
+    let reporter = CliWorldSourceReporter::new();
+    let resolved = world_source::resolve_world_source_with_reporter(&source, &reporter)
+        .unwrap_or_else(|err| {
+            eprintln!("Error: {err}");
+            std::process::exit(1);
+        });
+    let path = resolved.dir;
 
     let world_cfg = clawblox::config::WorldConfig::from_game_dir(&path).unwrap_or_else(|e| {
         eprintln!("{}", e);
@@ -4234,14 +4311,14 @@ fn prune_stale_audio_streams(state: &LocalState, now: Instant) {
     }
 }
 
-/// Check if the game instance is halted due to a Lua error.
+/// Check if the world instance is halted due to a Lua error.
 /// Returns the error message with log path appended, or None if running normally.
 fn check_halted(state: &LocalState) -> Option<String> {
     let handle = state.game_handle.instances.get(&state.instance_id)?;
     let instance = handle.read();
     instance.halted_error.as_ref().map(|err| {
         format!(
-            "Game halted: {}. See logs for full stack trace: {}",
+            "World halted: {}. See logs for full stack trace: {}",
             err,
             state.log_file.display()
         )
@@ -4637,7 +4714,7 @@ fn local_instance_tick(state: &LocalState) -> Result<u64, (axum::http::StatusCod
     if let Some(err) = &instance.halted_error {
         return Err((
             axum::http::StatusCode::SERVICE_UNAVAILABLE,
-            format!("Game halted: {}", err),
+            format!("World halted: {}", err),
         ));
     }
     Ok(instance.tick)
@@ -5777,7 +5854,7 @@ async fn handle_spectate_ws(socket: WebSocket, state: LocalState, role: Spectate
                         }
                         Err(_) => {
                             let _ = sender
-                                .send(Message::Text(r#"{"error":"Game ended"}"#.to_string().into()))
+                                .send(Message::Text(r#"{"error":"World ended"}"#.to_string().into()))
                                 .await;
                             break;
                         }
@@ -5841,7 +5918,7 @@ async fn handle_spectate_ws(socket: WebSocket, state: LocalState, role: Spectate
                     }
                     Err(_) => {
                         let _ = sender
-                            .send(Message::Text(r#"{"error":"Game ended"}"#.to_string().into()))
+                            .send(Message::Text(r#"{"error":"World ended"}"#.to_string().into()))
                             .await;
                         break;
                     }

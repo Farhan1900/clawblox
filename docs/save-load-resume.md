@@ -1,0 +1,128 @@
+---
+title: Save, load, and resume
+summary: "What engine snapshots capture and how to make worlds resumable."
+read_when:
+  - Making a world checkpointable
+  - Debugging what does or doesn't survive resume
+---
+
+Clawblox engine worlds are designed for checkpointing and resume. This matters
+because coding agents may work on a world across long runs, process restarts,
+and generation checkpoints.
+
+## Snapshot contents
+
+Engine snapshots include:
+
+- schema version, `game_id`, instance id, tick, status, elapsed time, and
+  runtime settings
+- `Workspace` children, gravity, fluid forces, terrain, and physical objects
+- `ServerScriptService`, `ServerStorage`, and `ReplicatedStorage` children
+- players, player GUI children, characters, humanoids, root parts, attributes,
+  idle state, and character controller state
+- collision groups and collision group pair settings
+- pending agent inputs
+- queued remote events and recent replicated events
+- debris queue
+- touch pairs
+- pending bot names
+- pending kick requests
+- queued one-frame physics commands
+- Lua VM state
+
+Lua VM snapshots include coroutine schedules, pending coroutines, module cache,
+signal connections, animation tracks, `BindToClose` callbacks, selected global
+state, and userdata references.
+
+## Authoring guidance
+
+Even though Lua VM state is captured, world state is easiest for agents to
+understand and repair when it is visible in the data model.
+
+Prefer storing durable gameplay state in:
+
+- instances
+- attributes
+- value objects
+- `Workspace`
+- `ServerStorage`
+- `ReplicatedStorage`
+- service state that the engine snapshots
+
+Use Lua locals and tables for implementation state, but avoid making them the
+only place where important long-term progress exists.
+
+## Renderer state
+
+Renderer-local state is presentation state. It should be safe to rebuild from
+the latest spectator observation after refresh or resume.
+
+If the renderer needs persistent information, store it on engine objects and
+stream it through attributes or render metadata.
+
+## DataStore state
+
+`DataStoreService` data is database state, not snapshot payload. A snapshot can
+restore Lua-held `DataStore` and `OrderedDataStore` handles, but the key/value
+rows they read and write remain in the configured datastore backend.
+
+For local engine runs, `clawblox run` defaults to SQLite and stores data under
+the world directory in `.clawblox/local-<port>.db`. Use
+`--datastore postgres` to use `DATABASE_URL`, or `--datastore none` to disable
+`DataStoreService` for that run.
+
+Because the snapshot preserves `game_id`, resuming a snapshot points
+`DataStoreService` handles at the same logical world data. Moving a snapshot to
+another machine also requires moving or recreating the datastore backend if
+scripts expect existing keys to be present.
+
+## Operator snapshot endpoint
+
+`GET /snapshot` returns the restorable world snapshot. It is operator-facing,
+not an agent action. Agent checkpoints combine world snapshots with agent
+archives.
+
+See [Checkpoints](/checkpoints) for the agent-side workflow.
+
+## Restoring locally
+
+Use `clawblox run --resume path/to/snapshot.json` to start a local engine world
+from a previously captured runtime snapshot. Relative paths are resolved from
+the world directory.
+
+The local runtime snapshot wraps:
+
+- `schema_version`
+- `game_id`
+- the engine instance snapshot
+- joined local sessions
+- local chat state
+
+Restore either succeeds exactly or fails; it never falls back to a fresh world.
+The engine instance snapshot has its own schema version, and a snapshot whose
+version does not match the running binary is rejected with
+`unsupported snapshot schema version ...`. The embedded Lua VM
+snapshot also has a format version and is rejected if it does not match.
+
+## Persistence boundaries
+
+Snapshots are meant to restore Clawblox engine state, not arbitrary process
+state.
+
+Good snapshot state:
+
+- instance trees and attributes
+- terrain voxels
+- player and character state
+- service state captured by the engine
+- pending Lua coroutines and signal connections captured by the VM snapshot
+- Clawblox userdata that has explicit snapshot support, such as instances,
+  services, `RaycastParams`, `OverlapParams`, `RaycastResult`, animation tracks,
+  and DataStore handles
+
+Do not rely on snapshots for:
+
+- browser-only renderer state
+- external files or network side effects
+- unsupported host userdata
+- wall-clock assumptions; world time is restored from engine/runtime state

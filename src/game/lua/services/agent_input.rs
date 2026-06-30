@@ -65,13 +65,6 @@ impl AgentInputService {
     ) -> mlua::Result<()> {
         let signal = self.data.lock().unwrap().input_received.clone();
 
-        if input_type == "Jump" {
-            eprintln!(
-                "[InputReceived] Firing Jump, signal connections={}",
-                signal.connection_count()
-            );
-        }
-
         // Convert serde_json::Value to Lua table
         let lua_data = json_to_lua_value(lua, input_data)?;
 
@@ -85,12 +78,6 @@ impl AgentInputService {
             ]),
         )?;
 
-        if input_type == "Jump" {
-            eprintln!(
-                "[InputReceived] Jump fire_as_coroutines returned {} threads",
-                threads.len()
-            );
-        }
         track_yielded_threads(lua, threads)?;
 
         // Handle GUI click events specially

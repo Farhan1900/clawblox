@@ -2118,7 +2118,6 @@ fn clear_workspace(workspace: &crate::game::lua::services::WorkspaceService) {
         child.set_parent(None);
     }
     let mut data = workspace.data.lock().unwrap();
-    data.children.clear();
     data.current_camera = None;
 }
 

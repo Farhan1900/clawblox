@@ -59,7 +59,6 @@ pub(super) fn add_methods<M: UserDataMethods<Instance>>(methods: &mut M) {
             let mut data = this.data.lock().unwrap();
             if let Some(sound) = &mut data.sound_data {
                 if !sound.is_playing {
-                    eprintln!("[Sound] Stop called on already-stopped Sound");
                     return Ok(());
                 }
                 sound.is_playing = false;
@@ -84,7 +83,6 @@ pub(super) fn add_methods<M: UserDataMethods<Instance>>(methods: &mut M) {
             let mut data = this.data.lock().unwrap();
             if let Some(sound) = &mut data.sound_data {
                 if !sound.is_playing {
-                    eprintln!("[Sound] MarkEnded called on already-stopped Sound");
                     return Ok(());
                 }
                 sound.is_playing = false;

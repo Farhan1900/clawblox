@@ -361,7 +361,7 @@ fn warn_once_move_to(instance: &GameInstance, agent_id: Uuid, reason: &str) {
     if let Ok(mut counts) = instance.humanoid_warn_counts.lock() {
         let count = counts.entry(agent_id).or_insert(0);
         if *count < 3 {
-            eprintln!("[MoveTo WARN] {} for agent {}", reason, agent_id);
+            let _ = reason;
             *count += 1;
         }
     }

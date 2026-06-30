@@ -1,4 +1,10 @@
-# Replication and Rendering Performance
+---
+title: Replication and rendering performance
+summary: "Delta replication, shared-model rendering, and large-world profiling."
+read_when:
+  - A world is large or rendering is slow
+  - Profiling replication or frontend performance
+---
 
 Large worlds can contain thousands of independently simulated parts. The runtime
 keeps those parts interactive in the engine, but the live client view must avoid
