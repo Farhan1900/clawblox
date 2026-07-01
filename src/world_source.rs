@@ -292,9 +292,12 @@ fn extract_world_from_github_archive(
         if !entry.header().entry_type().is_file() {
             continue;
         }
-        let path = entry.path().map_err(|err| {
-            WorldSourceError::Io(format!("failed to read GitHub archive path: {err}"))
-        })?.into_owned();
+        let path = entry
+            .path()
+            .map_err(|err| {
+                WorldSourceError::Io(format!("failed to read GitHub archive path: {err}"))
+            })?
+            .into_owned();
         let mut components = path.components();
         let _repo_root = components.next();
         let relative_repo_path = components.as_path().to_path_buf();
