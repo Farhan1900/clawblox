@@ -195,10 +195,10 @@ enum Commands {
         #[arg(default_value = ".")]
         path: PathBuf,
         /// Port to run the server on
-        #[arg(short, long, default_value = "8080")]
+        #[arg(short, long, default_value = "8080", env = "WORLD_PORT")]
         port: u16,
         /// URL base path to mount the runtime under
-        #[arg(long, default_value = "/")]
+        #[arg(long, default_value = "/", env = "WORLD_BASE_PATH")]
         base_path: String,
         /// Run as daemon (internal use only)
         #[arg(long, hide = true)]
@@ -207,14 +207,17 @@ enum Commands {
         #[arg(long, value_enum, default_value_t = LocalDatastore::Sqlite)]
         datastore: LocalDatastore,
         /// Record session to a .clawrec file for later replay
-        #[arg(long)]
+        #[arg(long, env = "WORLD_RECORD")]
         record: bool,
         /// Directory to write recording output into (default: <world>/recordings)
         #[arg(long, env = "CLAWBLOX_RECORD_DIR")]
         record_dir: Option<PathBuf>,
         /// Resume a previously snapshotted local run from this file
-        #[arg(long)]
+        #[arg(long, env = "WORLD_RESUME_PATH")]
         resume: Option<PathBuf>,
+        /// Skip world.toml [run].command delegation and run the built-in engine directly
+        #[arg(long, hide = true, env = "CLAWBLOX_SKIP_RUN_COMMAND")]
+        skip_run_command: bool,
         /// Start an agent in tmux after the local world starts
         #[arg(long, value_enum)]
         agent: Option<CliAgentKind>,
@@ -349,6 +352,7 @@ fn main() {
             record,
             record_dir,
             resume,
+            skip_run_command,
             agent,
             agent_name,
             model,
@@ -364,8 +368,9 @@ fn main() {
             daemon,
             datastore,
             record,
-            record_dir,
+            record_dir.or_else(|| std::env::var_os("WORLD_RECORD_DIR").map(PathBuf::from)),
             resume,
+            skip_run_command,
             agent.map(|kind| AgentRunnerOptions {
                 kind: kind.as_str().to_string(),
                 name: agent_name,
@@ -386,7 +391,15 @@ fn main() {
             asset_base_path,
             world_dir,
             agent,
-        } => run_replay(file, speed, port, &base_path, asset_base_path.as_deref(), world_dir, agent),
+        } => run_replay(
+            file,
+            speed,
+            port,
+            &base_path,
+            asset_base_path.as_deref(),
+            world_dir,
+            agent,
+        ),
         Commands::ReplayAdapter => run_replay_adapter(),
         Commands::App {
             path,
@@ -1846,6 +1859,7 @@ fn run_game(
     record: bool,
     record_dir: Option<PathBuf>,
     resume: Option<PathBuf>,
+    skip_run_command: bool,
     agent_options: Option<AgentRunnerOptions>,
 ) {
     let base_path = normalize_base_path(base_path);
@@ -1862,10 +1876,6 @@ fn run_game(
         eprintln!("{}", e);
         std::process::exit(1);
     });
-
-    let skip_run_command = std::env::var("CLAWBLOX_SKIP_RUN_COMMAND")
-        .map(|v| matches!(v.as_str(), "1" | "true" | "TRUE" | "yes" | "YES"))
-        .unwrap_or(false);
 
     if !skip_run_command {
         if let Some(command) = world_cfg.run.command.as_ref() {
@@ -2911,7 +2921,9 @@ async fn handle_replay_adapter_request(
             let recording = recordings
                 .get(&params.handle)
                 .ok_or_else(|| format!("unknown replay adapter handle: {}", params.handle))?;
-            let tick = params.tick.clamp(recording.first_tick, recording.meta.total_ticks);
+            let tick = params
+                .tick
+                .clamp(recording.first_tick, recording.meta.total_ticks);
             let from_tick = params.from_tick.clamp(recording.first_tick, tick);
             recording
                 .reader
@@ -2925,7 +2937,8 @@ async fn handle_replay_adapter_request(
             let recording = recordings
                 .get(&params.handle)
                 .ok_or_else(|| format!("unknown replay adapter handle: {}", params.handle))?;
-            let include_chat = params.kinds.is_empty() || params.kinds.iter().any(|kind| kind == "chat");
+            let include_chat =
+                params.kinds.is_empty() || params.kinds.iter().any(|kind| kind == "chat");
             let mut events = Vec::new();
             if include_chat {
                 let start_tick = params.start_tick.unwrap_or(recording.first_tick);
@@ -3056,7 +3069,13 @@ fn collect_clawblox_replay_assets_under(
 }
 
 fn replay_adapter_content_type_for_path(path: &Path) -> Option<&'static str> {
-    match path.extension().and_then(|ext| ext.to_str()).unwrap_or("").to_ascii_lowercase().as_str() {
+    match path
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase()
+        .as_str()
+    {
         "glb" => Some("model/gltf-binary"),
         "gltf" => Some("model/gltf+json"),
         "png" => Some("image/png"),
