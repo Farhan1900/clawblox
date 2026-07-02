@@ -2120,6 +2120,21 @@ fn run_game(
                         let _ = manifest::record_recording(&manifest_path, &rec_path, "clawrec");
                         recording_manifest_target = Some((manifest_path, rec_path.clone()));
                     }
+                    // Replay manifest for the actuate run contract: declares
+                    // the recording and how to replay it (see actuate's Runs
+                    // docs). {recording}/{port} are substituted by the app.
+                    let replay_manifest = format!(
+                        "version = 1\nformat = \"clawrec\"\nrecording = \"{}\"\n\ncommand = [\"clawblox\", \"replay\", \"{{recording}}\", \"--port\", \"{{port}}\"]\n",
+                        rec_path
+                            .file_name()
+                            .map(|name| name.to_string_lossy().to_string())
+                            .unwrap_or_default(),
+                    );
+                    if let Err(e) =
+                        std::fs::write(rec_path.with_extension("replay.toml"), replay_manifest)
+                    {
+                        eprintln!("Warning: failed to write replay manifest: {}", e);
+                    }
                     Some(Arc::new(tokio::sync::Mutex::new(writer)))
                 }
                 Err(e) => {
