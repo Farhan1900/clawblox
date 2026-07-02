@@ -2136,7 +2136,7 @@ fn run_game(
         let (speech_progress_tx, _) = broadcast::channel::<SpeechProgressEvent>(128);
         let (playback_done_tx, _) = broadcast::channel::<PlaybackDoneEvent>(64);
         let (chat_tx, _) = broadcast::channel::<LocalChatMessage>(128);
-        let spectator_token = Uuid::new_v4().to_string();
+        let spectator_token = resolve_spectator_token();
         let state = LocalState {
             game_id,
             instance_id,
@@ -3431,7 +3431,7 @@ fn run_external_runtime(
 
     let rt = tokio::runtime::Runtime::new().unwrap();
     rt.block_on(async {
-        let spectator_token = Uuid::new_v4().to_string();
+        let spectator_token = resolve_spectator_token();
         let state = ExternalLocalState {
             base_path: base_path.clone(),
             spectator_token: spectator_token.clone(),
@@ -5043,6 +5043,17 @@ fn get_session(
 #[derive(Deserialize)]
 struct SpectatorAccessQuery {
     spectator_token: Option<String>,
+}
+
+/// Use the launcher-provided spectator token when present (actuate sets
+/// WORLD_SPECTATOR_TOKEN and appends it to viewport URLs); otherwise
+/// self-generate one and print it at startup.
+fn resolve_spectator_token() -> String {
+    std::env::var("WORLD_SPECTATOR_TOKEN")
+        .ok()
+        .map(|token| token.trim().to_string())
+        .filter(|token| !token.is_empty())
+        .unwrap_or_else(|| Uuid::new_v4().to_string())
 }
 
 /// Accept the save/load protocol's operator token as an alternative to
