@@ -393,6 +393,7 @@ name = "clawblox"
 version = "0.1.4"
 dependencies = [
  "axum",
+ "base64",
  "chrono",
  "clap",
  "crossbeam-channel",

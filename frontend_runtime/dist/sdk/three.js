@@ -325,6 +325,11 @@ export function createCameraModeController(THREE, camera, options = {}) {
     orbitPitch: 0,
     orbitSeeded: false,
     debugTickCount: 0,
+    poseOverride: null,
+    fovBeforeOverride: null,
+    attach: null,
+    attachLastForward: null,
+    fovBeforeAttach: null,
   }
 
   const overviewCfg = {
@@ -439,6 +444,8 @@ export function createCameraModeController(THREE, camera, options = {}) {
     return {
       mode: controlsState.mode,
       modeOverride: getModeOverride(),
+      poseOverride: !!controlsState.poseOverride,
+      attach: controlsState.attach ? { ...controlsState.attach } : null,
       camera: getCameraPose(),
       spectator: {
         pan: toPlainVec3(controlsState.pan),
@@ -455,6 +462,145 @@ export function createCameraModeController(THREE, camera, options = {}) {
   function setModeOverride(mode = null) {
     controlsState.modeOverride = normalizeMode(mode)
     return getState()
+  }
+
+  function toVec3(value) {
+    if (Array.isArray(value) && value.length >= 3) {
+      const [x, y, z] = value.map(Number)
+      if ([x, y, z].every(Number.isFinite)) return new THREE.Vector3(x, y, z)
+      return null
+    }
+    if (value && typeof value === 'object') {
+      const x = Number(value.x)
+      const y = Number(value.y)
+      const z = Number(value.z)
+      if ([x, y, z].every(Number.isFinite)) return new THREE.Vector3(x, y, z)
+    }
+    return null
+  }
+
+  function setPoseOverride(next = null) {
+    if (!next || typeof next !== 'object') {
+      return clearPoseOverride()
+    }
+    clearFirstPersonAttach()
+    const position = toVec3(next.position)
+    const forward = toVec3(next.forward)
+    if (!position || !forward || forward.lengthSq() <= 1e-8) return getState()
+    const fovDeg = Number(next.fovDeg)
+    if (controlsState.poseOverride == null && Number.isFinite(fovDeg)) {
+      controlsState.fovBeforeOverride = camera.fov
+    }
+    controlsState.poseOverride = {
+      position,
+      forward: forward.normalize(),
+      fovDeg: Number.isFinite(fovDeg) ? THREE.MathUtils.clamp(fovDeg, 1, 179) : null,
+    }
+    applyPoseOverride()
+    return getState()
+  }
+
+  function clearPoseOverride() {
+    if (controlsState.poseOverride && controlsState.fovBeforeOverride != null) {
+      camera.fov = controlsState.fovBeforeOverride
+      camera.updateProjectionMatrix()
+    }
+    controlsState.poseOverride = null
+    controlsState.fovBeforeOverride = null
+    return getState()
+  }
+
+  function applyPoseOverride() {
+    const pose = controlsState.poseOverride
+    if (!pose) return false
+    camera.position.copy(pose.position)
+    camera.lookAt(pose.position.clone().add(pose.forward))
+    if (pose.fovDeg != null && camera.fov !== pose.fovDeg) {
+      camera.fov = pose.fovDeg
+      camera.updateProjectionMatrix()
+    }
+    return true
+  }
+
+  /// First-person attach: pin the camera to a player's interpolated render
+  /// state (the same snapshot-buffer sample the renderer draws models from),
+  /// so the camera and the character can never disagree temporally.
+  function setFirstPersonAttach(next = null) {
+    if (!next || typeof next !== 'object' || next.playerId == null) {
+      return clearFirstPersonAttach()
+    }
+    clearPoseOverride()
+    const fovDeg = Number(next.fovDeg)
+    if (controlsState.attach == null && Number.isFinite(fovDeg)) {
+      controlsState.fovBeforeAttach = camera.fov
+    }
+    const eyeHeight = Number(next.eyeHeight)
+    controlsState.attach = {
+      playerId: String(next.playerId),
+      eyeHeight: Number.isFinite(eyeHeight) ? eyeHeight : 1.6,
+      fovDeg: Number.isFinite(fovDeg) ? THREE.MathUtils.clamp(fovDeg, 1, 179) : null,
+    }
+    controlsState.attachLastForward = null
+    applyAttach()
+    return getState()
+  }
+
+  function clearFirstPersonAttach() {
+    if (controlsState.attach && controlsState.fovBeforeAttach != null) {
+      camera.fov = controlsState.fovBeforeAttach
+      camera.updateProjectionMatrix()
+    }
+    controlsState.attach = null
+    controlsState.attachLastForward = null
+    controlsState.fovBeforeAttach = null
+    return getState()
+  }
+
+  function attachSample() {
+    const stateBuffer = options.stateBuffer
+    if (!stateBuffer) return null
+    if (typeof stateBuffer.interpolated === 'function') {
+      const obs = stateBuffer.interpolated()
+      if (obs) return obs
+    }
+    return typeof stateBuffer.latest === 'function' ? stateBuffer.latest() : null
+  }
+
+  function applyAttach() {
+    const att = controlsState.attach
+    if (!att) return false
+    const obs = attachSample()
+    // Attached but no usable state yet: hold the current camera pose.
+    if (!obs) return true
+    const player = (obs.players || []).find((p) => String(p?.id || '') === att.playerId)
+    if (!player) return true
+    const rootId = player.root_part_id
+    const ent = rootId != null
+      ? (obs.entities || []).find((e) => String(e?.id) === String(rootId))
+      : null
+    const basePos = ent && Array.isArray(ent.position) ? ent.position : player.position
+    if (!Array.isArray(basePos)) return true
+
+    const eye = new THREE.Vector3(basePos[0], basePos[1] + att.eyeHeight, basePos[2])
+    let forward = null
+    const rot = ent?.rotation
+    if (Array.isArray(rot) && rot.length === 3) {
+      // Roblox/CFrame look vector convention: local -Z points forward.
+      const fx = -(rot[0]?.[2] ?? 0)
+      const fz = -(rot[2]?.[2] ?? 0)
+      const mag = Math.hypot(fx, fz)
+      if (mag > 1e-4) forward = new THREE.Vector3(fx / mag, 0, fz / mag)
+    }
+    if (!forward) forward = controlsState.attachLastForward || new THREE.Vector3(0, 0, -1)
+    controlsState.attachLastForward = forward
+
+    camera.position.copy(eye)
+    camera.lookAt(eye.clone().add(forward))
+    if (att.fovDeg != null && camera.fov !== att.fovDeg) {
+      camera.fov = att.fovDeg
+      camera.updateProjectionMatrix()
+    }
+    return true
   }
 
   function setSpectatorPose(next = {}) {
@@ -760,6 +906,8 @@ export function createCameraModeController(THREE, camera, options = {}) {
   }
 
   function update({ mode = 'follow', targetPosition, targetForward, dt = 1 / 60, collisionAdjust = null }) {
+    if (applyAttach()) return
+    if (applyPoseOverride()) return
     if (!targetPosition) return
     const effectiveMode = controlsState.modeOverride || mode
     controlsState.mode = effectiveMode
@@ -886,6 +1034,10 @@ export function createCameraModeController(THREE, camera, options = {}) {
       },
       setSpectatorPose,
       resetSpectator,
+      setPoseOverride,
+      clearPoseOverride,
+      setFirstPersonAttach,
+      clearFirstPersonAttach,
     },
     dispose() {
       if (typeof controlsState.dispose === 'function') controlsState.dispose()

@@ -129,6 +129,7 @@ solver_iterations = 4
 ```toml
 [agent_api]
 allow_reset = false
+vision = false
 
 [sandbox]
 enable_weaker_nested_sandbox = false
@@ -138,6 +139,10 @@ add_deps_lib_to_library_path = true
 
 `agent_api.allow_reset` controls whether engine reset endpoints are available to
 agent sessions.
+
+`agent_api.vision` enables `GET /observe/image`: first-person PNG frames
+rendered through the world's own renderer in a headless-browser sidecar. See
+[Observations and input](/observations-and-input) for details. Off by default.
 
 Sandbox settings control dependency mounts and nested sandbox behavior.
 

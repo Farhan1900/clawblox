@@ -16,3 +16,6 @@ capabilities = ["three-sdk"]
 
 [observation]
 radius = 40000
+
+[agent_api]
+vision = true

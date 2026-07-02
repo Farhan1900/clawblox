@@ -34,6 +34,19 @@ Returns an observation payload.
 
 `GET /observe`
 
+### Get First-Person View (image)
+
+`GET /observe/image`
+
+Returns a PNG of your current first-person view of the world (what you would
+see through your character's eyes). Save it to a file to look at it:
+
+```bash
+curl -H "X-Session: $SESSION" "$BASE_URL/observe/image" -o view.png
+```
+
+Optional query parameters: `width`, `height` (default 1088x640).
+
 ### Send Chat Message
 
 `POST /chat`

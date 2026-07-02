@@ -121,11 +121,18 @@ pub struct AgentApiConfig {
     /// Whether engine reset endpoints are available to agent sessions.
     #[serde(default)]
     pub allow_reset: bool,
+    /// Whether agent sessions can request first-person rendered frames via
+    /// GET /observe/image (spawns a headless-browser capture sidecar).
+    #[serde(default)]
+    pub vision: bool,
 }
 
 impl Default for AgentApiConfig {
     fn default() -> Self {
-        Self { allow_reset: false }
+        Self {
+            allow_reset: false,
+            vision: false,
+        }
     }
 }
 

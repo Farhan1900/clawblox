@@ -7,6 +7,7 @@ pub mod agent;
 pub mod agent_recovery;
 pub mod agent_runner;
 pub mod agent_sandbox;
+pub mod capture;
 pub mod config;
 pub mod db;
 pub mod game;

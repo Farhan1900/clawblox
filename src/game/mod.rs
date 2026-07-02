@@ -207,6 +207,14 @@ pub fn get_observation(
     manager::observations::get_observation(state, game_id, agent_id)
 }
 
+pub fn get_player_camera_pose(
+    state: &GameManagerHandle,
+    game_id: Uuid,
+    agent_id: Uuid,
+) -> Result<crate::game::instance::PlayerCameraPose, String> {
+    manager::observations::get_player_camera_pose(state, game_id, agent_id)
+}
+
 pub fn get_spectator_observation(
     state: &GameManagerHandle,
     game_id: Uuid,

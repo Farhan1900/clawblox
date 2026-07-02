@@ -43,6 +43,7 @@ use tower_http::services::ServeDir;
 
 use clawblox::{
     agent_runner::{start_agent_tmux_for_local_world, AgentRunnerOptions},
+    capture::{CaptureAttach, CaptureManager},
     config::{PhysicsConfig, SpeechConfig, SpeechMode},
     db,
     game::{
@@ -2152,6 +2153,15 @@ fn run_game(
         let (playback_done_tx, _) = broadcast::channel::<PlaybackDoneEvent>(64);
         let (chat_tx, _) = broadcast::channel::<LocalChatMessage>(128);
         let spectator_token = resolve_spectator_token();
+        let capture = config.agent_api.vision.then(|| {
+            Arc::new(CaptureManager::new(format!(
+                "http://127.0.0.1:{}{}?viewport=1&spectator_token={}",
+                port,
+                join_base_path(&base_path, "/"),
+                spectator_token
+            )))
+        });
+        let vision_enabled = capture.is_some();
         let state = LocalState {
             game_id,
             instance_id,
@@ -2187,6 +2197,7 @@ fn run_game(
             chat_state: Arc::new(Mutex::new(LocalChatState::default())),
             recording_writer: recording_writer.clone(),
             recording_timeline: Arc::new(Mutex::new(RecordingTimeline::default())),
+            capture,
         };
 
         if let Some(snapshot) = resume_snapshot_for_server {
@@ -2392,6 +2403,7 @@ fn run_game(
             .route("/join", post(local_join))
             .route("/input", post(local_input))
             .route("/observe", get(local_observe))
+            .route("/observe/image", get(local_observe_image))
             .route("/reset", post(local_reset))
             .route("/snapshot", get(local_snapshot))
             .route("/api.md", get(local_skill))
@@ -2424,6 +2436,9 @@ fn run_game(
         println!("  POST /join?name=X  - Join world, returns session token");
         println!("  POST /input        - Send input (requires X-Session header)");
         println!("  GET  /observe      - Player observation (requires X-Session header)");
+        if vision_enabled {
+            println!("  GET  /observe/image - First-person view as PNG (requires X-Session header)");
+        }
         println!("  POST /reset        - Engine-level full reset (requires X-Session header)");
         println!("  POST /chat         - Send chat message (requires X-Session header)");
         println!("  GET  /chat/messages - List local chat messages");
@@ -3901,6 +3916,9 @@ struct LocalState {
     #[allow(dead_code)]
     recording_writer: Option<Arc<tokio::sync::Mutex<recording::RecordingWriter>>>,
     recording_timeline: Arc<Mutex<RecordingTimeline>>,
+    /// Headless-browser sidecar for agent vision (GET /observe/image).
+    /// None when the world does not enable vision ([agent_api] vision = true).
+    capture: Option<Arc<CaptureManager>>,
 }
 
 #[derive(Clone)]
@@ -5615,6 +5633,66 @@ async fn local_observe(
     maybe_publish_authoritative_speech_events(&state, &observation.recent_events);
 
     Ok(Json(observation))
+}
+
+#[derive(Deserialize)]
+struct ObserveImageQuery {
+    width: Option<u32>,
+    height: Option<u32>,
+}
+
+/// First-person PNG frame of what the requesting agent currently sees,
+/// rendered by the world's own renderer in the capture sidecar.
+async fn local_observe_image(
+    State(state): State<LocalState>,
+    headers: axum::http::HeaderMap,
+    Query(query): Query<ObserveImageQuery>,
+) -> Result<axum::response::Response, (axum::http::StatusCode, String)> {
+    if let Some(err) = check_halted(&state) {
+        return Err((axum::http::StatusCode::SERVICE_UNAVAILABLE, err));
+    }
+
+    let Some(capture) = state.capture.clone() else {
+        return Err((
+            axum::http::StatusCode::NOT_FOUND,
+            "Vision is not enabled for this world (set [agent_api] vision = true in world.toml)"
+                .to_string(),
+        ));
+    };
+
+    let (agent_id, _) = get_session(&state, &headers)?;
+
+    // Validates the agent is alive in the instance and provides the engine FOV.
+    let pose = game::get_player_camera_pose(&state.game_handle, state.game_id, agent_id)
+        .map_err(|e| (axum::http::StatusCode::BAD_REQUEST, e))?;
+
+    // Default 1088x640 (aspect ~1.7): the engine's 105° horizontal FOV maps to
+    // the 75° vertical FOV used for observation culling.
+    let width = query.width.unwrap_or(1088).clamp(64, 1920);
+    let height = query.height.unwrap_or(640).clamp(64, 1080);
+
+    // The engine FOV is horizontal; Three.js cameras take vertical FOV.
+    let aspect = width as f32 / height as f32;
+    let horizontal_rad = pose.fov_deg.clamp(1.0, 179.0).to_radians();
+    let vertical_fov_deg = (2.0 * ((horizontal_rad / 2.0).tan() / aspect).atan()).to_degrees();
+
+    // The capture page attaches its camera to the player's interpolated
+    // render state, so the eye always matches the drawn character.
+    let attach = CaptureAttach {
+        player_id: agent_id.to_string(),
+        eye_height: clawblox::game::instance::PLAYER_EYE_HEIGHT,
+        fov_deg: vertical_fov_deg,
+    };
+    let png = capture
+        .capture(&attach, width, height)
+        .await
+        .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e))?;
+
+    Ok((
+        [(axum::http::header::CONTENT_TYPE, "image/png")],
+        png,
+    )
+        .into_response())
 }
 
 fn resolve_local_asset_url(url: &mut String, base_path: &str) {

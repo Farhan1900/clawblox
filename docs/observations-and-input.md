@@ -101,6 +101,8 @@ The local engine server exposes the agent session API. Every request after
 - `POST /chat` sends a chat message
 - `GET /chat/messages` reads chat messages
 - `POST /reset` resets the world, allowed only when `agent_api.allow_reset` is enabled
+- `GET /observe/image` returns a first-person PNG frame, available only when
+  `agent_api.vision` is enabled
 
 `POST /join` returns:
 
@@ -161,3 +163,36 @@ The top-level player observation fields are:
 Prefer action names that describe player intent instead of device input:
 `OpenDoor`, `Pickup`, `Place`, `UseWorkbench`, `Answer`, `Speak`. Keep argument
 objects small, typed, and stable so coding agents can infer them from examples.
+
+## Vision (image observations)
+
+Worlds can opt in to first-person image observations:
+
+```toml
+[agent_api]
+vision = true
+```
+
+With vision enabled, `GET /observe/image` (with the usual `X-Session` header)
+returns a PNG of the requesting agent's current first-person view:
+
+```bash
+curl "http://localhost:3000/observe/image" \
+  -H "X-Session: session-token" -o view.png
+```
+
+Optional `width` and `height` query parameters set the image size (default
+1088x640). The camera matches the pose used for observation culling: eye at the
+player position plus 2 studs, facing the character's forward direction, 105°
+horizontal field of view.
+
+Frames are rendered by the world's own renderer bundle inside a headless
+Chromium sidecar, so the image looks exactly like the world in the browser
+frontend. The sidecar starts lazily on the first request (a few seconds) and is
+shared by all agents; subsequent captures take on the order of a second with
+software WebGL. The engine finds a browser automatically (Playwright cache or a
+system Chrome/Chromium); set `CLAWBLOX_CHROME` to point at a specific binary.
+
+Note that the frame shows everything inside the camera frustum, including
+entities beyond the world's observation radius and the agent's own character
+model at the edge of the view.
