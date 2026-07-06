@@ -102,7 +102,7 @@ The local engine server exposes the agent session API. Every request after
 - `GET /chat/messages` reads chat messages
 - `POST /reset` resets the world, allowed only when `agent_api.allow_reset` is enabled
 - `GET /observe/image` returns a first-person PNG frame, available only when
-  `agent_api.vision` is enabled
+  `agent_api.vision_observation` is enabled
 
 `POST /join` returns:
 
@@ -170,7 +170,7 @@ Worlds can opt in to first-person image observations:
 
 ```toml
 [agent_api]
-vision = true
+vision_observation = true
 ```
 
 With vision enabled, `GET /observe/image` (with the usual `X-Session` header)
@@ -196,3 +196,31 @@ system Chrome/Chromium); set `CLAWBLOX_CHROME` to point at a specific binary.
 Note that the frame shows everything inside the camera frustum, including
 entities beyond the world's observation radius and the agent's own character
 model at the edge of the view.
+
+## State observation and action feedback
+
+Worlds can disable structured JSON state while keeping vision observations:
+
+```toml
+[agent_api]
+vision_observation = true
+state_observation = false
+action_feedback = true
+```
+
+When `state_observation` is `false`, `GET /observe` returns `403`. `POST /input`
+still queues the action and waits for the normal post-action tick. If
+`action_feedback` is enabled, it returns only a narrow non-spatial action result:
+
+```json
+{
+  "tick": 1234,
+  "action": {
+    "type": "Pickup",
+    "status": "PickupFailed:NoBlock"
+  }
+}
+```
+
+If both `state_observation` and `action_feedback` are disabled, `POST /input`
+returns `204 No Content` after accepting the action.

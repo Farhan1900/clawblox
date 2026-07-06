@@ -2153,7 +2153,7 @@ fn run_game(
         let (playback_done_tx, _) = broadcast::channel::<PlaybackDoneEvent>(64);
         let (chat_tx, _) = broadcast::channel::<LocalChatMessage>(128);
         let spectator_token = resolve_spectator_token();
-        let capture = config.agent_api.vision.then(|| {
+        let capture = config.agent_api.vision_observation.then(|| {
             Arc::new(CaptureManager::new(format!(
                 "http://127.0.0.1:{}{}?viewport=1&spectator_token={}",
                 port,
@@ -2173,6 +2173,8 @@ fn run_game(
             player_object_physics: config.clawblox.player_object_physics,
             physics_config: config.clawblox.physics.clone(),
             allow_reset: config.agent_api.allow_reset,
+            state_observation: config.agent_api.state_observation,
+            action_feedback: config.agent_api.action_feedback,
             afk_timeout_secs: config.afk_timeout,
             error_mode: ErrorMode::Halt,
             started_at: Instant::now(),
@@ -2435,7 +2437,11 @@ fn run_game(
         println!("  GET  /              - Embedded local frontend");
         println!("  POST /join?name=X  - Join world, returns session token");
         println!("  POST /input        - Send input (requires X-Session header)");
-        println!("  GET  /observe      - Player observation (requires X-Session header)");
+        if config.agent_api.state_observation {
+            println!("  GET  /observe      - Player observation (requires X-Session header)");
+        } else {
+            println!("  GET  /observe      - Disabled by world config");
+        }
         if vision_enabled {
             println!("  GET  /observe/image - First-person view as PNG (requires X-Session header)");
         }
@@ -3888,6 +3894,8 @@ struct LocalState {
     player_object_physics: bool,
     physics_config: PhysicsConfig,
     allow_reset: bool,
+    state_observation: bool,
+    action_feedback: bool,
     afk_timeout_secs: u64,
     error_mode: ErrorMode,
     started_at: Instant,
@@ -5415,6 +5423,54 @@ struct InputRequest {
     data: serde_json::Value,
 }
 
+#[derive(Serialize)]
+struct ActionFeedbackResponse {
+    tick: u64,
+    action: ActionFeedback,
+}
+
+#[derive(Serialize)]
+struct ActionFeedback {
+    #[serde(rename = "type")]
+    input_type: String,
+    status: String,
+}
+
+fn action_status_from_observation(action_type: &str, observation: &PlayerObservation) -> String {
+    if action_type == "Reset" {
+        return "ResetSuccess".to_string();
+    }
+    observation
+        .player
+        .attributes
+        .get("LastActionResult")
+        .and_then(|value| value.as_str())
+        .unwrap_or("Unknown")
+        .to_string()
+}
+
+fn action_response(
+    state: &LocalState,
+    action_type: String,
+    observation: PlayerObservation,
+) -> axum::response::Response {
+    if state.state_observation {
+        return Json(observation).into_response();
+    }
+    if state.action_feedback {
+        let status = action_status_from_observation(&action_type, &observation);
+        return Json(ActionFeedbackResponse {
+            tick: observation.tick,
+            action: ActionFeedback {
+                input_type: action_type,
+                status,
+            },
+        })
+        .into_response();
+    }
+    axum::http::StatusCode::NO_CONTENT.into_response()
+}
+
 fn parse_json_number(value: &serde_json::Value) -> Option<f64> {
     let number = match value {
         serde_json::Value::Number(n) => n.as_f64()?,
@@ -5474,7 +5530,7 @@ async fn local_input(
     State(state): State<LocalState>,
     headers: axum::http::HeaderMap,
     Json(input): Json<InputRequest>,
-) -> Result<Json<PlayerObservation>, (axum::http::StatusCode, String)> {
+) -> Result<axum::response::Response, (axum::http::StatusCode, String)> {
     let (agent_id, agent_name) = get_session(&state, &headers)?;
     if input.input_type == "Reset" {
         if !state.allow_reset {
@@ -5483,7 +5539,8 @@ async fn local_input(
                 "Reset is disabled for this world".to_string(),
             ));
         }
-        return perform_engine_reset_for_session(&state, agent_id).map(Json);
+        return perform_engine_reset_for_session(&state, agent_id)
+            .map(|observation| action_response(&state, "Reset".to_string(), observation));
     }
 
     if let Some(err) = check_halted(&state) {
@@ -5512,19 +5569,25 @@ async fn local_input(
     // agent-input phase, so one tick boundary can still be stale.
     let observation =
         build_local_player_observation_after_tick(&state, agent_id, queued_before_tick).await?;
-    record_local_input(&state, agent_id, input_type, input_data, observation.tick);
+    record_local_input(
+        &state,
+        agent_id,
+        input_type.clone(),
+        input_data,
+        observation.tick,
+    );
 
     if let Some(progress) = speech_progress {
         maybe_publish_speech_progress(&state, &observation, &agent_name, progress);
     }
 
-    Ok(Json(observation))
+    Ok(action_response(&state, input_type, observation))
 }
 
 async fn local_reset(
     State(state): State<LocalState>,
     headers: axum::http::HeaderMap,
-) -> Result<Json<PlayerObservation>, (axum::http::StatusCode, String)> {
+) -> Result<axum::response::Response, (axum::http::StatusCode, String)> {
     let (agent_id, _) = get_session(&state, &headers)?;
     if !state.allow_reset {
         return Err((
@@ -5532,7 +5595,8 @@ async fn local_reset(
             "Reset is disabled for this world".to_string(),
         ));
     }
-    perform_engine_reset_for_session(&state, agent_id).map(Json)
+    perform_engine_reset_for_session(&state, agent_id)
+        .map(|observation| action_response(&state, "Reset".to_string(), observation))
 }
 
 #[derive(Clone, Debug)]
@@ -5621,6 +5685,13 @@ async fn local_observe(
     State(state): State<LocalState>,
     headers: axum::http::HeaderMap,
 ) -> Result<Json<PlayerObservation>, (axum::http::StatusCode, String)> {
+    if !state.state_observation {
+        return Err((
+            axum::http::StatusCode::FORBIDDEN,
+            "State observation is disabled for this world".to_string(),
+        ));
+    }
+
     if let Some(err) = check_halted(&state) {
         return Err((axum::http::StatusCode::SERVICE_UNAVAILABLE, err));
     }
@@ -5688,11 +5759,7 @@ async fn local_observe_image(
         .await
         .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e))?;
 
-    Ok((
-        [(axum::http::header::CONTENT_TYPE, "image/png")],
-        png,
-    )
-        .into_response())
+    Ok(([(axum::http::header::CONTENT_TYPE, "image/png")], png).into_response())
 }
 
 fn resolve_local_asset_url(url: &mut String, base_path: &str) {

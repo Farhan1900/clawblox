@@ -129,7 +129,9 @@ solver_iterations = 4
 ```toml
 [agent_api]
 allow_reset = false
-vision = false
+vision_observation = false
+state_observation = true
+action_feedback = true
 
 [sandbox]
 enable_weaker_nested_sandbox = false
@@ -140,9 +142,18 @@ add_deps_lib_to_library_path = true
 `agent_api.allow_reset` controls whether engine reset endpoints are available to
 agent sessions.
 
-`agent_api.vision` enables `GET /observe/image`: first-person PNG frames
-rendered through the world's own renderer in a headless-browser sidecar. See
+`agent_api.vision_observation` enables `GET /observe/image`: first-person PNG
+frames rendered through the world's own renderer in a headless-browser sidecar.
+The legacy key `vision` is still accepted as an alias. See
 [Observations and input](/observations-and-input) for details. Off by default.
+
+`agent_api.state_observation` controls structured JSON state from `GET /observe`
+and action responses. It defaults to `true`. If it is `false`,
+`vision_observation` must be enabled.
+
+`agent_api.action_feedback` controls whether `POST /input` returns a narrow
+non-spatial action result when state observation is disabled. It defaults to
+`true`.
 
 Sandbox settings control dependency mounts and nested sandbox behavior.
 
@@ -165,6 +176,8 @@ The loader validates `world.toml` before starting the world:
 - `run.command`, when set, must contain at least one token and a non-empty
   executable name
 - `sandbox.deps_root`, when set, must be a non-empty path
+- `agent_api.state_observation = false` requires
+  `agent_api.vision_observation = true`
 - `clawblox.physics.solver_iterations` must be between `1` and `32`
 
 For engine worlds, treat `[run]` and `runtime.mode = "external"` as the

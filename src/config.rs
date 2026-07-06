@@ -123,17 +123,35 @@ pub struct AgentApiConfig {
     pub allow_reset: bool,
     /// Whether agent sessions can request first-person rendered frames via
     /// GET /observe/image (spawns a headless-browser capture sidecar).
-    #[serde(default)]
-    pub vision: bool,
+    #[serde(default, alias = "vision")]
+    pub vision_observation: bool,
+    /// Whether agent sessions can request structured JSON state observations
+    /// via GET /observe and action responses.
+    #[serde(default = "default_state_observation")]
+    pub state_observation: bool,
+    /// Whether action responses may include a narrow, non-spatial feedback
+    /// payload when state observations are disabled.
+    #[serde(default = "default_action_feedback")]
+    pub action_feedback: bool,
 }
 
 impl Default for AgentApiConfig {
     fn default() -> Self {
         Self {
             allow_reset: false,
-            vision: false,
+            vision_observation: false,
+            state_observation: default_state_observation(),
+            action_feedback: default_action_feedback(),
         }
     }
+}
+
+fn default_state_observation() -> bool {
+    true
+}
+
+fn default_action_feedback() -> bool {
+    true
 }
 
 /// Built-in Clawblox runtime configuration.
@@ -374,6 +392,13 @@ impl WorldConfig {
                 "clawblox.physics.solver_iterations must be between 1 and 32".to_string(),
             ));
         }
+        if !self.agent_api.state_observation && !self.agent_api.vision_observation {
+            return Err(WorldConfigError::ValidationError(
+                path.to_path_buf(),
+                "agent_api.state_observation=false requires agent_api.vision_observation=true"
+                    .to_string(),
+            ));
+        }
         Ok(())
     }
 }
@@ -421,6 +446,10 @@ mod tests {
         assert_eq!(config.observation.radius, 100.0);
         assert_eq!(config.speech.mode, SpeechMode::Global);
         assert_eq!(config.speech.hearing_radius, 30.0);
+        assert!(!config.agent_api.allow_reset);
+        assert!(!config.agent_api.vision_observation);
+        assert!(config.agent_api.state_observation);
+        assert!(config.agent_api.action_feedback);
         assert!(config.clawblox.player_object_physics);
         assert_eq!(config.clawblox.physics.solver_iterations, 4);
         assert!(!config.sandbox.enable_weaker_nested_sandbox);
@@ -464,6 +493,12 @@ mod tests {
             [clawblox]
             player_object_physics = false
 
+            [agent_api]
+            allow_reset = true
+            vision_observation = true
+            state_observation = false
+            action_feedback = true
+
             [clawblox.physics]
             solver_iterations = 2
 
@@ -484,6 +519,10 @@ mod tests {
         assert_eq!(config.observation.radius, 64.0);
         assert_eq!(config.speech.mode, SpeechMode::Proximity);
         assert_eq!(config.speech.hearing_radius, 24.0);
+        assert!(config.agent_api.allow_reset);
+        assert!(config.agent_api.vision_observation);
+        assert!(!config.agent_api.state_observation);
+        assert!(config.agent_api.action_feedback);
         assert!(!config.clawblox.player_object_physics);
         assert_eq!(config.clawblox.physics.solver_iterations, 2);
         assert!(config.sandbox.enable_weaker_nested_sandbox);
@@ -528,5 +567,34 @@ mod tests {
             .validate(std::path::Path::new("world.toml"))
             .unwrap_err();
         assert!(format!("{}", err).contains("speech.hearing_radius"));
+    }
+
+    #[test]
+    fn test_legacy_vision_alias_parses() {
+        let toml = r#"
+            name = "Vision Alias"
+
+            [agent_api]
+            vision = true
+        "#;
+
+        let config: WorldConfig = toml::from_str(toml).unwrap();
+        assert!(config.agent_api.vision_observation);
+    }
+
+    #[test]
+    fn test_state_observation_disabled_requires_vision() {
+        let toml = r#"
+            name = "Bad Config"
+
+            [agent_api]
+            state_observation = false
+        "#;
+
+        let config: WorldConfig = toml::from_str(toml).unwrap();
+        let err = config
+            .validate(std::path::Path::new("world.toml"))
+            .unwrap_err();
+        assert!(format!("{}", err).contains("state_observation"));
     }
 }

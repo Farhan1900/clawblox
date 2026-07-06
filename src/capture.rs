@@ -126,12 +126,11 @@ mod tempdir {
 
 impl CaptureSession {
     async fn start(page_url: &str, width: u32, height: u32) -> Result<Self, String> {
-        let browser = find_browser()
-            .ok_or_else(|| {
-                "No Chromium/Chrome binary found for vision capture. Install Chromium or set \
+        let browser = find_browser().ok_or_else(|| {
+            "No Chromium/Chrome binary found for vision capture. Install Chromium or set \
                  CLAWBLOX_CHROME to a browser executable."
-                    .to_string()
-            })?;
+                .to_string()
+        })?;
 
         let user_data_dir = tempdir::TempDirGuard::create("clawblox-capture")
             .map_err(|e| format!("Failed to create capture profile dir: {e}"))?;
@@ -378,9 +377,7 @@ impl CaptureSession {
                     .map_err(|e| format!("CDP receive failed ({method}): {e}"))?;
                 let text = match frame {
                     Message::Text(text) => text,
-                    Message::Close(_) => {
-                        return Err(format!("CDP socket closed during {method}"))
-                    }
+                    Message::Close(_) => return Err(format!("CDP socket closed during {method}")),
                     _ => continue,
                 };
                 let value: Value = match serde_json::from_str(&text) {
@@ -418,9 +415,14 @@ pub fn find_browser() -> Option<PathBuf> {
             home.join("AppData/Local/ms-playwright"),
         ];
         let candidates = [
+            (
+                "chromium_headless_shell-",
+                "chrome-headless-shell-linux64/chrome-headless-shell",
+            ),
             ("chromium_headless_shell-", "chrome-linux/headless_shell"),
             ("chromium_headless_shell-", "chrome-mac/headless_shell"),
             ("chromium_headless_shell-", "chrome-win/headless_shell.exe"),
+            ("chromium-", "chrome-linux64/chrome"),
             ("chromium-", "chrome-linux/chrome"),
             (
                 "chromium-",
