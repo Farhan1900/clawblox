@@ -1,6 +1,6 @@
-name = "Mesa Island"
-description = "A mysterious island with alien flora and hidden secrets."
-max_players = 10
+name = "Mesa World"
+description = "A simple mesa world with a player and ground."
+max_players = 1
 afk_timeout = 0
 
 [scripts]
@@ -8,15 +8,14 @@ main = "main.lua"
 skill = "API.md"
 
 [renderer]
-name = "Mesa Island Renderer"
+name = "Mesa World Renderer"
 mode = "module"
 api_version = 1
 entry = "dist/renderer.bundle.js"
 capabilities = ["three-sdk"]
 
 [observation]
-radius = 80
+radius = 40000
 
-[speech]
-mode = "proximity"
-hearing_radius = 30
+[agent_api]
+vision = true

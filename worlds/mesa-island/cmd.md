@@ -1,65 +1,46 @@
-bash launch_multi.sh --force --goal "Goal: climb to the highest possible point in the world" --num-worlds 1 --base-port 8085
+bash worlds/mesa-world/launch_multi_generations_claude.sh --world-dir worlds/mesa-small-world-3 --generations 30 --generation-duration 1h --base-port 8085 --tmux-prefix mesa-small-world-3-0 --system-prompt worlds/mesa-world/system_prompt.md --model claude-opus-4-7 --sandbox --resume --experiment-id genexp-claude-20260423T040201Z
 
-bash launch_multi.sh --force --num-worlds 1 --base-port 8085
-
-uv run analyze_recording.py /storage/nacloos/projects/clawblox/worlds/mesa-world/results/20260311T032536Z/worlds/world-0/recordings/20260311_040913.clawrec --max-duration 3h
-
-uv run python analysis/plot_sustained_max_y_runs.py results/20260311T032536Z_run1 results/20260311T141543Z_run2 results/20260311T150153Z_run3 results/20260311T153109Z_run4
+scripts/krb-longrun run --name mesa-small-world-3-0 -- bash worlds/mesa-world/launch_multi_generations_claude.sh --world-dir worlds/mesa-small-world-3 --generations 30 --generation-duration 1h --base-port 8085 --tmux-prefix mesa-small-world-3-0 --system-prompt worlds/mesa-world/system_prompt.md --model claude-opus-4-7 --sandbox
 
 
-uv run python analysis/plot_sustained_max_y_runs.py results/20260311T200926Z_play1 results/20260311T215544Z_play2 results/20260311T231238Z_play3 results/20260312T150549Z_play4
+scripts/krb-longrun run --name mesa-small-world-3-1 -- bash worlds/mesa-world/launch_multi_generations_claude.sh --world-dir worlds/mesa-small-world-3 --generations 30 --generation-duration 1h --base-port 8185 --tmux-prefix mesa-small-world-3-1 --system-prompt worlds/mesa-world/system_prompt.md --model claude-opus-4-7 --sandbox
 
 
+tmux new-session -d -s clawblox-watchdog -n monitor 'exec scripts/clawblox-watchdog'
 
 
-bash launch_multi_generations.sh --generations 5 --generation-duration 2h --base-port 8085
-bash launch_multi_generations.sh --generations 10 --generation-duration 1h --base-port 8085
+2 agents:
+scripts/krb-longrun run --name mesa-small-world-3-0 -- bash worlds/mesa-world/launch_multi_generations_claude.sh --world-dir worlds/mesa-small-world-3 --generations 30 --generation-duration 1h --base-port 8085 --tmux-prefix mesa-small-world-3-0 --system-prompt worlds/mesa-world/system_prompt.md --model claude-opus-4-7 --sandbox --agents-per-world 2 --template /storage/nacloos/projects/clawblox/agent/template/agent_voice
 
 
-uv run python analysis/plot_sustained_max_y_runs.py /storage/nacloos/projects/clawblox/worlds/mesa-world/results/genexp-20260315T021154Z/runs/genexp-20260315T021154Z-g*
+---
 
-uv run mesa-capture-replay-clip http://127.0.0.1:10181/ /storage/nacloos/projects/clawblox/worlds/mesa-world/results/genexp-20260315T021154Z/runs/clips/g005_spire_breakthrough.mp4 144200 150320 --width 1280 --height 720 --output-fps 12 --speed 4 --probe-timeout-ms 120000 --camera-mode spectator --camera-pan-x -30 --camera-pan-y 20 --camera-pan-z -33 --camera-zoom 1.0 --camera-yaw -1.0 --camera-pitch 0.75 --tail-ms 1000 --debug-dir /storage/nacloos/projects/clawblox/worlds/mesa-world/results/genexp-20260315T021154Z/runs/clips/debug_g005_spire_fixed
+no soul:
+bash worlds/mesa-world/launch_multi_generations_claude.sh --world-dir worlds/mesa-small-world-3 --generations 30 --generation-duration 1h --base-port 8085 --tmux-prefix mesa-small-world-3-0 --system-prompt worlds/mesa-world/system_prompt.md --model claude-opus-4-7 --sandbox --skip-soul --env-file .clawblox-multi/mesa-a.env
 
-uv run python analysis/extract_interesting_clips.py /storage/nacloos/projects/clawblox/worlds/mesa-world/results/genexp-20260315T021154Z/runs
+bash worlds/mesa-world/launch_multi_generations_claude.sh --world-dir worlds/mesa-small-world-3 --generations 30 --generation-duration 1h --base-port 8185 --tmux-prefix mesa-small-world-3-1 --system-prompt worlds/mesa-world/system_prompt.md --model claude-opus-4-7 --sandbox --skip-soul --env-file .clawblox-multi/mesa-b.env
 
-uv run python analysis/extract_behavior_clips.py /storage/nacloos/projects/clawblox/worlds/mesa-world/results/genexp-20260315T021154Z/runs
-
-# evaluate on tasks
-bash ./launch_parallel_evals.sh --experiment-dir /storage/nacloos/projects/clawblox/worlds/mesa-world/results/genexp-20260315T021154Z --template-workspace /storage/nacloos/projects/clawblox/worlds/mesa-world/results/genexp-20260315T021154Z/runs/genexp-20260315T021154Z-g010/worlds/world-0/agents/mesa-rgenexp-20260315T021154Z-g010-w0-a0/workspace --duration 1h
-
-uv run python analysis/plot_eval_naive_vs_experienced.py /storage/nacloos/projects/clawblox/worlds/mesa-world/results/genexp-20260315T021154Z/evals
-
-# evaluate in new world
-bash /storage/nacloos/projects/clawblox/worlds/mesa-world/launch_parallel_evals.sh --experiment-dir /storage/nacloos/projects/clawblox/worlds/mesa-world/results/genexp-20260315T021154Z --template-workspace /storage/nacloos/projects/clawblox/worlds/mesa-world/results/genexp-20260315T021154Z/runs/genexp-20260315T021154Z-g010/worlds/world-0/agents/mesa-rgenexp-20260315T021154Z-g010-w0-a0/workspace --world-dir /storage/nacloos/projects/clawblox/worlds/mesa-world/eval-worlds/single-peak-2xblocks --duration 1h
+bash worlds/mesa-world/launch_multi_generations_claude.sh --world-dir worlds/mesa-small-world-3 --generations 30 --generation-duration 1h --base-port 8285 --tmux-prefix mesa-small-world-3-2 --system-prompt worlds/mesa-world/system_prompt.md --model claude-opus-4-7 --sandbox --skip-soul --env-file .clawblox-multi/mesa-b.env
 
 
-bash /storage/nacloos/projects/clawblox/worlds/mesa-world/launch_parallel_evals.sh --experiment-dir /storage/nacloos/projects/clawblox/worlds/mesa-world/results/genexp-20260315T021154Z --template-workspace /storage/nacloos/projects/clawblox/worlds/mesa-world/results/genexp-20260315T021154Z/runs/genexp-20260315T021154Z-g010/worlds/world-0/agents/mesa-rgenexp-20260315T021154Z-g010-w0-a0/workspace --world-dir /storage/nacloos/projects/clawblox/worlds/mesa-world/eval-worlds/single-peak-2xblocks --duration 1h --repeats 3 --objectives highest
+nothing:
+bash worlds/mesa-world/launch_multi_generations_claude.sh --world-dir worlds/mesa-small-world-3 --generations 30 --generation-duration 1h --base-port 8085 --tmux-prefix mesa-small-world-3-0 --system-prompt /home/naclo/Code/clawblox/agent/template/empty_system_prompt.md --model claude-opus-4-7 --sandbox --skip-soul --env-file .clawblox-multi/mesa-a.env --template /home/naclo/Code/clawblox/agent/template/empty
+
+bash worlds/mesa-world/launch_multi_generations_claude.sh --world-dir worlds/mesa-small-world-3 --generations 30 --generation-duration 1h --base-port 8185 --tmux-prefix mesa-small-world-3-1 --system-prompt /home/naclo/Code/clawblox/agent/template/empty_system_prompt.md --model claude-opus-4-7 --sandbox --skip-soul --env-file .clawblox-multi/mesa-b.env --template /home/naclo/Code/clawblox/agent/template/empty --auto-loop-message "continue"
 
 
-uv run python analysis/plot_eval_naive_vs_experienced.py /storage/nacloos/projects/clawblox/worlds/mesa-world/results/genexp-20260315T021154Z/evals
+builder:
+bash worlds/mesa-world/launch_multi_generations_claude.sh --world-dir worlds/mesa-small-world-3 --generations 30 --generation-duration 1h --base-port 8085 --tmux-prefix mesa-small-world-3-0 --system-prompt worlds/mesa-world/system_prompt.md --model claude-opus-4-7 --sandbox --env-file .clawblox-multi/mesa-a.env --template /home/naclo/Code/clawblox/agent/template/agent_builder
+
+bash worlds/mesa-world/launch_multi_generations_claude.sh --world-dir worlds/mesa-small-world-3 --generations 30 --generation-duration 1h --base-port 8185 --tmux-prefix mesa-small-world-3-1 --system-prompt worlds/mesa-world/system_prompt.md --model claude-opus-4-7 --sandbox --env-file .clawblox-multi/mesa-b.env --template /home/naclo/Code/clawblox/agent/template/agent_builder
 
 
-# multi agent
-bash launch_multi_generations.sh --generations 10 --generation-duration 1h --base-port 8085 --agents-per-world 2
+minimal:
+bash worlds/mesa-world/launch_multi_generations_claude.sh --world-dir worlds/mesa-small-world-3 --generations 30 --generation-duration 1h --base-port 8185 --tmux-prefix mesa-small-world-3-1 --system-prompt /home/naclo/Code/clawblox/agent/template/minimal_system_prompt.md --model claude-opus-4-7 --sandbox --skip-soul --env-file .clawblox-multi/mesa-b.env --template /home/naclo/Code/clawblox/agent/template/empty --auto-loop-message "continue"
+
+bash worlds/mesa-world/launch_multi_generations_codex.sh --world-dir worlds/mesa-small-world-3 --generations 30 --generation-duration 1h --base-port 8085 --tmux-prefix mesa-small-world-3-0 --system-prompt /home/naclo/Code/clawblox/agent/template/minimal_system_prompt.md --model gpt-5.5 --sandbox --skip-soul --env-file .clawblox-multi/mesa-a.env --template /home/naclo/Code/clawblox/agent/template/empty --auto-loop-message "continue"
 
 
+---
 
-# mesa island
-
-./launch_multi.sh --num-worlds 1 --agents-per-world 5 --world-dir worlds/mesa-island --template worlds/mesa-island/agent-template --record true
-
-./launch_multi.sh --num-worlds 1 --agents-per-world 5 --world-dir worlds/mesa-island --template worlds/mesa-island/agent-template --record true --reset-every 3600
-
-./launch_multi.sh --stop
-
-./launch_multi.sh --resume worlds/mesa-island/results/<run-id>
-
-
-./launch_multi.sh --tmux-session clawblox --base-port 8081 --num-worlds 1 --agents-per-world 1 --world-dir worlds/mesa-island --template worlds/mesa-island/agent-template --record true --sandbox --reset-every 3600
-
-
-./launch_multi.sh --tmux-session clawblox-alt --base-port 8081 --num-worlds 1 --agents-per-world 2 --world-dir worlds/mesa-island --template worlds/mesa-island/agent-template --record true --reset-every 3600 --model claude-sonnet-4-6
-
-
-
-./launch_multi.sh --tmux-session river-bridge --base-port 8099 --num-worlds 1   --agents-per-world 1 --world-dir worlds/mesa-island/eval-worlds/river-bridge --template worlds/mesa-island/agent-template --record true --sandbox --reset-every 3600
+bash worlds/mesa-world/launch_multi_generations_codex.sh --world-dir worlds/mesa-small-world-3 --generations 30 --generation-duration 1h --base-port 8085 --tmux-prefix mesa-small-world-3-0 --system-prompt worlds/mesa-world/system_prompt.md --model gpt-5.5 --sandbox
