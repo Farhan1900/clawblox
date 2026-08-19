@@ -1074,6 +1074,15 @@ fn write_kimi_config(ctx: &AgentContext) -> AgentResult<()> {
          capabilities = [\"thinking\", \"image_in\", \"video_in\", \"tool_use\"]\n\
          display_name = \"Kimi-k2.6\"\n\
          \n\
+         [models.\"kimi-code/k3\"]\n\
+         provider = \"managed:kimi-code\"\n\
+         model = \"k3\"\n\
+         max_context_size = 1048576\n\
+         capabilities = [\"thinking\", \"always_thinking\", \"image_in\", \"video_in\", \"tool_use\"]\n\
+         display_name = \"K3\"\n\
+         support_efforts = [\"max\"]\n\
+         default_effort = \"max\"\n\
+         \n\
          [[hooks]]\n\
          event = \"Stop\"\n\
          command = \"python3 {stop_hook}\"\n\
@@ -2569,6 +2578,22 @@ mod tests {
         assert_eq!(next.args.first(), Some(&"resume".to_string()));
         assert!(next.args.contains(&"codex-session".to_string()));
         assert_eq!(next.args.last(), Some(&"Resume prompt".to_string()));
+    }
+
+    #[test]
+    fn kimi_agent_configures_k3_model() {
+        let mut ctx = test_context();
+        ctx.settings.model = "kimi-code/k3".to_string();
+        ctx.prepare_paths().unwrap();
+
+        KimiAgent::default().configure_auto_continue(&ctx).unwrap();
+
+        let config = std::fs::read_to_string(kimi_home_dir(&ctx).join("config.toml")).unwrap();
+        assert!(config.contains("default_model = \"kimi-code/k3\""));
+        assert!(config.contains("[models.\"kimi-code/k3\"]"));
+        assert!(config.contains("model = \"k3\""));
+        assert!(config.contains("max_context_size = 1048576"));
+        assert!(config.contains("default_effort = \"max\""));
     }
 
     #[test]
