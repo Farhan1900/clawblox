@@ -1,5 +1,22 @@
 import * as THREE from 'https://esm.sh/three@0.160.0'
 
+const COLLIDER_DEBUG_FILL_MATERIAL = new THREE.MeshBasicMaterial({
+  color: 0x00d8ff,
+  transparent: true,
+  opacity: 0.08,
+  depthWrite: false,
+  depthTest: false,
+  toneMapped: false,
+})
+
+const COLLIDER_DEBUG_LINE_MATERIAL = new THREE.LineBasicMaterial({
+  color: 0x00d8ff,
+  transparent: true,
+  opacity: 0.95,
+  depthTest: false,
+  toneMapped: false,
+})
+
 function rotationToQuaternion(rot) {
   const m = new THREE.Matrix4()
   m.set(
@@ -42,12 +59,6 @@ function resolveEntityColor(entity) {
   return new THREE.Color(color[0], color[1], color[2])
 }
 
-function darkenHex(hex, factor = 0.75) {
-  const color = new THREE.Color(hex)
-  color.multiplyScalar(factor)
-  return color.getHex()
-}
-
 function createRockLikeMaterial(color) {
   return new THREE.MeshStandardMaterial({
     color,
@@ -57,35 +68,162 @@ function createRockLikeMaterial(color) {
   })
 }
 
+function readDebugFlag(name) {
+  if (typeof globalThis?.location?.search !== 'string') return false
+  const params = new URLSearchParams(globalThis.location.search)
+  const raw = params.get(name)
+  if (raw == null) return false
+  const normalized = raw.trim().toLowerCase()
+  return normalized === '' || normalized === '1' || normalized === 'true' || normalized === 'yes' || normalized === 'on'
+}
+
+function resolveColliderShape(entity) {
+  if (typeof entity?.shape === 'string' && entity.shape.length > 0) {
+    return entity.shape
+  }
+
+  const primitive = typeof entity?.render?.primitive === 'string'
+    ? entity.render.primitive.toLowerCase()
+    : ''
+  if (primitive === 'sphere' || primitive === 'ball') return 'Ball'
+  if (primitive === 'cylinder') return 'Cylinder'
+  if (primitive === 'wedge') return 'Wedge'
+
+  const role = typeof entity?.render?.role === 'string' ? entity.render.role : ''
+  if (role === 'Ring') return 'Ring'
+  return 'Block'
+}
+
+function createWedgeGeometry(size) {
+  const hx = size[0] * 0.5
+  const hy = size[1] * 0.5
+  const hz = size[2] * 0.5
+  const vertices = new Float32Array([
+    -hx, -hy, -hz,
+    hx, -hy, -hz,
+    -hx, -hy, hz,
+    hx, -hy, hz,
+    -hx, hy, -hz,
+    -hx, hy, hz,
+  ])
+  const indices = [
+    0, 1, 2,
+    1, 3, 2,
+    0, 4, 1,
+    2, 3, 5,
+    0, 2, 4,
+    2, 5, 4,
+    1, 4, 3,
+    3, 4, 5,
+  ]
+  const geometry = new THREE.BufferGeometry()
+  geometry.setAttribute('position', new THREE.BufferAttribute(vertices, 3))
+  geometry.setIndex(indices)
+  geometry.computeVertexNormals()
+  return geometry
+}
+
+function buildRingSegmentSpecs(size) {
+  const outerRadius = Math.min(size[0], size[2]) * 0.5
+  const tubeRadius = Math.max(Math.min(size[1] * 0.5, outerRadius * 0.45), 0.05)
+  const majorRadius = Math.max(outerRadius - tubeRadius, 0.05)
+  const segments = 12
+  const segmentLength = Math.max(2 * majorRadius * Math.tan(Math.PI / segments), tubeRadius * 1.5) * 1.08
+  const segmentSize = [segmentLength, tubeRadius * 2, tubeRadius * 2]
+  const out = []
+  for (let index = 0; index < segments; index += 1) {
+    const angle = (index / segments) * Math.PI * 2
+    out.push({
+      position: [Math.cos(angle) * majorRadius, 0, Math.sin(angle) * majorRadius],
+      rotationY: -(angle + Math.PI / 2),
+      size: segmentSize,
+    })
+  }
+  return out
+}
+
+function addColliderDebugPrimitive(parent, geometry, position = [0, 0, 0], quaternion = null) {
+  const fill = new THREE.Mesh(geometry, COLLIDER_DEBUG_FILL_MATERIAL)
+  fill.renderOrder = 999
+  fill.position.set(position[0], position[1], position[2])
+  if (quaternion) fill.quaternion.copy(quaternion)
+  parent.add(fill)
+
+  const edges = new THREE.LineSegments(new THREE.EdgesGeometry(geometry), COLLIDER_DEBUG_LINE_MATERIAL)
+  edges.renderOrder = 1000
+  edges.position.copy(fill.position)
+  if (quaternion) edges.quaternion.copy(quaternion)
+  parent.add(edges)
+}
+
+function buildColliderDebugKey(entity) {
+  const size = Array.isArray(entity?.size) && entity.size.length >= 3 ? entity.size : null
+  if (!size) return 'none'
+  const shape = resolveColliderShape(entity)
+  return `${shape}:${size.map((value) => Number(value).toFixed(3)).join(',')}`
+}
+
+function createColliderDebugVisual(entity) {
+  const size = Array.isArray(entity?.size) && entity.size.length >= 3 ? entity.size : null
+  if (!size) return null
+
+  const shape = resolveColliderShape(entity)
+  const group = new THREE.Group()
+  group.userData.colliderDebugKey = buildColliderDebugKey(entity)
+
+  if (shape === 'Ball') {
+    addColliderDebugPrimitive(group, new THREE.SphereGeometry(size[0] * 0.5, 18, 12))
+    return group
+  }
+
+  if (shape === 'Cylinder') {
+    addColliderDebugPrimitive(group, new THREE.CylinderGeometry(size[0] * 0.5, size[0] * 0.5, size[1], 18, 1, false))
+    return group
+  }
+
+  if (shape === 'Wedge') {
+    addColliderDebugPrimitive(group, createWedgeGeometry(size))
+    return group
+  }
+
+  if (shape === 'Ring') {
+    for (const segment of buildRingSegmentSpecs(size)) {
+      const rotation = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), segment.rotationY)
+      addColliderDebugPrimitive(
+        group,
+        new THREE.BoxGeometry(segment.size[0], segment.size[1], segment.size[2]),
+        segment.position,
+        rotation,
+      )
+    }
+    return group
+  }
+
+  addColliderDebugPrimitive(group, new THREE.BoxGeometry(size[0], size[1], size[2]))
+  return group
+}
+
+function applyColorToMeshes(obj, colorHex) {
+  obj.traverse((child) => {
+    if (child.isMesh && child.material && child.userData?.preserveColor !== true) {
+      child.material.color.setHex(colorHex)
+    }
+  })
+}
+
 function applyEntityAppearance(obj, entity) {
   if (!obj?.userData) return
 
-  if (obj.userData.dynamicRole === 'Skuttler') {
-    const bodyHex = resolveEntityColorHex(entity)
-    const legHex = darkenHex(bodyHex, 0.72)
-    if (obj.userData.skuttlerBodyMaterial) {
-      obj.userData.skuttlerBodyMaterial.color.setHex(bodyHex)
-    }
-    if (obj.userData.skuttlerLegMaterial) {
-      obj.userData.skuttlerLegMaterial.color.setHex(legHex)
-    }
+  if (obj.userData.dynamicRole === 'Rock' && obj.material) {
+    obj.material.color.copy(resolveEntityColor(entity))
   }
 
-  if (obj.userData.dynamicRole === 'GlowBulb') {
-    const size = entity.size || [0.7, 0.7, 0.7]
-    obj.scale.set(
-      (size[0] || 0.7) / 0.7,
-      (size[1] || 0.7) / 0.7,
-      (size[2] || 0.7) / 0.7,
-    )
-  }
-
-  if (obj.userData.dynamicRole === 'StoneBlock' && obj.material) {
+  if (obj.userData.dynamicRole === 'PickupObject' && obj.material) {
     obj.material.color.setHex(resolveEntityColorHex(entity))
   }
 
-  if (obj.userData.dynamicRole === 'Clump' && obj.material) {
-    obj.material.color.setHex(resolveEntityColorHex(entity))
+  if ((obj.userData.dynamicRole === 'Ball' || obj.userData.dynamicRole === 'Ring') && obj.userData.isStyledCarryable) {
+    applyColorToMeshes(obj, resolveEntityColorHex(entity))
   }
 }
 
@@ -152,6 +290,7 @@ function createEntityVisual(entity) {
   const role = (entity.render && entity.render.role) || entity.name || ''
   const size = entity.size || [1, 1, 1]
   const modelUrl = resolveEntityModelUrl(entity)
+  const color = resolveEntityColorHex(entity)
 
   if (modelUrl) {
     const root = new THREE.Group()
@@ -170,17 +309,20 @@ function createEntityVisual(entity) {
   }
 
   if (role === 'Ocean') {
+    const geometry = new THREE.PlaneGeometry(size[0], size[2])
+    // Bake rotation into geometry; per-frame updateScene resets object quaternion
+    // when entity rotation is identity, which would otherwise flip the plane vertical.
+    geometry.rotateX(-Math.PI / 2)
     const mesh = new THREE.Mesh(
-      new THREE.PlaneGeometry(size[0], size[2]),
+      geometry,
       new THREE.MeshStandardMaterial({
-        color: 0x3da8d4,
+        color: 0x4ab0d6,
         transparent: true,
-        opacity: 0.65,
-        roughness: 0.1,
-        metalness: 0.4,
+        opacity: 0.72,
+        roughness: 0.08,
+        metalness: 0.18,
       }),
     )
-    mesh.rotation.x = -Math.PI / 2
     mesh.receiveShadow = true
     return mesh
   }
@@ -223,221 +365,85 @@ function createEntityVisual(entity) {
     return group
   }
 
-  if (role === 'Rock' || role === 'StoneBlock') {
-    const color = resolveEntityColor(entity)
-    const geo = role === 'Rock'
-      ? new THREE.DodecahedronGeometry(Math.max(size[0], size[1], size[2]) / 2, 0)
-      : new THREE.BoxGeometry(size[0], size[1], size[2])
-    const mesh = new THREE.Mesh(geo, createRockLikeMaterial(color))
-    mesh.castShadow = true
-    mesh.receiveShadow = true
-    mesh.userData.dynamicRole = role
-    return mesh
-  }
-
-  if (role === 'Orbweaver') {
-      const group = new THREE.Group()
-      // Outer translucent shell
-      const shell = new THREE.Mesh(
-        new THREE.SphereGeometry(0.6, 24, 24),
-        new THREE.MeshStandardMaterial({
-          color: 0x7840c8,
-          emissive: 0x5020a0,
-          emissiveIntensity: 0.4,
-          transparent: true,
-          opacity: 0.5,
-          roughness: 0.1,
-          metalness: 0.3,
-        }),
-      )
-      group.add(shell)
-      // Inner bright core
-      const core = new THREE.Mesh(
-        new THREE.SphereGeometry(0.25, 16, 16),
-        new THREE.MeshStandardMaterial({
-          color: 0xcc88ff,
-          emissive: 0xaa66ff,
-          emissiveIntensity: 1.2,
-          roughness: 0.0,
-          metalness: 0.1,
-        }),
-      )
-      group.add(core)
-      // Orbiting ring
-      const ring = new THREE.Mesh(
-        new THREE.TorusGeometry(0.45, 0.03, 8, 32),
-        new THREE.MeshStandardMaterial({
-          color: 0xbb77ff,
-          emissive: 0x9955dd,
-          emissiveIntensity: 0.6,
-        }),
-      )
-      ring.rotation.x = Math.PI / 3
-      ring.userData.isOrbitRing = true
-      group.add(ring)
-      group.userData.isFauna = true
-      group.userData.faunaSpecies = 'Orbweaver'
-      return group
-  }
-  if (role === 'Skuttler') {
-      const group = new THREE.Group()
-      const bodyColor = resolveEntityColorHex(entity)
-      // Body
-      const bodyMaterial = new THREE.MeshStandardMaterial({ color: bodyColor, roughness: 0.7, metalness: 0.05 })
-      const body = new THREE.Mesh(
-        new THREE.BoxGeometry(0.6, 0.35, 0.8),
-        bodyMaterial,
-      )
-      body.castShadow = true
-      body.receiveShadow = true
-      group.add(body)
-      // Four stubby legs
-      const legMat = new THREE.MeshStandardMaterial({ color: darkenHex(bodyColor, 0.72), roughness: 0.8 })
-      const legGeo = new THREE.BoxGeometry(0.08, 0.18, 0.08)
-      const legOffsets = [
-        [-0.2, -0.2, 0.25],
-        [0.2, -0.2, 0.25],
-        [-0.2, -0.2, -0.25],
-        [0.2, -0.2, -0.25],
-      ]
-      for (const [lx, ly, lz] of legOffsets) {
-        const leg = new THREE.Mesh(legGeo, legMat)
-        leg.position.set(lx, ly, lz)
-        leg.castShadow = true
-        leg.userData.isSkuttlerLeg = true
-        leg.userData.baseY = ly
-        leg.userData.phase = (lx < 0 ? 1 : -1) * (lz > 0 ? 1 : -1)
-        group.add(leg)
-      }
-      // Two "eye" dots on front
-      const eyeMat = new THREE.MeshStandardMaterial({
-        color: 0xffee44,
-        emissive: 0xffee44,
-        emissiveIntensity: 0.8,
-      })
-      const eyeGeo = new THREE.SphereGeometry(0.04, 8, 8)
-      for (const ex of [-0.12, 0.12]) {
-        const eye = new THREE.Mesh(eyeGeo, eyeMat)
-        eye.position.set(ex, 0.08, 0.4)
-        group.add(eye)
-      }
-      group.userData.isFauna = true
-      group.userData.faunaSpecies = 'Skuttler'
-      group.userData.dynamicRole = 'Skuttler'
-      group.userData.skuttlerBodyMaterial = bodyMaterial
-      group.userData.skuttlerLegMaterial = legMat
-      return group
-  }
-  if (role === 'Drifter') {
-      const group = new THREE.Group()
-      // Flat disc body
-      const disc = new THREE.Mesh(
-        new THREE.CylinderGeometry(0.75, 0.75, 0.15, 24),
-        new THREE.MeshStandardMaterial({
-          color: 0xa0c8a0,
-          roughness: 0.6,
-          metalness: 0.0,
-          transparent: true,
-          opacity: 0.85,
-        }),
-      )
-      disc.castShadow = true
-      disc.receiveShadow = true
-      group.add(disc)
-      // Surface vein pattern: a slightly smaller darker disc on top
-      const veins = new THREE.Mesh(
-        new THREE.CylinderGeometry(0.6, 0.6, 0.02, 24),
-        new THREE.MeshStandardMaterial({
-          color: 0x70a070,
-          roughness: 0.4,
-          transparent: true,
-          opacity: 0.6,
-        }),
-      )
-      veins.position.y = 0.08
-      group.add(veins)
-      // Faint glow underneath
-      const underGlow = new THREE.Mesh(
-        new THREE.CylinderGeometry(0.5, 0.5, 0.05, 16),
-        new THREE.MeshStandardMaterial({
-          color: 0x88ddaa,
-          emissive: 0x88ddaa,
-          emissiveIntensity: 0.3,
-          transparent: true,
-          opacity: 0.4,
-        }),
-      )
-      underGlow.position.y = -0.1
-      group.add(underGlow)
-      group.userData.isFauna = true
-      group.userData.faunaSpecies = 'Drifter'
-      return group
-  }
-  if (role === 'GlowBulb') {
-      const group = new THREE.Group()
-      const radius = 0.35
-      // Outer glow sphere
-      const glowMat = new THREE.MeshStandardMaterial({
-        color: 0x00dcc8,
-        emissive: 0x00dcc8,
-        emissiveIntensity: 0.6,
-        transparent: true,
-        opacity: 0.5,
-        roughness: 0.2,
-        metalness: 0.0,
-      })
-      const glow = new THREE.Mesh(new THREE.SphereGeometry(radius * 1.6, 16, 16), glowMat)
-      glow.userData.isGlow = true
-      group.add(glow)
-      // Inner solid core
-      const core = new THREE.Mesh(
-        new THREE.SphereGeometry(radius, 16, 16),
-        new THREE.MeshStandardMaterial({
-          color: 0x00ffee,
-          emissive: 0x00ffee,
-          emissiveIntensity: 1.0,
-          roughness: 0.1,
-          metalness: 0.0,
-        }),
-      )
-      core.castShadow = true
-      group.add(core)
-      // Thin stalk underneath
-      const stalk = new THREE.Mesh(
-        new THREE.CylinderGeometry(0.03, 0.05, radius * 2, 6),
-        new THREE.MeshStandardMaterial({ color: 0x338877, roughness: 0.8 }),
-      )
-      stalk.position.y = -radius * 1.2
-      group.add(stalk)
-      group.userData.isGlowBulb = true
-      group.userData.dynamicRole = 'GlowBulb'
-      applyEntityAppearance(group, entity)
-      return group
-  }
-
-
-  if (role === 'Clump') {
-    const color = resolveEntityColorHex(entity)
+  if (role === 'Rock') {
     const mesh = new THREE.Mesh(
-      new THREE.SphereGeometry(Math.max(size[0], size[1], size[2]) * 0.5, 14, 14),
-      new THREE.MeshStandardMaterial({
-        color,
-        roughness: 0.85,
-        metalness: 0.0,
-        transparent: true,
-        opacity: 0.92,
-      }),
+      new THREE.DodecahedronGeometry(Math.max(size[0], size[1], size[2]) / 2, 0),
+      createRockLikeMaterial(resolveEntityColor(entity)),
     )
     mesh.castShadow = true
     mesh.receiveShadow = true
-    mesh.userData.dynamicRole = 'Clump'
+    mesh.userData.dynamicRole = 'Rock'
     return mesh
   }
 
-  const entityId = typeof entity.id === 'number' || typeof entity.id === 'string'
-    ? String(entity.id)
-    : 'unknown'
-  throw new Error(`Unhandled RenderRole "${role}" for entity ${entityId}`)
+  if (role === 'Plank') {
+    const group = new THREE.Group()
+
+    const body = new THREE.Mesh(
+      new THREE.BoxGeometry(size[0], size[1], size[2]),
+      new THREE.MeshStandardMaterial({ color: 0x9c6e48, roughness: 0.92, metalness: 0.0 }),
+    )
+    body.castShadow = true
+    body.receiveShadow = true
+    group.add(body)
+
+    const slatOffsets = [-0.28, 0, 0.28]
+    for (const zFrac of slatOffsets) {
+      const groove = new THREE.Mesh(
+        new THREE.BoxGeometry(size[0] * 0.96, size[1] * 0.12, size[2] * 0.08),
+        new THREE.MeshStandardMaterial({ color: 0x6f4a2c, roughness: 1.0, metalness: 0.0 }),
+      )
+      groove.position.set(0, size[1] * 0.18, size[2] * zFrac)
+      groove.castShadow = true
+      groove.receiveShadow = true
+      groove.userData.preserveColor = true
+      group.add(groove)
+    }
+
+    return group
+  }
+
+  if (role === 'Ring') {
+    const group = new THREE.Group()
+    const outerRadius = Math.min(size[0], size[2]) * 0.5
+    const tubeRadius = Math.max(Math.min(size[1] * 0.5, outerRadius * 0.45), 0.05)
+    const ringRadius = Math.max(outerRadius - tubeRadius, 0.05)
+
+    const ring = new THREE.Mesh(
+      new THREE.TorusGeometry(ringRadius, tubeRadius, 18, 40),
+      new THREE.MeshStandardMaterial({ color, roughness: 0.82, metalness: 0.12 }),
+    )
+    ring.rotation.x = Math.PI / 2
+    ring.castShadow = true
+    ring.receiveShadow = true
+    group.add(ring)
+    group.userData.dynamicRole = 'Ring'
+    group.userData.isStyledCarryable = true
+    return group
+  }
+
+  if (role === 'PickupObject') {
+    const mesh = new THREE.Mesh(
+      new THREE.BoxGeometry(size[0], size[1], size[2]),
+      createRockLikeMaterial(resolveEntityColor(entity)),
+    )
+    mesh.castShadow = true
+    mesh.receiveShadow = true
+    mesh.userData.dynamicRole = 'PickupObject'
+    return mesh
+  }
+
+  // Default: box with entity color
+  let geometry
+  const primitive = entity.render && entity.render.primitive
+  if (primitive === 'cylinder') geometry = new THREE.CylinderGeometry(size[0] / 2, size[0] / 2, size[1], 16)
+  else if (primitive === 'sphere') geometry = new THREE.SphereGeometry(size[0] / 2, 16, 16)
+  else geometry = new THREE.BoxGeometry(size[0], size[1], size[2])
+
+  const mesh = new THREE.Mesh(geometry, new THREE.MeshStandardMaterial({ color, roughness: 0.5, metalness: 0.2 }))
+  mesh.castShadow = true
+  mesh.receiveShadow = true
+  return mesh
 }
 
 export function createRenderer(ctx) {
@@ -445,6 +451,7 @@ export function createRenderer(ctx) {
   const captureConfig = globalThis.__mesaCaptureConfig && typeof globalThis.__mesaCaptureConfig === 'object'
     ? globalThis.__mesaCaptureConfig
     : {}
+  const debugCollidersEnabled = Boolean(captureConfig.debugColliders) || readDebugFlag('debugColliders') || readDebugFlag('debugCollider')
 
   const camera = new THREE.PerspectiveCamera(60, 1, 0.1, 3000)
 
@@ -462,15 +469,14 @@ export function createRenderer(ctx) {
   const dirLight = new THREE.DirectionalLight(0xffffff, 1.2)
   dirLight.position.set(30, 50, 20)
   dirLight.castShadow = true
-  dirLight.shadow.mapSize.set(4096, 4096)
-  dirLight.shadow.camera.left = -180
-  dirLight.shadow.camera.right = 180
-  dirLight.shadow.camera.top = 180
-  dirLight.shadow.camera.bottom = -180
+  dirLight.shadow.mapSize.set(2048, 2048)
+  dirLight.shadow.camera.left = -80
+  dirLight.shadow.camera.right = 80
+  dirLight.shadow.camera.top = 80
+  dirLight.shadow.camera.bottom = -80
   dirLight.shadow.camera.near = 1
-  dirLight.shadow.camera.far = 400
+  dirLight.shadow.camera.far = 200
   dirLight.shadow.bias = -0.00005
-  dirLight.shadow.normalBias = 0.01
   scene.add(dirLight)
   scene.add(dirLight.target)
 
@@ -507,6 +513,7 @@ export function createRenderer(ctx) {
     ctx.runtime.internal.expose('camera', cameraModes.api)
   }
   const entityObjects = new Map()
+  const colliderDebugObjects = new Map()
   const modelController = ctx.runtime.three.createModelEntityController(THREE, {
     onError(err, meta) {
       ctx.log('warn', 'Model entity load failed', { err: String(err), ...meta })
@@ -516,7 +523,30 @@ export function createRenderer(ctx) {
   const tmpForward = new THREE.Vector3(0, 0, 1)
   const anchorPos = new THREE.Vector3(0, 4, 0)
   const clock = new THREE.Clock()
-  let elapsed = 0
+
+  function syncColliderDebug(entity, visible) {
+    if (!debugCollidersEnabled) return
+
+    const debugKey = buildColliderDebugKey(entity)
+    let debugObj = colliderDebugObjects.get(entity.id)
+    if (!debugObj || debugObj.userData.colliderDebugKey !== debugKey) {
+      if (debugObj) {
+        scene.remove(debugObj)
+        colliderDebugObjects.delete(entity.id)
+      }
+      debugObj = createColliderDebugVisual(entity)
+      if (debugObj) {
+        colliderDebugObjects.set(entity.id, debugObj)
+        scene.add(debugObj)
+      }
+    }
+
+    if (!debugObj) return
+    debugObj.position.set(entity.position[0], entity.position[1], entity.position[2])
+    if (entity.rotation) debugObj.quaternion.copy(rotationToQuaternion(entity.rotation))
+    else debugObj.quaternion.identity()
+    debugObj.visible = visible
+  }
 
   function computeAnchorPosition(obs) {
     let count = 0
@@ -560,8 +590,10 @@ export function createRenderer(ctx) {
 
       obj.position.set(entity.position[0], entity.position[1], entity.position[2])
       if (entity.rotation) obj.quaternion.copy(rotationToQuaternion(entity.rotation))
+      else obj.quaternion.identity()
       obj.visible = !(entity.render && entity.render.visible === false)
       applyEntityAppearance(obj, entity)
+      syncColliderDebug(entity, obj.visible)
 
       const prev = obj.userData.prevPos
       let speed = 0
@@ -598,6 +630,12 @@ export function createRenderer(ctx) {
         entityObjects.delete(id)
       }
     }
+    for (const [id, obj] of colliderDebugObjects.entries()) {
+      if (!activeIds.has(id)) {
+        scene.remove(obj)
+        colliderDebugObjects.delete(id)
+      }
+    }
 
     const players = obs.players || []
     const selectedId = obs && obs.selected_player_id ? String(obs.selected_player_id) : null
@@ -618,53 +656,8 @@ export function createRenderer(ctx) {
       dt,
     })
 
-    dirLight.position.set(cameraTarget.x + 60, 100, cameraTarget.z + 40)
+    dirLight.position.set(cameraTarget.x + 30, 50, cameraTarget.z + 20)
     dirLight.target.position.copy(cameraTarget)
-
-    // Animate flora and fauna
-    elapsed += dt
-    for (const obj of entityObjects.values()) {
-      if (!obj.userData) continue
-
-      // GlowBulb pulsing
-      if (obj.userData.isGlowBulb) {
-        obj.traverse((child) => {
-          if (child.userData && child.userData.isGlow && child.material) {
-            const pulse = 0.3 + 0.3 * Math.sin(elapsed * 2.5)
-            child.material.opacity = pulse
-            child.material.emissiveIntensity = 0.3 + 0.5 * Math.sin(elapsed * 2.5)
-          }
-        })
-        obj.position.y += Math.sin(elapsed * 1.5) * 0.003
-      }
-
-      // Fauna animations
-      if (obj.userData.isFauna) {
-        const sp = obj.userData.faunaSpecies
-        if (sp === 'Orbweaver') {
-          // Spin the orbit ring
-          obj.traverse((child) => {
-            if (child.userData && child.userData.isOrbitRing) {
-              child.rotation.z += dt * 1.8
-            }
-          })
-          // Gentle float bob
-          obj.position.y += Math.sin(elapsed * 1.2) * 0.004
-        } else if (sp === 'Skuttler') {
-          const gait = Math.min(speed / 2.5, 1)
-          const wiggle = Math.sin(elapsed * (8 + gait * 8)) * (0.02 + gait * 0.06)
-          obj.traverse((child) => {
-            if (child.userData && child.userData.isSkuttlerLeg) {
-              child.position.y = child.userData.baseY + wiggle * child.userData.phase
-            }
-          })
-        } else if (sp === 'Drifter') {
-          // Slow undulating wobble
-          obj.rotation.z = Math.sin(elapsed * 0.8) * 0.06
-          obj.rotation.x = Math.cos(elapsed * 0.6) * 0.04
-        }
-      }
-    }
   }
 
   return {
@@ -704,7 +697,9 @@ export function createRenderer(ctx) {
       if (ctx.runtime?.internal?.remove) ctx.runtime.internal.remove('camera')
       if (cameraModes?.dispose) cameraModes.dispose()
       for (const obj of entityObjects.values()) scene.remove(obj)
+      for (const obj of colliderDebugObjects.values()) scene.remove(obj)
       entityObjects.clear()
+      colliderDebugObjects.clear()
       modelController.clear()
       renderer.dispose()
     },

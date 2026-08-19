@@ -672,6 +672,18 @@ impl GameInstance {
         build_player_observation(self, agent_id)
     }
 
+    /// First-person camera pose for a player, matching the view used for
+    /// observation FOV/line-of-sight culling (ViewOrigin/ViewForward/ViewFovDeg).
+    pub fn get_player_camera_pose(&self, agent_id: Uuid) -> Option<PlayerCameraPose> {
+        let position = self.get_player_view_origin(agent_id)?;
+        let forward = self.get_player_view_forward(agent_id)?;
+        Some(PlayerCameraPose {
+            position,
+            forward,
+            fov_deg: self.player_view_fov_deg(),
+        })
+    }
+
     /// Get static map geometry (entities with "Static" tag).
     pub fn get_map_info(&self) -> MapInfo {
         build_map_info(self)
@@ -1165,7 +1177,7 @@ impl GameInstance {
 
     fn get_player_view_origin(&self, agent_id: Uuid) -> Option<[f32; 3]> {
         let pos = self.get_player_position(agent_id)?;
-        Some([pos[0], pos[1] + 2.0, pos[2]])
+        Some([pos[0], pos[1] + PLAYER_EYE_HEIGHT, pos[2]])
     }
 
     fn get_player_view_forward(&self, agent_id: Uuid) -> Option<[f32; 3]> {
@@ -1480,6 +1492,17 @@ impl GameInstance {
         }
         None
     }
+}
+
+/// Eye height above the player position (HumanoidRootPart center), in studs.
+pub const PLAYER_EYE_HEIGHT: f32 = 2.0;
+
+/// First-person camera pose for a player (world protocol: agent vision).
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct PlayerCameraPose {
+    pub position: [f32; 3],
+    pub forward: [f32; 3],
+    pub fov_deg: f32,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]

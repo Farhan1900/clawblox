@@ -27,6 +27,7 @@ const HOP_BY_HOP_HEADERS: &[&str] = &[
 
 const ALLOWED_EXACT_PATHS: &[&str] = &[
     "/observe",
+    "/observe/image",
     "/input",
     "/chat",
     "/chat/messages",
@@ -569,6 +570,7 @@ mod tests {
     #[test]
     fn validates_allowed_and_denied_paths() {
         assert!(validate_path("/observe"));
+        assert!(validate_path("/observe/image?width=320&height=180"));
         assert!(validate_path("/assets/foo.png"));
         assert!(!validate_path("/api/admin"));
         assert!(!validate_path("/sessions/secret"));

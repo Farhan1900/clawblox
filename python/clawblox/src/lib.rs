@@ -1242,20 +1242,21 @@ impl PyWorld {
                 response.body.chars().take(400).collect::<String>()
             )));
         }
-        let (format, checkpoint_tick, sim_time) = serde_json::from_str::<serde_json::Value>(&response.body)
-            .map(|doc| {
-                (
-                    doc.get("format")
-                        .and_then(|value| value.as_str())
-                        .unwrap_or("world-snapshot")
-                        .to_string(),
-                    doc.get("instance")
-                        .and_then(|value| value.get("tick"))
-                        .and_then(|value| value.as_u64()),
-                    doc.get("time").and_then(|value| value.as_f64()),
-                )
-            })
-            .unwrap_or_else(|_| ("world-snapshot".to_string(), None, None));
+        let (format, checkpoint_tick, sim_time) =
+            serde_json::from_str::<serde_json::Value>(&response.body)
+                .map(|doc| {
+                    (
+                        doc.get("format")
+                            .and_then(|value| value.as_str())
+                            .unwrap_or("world-snapshot")
+                            .to_string(),
+                        doc.get("instance")
+                            .and_then(|value| value.get("tick"))
+                            .and_then(|value| value.as_u64()),
+                        doc.get("time").and_then(|value| value.as_f64()),
+                    )
+                })
+                .unwrap_or_else(|_| ("world-snapshot".to_string(), None, None));
         std::fs::create_dir_all(&dir).map_err(io_error)?;
         let file_name = name.unwrap_or_else(|| {
             format!(
@@ -1266,8 +1267,14 @@ impl PyWorld {
         let snapshot_path = dir.join(file_name);
         std::fs::write(&snapshot_path, &response.body).map_err(io_error)?;
         if let Some(manifest_path) = &self.manifest_path {
-            record_checkpoint(manifest_path, &snapshot_path, &format, checkpoint_tick, sim_time)
-                .map_err(PyAgentError::new_err)?;
+            record_checkpoint(
+                manifest_path,
+                &snapshot_path,
+                &format,
+                checkpoint_tick,
+                sim_time,
+            )
+            .map_err(PyAgentError::new_err)?;
         }
         let result = PyDict::new_bound(py);
         result.set_item("path", snapshot_path)?;

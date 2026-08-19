@@ -626,6 +626,35 @@ fn test_cframe_from_orientation_matches_yxz_and_roundtrips() {
 }
 
 #[test]
+fn test_cframe_vector_space_transforms_ignore_translation() {
+    let mut runtime = test_runtime();
+    runtime
+        .load_script(
+            r#"
+            local cf = CFrame.new(10, 20, 30) * CFrame.Angles(0, math.rad(90), 0)
+            local localVector = Vector3.new(0, 0, -2)
+            local worldVector = cf:VectorToWorldSpace(localVector)
+            local worldPoint = cf:PointToWorldSpace(localVector)
+            local roundTrip = cf:VectorToObjectSpace(worldVector)
+
+            _G.translationDelta = (worldPoint - worldVector - cf.Position).Magnitude
+            _G.roundTripDelta = (roundTrip - localVector).Magnitude
+            _G.worldMagnitude = worldVector.Magnitude
+        "#,
+        )
+        .expect("Failed to load script");
+
+    let globals = runtime.lua().globals().get::<mlua::Table>("_G").unwrap();
+    let translation_delta: f64 = globals.get("translationDelta").unwrap();
+    let round_trip_delta: f64 = globals.get("roundTripDelta").unwrap();
+    let world_magnitude: f64 = globals.get("worldMagnitude").unwrap();
+
+    assert!(translation_delta < 1e-4);
+    assert!(round_trip_delta < 1e-4);
+    assert!((world_magnitude - 2.0).abs() < 1e-4);
+}
+
+#[test]
 fn test_cframe_lerp_preserves_orthonormal_basis() {
     let mut runtime = test_runtime();
     runtime

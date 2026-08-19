@@ -298,6 +298,53 @@ function removeInternalApi(name) {
 
 installInternalApiFacade()
 
+// Capture hook for server-driven frame capture (agent vision). The engine's
+// capture sidecar drives this over CDP: set a camera pose, wait for the frame
+// counter to advance past the returned value, then screenshot.
+const captureHook = {
+  frame: 0,
+  tick: 0,
+  setPose(pose) {
+    const api = internalApiRegistry.get('camera')
+    if (!api || typeof api.setPoseOverride !== 'function') {
+      return { ok: false, error: 'camera api unavailable', frame: captureHook.frame, tick: captureHook.tick }
+    }
+    const state = api.setPoseOverride(pose)
+    return { ok: !!state?.poseOverride, frame: captureHook.frame, tick: captureHook.tick }
+  },
+  clearPose() {
+    const api = internalApiRegistry.get('camera')
+    if (api && typeof api.clearPoseOverride === 'function') api.clearPoseOverride()
+    return { ok: true, frame: captureHook.frame, tick: captureHook.tick }
+  },
+  attach(cfg) {
+    const api = internalApiRegistry.get('camera')
+    if (!api || typeof api.setFirstPersonAttach !== 'function') {
+      return { ok: false, error: 'camera api unavailable', frame: captureHook.frame, tick: captureHook.tick }
+    }
+    const state = api.setFirstPersonAttach(cfg)
+    return { ok: !!state?.attach, frame: captureHook.frame, tick: captureHook.tick }
+  },
+  detach() {
+    const api = internalApiRegistry.get('camera')
+    if (api && typeof api.clearFirstPersonAttach === 'function') api.clearFirstPersonAttach()
+    return { ok: true, frame: captureHook.frame, tick: captureHook.tick }
+  },
+  status() {
+    return {
+      frame: captureHook.frame,
+      tick: captureHook.tick,
+      hasCamera: internalApiRegistry.has('camera'),
+    }
+  },
+}
+Object.defineProperty(window, '__clawbloxCapture', {
+  value: captureHook,
+  configurable: true,
+  enumerable: false,
+  writable: false,
+})
+
 function readStoredBool(key, fallback) {
   try {
     const raw = localStorage.getItem(key)
@@ -2594,6 +2641,7 @@ async function bootstrap() {
       rendererFrameLoopLastMs = nowMs
       if (rendererFrameScheduled || pendingRendererState) return
       renderer.onFrame({ dt, nowMs, replay: replayState.enabled })
+      captureHook.frame += 1
       applyPendingReplayCameraState()
       if (replayState.enabled && ws.readyState === WebSocket.OPEN) reportReplayCameraState(ws)
     }
@@ -2769,6 +2817,8 @@ async function bootstrap() {
       const rendererState = prioritizeSelectedPlayer(state)
       const renderStartMs = performance.now()
       if (renderer.onState) renderer.onState(rendererState)
+      captureHook.frame += 1
+      if (Number.isFinite(rendererState?.tick)) captureHook.tick = rendererState.tick
       const renderEndMs = performance.now()
       const rendererProfile = typeof renderer.getProfile === 'function' ? renderer.getProfile() : null
       if (replayState.enabled) {

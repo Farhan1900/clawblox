@@ -43,6 +43,7 @@ use tower_http::services::ServeDir;
 
 use clawblox::{
     agent_runner::{start_agent_tmux_for_local_world, AgentRunnerOptions},
+    capture::{CaptureAttach, CaptureManager},
     config::{PhysicsConfig, SpeechConfig, SpeechMode},
     db,
     game::{
@@ -195,10 +196,10 @@ enum Commands {
         #[arg(default_value = ".")]
         path: PathBuf,
         /// Port to run the server on
-        #[arg(short, long, default_value = "8080")]
+        #[arg(short, long, default_value = "8080", env = "WORLD_PORT")]
         port: u16,
         /// URL base path to mount the runtime under
-        #[arg(long, default_value = "/")]
+        #[arg(long, default_value = "/", env = "WORLD_BASE_PATH")]
         base_path: String,
         /// Run as daemon (internal use only)
         #[arg(long, hide = true)]
@@ -207,14 +208,17 @@ enum Commands {
         #[arg(long, value_enum, default_value_t = LocalDatastore::Sqlite)]
         datastore: LocalDatastore,
         /// Record session to a .clawrec file for later replay
-        #[arg(long)]
+        #[arg(long, env = "WORLD_RECORD")]
         record: bool,
         /// Directory to write recording output into (default: <world>/recordings)
         #[arg(long, env = "CLAWBLOX_RECORD_DIR")]
         record_dir: Option<PathBuf>,
         /// Resume a previously snapshotted local run from this file
-        #[arg(long)]
+        #[arg(long, env = "WORLD_RESUME_PATH")]
         resume: Option<PathBuf>,
+        /// Skip world.toml [run].command delegation and run the built-in engine directly
+        #[arg(long, hide = true, env = "CLAWBLOX_SKIP_RUN_COMMAND")]
+        skip_run_command: bool,
         /// Start an agent in tmux after the local world starts
         #[arg(long, value_enum)]
         agent: Option<CliAgentKind>,
@@ -349,6 +353,7 @@ fn main() {
             record,
             record_dir,
             resume,
+            skip_run_command,
             agent,
             agent_name,
             model,
@@ -364,8 +369,9 @@ fn main() {
             daemon,
             datastore,
             record,
-            record_dir,
+            record_dir.or_else(|| std::env::var_os("WORLD_RECORD_DIR").map(PathBuf::from)),
             resume,
+            skip_run_command,
             agent.map(|kind| AgentRunnerOptions {
                 kind: kind.as_str().to_string(),
                 name: agent_name,
@@ -386,7 +392,15 @@ fn main() {
             asset_base_path,
             world_dir,
             agent,
-        } => run_replay(file, speed, port, &base_path, asset_base_path.as_deref(), world_dir, agent),
+        } => run_replay(
+            file,
+            speed,
+            port,
+            &base_path,
+            asset_base_path.as_deref(),
+            world_dir,
+            agent,
+        ),
         Commands::ReplayAdapter => run_replay_adapter(),
         Commands::App {
             path,
@@ -1846,6 +1860,7 @@ fn run_game(
     record: bool,
     record_dir: Option<PathBuf>,
     resume: Option<PathBuf>,
+    skip_run_command: bool,
     agent_options: Option<AgentRunnerOptions>,
 ) {
     let base_path = normalize_base_path(base_path);
@@ -1862,10 +1877,6 @@ fn run_game(
         eprintln!("{}", e);
         std::process::exit(1);
     });
-
-    let skip_run_command = std::env::var("CLAWBLOX_SKIP_RUN_COMMAND")
-        .map(|v| matches!(v.as_str(), "1" | "true" | "TRUE" | "yes" | "YES"))
-        .unwrap_or(false);
 
     if !skip_run_command {
         if let Some(command) = world_cfg.run.command.as_ref() {
@@ -2110,6 +2121,21 @@ fn run_game(
                         let _ = manifest::record_recording(&manifest_path, &rec_path, "clawrec");
                         recording_manifest_target = Some((manifest_path, rec_path.clone()));
                     }
+                    // Replay manifest for the actuate run contract: declares
+                    // the recording and how to replay it (see actuate's Runs
+                    // docs). {recording}/{port} are substituted by the app.
+                    let replay_manifest = format!(
+                        "version = 1\nformat = \"clawrec\"\nrecording = \"{}\"\n\ncommand = [\"clawblox\", \"replay\", \"{{recording}}\", \"--port\", \"{{port}}\"]\n",
+                        rec_path
+                            .file_name()
+                            .map(|name| name.to_string_lossy().to_string())
+                            .unwrap_or_default(),
+                    );
+                    if let Err(e) =
+                        std::fs::write(rec_path.with_extension("replay.toml"), replay_manifest)
+                    {
+                        eprintln!("Warning: failed to write replay manifest: {}", e);
+                    }
                     Some(Arc::new(tokio::sync::Mutex::new(writer)))
                 }
                 Err(e) => {
@@ -2126,7 +2152,16 @@ fn run_game(
         let (speech_progress_tx, _) = broadcast::channel::<SpeechProgressEvent>(128);
         let (playback_done_tx, _) = broadcast::channel::<PlaybackDoneEvent>(64);
         let (chat_tx, _) = broadcast::channel::<LocalChatMessage>(128);
-        let spectator_token = Uuid::new_v4().to_string();
+        let spectator_token = resolve_spectator_token();
+        let capture = config.agent_api.vision_observation.then(|| {
+            Arc::new(CaptureManager::new(format!(
+                "http://127.0.0.1:{}{}?viewport=1&spectator_token={}",
+                port,
+                join_base_path(&base_path, "/"),
+                spectator_token
+            )))
+        });
+        let vision_enabled = capture.is_some();
         let state = LocalState {
             game_id,
             instance_id,
@@ -2138,6 +2173,8 @@ fn run_game(
             player_object_physics: config.clawblox.player_object_physics,
             physics_config: config.clawblox.physics.clone(),
             allow_reset: config.agent_api.allow_reset,
+            state_observation: config.agent_api.state_observation,
+            action_feedback: config.agent_api.action_feedback,
             afk_timeout_secs: config.afk_timeout,
             error_mode: ErrorMode::Halt,
             started_at: Instant::now(),
@@ -2162,6 +2199,7 @@ fn run_game(
             chat_state: Arc::new(Mutex::new(LocalChatState::default())),
             recording_writer: recording_writer.clone(),
             recording_timeline: Arc::new(Mutex::new(RecordingTimeline::default())),
+            capture,
         };
 
         if let Some(snapshot) = resume_snapshot_for_server {
@@ -2367,6 +2405,7 @@ fn run_game(
             .route("/join", post(local_join))
             .route("/input", post(local_input))
             .route("/observe", get(local_observe))
+            .route("/observe/image", get(local_observe_image))
             .route("/reset", post(local_reset))
             .route("/snapshot", get(local_snapshot))
             .route("/api.md", get(local_skill))
@@ -2398,7 +2437,14 @@ fn run_game(
         println!("  GET  /              - Embedded local frontend");
         println!("  POST /join?name=X  - Join world, returns session token");
         println!("  POST /input        - Send input (requires X-Session header)");
-        println!("  GET  /observe      - Player observation (requires X-Session header)");
+        if config.agent_api.state_observation {
+            println!("  GET  /observe      - Player observation (requires X-Session header)");
+        } else {
+            println!("  GET  /observe      - Disabled by world config");
+        }
+        if vision_enabled {
+            println!("  GET  /observe/image - First-person view as PNG (requires X-Session header)");
+        }
         println!("  POST /reset        - Engine-level full reset (requires X-Session header)");
         println!("  POST /chat         - Send chat message (requires X-Session header)");
         println!("  GET  /chat/messages - List local chat messages");
@@ -2911,7 +2957,9 @@ async fn handle_replay_adapter_request(
             let recording = recordings
                 .get(&params.handle)
                 .ok_or_else(|| format!("unknown replay adapter handle: {}", params.handle))?;
-            let tick = params.tick.clamp(recording.first_tick, recording.meta.total_ticks);
+            let tick = params
+                .tick
+                .clamp(recording.first_tick, recording.meta.total_ticks);
             let from_tick = params.from_tick.clamp(recording.first_tick, tick);
             recording
                 .reader
@@ -2925,7 +2973,8 @@ async fn handle_replay_adapter_request(
             let recording = recordings
                 .get(&params.handle)
                 .ok_or_else(|| format!("unknown replay adapter handle: {}", params.handle))?;
-            let include_chat = params.kinds.is_empty() || params.kinds.iter().any(|kind| kind == "chat");
+            let include_chat =
+                params.kinds.is_empty() || params.kinds.iter().any(|kind| kind == "chat");
             let mut events = Vec::new();
             if include_chat {
                 let start_tick = params.start_tick.unwrap_or(recording.first_tick);
@@ -3056,7 +3105,13 @@ fn collect_clawblox_replay_assets_under(
 }
 
 fn replay_adapter_content_type_for_path(path: &Path) -> Option<&'static str> {
-    match path.extension().and_then(|ext| ext.to_str()).unwrap_or("").to_ascii_lowercase().as_str() {
+    match path
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase()
+        .as_str()
+    {
         "glb" => Some("model/gltf-binary"),
         "gltf" => Some("model/gltf+json"),
         "png" => Some("image/png"),
@@ -3412,7 +3467,7 @@ fn run_external_runtime(
 
     let rt = tokio::runtime::Runtime::new().unwrap();
     rt.block_on(async {
-        let spectator_token = Uuid::new_v4().to_string();
+        let spectator_token = resolve_spectator_token();
         let state = ExternalLocalState {
             base_path: base_path.clone(),
             spectator_token: spectator_token.clone(),
@@ -3839,6 +3894,8 @@ struct LocalState {
     player_object_physics: bool,
     physics_config: PhysicsConfig,
     allow_reset: bool,
+    state_observation: bool,
+    action_feedback: bool,
     afk_timeout_secs: u64,
     error_mode: ErrorMode,
     started_at: Instant,
@@ -3867,6 +3924,9 @@ struct LocalState {
     #[allow(dead_code)]
     recording_writer: Option<Arc<tokio::sync::Mutex<recording::RecordingWriter>>>,
     recording_timeline: Arc<Mutex<RecordingTimeline>>,
+    /// Headless-browser sidecar for agent vision (GET /observe/image).
+    /// None when the world does not enable vision ([agent_api] vision = true).
+    capture: Option<Arc<CaptureManager>>,
 }
 
 #[derive(Clone)]
@@ -5026,6 +5086,17 @@ struct SpectatorAccessQuery {
     spectator_token: Option<String>,
 }
 
+/// Use the launcher-provided spectator token when present (actuate sets
+/// WORLD_SPECTATOR_TOKEN and appends it to viewport URLs); otherwise
+/// self-generate one and print it at startup.
+fn resolve_spectator_token() -> String {
+    std::env::var("WORLD_SPECTATOR_TOKEN")
+        .ok()
+        .map(|token| token.trim().to_string())
+        .filter(|token| !token.is_empty())
+        .unwrap_or_else(|| Uuid::new_v4().to_string())
+}
+
 /// Accept the save/load protocol's operator token as an alternative to
 /// spectator access: clawblox sets WORLD_OPERATOR_TOKEN when it launches a
 /// world and presents it via X-Operator-Token when pulling snapshots.
@@ -5352,66 +5423,59 @@ struct InputRequest {
     data: serde_json::Value,
 }
 
-fn parse_json_number(value: &serde_json::Value) -> Option<f64> {
-    let number = match value {
-        serde_json::Value::Number(n) => n.as_f64()?,
-        serde_json::Value::String(s) => s.parse::<f64>().ok()?,
-        _ => return None,
-    };
-    if number.is_finite() {
-        Some(number)
-    } else {
-        None
-    }
+#[derive(Serialize)]
+struct ActionFeedbackResponse {
+    tick: u64,
+    action: ActionFeedback,
 }
 
-fn parse_json_vector3(value: &serde_json::Value) -> Option<(f64, f64, f64)> {
-    let arr = value.as_array()?;
-    if arr.len() != 3 {
-        return None;
-    }
-    let x = parse_json_number(&arr[0])?;
-    let y = parse_json_number(&arr[1])?;
-    let z = parse_json_number(&arr[2])?;
-    Some((x, y, z))
+#[derive(Serialize)]
+struct ActionFeedback {
+    #[serde(rename = "type")]
+    input_type: String,
+    status: String,
 }
 
-fn validate_builtin_input(input_type: &str, data: &serde_json::Value) -> Result<(), String> {
-    match input_type {
-        "MoveTo" | "Pickup" | "Place" => {
-            let position = data
-                .as_object()
-                .and_then(|obj| obj.get("position"))
-                .ok_or_else(|| format!("{input_type} requires data.position"))?;
-            parse_json_vector3(position).ok_or_else(|| {
-                format!("{input_type} requires data.position to be a finite [x, y, z] vector")
-            })?;
-            Ok(())
-        }
-        "Throw" => {
-            let direction = data
-                .as_object()
-                .and_then(|obj| obj.get("direction"))
-                .ok_or_else(|| "Throw requires data.direction".to_string())?;
-            parse_json_vector3(direction).ok_or_else(|| {
-                "Throw requires data.direction to be a finite [x, y, z] vector".to_string()
-            })?;
-            if let Some(speed) = data.as_object().and_then(|obj| obj.get("speed")) {
-                parse_json_number(speed)
-                    .ok_or_else(|| "Throw requires data.speed to be a finite number".to_string())?;
-            }
-            Ok(())
-        }
-        "Stop" | "Jump" => Ok(()),
-        _ => Ok(()),
+fn action_status_from_observation(action_type: &str, observation: &PlayerObservation) -> String {
+    if action_type == "Reset" {
+        return "ResetSuccess".to_string();
     }
+    observation
+        .player
+        .attributes
+        .get("LastActionResult")
+        .and_then(|value| value.as_str())
+        .unwrap_or("Unknown")
+        .to_string()
+}
+
+fn action_response(
+    state: &LocalState,
+    action_type: String,
+    observation: PlayerObservation,
+) -> axum::response::Response {
+    if state.state_observation {
+        return Json(observation).into_response();
+    }
+    if state.action_feedback {
+        let status = action_status_from_observation(&action_type, &observation);
+        return Json(ActionFeedbackResponse {
+            tick: observation.tick,
+            action: ActionFeedback {
+                input_type: action_type,
+                status,
+            },
+        })
+        .into_response();
+    }
+    axum::http::StatusCode::NO_CONTENT.into_response()
 }
 
 async fn local_input(
     State(state): State<LocalState>,
     headers: axum::http::HeaderMap,
     Json(input): Json<InputRequest>,
-) -> Result<Json<PlayerObservation>, (axum::http::StatusCode, String)> {
+) -> Result<axum::response::Response, (axum::http::StatusCode, String)> {
     let (agent_id, agent_name) = get_session(&state, &headers)?;
     if input.input_type == "Reset" {
         if !state.allow_reset {
@@ -5420,15 +5484,13 @@ async fn local_input(
                 "Reset is disabled for this world".to_string(),
             ));
         }
-        return perform_engine_reset_for_session(&state, agent_id).map(Json);
+        return perform_engine_reset_for_session(&state, agent_id)
+            .map(|observation| action_response(&state, "Reset".to_string(), observation));
     }
 
     if let Some(err) = check_halted(&state) {
         return Err((axum::http::StatusCode::SERVICE_UNAVAILABLE, err));
     }
-
-    validate_builtin_input(&input.input_type, &input.data)
-        .map_err(|e| (axum::http::StatusCode::BAD_REQUEST, e))?;
 
     let speech_progress = extract_speech_progress_event(&input.input_type, &input.data);
     let input_type = input.input_type.clone();
@@ -5449,19 +5511,25 @@ async fn local_input(
     // agent-input phase, so one tick boundary can still be stale.
     let observation =
         build_local_player_observation_after_tick(&state, agent_id, queued_before_tick).await?;
-    record_local_input(&state, agent_id, input_type, input_data, observation.tick);
+    record_local_input(
+        &state,
+        agent_id,
+        input_type.clone(),
+        input_data,
+        observation.tick,
+    );
 
     if let Some(progress) = speech_progress {
         maybe_publish_speech_progress(&state, &observation, &agent_name, progress);
     }
 
-    Ok(Json(observation))
+    Ok(action_response(&state, input_type, observation))
 }
 
 async fn local_reset(
     State(state): State<LocalState>,
     headers: axum::http::HeaderMap,
-) -> Result<Json<PlayerObservation>, (axum::http::StatusCode, String)> {
+) -> Result<axum::response::Response, (axum::http::StatusCode, String)> {
     let (agent_id, _) = get_session(&state, &headers)?;
     if !state.allow_reset {
         return Err((
@@ -5469,7 +5537,8 @@ async fn local_reset(
             "Reset is disabled for this world".to_string(),
         ));
     }
-    perform_engine_reset_for_session(&state, agent_id).map(Json)
+    perform_engine_reset_for_session(&state, agent_id)
+        .map(|observation| action_response(&state, "Reset".to_string(), observation))
 }
 
 #[derive(Clone, Debug)]
@@ -5558,6 +5627,13 @@ async fn local_observe(
     State(state): State<LocalState>,
     headers: axum::http::HeaderMap,
 ) -> Result<Json<PlayerObservation>, (axum::http::StatusCode, String)> {
+    if !state.state_observation {
+        return Err((
+            axum::http::StatusCode::FORBIDDEN,
+            "State observation is disabled for this world".to_string(),
+        ));
+    }
+
     if let Some(err) = check_halted(&state) {
         return Err((axum::http::StatusCode::SERVICE_UNAVAILABLE, err));
     }
@@ -5570,6 +5646,62 @@ async fn local_observe(
     maybe_publish_authoritative_speech_events(&state, &observation.recent_events);
 
     Ok(Json(observation))
+}
+
+#[derive(Deserialize)]
+struct ObserveImageQuery {
+    width: Option<u32>,
+    height: Option<u32>,
+}
+
+/// First-person PNG frame of what the requesting agent currently sees,
+/// rendered by the world's own renderer in the capture sidecar.
+async fn local_observe_image(
+    State(state): State<LocalState>,
+    headers: axum::http::HeaderMap,
+    Query(query): Query<ObserveImageQuery>,
+) -> Result<axum::response::Response, (axum::http::StatusCode, String)> {
+    if let Some(err) = check_halted(&state) {
+        return Err((axum::http::StatusCode::SERVICE_UNAVAILABLE, err));
+    }
+
+    let Some(capture) = state.capture.clone() else {
+        return Err((
+            axum::http::StatusCode::NOT_FOUND,
+            "Vision is not enabled for this world (set [agent_api] vision = true in world.toml)"
+                .to_string(),
+        ));
+    };
+
+    let (agent_id, _) = get_session(&state, &headers)?;
+
+    // Validates the agent is alive in the instance and provides the engine FOV.
+    let pose = game::get_player_camera_pose(&state.game_handle, state.game_id, agent_id)
+        .map_err(|e| (axum::http::StatusCode::BAD_REQUEST, e))?;
+
+    // Default 1088x640 (aspect ~1.7): the engine's 105° horizontal FOV maps to
+    // the 75° vertical FOV used for observation culling.
+    let width = query.width.unwrap_or(1088).clamp(64, 1920);
+    let height = query.height.unwrap_or(640).clamp(64, 1080);
+
+    // The engine FOV is horizontal; Three.js cameras take vertical FOV.
+    let aspect = width as f32 / height as f32;
+    let horizontal_rad = pose.fov_deg.clamp(1.0, 179.0).to_radians();
+    let vertical_fov_deg = (2.0 * ((horizontal_rad / 2.0).tan() / aspect).atan()).to_degrees();
+
+    // The capture page attaches its camera to the player's interpolated
+    // render state, so the eye always matches the drawn character.
+    let attach = CaptureAttach {
+        player_id: agent_id.to_string(),
+        eye_height: clawblox::game::instance::PLAYER_EYE_HEIGHT,
+        fov_deg: vertical_fov_deg,
+    };
+    let png = capture
+        .capture(&attach, width, height)
+        .await
+        .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e))?;
+
+    Ok(([(axum::http::header::CONTENT_TYPE, "image/png")], png).into_response())
 }
 
 fn resolve_local_asset_url(url: &mut String, base_path: &str) {

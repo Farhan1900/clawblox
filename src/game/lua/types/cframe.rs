@@ -225,16 +225,40 @@ impl CFrame {
         )
     }
 
+    pub fn vector_to_world_space(&self, vector: &Vector3) -> Vector3 {
+        Vector3::new(
+            self.rotation[0][0] * vector.x
+                + self.rotation[0][1] * vector.y
+                + self.rotation[0][2] * vector.z,
+            self.rotation[1][0] * vector.x
+                + self.rotation[1][1] * vector.y
+                + self.rotation[1][2] * vector.z,
+            self.rotation[2][0] * vector.x
+                + self.rotation[2][1] * vector.y
+                + self.rotation[2][2] * vector.z,
+        )
+    }
+
     pub fn point_to_object_space(&self, point: &Vector3) -> Vector3 {
         let rel = Vector3::new(
             point.x - self.position.x,
             point.y - self.position.y,
             point.z - self.position.z,
         );
+        self.vector_to_object_space(&rel)
+    }
+
+    pub fn vector_to_object_space(&self, vector: &Vector3) -> Vector3 {
         Vector3::new(
-            self.rotation[0][0] * rel.x + self.rotation[1][0] * rel.y + self.rotation[2][0] * rel.z,
-            self.rotation[0][1] * rel.x + self.rotation[1][1] * rel.y + self.rotation[2][1] * rel.z,
-            self.rotation[0][2] * rel.x + self.rotation[1][2] * rel.y + self.rotation[2][2] * rel.z,
+            self.rotation[0][0] * vector.x
+                + self.rotation[1][0] * vector.y
+                + self.rotation[2][0] * vector.z,
+            self.rotation[0][1] * vector.x
+                + self.rotation[1][1] * vector.y
+                + self.rotation[2][1] * vector.z,
+            self.rotation[0][2] * vector.x
+                + self.rotation[1][2] * vector.y
+                + self.rotation[2][2] * vector.z,
         )
     }
 
@@ -497,6 +521,12 @@ impl UserData for CFrame {
         });
         methods.add_method("PointToObjectSpace", |_, this, v: Vector3| {
             Ok(this.point_to_object_space(&v))
+        });
+        methods.add_method("VectorToWorldSpace", |_, this, v: Vector3| {
+            Ok(this.vector_to_world_space(&v))
+        });
+        methods.add_method("VectorToObjectSpace", |_, this, v: Vector3| {
+            Ok(this.vector_to_object_space(&v))
         });
         methods.add_method("GetComponents", |_, this, ()| {
             let c = this.get_components();
