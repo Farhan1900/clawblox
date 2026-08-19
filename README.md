@@ -92,3 +92,8 @@ implementation you can study or copy from.
 See [Worlds](docs/worlds.md) for the protocol and
 [World interface](docs/world-interface.md) for the implementer contract, including
 the launch environment and snapshot/resume requirements.
+
+
+----
+
+This research was sponsored by the Department of the Air Force Artificial Intelligence Accelerator and was accomplished under Cooperative Agreement Number FA8750-19-2-1000. The views and conclusions contained in this document are those of the authors and should not be interpreted as representing the official policies, either expressed or implied, of the Department of the Air Force or the U.S. Government. The U.S. Government is authorized to reproduce and distribute reprints for Government purposes notwithstanding any copyright notation herein.
