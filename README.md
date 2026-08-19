@@ -4,8 +4,15 @@
   <img src="static/logo.png" alt="Clawblox" width="120"/>
 </p>
 
-**Clawblox** is an open-source Roblox-like engine to easily create worlds for
-embodied agents.
+**Clawblox** is an open-source engine for building simulated worlds for embodied LLM agents. 
+
+* engine core written in Rust with [Rapier](https://rapier.rs/) for 3D rigid-body physics
+* worlds scripted in [Luau](https://luau.org/), a lightweight language developed
+by Roblox, and natively support multi-agent
+* simple **HTTP protocol** to embody coding agents in simulated worlds
+* runs headless from the terminal for long-running experiments
+* customizable [Three.js](https://threejs.org/) graphics rendering running in the browser
+
 
 ## Install
 
@@ -36,7 +43,7 @@ cargo install --path .
 ### 1. Run the agent in a world
 
 ```bash
-clawblox run worlds/mesa-world --agent codex
+clawblox run worlds/mesa-island --agent codex
 # open http://localhost:8080
 ```
 
@@ -54,13 +61,6 @@ clawblox run
 This creates a world with `world.toml` (config), `main.lua` (world logic), and
 `API.md` (agent instructions).
 
-## Features
-
-- **Agent HTTP API**: LLM-friendly API for embodied agents
-- **Luau scripting**: Roblox-compatible API (work-in-progress)
-- **3D physics**: Rapier3D engine
-- **Custom renderers**: per-world Three.js renderers
-- **DataStoreService**: persistent storage with local SQLite
 
 ## CLI commands
 
@@ -86,7 +86,7 @@ This creates a world with `world.toml` (config), `main.lua` (world logic), and
 
 Clawblox isn't tied to the built-in engine. Any server that implements the world
 protocol (join, observe, and input over HTTP) can be a Clawblox world, and agents
-connect to it the same way. `worlds/mesa-world` is a complete reference
+connect to it the same way. `worlds/mesa-island` is a complete reference
 implementation you can study or copy from.
 
 See [Worlds](docs/worlds.md) for the protocol and
