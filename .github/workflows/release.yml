@@ -4,12 +4,85 @@ on:
   push:
     tags:
       - 'v*'
+  workflow_call:
+    inputs:
+      ref:
+        required: true
+        type: string
+      publish:
+        required: true
+        type: boolean
+    secrets:
+      R2_ACCESS_KEY_ID:
+        required: false
+      R2_SECRET_ACCESS_KEY:
+        required: false
+      R2_ACCOUNT_ID:
+        required: false
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: 'Tag to release (for example v0.1.5)'
+        required: true
+        type: string
+      publish:
+        description: 'Publish verified binaries and update the installer'
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ (inputs.publish || (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/'))) && 'publish-release' || format('validate-release-{0}', github.ref) }}
+  cancel-in-progress: false
 
 env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.metadata.outputs.version }}
+      sha: ${{ steps.metadata.outputs.sha }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref || github.ref }}
+      - name: Validate release metadata
+        id: metadata
+        env:
+          RELEASE_REF: ${{ inputs.ref || github.ref_name }}
+          PUBLISH: ${{ inputs.publish || (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')) }}
+        run: |
+          python3 - <<'PY'
+          import os, re, subprocess, tomllib
+          from pathlib import Path
+
+          version = tomllib.loads(Path("Cargo.toml").read_text())["package"]["version"]
+          if not re.fullmatch(r"(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)", version):
+              raise SystemExit("Stable releases require a major.minor.patch version")
+          lock = tomllib.loads(Path("Cargo.lock").read_text())
+          locked = next(p["version"] for p in lock["package"] if p["name"] == "clawblox")
+          if locked != version:
+              raise SystemExit("Cargo.toml and Cargo.lock versions differ")
+          sha = subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()
+          if os.environ["PUBLISH"] == "true":
+              tag = "v" + version
+              if os.environ["RELEASE_REF"] != tag:
+                  raise SystemExit(f"Publishing requires tag {tag}")
+              tagged = subprocess.check_output(
+                  ["git", "rev-parse", f"refs/tags/{tag}^{{commit}}"], text=True
+              ).strip()
+              if tagged != sha:
+                  raise SystemExit("Checkout does not match the release tag")
+          with open(os.environ["GITHUB_OUTPUT"], "a") as output:
+              output.write(f"version={version}\nsha={sha}\n")
+          PY
+
   build:
+    needs: prepare
     name: Build ${{ matrix.platform }}
     runs-on: ${{ matrix.os }}
     strategy:
@@ -37,6 +110,8 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.prepare.outputs.sha }}
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
@@ -49,11 +124,32 @@ jobs:
 
       - name: Build (Linux with cross)
         if: runner.os == 'Linux'
-        run: cross build --release --target ${{ matrix.target }} --bin clawblox
+        run: cross build --locked --release --target ${{ matrix.target }} --bin clawblox
 
       - name: Build (macOS/Windows)
         if: runner.os != 'Linux'
-        run: cargo build --release --target ${{ matrix.target }} --bin clawblox
+        run: cargo build --locked --release --target ${{ matrix.target }} --bin clawblox
+
+      - name: Check CLI version and help (native Unix)
+        if: runner.os != 'Windows' && matrix.platform != 'linux-arm64'
+        env:
+          RELEASE_VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          test "$(target/${{ matrix.target }}/release/clawblox --version)" = "clawblox $RELEASE_VERSION"
+          target/${{ matrix.target }}/release/clawblox --help
+
+      - name: Check CLI version and help (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          RELEASE_VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          $version = & target/${{ matrix.target }}/release/clawblox.exe --version
+          if ($LASTEXITCODE -ne 0 -or $version -ne "clawblox $env:RELEASE_VERSION") {
+            throw "Unexpected CLI version: $version"
+          }
+          & target/${{ matrix.target }}/release/clawblox.exe --help
+          if ($LASTEXITCODE -ne 0) { throw "CLI help failed" }
 
       - name: Prepare binary (Unix)
         if: runner.os != 'Windows'
@@ -77,25 +173,37 @@ jobs:
 
   release:
     name: Upload to R2
-    needs: build
+    needs: [prepare, build]
+    if: inputs.publish || (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/'))
     runs-on: ubuntu-latest
+    env:
+      VERSION: ${{ needs.prepare.outputs.version }}
+      RELEASE_SHA: ${{ needs.prepare.outputs.sha }}
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.prepare.outputs.sha }}
 
       - name: Download all artifacts
         uses: actions/download-artifact@v4
         with:
           path: dist
 
-      - name: Get version
-        id: version
-        run: echo "version=${GITHUB_REF#refs/tags/v}" >> $GITHUB_OUTPUT
+      - name: Prevent overwriting or downgrading a published release
+        run: |
+          LATEST=$(curl -fsSL https://releases.clawblox.com/latest)
+          export LATEST
+          python3 - <<'PY'
+          import os
+          def parts(version):
+              return tuple(map(int, version.strip().split(".")))
+          if parts(os.environ["VERSION"]) <= parts(os.environ["LATEST"]):
+              raise SystemExit("Release version must be newer than the published version")
+          PY
 
       - name: Calculate checksums and create manifest
         run: |
-          VERSION=${{ steps.version.outputs.version }}
-
           # Calculate checksums for all binaries
           LINUX_X64=$(sha256sum dist/linux-x64/clawblox | cut -d' ' -f1)
           LINUX_ARM64=$(sha256sum dist/linux-arm64/clawblox | cut -d' ' -f1)
@@ -115,6 +223,7 @@ jobs:
           cat > dist/manifest.json << EOF
           {
             "version": "$VERSION",
+            "commit": "$RELEASE_SHA",
             "platforms": {
               "linux-x64": {
                 "checksum": "$LINUX_X64"
@@ -141,7 +250,7 @@ jobs:
 
       - name: Install rclone
         run: |
-          curl -O https://downloads.rclone.org/rclone-current-linux-amd64.zip
+          curl -fsSLO https://downloads.rclone.org/rclone-current-linux-amd64.zip
           unzip rclone-current-linux-amd64.zip
           sudo cp rclone-*-linux-amd64/rclone /usr/local/bin/
 
@@ -160,8 +269,6 @@ jobs:
 
       - name: Upload to R2
         run: |
-          VERSION=${{ steps.version.outputs.version }}
-
           # Upload versioned release
           rclone copy dist/linux-x64/clawblox r2:clawblox-releases/$VERSION/linux-x64/ --s3-no-check-bucket
           rclone copy dist/linux-arm64/clawblox r2:clawblox-releases/$VERSION/linux-arm64/ --s3-no-check-bucket
@@ -174,6 +281,18 @@ jobs:
           rclone copy scripts/install.ps1 r2:clawblox-releases/ --s3-no-check-bucket
           rclone copy scripts/install.cmd r2:clawblox-releases/ --s3-no-check-bucket
 
+      - name: Verify uploaded release before promoting it
+        run: |
+          rclone check dist "r2:clawblox-releases/$VERSION" --one-way --download --s3-no-check-bucket
+          curl -fsSL "https://releases.clawblox.com/$VERSION/manifest.json" -o published-manifest.json
+          cmp dist/manifest.json published-manifest.json
+          for script in install.sh install.ps1 install.cmd; do
+            curl -fsSL "https://releases.clawblox.com/$script" -o "published-$script"
+            cmp "scripts/$script" "published-$script"
+          done
+
+      - name: Promote release
+        run: |
           # Update latest pointer
           echo -n "$VERSION" > latest.txt
           rclone copy latest.txt r2:clawblox-releases/ --s3-no-check-bucket
@@ -181,8 +300,8 @@ jobs:
 
       - name: Verify upload
         run: |
-          curl -fsSL https://releases.clawblox.com/latest
-          curl -fsSI https://releases.clawblox.com/${{ steps.version.outputs.version }}/manifest.json
+          test "$(curl -fsSL https://releases.clawblox.com/latest)" = "$VERSION"
+          curl -fsSI "https://releases.clawblox.com/$VERSION/manifest.json"
           curl -fsSI https://releases.clawblox.com/install.sh
           curl -fsSI https://releases.clawblox.com/install.ps1
           curl -fsSI https://releases.clawblox.com/install.cmd
