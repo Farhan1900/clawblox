@@ -1,15 +1,22 @@
-name: Auto Tag
+name: Release version
 
 on:
   push:
     branches: [main]
-    paths: [Cargo.toml]
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-version
+  cancel-in-progress: false
 
 jobs:
   tag:
     runs-on: ubuntu-latest
-    permissions:
-      contents: write
+    outputs:
+      tag: ${{ steps.version.outputs.tag }}
+      publish: ${{ steps.check.outputs.publish }}
 
     steps:
       - uses: actions/checkout@v4
@@ -19,25 +26,48 @@ jobs:
       - name: Get version from Cargo.toml
         id: version
         run: |
-          VERSION=$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
-          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          VERSION=$(python3 -c 'import tomllib; print(tomllib.load(open("Cargo.toml", "rb"))["package"]["version"])')
+          echo "tag=v$VERSION" >> "$GITHUB_OUTPUT"
           echo "Version: $VERSION"
 
       - name: Check if tag exists
         id: check
+        env:
+          RELEASE_TAG: ${{ steps.version.outputs.tag }}
         run: |
-          if git rev-parse "v${{ steps.version.outputs.version }}" >/dev/null 2>&1; then
+          if git rev-parse --verify "refs/tags/$RELEASE_TAG" >/dev/null 2>&1; then
             echo "exists=true" >> $GITHUB_OUTPUT
-            echo "Tag v${{ steps.version.outputs.version }} already exists"
+            if [ "$(git rev-parse "refs/tags/$RELEASE_TAG^{commit}")" = "$GITHUB_SHA" ]; then
+              # Retry a failed release by rerunning this workflow.
+              echo "publish=true" >> "$GITHUB_OUTPUT"
+            else
+              echo "publish=false" >> "$GITHUB_OUTPUT"
+              COUNT=$(git rev-list --count "$RELEASE_TAG..$GITHUB_SHA")
+              echo "::warning::No release: main is $COUNT commits ahead of $RELEASE_TAG. Bump the package version to publish these changes."
+              echo "### Release skipped" >> "$GITHUB_STEP_SUMMARY"
+              echo "main is $COUNT commits ahead of $RELEASE_TAG. The installer still uses the published release; bump Cargo.toml and Cargo.lock to release these changes." >> "$GITHUB_STEP_SUMMARY"
+            fi
           else
             echo "exists=false" >> $GITHUB_OUTPUT
-            echo "Tag v${{ steps.version.outputs.version }} does not exist"
+            echo "publish=true" >> "$GITHUB_OUTPUT"
           fi
 
       - name: Create and push tag
         if: steps.check.outputs.exists == 'false'
+        env:
+          RELEASE_TAG: ${{ steps.version.outputs.tag }}
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git tag -a "v${{ steps.version.outputs.version }}" -m "Release v${{ steps.version.outputs.version }}"
-          git push origin "v${{ steps.version.outputs.version }}"
+          git tag -a "$RELEASE_TAG" -m "Release $RELEASE_TAG"
+          git push origin "refs/tags/$RELEASE_TAG"
+
+  release:
+    needs: tag
+    if: needs.tag.outputs.publish == 'true'
+    # GITHUB_TOKEN tag pushes do not start another workflow. Call it directly.
+    uses: ./.github/workflows/release.yml
+    with:
+      ref: ${{ needs.tag.outputs.tag }}
+      publish: true
+    secrets: inherit
