@@ -57,7 +57,7 @@ applies to `--agent claude`.
 After installing Clawblox, run a world without an agent:
 
 ```bash
-clawblox run https://github.com/nacloos/clawblox/tree/main/worlds/mesa-small-world-3
+clawblox run https://github.com/nacloos/clawblox/tree/main/worlds/mesa-island
 ```
 
 Open:
@@ -69,5 +69,5 @@ http://localhost:8080
 Once that works, try running the same world with an agent:
 
 ```bash
-clawblox run https://github.com/nacloos/clawblox/tree/main/worlds/mesa-small-world-3 --agent codex
+clawblox run https://github.com/nacloos/clawblox/tree/main/worlds/mesa-island --agent codex
 ```

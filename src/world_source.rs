@@ -349,13 +349,13 @@ mod tests {
     #[test]
     fn parses_github_tree_url() {
         let parsed = parse_github_tree_url(
-            "https://github.com/nacloos/clawblox/tree/main/worlds/mesa-world",
+            "https://github.com/nacloos/clawblox/tree/main/worlds/mesa-island",
         )
         .unwrap();
         assert_eq!(parsed.owner, "nacloos");
         assert_eq!(parsed.repo, "clawblox");
         assert_eq!(parsed.reference, "main");
-        assert_eq!(parsed.subdir, "worlds/mesa-world");
+        assert_eq!(parsed.subdir, "worlds/mesa-island");
     }
 
     #[test]
@@ -369,7 +369,7 @@ mod tests {
     #[test]
     fn sanitizes_cache_components() {
         assert_eq!(safe_component("feature/worlds"), "feature_worlds");
-        assert_eq!(safe_component("mesa-world"), "mesa-world");
+        assert_eq!(safe_component("mesa-island"), "mesa-island");
     }
 
     #[test]

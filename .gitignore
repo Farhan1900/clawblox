@@ -11,41 +11,20 @@
 .claude/
 **/.DS_Store
 
-
 # Local runtime artifacts
-agent/results/
-agent/logs/
-agent/workspace/
 **/.clawblox/
-mc-server/
-examples/minecraft/client-mod-fabric/.gradle/
-examples/minecraft/client-mod-fabric/.tooling/
-examples/minecraft/client-mod-fabric/build/
-examples/minecraft/launcher/.cache/
-examples/minecraft/launcher/.runtime/
 
 results/
 recordings/
 /analysis/
 
-minecraft-adapter/
-worlds/minecraft/monitor/
-worlds/minecraft/monitor-old/
-worlds/mesa-opaque-actions-world/live_observation_pretty.json
-
 *.egg-info/
 python/clawblox/clawblox/*.so
 **/.build.lock
 
-# Piper TTS binary (download separately, not versioned)
-agent/piper/
-agent/piper_linux_x86_64.tar.gz
-
 .codex_pydeps/
 
-# Local multi-world and build cache artifacts
-.clawblox-multi/*.env
-.clawblox-watchdog/
+# Local build cache artifacts
 worlds/mesa-island/.cargo-target/
 
 **/.codex

@@ -6,14 +6,14 @@ use clawblox::game::script_bundle::load_world_and_entry_script;
 use clawblox::snapshot::{capture_game_instance, restore_game_instance};
 use uuid::Uuid;
 
-fn mesa_world_dir() -> PathBuf {
+fn mesa_island_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("worlds")
-        .join("mesa-world")
+        .join("mesa-island")
 }
 
-fn mesa_world_script_path() -> PathBuf {
-    mesa_world_dir().join("main.lua")
+fn mesa_island_script_path() -> PathBuf {
+    mesa_island_dir().join("main.lua")
 }
 
 fn workspace_inventory(instance: &GameInstance) -> (i64, i64, i64, i64, i64) {
@@ -54,9 +54,9 @@ fn workspace_inventory(instance: &GameInstance) -> (i64, i64, i64, i64, i64) {
 }
 
 #[test]
-fn mesa_world_resume_preserves_existing_player_position() {
+fn mesa_island_resume_preserves_existing_player_position() {
     let mut instance = GameInstance::new(Uuid::new_v4(), None);
-    let source = fs::read_to_string(mesa_world_script_path()).expect("failed to read mesa-world");
+    let source = fs::read_to_string(mesa_island_script_path()).expect("failed to read mesa-island");
     instance.load_script(&source);
 
     let agent_id = Uuid::new_v4();
@@ -148,10 +148,10 @@ fn mesa_world_resume_preserves_existing_player_position() {
 }
 
 #[test]
-fn mesa_world_resume_preserves_workspace_inventory() {
+fn mesa_island_resume_preserves_workspace_inventory() {
     let mut instance = GameInstance::new(Uuid::new_v4(), None);
-    let (_config, source) =
-        load_world_and_entry_script(&mesa_world_dir()).expect("failed to load bundled mesa-world");
+    let (_config, source) = load_world_and_entry_script(&mesa_island_dir())
+        .expect("failed to load bundled mesa-island");
     instance.load_script(&source);
 
     for _ in 0..5 {
@@ -161,7 +161,7 @@ fn mesa_world_resume_preserves_workspace_inventory() {
     let before_restore = workspace_inventory(&instance);
     assert!(
         before_restore.0 > 0,
-        "expected mesa-world to have pickup blocks before snapshot"
+        "expected mesa-island to have pickup blocks before snapshot"
     );
 
     let snapshot = capture_game_instance(&instance).expect("failed to capture snapshot");

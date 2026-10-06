@@ -2507,15 +2507,15 @@ fn io_error(err: std::io::Error) -> PyErr {
 }
 
 /// Generate a default tmux session name from the world directory name and a
-/// compact UTC timestamp, matching the convention used in run_agent_generations.py:
+/// compact UTC timestamp:
 ///   {sanitized_dir_name}-{YYYYMMDDTHHmmssZ}
-/// e.g. "river-bridge-small-20260527T194512Z"
+/// e.g. "mesa-island-20260527T194512Z"
 fn default_tmux_session(world_dir: &Path) -> String {
     let dir_name = world_dir
         .file_name()
         .map(|s| s.to_string_lossy().to_string())
         .unwrap_or_else(|| "world".to_string());
-    // Same sanitization as run_agent_generations.py safe_name(): keep [A-Za-z0-9._-], replace rest with '_'
+    // Keep [A-Za-z0-9._-], replace rest with '_'
     let safe: String = dir_name
         .chars()
         .map(|c| {

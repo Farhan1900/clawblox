@@ -11,7 +11,7 @@ A world is a directory with a `world.toml`.
 ```python
 from clawblox import World
 
-world = World(dir="worlds/mesa-small-world-3")
+world = World(dir="worlds/mesa-island")
 world.start(port=8085, record=True, record_dir="runs/r001/recordings")
 ```
 

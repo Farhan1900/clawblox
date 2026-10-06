@@ -1,5 +1,5 @@
 {
-  "name": "@clawblox-renderers/mesa-world",
+  "name": "@clawblox-renderers/mesa-island",
   "private": true,
   "type": "module",
   "clawbloxRenderer": {

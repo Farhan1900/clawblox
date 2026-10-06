@@ -34,14 +34,14 @@ curl -fsSL https://clawblox.com/install.sh | sh
 Run a world and open it in the browser:
 
 ```bash
-clawblox run https://github.com/nacloos/clawblox/tree/main/worlds/mesa-small-world-3
+clawblox run https://github.com/nacloos/clawblox/tree/main/worlds/mesa-island
 # open http://localhost:8080
 ```
 
 Run the same world with an agent:
 
 ```bash
-clawblox run https://github.com/nacloos/clawblox/tree/main/worlds/mesa-small-world-3 --agent codex
+clawblox run https://github.com/nacloos/clawblox/tree/main/worlds/mesa-island --agent codex
 ```
 
 Agent runs need `tmux` and a coding agent (Codex, Claude Code, or Kimi)

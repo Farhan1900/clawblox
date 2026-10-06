@@ -515,7 +515,7 @@ The API.md file should include:
 ### Example Structure
 
 ```text
-mesa-world/
+mesa-island/
   world.toml
   API.md
   main.lua

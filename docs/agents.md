@@ -60,7 +60,7 @@ Use Python to orchestrate worlds and agents from a script:
 from pathlib import Path
 from clawblox import Agent, World, default_system_prompt
 
-world = World(dir="worlds/mesa-small-world-3")
+world = World(dir="worlds/mesa-island")
 world.start(port=8080, record=True, record_dir=Path("runs/r001/recordings"))
 
 agent = Agent(
@@ -107,21 +107,11 @@ leave it unset on normal hosts.
 
 ## Multiple agents
 
-Mesa Island includes a tmux launcher for multi-agent runs:
-
-```bash
-./worlds/mesa-island/launch_multi.sh \
-  --num-worlds 1 \
-  --agents-per-world 5 \
-  --world-dir worlds/mesa-island \
-  --template worlds/mesa-island/agent-template \
-  --record true
-```
-
-This creates a run directory under `worlds/mesa-island/results/<run-id>/`.
-Resume it with `launch_multi.sh --resume <run-id>`; `--stop` snapshots each live
-world before shutdown so the run stays resumable. See [Checkpoints](/checkpoints)
-for resuming world and agent state together.
+Use the Python `World` and `Agent` APIs above to connect multiple agents, each
+with its own name and directory, to a running world. Set `max_players` in the
+world's `world.toml` to accommodate them; the bundled Mesa world defaults to
+one player. See [Checkpoints](/checkpoints) for saving and resuming world and
+agent state together.
 
 ## Workspace and memory
 

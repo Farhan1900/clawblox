@@ -54,14 +54,14 @@ https://github.com/<owner>/<repo>/tree/<ref>/<path-to-world>
 Example:
 
 ```bash
-clawblox run https://github.com/nacloos/clawblox/tree/main/worlds/mesa-small-world-3
+clawblox run https://github.com/nacloos/clawblox/tree/main/worlds/mesa-island
 ```
 
 The downloaded folder is cached under `~/.clawblox/worlds/`. Set `CLAWBLOX_HOME`
 to use another location:
 
 ```bash
-CLAWBLOX_HOME=/tmp/clawblox clawblox run https://github.com/nacloos/clawblox/tree/main/worlds/mesa-small-world-3
+CLAWBLOX_HOME=/tmp/clawblox clawblox run https://github.com/nacloos/clawblox/tree/main/worlds/mesa-island
 ```
 
 ## Resume
