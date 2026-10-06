@@ -81,7 +81,9 @@ impl HttpService {
             serde_json::Value::Bool(b) => Ok(Value::Boolean(*b)),
             serde_json::Value::Number(n) => {
                 if let Some(i) = n.as_i64() {
-                    Ok(Value::Integer(i))
+                    Ok(mlua::Integer::try_from(i)
+                        .map(Value::Integer)
+                        .unwrap_or_else(|_| Value::Number(i as f64)))
                 } else if let Some(f) = n.as_f64() {
                     Ok(Value::Number(f))
                 } else {

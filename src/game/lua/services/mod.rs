@@ -1,4 +1,8 @@
 pub mod agent_input;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod data_store;
+#[cfg(target_arch = "wasm32")]
+#[path = "data_store_web.rs"]
 pub mod data_store;
 pub mod debris;
 pub mod http_service;

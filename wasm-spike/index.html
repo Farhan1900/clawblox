@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Clawblox Luau WASM spike</title>
+  </head>
+  <body>
+    <pre id="status">Loading Luau WASM…</pre>
+    <script>
+      window.Module = {
+        print(text) {
+          document.querySelector('#status').textContent = text
+        },
+        printErr(text) {
+          document.querySelector('#status').textContent = text
+        },
+      }
+    </script>
+    <script src="./clawblox_luau_wasm_spike.js"></script>
+  </body>
+</html>
+

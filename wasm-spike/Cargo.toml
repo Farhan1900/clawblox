@@ -1,0 +1,22 @@
+[package]
+name = "clawblox-luau-wasm-spike"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+# Keep this proof-of-concept out of the production workspace until the
+# simulation boundary is ready to become a supported crate.
+[workspace]
+
+[dependencies]
+chrono = "0.4"
+futures-util = "=0.3.31"
+getrandom = { version = "0.2", features = ["js"] }
+mlua = { version = "=0.11.6", features = ["luau", "vendored", "serialize", "send", "async"] }
+nalgebra = "0.33"
+parking_lot = "0.12"
+rand = "0.8"
+rapier3d = "0.25.1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+uuid = { version = "1", features = ["v4", "serde", "js"] }

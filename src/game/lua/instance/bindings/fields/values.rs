@@ -22,7 +22,9 @@ pub(super) fn add_fields<F: UserDataFields<Instance>>(fields: &mut F) {
     fields.add_field_method_get("Value", |lua, this| {
         let data = this.data.lock().unwrap();
         if let Some(v) = &data.int_value_data {
-            return Ok(Value::Integer(v.value));
+            return Ok(mlua::Integer::try_from(v.value)
+                .map(Value::Integer)
+                .unwrap_or_else(|_| Value::Number(v.value as f64)));
         }
         if let Some(v) = &data.number_value_data {
             return Ok(Value::Number(v.value));
@@ -52,7 +54,7 @@ pub(super) fn add_fields<F: UserDataFields<Instance>>(fields: &mut F) {
             let mut data = this.data.lock().unwrap();
             if let Some(v) = &mut data.int_value_data {
                 v.value = match &value {
-                    Value::Integer(i) => *i,
+                    Value::Integer(i) => i64::from(*i),
                     Value::Number(n) => *n as i64,
                     _ => v.value,
                 };

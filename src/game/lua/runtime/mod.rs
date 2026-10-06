@@ -21,10 +21,12 @@ mod coroutines;
 mod data_model;
 mod frame_events;
 mod script_runtime;
+#[cfg(not(target_arch = "wasm32"))]
 mod vm_snapshot;
 
 use data_model::BindToCloseCallbacks;
 pub use data_model::{Game, GameDataModel, KickRequest, PhysicsCommand};
+#[cfg(not(target_arch = "wasm32"))]
 pub use vm_snapshot::LuaVmSnapshot;
 
 const DEFAULT_PLAYER_MODEL_URL: &str = "asset://player.glb";
@@ -82,7 +84,9 @@ impl LuaRuntime {
             serde_json::Value::Bool(b) => Ok(Value::Boolean(*b)),
             serde_json::Value::Number(n) => {
                 if let Some(i) = n.as_i64() {
-                    Ok(Value::Integer(i))
+                    Ok(mlua::Integer::try_from(i)
+                        .map(Value::Integer)
+                        .unwrap_or_else(|_| Value::Number(i as f64)))
                 } else if let Some(f) = n.as_f64() {
                     Ok(Value::Number(f))
                 } else {
@@ -460,8 +464,8 @@ impl LuaRuntime {
             |_, (tbl, pos_or_val, val): (mlua::Table, Value, Option<Value>)| {
                 match val {
                     Some(v) => {
-                        let pos: i64 = match pos_or_val {
-                            Value::Number(n) => n as i64,
+                        let pos: mlua::Integer = match pos_or_val {
+                            Value::Number(n) => n as mlua::Integer,
                             Value::Integer(i) => i,
                             _ => return Err(mlua::Error::runtime("Invalid position")),
                         };
@@ -469,7 +473,7 @@ impl LuaRuntime {
                     }
                     None => {
                         let len = tbl.raw_len();
-                        tbl.raw_insert(len as i64 + 1, pos_or_val)?;
+                        tbl.raw_insert(len as mlua::Integer + 1, pos_or_val)?;
                     }
                 }
                 Ok(())
@@ -527,6 +531,7 @@ impl LuaRuntime {
         lua.set_app_data(crate::game::replication::SharedWorldReplicationState::default());
 
         Self::register_require(&lua, pending_coroutines.clone())?;
+        #[cfg(not(target_arch = "wasm32"))]
         vm_snapshot::initialize_global_baseline(&lua)?;
 
         Ok(Self {
