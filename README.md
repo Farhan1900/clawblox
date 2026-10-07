@@ -13,6 +13,7 @@ by Roblox, and natively support multi-agent
 * runs headless from the terminal for long-running experiments
 * customizable [Three.js](https://threejs.org/) graphics rendering running in the browser
 
+Paper: https://machineplaying.org
 
 ## Install
 
@@ -92,6 +93,21 @@ implementation you can study or copy from.
 See [Worlds](docs/worlds.md) for the protocol and
 [World interface](docs/world-interface.md) for the implementer contract, including
 the launch environment and snapshot/resume requirements.
+
+---
+Please cite as:
+
+```
+@misc{cloos2026machineplaying,
+      title={Is this machine playing?}, 
+      author={Nathan Cloos and Antonio Norelli and Daniel Durbin and Jacob Andreas and Daniela Rus and Phillip Isola},
+      year={2026},
+      eprint={2610.07130},
+      archivePrefix={arXiv},
+      primaryClass={cs.AI},
+      url={https://arxiv.org/abs/2610.07130}, 
+}
+```
 
 ---
 
