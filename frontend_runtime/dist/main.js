@@ -5,7 +5,7 @@ import {
   Wrench,
   CircleAlert,
   User,
-} from "https://esm.sh/lucide@0.468.0"
+} from "lucide"
 
 function icon(iconNode, size = 14) {
   const el = createLucideElement(iconNode)

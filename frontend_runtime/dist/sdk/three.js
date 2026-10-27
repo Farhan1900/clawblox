@@ -1211,7 +1211,7 @@ export function createSharedModelRenderer(THREE, scene, options = {}) {
   async function ensureModelModules() {
     if (moduleCache.loader) return moduleCache
     if (!moduleCache.pending) {
-      moduleCache.pending = import('https://esm.sh/three@0.160.0/examples/jsm/loaders/GLTFLoader.js')
+      moduleCache.pending = import('three/examples/jsm/loaders/GLTFLoader.js')
         .then((loaderMod) => {
           moduleCache.loader = new loaderMod.GLTFLoader()
           return moduleCache
@@ -1609,8 +1609,8 @@ export function createModelEntityController(THREE, options = {}) {
     if (moduleCache.loader && moduleCache.cloneFn) return moduleCache
     if (!moduleCache.pending) {
       moduleCache.pending = Promise.all([
-        import('https://esm.sh/three@0.160.0/examples/jsm/loaders/GLTFLoader.js'),
-        import('https://esm.sh/three@0.160.0/examples/jsm/utils/SkeletonUtils.js'),
+        import('three/examples/jsm/loaders/GLTFLoader.js'),
+        import('three/examples/jsm/utils/SkeletonUtils.js'),
       ]).then(([loaderMod, skeletonMod]) => {
         moduleCache.loader = new loaderMod.GLTFLoader()
         moduleCache.cloneFn = skeletonMod.clone
