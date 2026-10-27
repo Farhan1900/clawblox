@@ -18,11 +18,13 @@ pub(super) fn sync_move_targets(instance: &mut GameInstance) {
         return;
     }
 
-    let player_pairs: Vec<(Uuid, u64)> = instance
+    let mut player_pairs: Vec<(Uuid, u64)> = instance
         .players
         .iter()
         .map(|(&agent_id, &user_id)| (agent_id, user_id))
         .collect();
+    // HashMap order is randomised per process; a fixed order keeps lockstep runs bit-identical.
+    player_pairs.sort_by_key(|&(_, user_id)| user_id);
 
     for (agent_id, user_id) in player_pairs {
         let Some(&hrp_id) = instance.player_hrp_ids.get(&agent_id) else {
@@ -107,11 +109,13 @@ pub(super) fn sync_move_targets(instance: &mut GameInstance) {
 
 /// Updates character controller movement towards targets for one frame.
 pub(super) fn update_character_movement(instance: &mut GameInstance, dt: f32) {
-    let agent_hrp_pairs: Vec<(Uuid, u64)> = instance
+    let mut agent_hrp_pairs: Vec<(Uuid, u64)> = instance
         .player_hrp_ids
         .iter()
         .map(|(&agent_id, &hrp_id)| (agent_id, hrp_id))
         .collect();
+    // Characters push the same bodies; update them in a fixed order so float sums do not vary between runs.
+    agent_hrp_pairs.sort_by_key(|&(_, hrp_id)| hrp_id);
 
     for (agent_id, hrp_id) in agent_hrp_pairs {
         let (
