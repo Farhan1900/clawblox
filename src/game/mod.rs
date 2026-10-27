@@ -13,6 +13,7 @@ pub mod world_root;
 use dashmap::DashMap;
 use parking_lot::RwLock;
 use sqlx::PgPool;
+use std::sync::atomic::{AtomicBool, AtomicU64};
 use std::sync::Arc;
 use std::time::Duration;
 use uuid::Uuid;
@@ -51,6 +52,10 @@ pub struct GameManagerState {
     pub error_mode: ErrorMode,
     /// When true, skip garbage collection of empty instances (used by CLI)
     pub disable_gc: bool,
+    /// agent-worlds: when paused the manager loop only ticks while `pending_steps > 0`
+    pub paused: AtomicBool,
+    /// agent-worlds: ticks still to run while paused (each runs without wall-clock sleep)
+    pub pending_steps: AtomicU64,
 }
 
 impl GameManagerState {
@@ -69,6 +74,10 @@ impl GameManagerState {
             async_bridge,
             error_mode,
             disable_gc,
+            paused: AtomicBool::new(
+                std::env::var("CLAWBLOX_START_PAUSED").is_ok_and(|v| v == "1" || v == "true"),
+            ),
+            pending_steps: AtomicU64::new(0),
         }
     }
 }

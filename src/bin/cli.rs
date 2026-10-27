@@ -2408,6 +2408,10 @@ fn run_game(
             .route("/observe/image", get(local_observe_image))
             .route("/reset", post(local_reset))
             .route("/snapshot", get(local_snapshot))
+            .route("/operator/clock", get(local_operator_clock))
+            .route("/operator/pause", post(local_operator_pause))
+            .route("/operator/resume", post(local_operator_resume))
+            .route("/operator/step", post(local_operator_step))
             .route("/api.md", get(local_skill))
             .route("/skill.md", get(local_skill))
             .route("/audio", post(local_audio))
@@ -4798,11 +4802,99 @@ async fn build_local_player_observation_after_tick(
 
     loop {
         let observation = build_local_player_observation(state, agent_id)?;
-        if observation.tick >= target_tick || Instant::now() >= deadline {
+        // agent-worlds: while paused no tick will come, so answer at once.
+        let paused = state.game_handle.paused.load(Ordering::SeqCst);
+        if paused || observation.tick >= target_tick || Instant::now() >= deadline {
             return Ok(observation);
         }
         tokio::time::sleep(poll_interval).await;
     }
+}
+
+// agent-worlds: operator clock control for lockstep scheduling (pause, resume, step N ticks).
+#[derive(Deserialize)]
+struct OperatorStepQuery {
+    ticks: Option<u64>,
+}
+
+fn operator_clock_json(
+    state: &LocalState,
+) -> Result<serde_json::Value, (axum::http::StatusCode, String)> {
+    Ok(serde_json::json!({
+        "tick": local_instance_tick(state)?,
+        "tick_rate": 60,
+        "paused": state.game_handle.paused.load(Ordering::SeqCst),
+    }))
+}
+
+fn require_operator(
+    headers: &axum::http::HeaderMap,
+) -> Result<(), (axum::http::StatusCode, String)> {
+    if operator_token_matches(headers) {
+        Ok(())
+    } else {
+        Err((
+            axum::http::StatusCode::UNAUTHORIZED,
+            "operator token required".to_string(),
+        ))
+    }
+}
+
+async fn local_operator_clock(
+    State(state): State<LocalState>,
+    headers: axum::http::HeaderMap,
+) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, String)> {
+    require_operator(&headers)?;
+    operator_clock_json(&state).map(Json)
+}
+
+async fn local_operator_pause(
+    State(state): State<LocalState>,
+    headers: axum::http::HeaderMap,
+) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, String)> {
+    require_operator(&headers)?;
+    state.game_handle.paused.store(true, Ordering::SeqCst);
+    operator_clock_json(&state).map(Json)
+}
+
+async fn local_operator_resume(
+    State(state): State<LocalState>,
+    headers: axum::http::HeaderMap,
+) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, String)> {
+    require_operator(&headers)?;
+    state.game_handle.pending_steps.store(0, Ordering::SeqCst);
+    state.game_handle.paused.store(false, Ordering::SeqCst);
+    operator_clock_json(&state).map(Json)
+}
+
+async fn local_operator_step(
+    State(state): State<LocalState>,
+    headers: axum::http::HeaderMap,
+    Query(query): Query<OperatorStepQuery>,
+) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, String)> {
+    require_operator(&headers)?;
+    if !state.game_handle.paused.load(Ordering::SeqCst) {
+        return Err((
+            axum::http::StatusCode::CONFLICT,
+            "world is not paused".to_string(),
+        ));
+    }
+    let ticks = query.ticks.unwrap_or(1).min(60 * 600);
+    state
+        .game_handle
+        .pending_steps
+        .fetch_add(ticks, Ordering::SeqCst);
+    let deadline = Instant::now() + Duration::from_secs(120);
+    while state.game_handle.pending_steps.load(Ordering::SeqCst) > 0 {
+        if Instant::now() >= deadline {
+            return Err((
+                axum::http::StatusCode::GATEWAY_TIMEOUT,
+                "step timed out".to_string(),
+            ));
+        }
+        tokio::time::sleep(Duration::from_millis(1)).await;
+    }
+    operator_clock_json(&state).map(Json)
 }
 
 fn perform_engine_reset_for_session(

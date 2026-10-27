@@ -1,5 +1,6 @@
 use std::any::Any;
 use std::backtrace::Backtrace;
+use std::sync::atomic::Ordering;
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -34,6 +35,12 @@ impl GameManager {
         let mut tick_counter: u64 = 0;
 
         loop {
+            // agent-worlds: lockstep stepping. While paused, only run queued steps, back to back.
+            let stepping = self.state.paused.load(Ordering::SeqCst);
+            if stepping && self.state.pending_steps.load(Ordering::SeqCst) == 0 {
+                thread::sleep(Duration::from_millis(1));
+                continue;
+            }
             let start = Instant::now();
             let mut profile = ProfileFrame::new("manager.loop");
 
@@ -61,6 +68,14 @@ impl GameManager {
             let elapsed = start.elapsed();
             if let Some(profile) = profile {
                 profile.finish();
+            }
+            if stepping {
+                let _ = self.state.pending_steps.fetch_update(
+                    Ordering::SeqCst,
+                    Ordering::SeqCst,
+                    |n| n.checked_sub(1),
+                );
+                continue;
             }
             if elapsed < tick_duration {
                 thread::sleep(tick_duration - elapsed);
