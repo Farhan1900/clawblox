@@ -335,7 +335,7 @@ pub fn run_app(path: PathBuf, port: u16, base_path: &str) {
             &base_path,
         );
 
-        let addr = SocketAddr::from(([0, 0, 0, 0], port));
+        let addr = clawblox::bind_addr(port);
         println!(
             "App server: http://localhost:{}{}",
             port,

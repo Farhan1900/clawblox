@@ -23,3 +23,17 @@ pub mod workspace_recording;
 pub mod world_capability_proxy;
 pub mod world_runner;
 pub mod world_source;
+
+/// Address local servers listen on: `CLAWBLOX_HOST` (set by the global `--host` flag), default loopback only.
+pub fn bind_addr(port: u16) -> std::net::SocketAddr {
+    let host = std::env::var("CLAWBLOX_HOST").unwrap_or_default();
+    let ip = if host.trim().is_empty() {
+        std::net::IpAddr::from([127, 0, 0, 1])
+    } else {
+        host.trim().parse().unwrap_or_else(|_| {
+            eprintln!("Error: invalid --host / CLAWBLOX_HOST value '{}'", host);
+            std::process::exit(2);
+        })
+    };
+    std::net::SocketAddr::new(ip, port)
+}

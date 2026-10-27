@@ -19,7 +19,6 @@ use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs::OpenOptions;
 use std::io::{BufRead, Write};
-use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::{
@@ -179,6 +178,9 @@ impl CliAgentKind {
 #[command(name = "clawblox")]
 #[command(about = "Clawblox world engine CLI", long_about = None, version)]
 struct Cli {
+    /// Interface for local servers to listen on (default 127.0.0.1; use 0.0.0.0 to accept other machines)
+    #[arg(long, global = true, env = "CLAWBLOX_HOST", default_value = "127.0.0.1")]
+    host: std::net::IpAddr,
     #[command(subcommand)]
     command: Commands,
 }
@@ -341,6 +343,8 @@ enum Commands {
 
 fn main() {
     let cli = Cli::parse();
+    // Children (daemon mode, delegated world commands) inherit the choice.
+    std::env::set_var("CLAWBLOX_HOST", cli.host.to_string());
 
     match cli.command {
         Commands::Init { name } => init_project(name),
@@ -2423,7 +2427,7 @@ fn run_game(
             .with_state(state)
             .layer(cors), &base_path);
 
-        let addr = SocketAddr::from(([0, 0, 0, 0], port));
+        let addr = clawblox::bind_addr(port);
         println!();
         println!("Server running on http://localhost:{}", port);
         println!("Local frontend: http://localhost:{}{}", port, join_base_path(&base_path, "/"));
@@ -2683,7 +2687,7 @@ fn run_replay(
             .with_state(replay_state)
             .layer(cors), &base_path);
 
-        let addr = SocketAddr::from(([0, 0, 0, 0], port));
+        let addr = clawblox::bind_addr(port);
         println!("Replay server: http://localhost:{}{}", port, join_base_path(&base_path, "/"));
 
         let listener = tokio::net::TcpListener::bind(addr).await.unwrap_or_else(|e| {
@@ -3504,7 +3508,7 @@ fn run_external_runtime(
             &base_path,
         );
 
-        let addr = SocketAddr::from(([0, 0, 0, 0], port));
+        let addr = clawblox::bind_addr(port);
         println!();
         println!("Server running on http://localhost:{}", port);
         println!(
