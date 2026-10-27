@@ -14,7 +14,7 @@ mod characters;
 mod parts;
 
 pub use align_motors::{AlignKind, AlignMotorSpec, AlignTarget};
-pub use characters::{CharacterControllerState, GroundKinematicSupport};
+pub use characters::{CharacterControllerState, CharacterTuning, GroundKinematicSupport};
 use parts::build_collider_with_physical_properties;
 
 /// Large enough for normal worlds, small enough to keep Rapier broad-phase keys
@@ -145,6 +145,8 @@ pub struct PhysicsWorld {
     pub lua_to_interactions: HashMap<u64, PartInteractionState>,
     /// Character controllers for player movement
     pub character_controllers: HashMap<u64, CharacterControllerState>,
+    /// Per-world character movement tuning (`[clawblox.physics]` in world.toml).
+    pub character_tuning: CharacterTuning,
     /// Maps Rapier collider handle to Lua instance ID (for touch detection)
     pub collider_to_lua: HashMap<ColliderHandle, u64>,
     /// Maps Lua part IDs to their collider handles. Multiple Lua parts can
@@ -634,6 +636,7 @@ impl PhysicsWorld {
             lua_to_physical_properties: HashMap::new(),
             lua_to_interactions: HashMap::new(),
             character_controllers: HashMap::new(),
+            character_tuning: CharacterTuning::default(),
             collider_to_lua: HashMap::new(),
             lua_to_collider: HashMap::new(),
             lua_to_local_frame: HashMap::new(),

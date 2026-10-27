@@ -188,14 +188,46 @@ pub struct PhysicsConfig {
     /// at the cost of CPU.
     #[serde(default = "default_physics_solver_iterations")]
     pub solver_iterations: usize,
+    /// Characters fall with `Workspace.Gravity` times this (upstream behaviour: 20).
+    #[serde(default = "default_character_gravity_multiplier")]
+    pub character_gravity_multiplier: f32,
+    /// Highest step, in studs, a walking character climbs without jumping.
+    #[serde(default = "default_character_step_height")]
+    pub character_step_height: f32,
+    /// Steepest slope, in degrees, a walking character climbs.
+    #[serde(default = "default_character_max_slope_deg")]
+    pub character_max_slope_deg: f32,
+    /// Fastest a character falls, in studs per second.
+    #[serde(default = "default_character_terminal_velocity")]
+    pub character_terminal_velocity: f32,
 }
 
 impl Default for PhysicsConfig {
     fn default() -> Self {
         Self {
             solver_iterations: default_physics_solver_iterations(),
+            character_gravity_multiplier: default_character_gravity_multiplier(),
+            character_step_height: default_character_step_height(),
+            character_max_slope_deg: default_character_max_slope_deg(),
+            character_terminal_velocity: default_character_terminal_velocity(),
         }
     }
+}
+
+fn default_character_gravity_multiplier() -> f32 {
+    crate::game::constants::physics::CHARACTER_GRAVITY_MULTIPLIER
+}
+
+fn default_character_step_height() -> f32 {
+    crate::game::constants::physics::AUTOSTEP_MAX_HEIGHT
+}
+
+fn default_character_max_slope_deg() -> f32 {
+    45.0
+}
+
+fn default_character_terminal_velocity() -> f32 {
+    crate::game::constants::physics::CHARACTER_TERMINAL_FALL_SPEED
 }
 
 fn default_physics_solver_iterations() -> usize {

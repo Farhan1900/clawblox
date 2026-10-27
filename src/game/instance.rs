@@ -218,6 +218,12 @@ impl GameInstance {
 
     pub fn set_physics_config(&mut self, config: &PhysicsConfig) {
         self.physics.set_solver_iterations(config.solver_iterations);
+        self.physics.character_tuning = crate::game::physics::CharacterTuning {
+            gravity_multiplier: config.character_gravity_multiplier,
+            step_height: config.character_step_height,
+            max_slope_deg: config.character_max_slope_deg,
+            terminal_velocity: config.character_terminal_velocity,
+        };
     }
 
     /// Returns milliseconds since game instance was created

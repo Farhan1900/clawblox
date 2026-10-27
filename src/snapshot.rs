@@ -211,6 +211,8 @@ pub struct PlayerCharacterControllerSnapshot {
     pub move_to_elapsed: f32,
     pub grounded: bool,
     pub horizontal_velocity: [f32; 2],
+    #[serde(default)]
+    pub external_velocity: [f32; 2],
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1259,6 +1261,7 @@ fn capture_player_snapshot(
                                 move_to_elapsed: state.move_to_elapsed,
                                 grounded: state.grounded,
                                 horizontal_velocity: state.horizontal_velocity,
+                                external_velocity: state.external_velocity,
                             });
                     humanoid_root_part = Some(PlayerPartSnapshot {
                         attributes: data
@@ -1525,6 +1528,7 @@ fn restore_players(
                         state.move_to_elapsed = controller_snapshot.move_to_elapsed;
                         state.grounded = controller_snapshot.grounded;
                         state.horizontal_velocity = controller_snapshot.horizontal_velocity;
+                        state.external_velocity = controller_snapshot.external_velocity;
                     } else {
                         state.grounded = inferred_grounded;
                     }

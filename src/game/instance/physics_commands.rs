@@ -1,4 +1,5 @@
 use super::super::lua::runtime::PhysicsCommand;
+use super::controller_runtime::character_part_mass;
 use super::GameInstance;
 
 impl GameInstance {
@@ -9,6 +10,16 @@ impl GameInstance {
 
         for command in runtime.game().drain_physics_commands() {
             match command {
+                PhysicsCommand::ApplyImpulse { part_id, impulse }
+                | PhysicsCommand::ApplyImpulseAtPosition {
+                    part_id, impulse, ..
+                } if self.physics.character_controllers.contains_key(&part_id) => {
+                    // Characters are kinematic, so Rapier ignores impulses; feed them to the controller.
+                    if let Some(mass) = character_part_mass(self, part_id).filter(|m| *m > 0.0) {
+                        let dv = impulse.to_array().map(|v| v / mass);
+                        self.physics.add_character_velocity(part_id, dv);
+                    }
+                }
                 PhysicsCommand::ApplyImpulse { part_id, impulse } => {
                     self.physics
                         .apply_impulse_to_part(part_id, impulse.to_array());
@@ -219,5 +230,78 @@ mod tests {
             before_handle, after_handle,
             "interaction flag changes should update colliders without rebuilding the assembly body"
         );
+    }
+
+    fn character_world(gravity_multiplier: Option<f32>) -> GameInstance {
+        let mut instance = GameInstance::new(Uuid::new_v4(), None);
+        if let Some(m) = gravity_multiplier {
+            let mut config = crate::config::PhysicsConfig::default();
+            config.character_gravity_multiplier = m;
+            instance.set_physics_config(&config);
+        }
+        instance.load_script(
+            r#"
+            Workspace.Gravity = 10
+            local floor = Instance.new("Part")
+            floor.Size = Vector3.new(400, 2, 400)
+            floor.Position = Vector3.new(0, -1, 0)
+            floor.Anchored = true
+            floor.Parent = Workspace
+            game:GetService("Players").PlayerAdded:Connect(function(p) _G.player = p end)
+        "#,
+        );
+        assert!(instance.add_player(Uuid::new_v4(), "Subject"));
+        instance
+    }
+
+    fn root(instance: &GameInstance) -> (f64, f64) {
+        instance
+            .lua_runtime
+            .as_ref()
+            .unwrap()
+            .lua()
+            .load("local p = _G.player.Character.HumanoidRootPart.Position return p.X, p.Y")
+            .eval()
+            .unwrap()
+    }
+
+    #[test]
+    fn impulse_on_character_root_shoves_it_and_the_shove_fades() {
+        let mut instance = character_world(None);
+        for _ in 0..120 {
+            instance.tick();
+        }
+        let (x0, _) = root(&instance);
+        instance
+            .lua_runtime
+            .as_ref()
+            .unwrap()
+            .lua()
+            .load("local r = _G.player.Character.HumanoidRootPart r:ApplyImpulse(Vector3.new(r:GetMass() * 12, 0, 0))")
+            .exec()
+            .unwrap();
+        for _ in 0..60 {
+            instance.tick();
+        }
+        let (x1, _) = root(&instance);
+        for _ in 0..60 {
+            instance.tick();
+        }
+        let (x2, _) = root(&instance);
+        assert!(x1 - x0 > 0.5, "a 12 u/s shove should move the character: {x0} -> {x1}");
+        assert!(x2 - x1 < 0.05, "the shove should have faded on the ground: {x1} -> {x2}");
+    }
+
+    #[test]
+    fn character_gravity_multiplier_comes_from_physics_config() {
+        let mut heavy = character_world(None);
+        let mut light = character_world(Some(2.0));
+        for _ in 0..12 {
+            heavy.tick();
+            light.tick();
+        }
+        let (_, heavy_y) = root(&heavy);
+        let (_, light_y) = root(&light);
+        assert!(light_y > heavy_y + 1.0, "low character gravity should fall slower: {light_y} vs {heavy_y}");
     }
 }

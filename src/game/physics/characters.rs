@@ -16,6 +16,26 @@ fn interaction_groups(collision_group: CollisionGroupMask) -> InteractionGroups 
     )
 }
 
+/// Character movement tuning shared by every character in a world.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct CharacterTuning {
+    pub gravity_multiplier: f32,
+    pub step_height: f32,
+    pub max_slope_deg: f32,
+    pub terminal_velocity: f32,
+}
+
+impl Default for CharacterTuning {
+    fn default() -> Self {
+        Self {
+            gravity_multiplier: consts::CHARACTER_GRAVITY_MULTIPLIER,
+            step_height: consts::AUTOSTEP_MAX_HEIGHT,
+            max_slope_deg: 45.0,
+            terminal_velocity: consts::CHARACTER_TERMINAL_FALL_SPEED,
+        }
+    }
+}
+
 /// State for a character controller (player or NPC)
 pub struct CharacterControllerState {
     pub controller: KinematicCharacterController,
@@ -37,6 +57,8 @@ pub struct CharacterControllerState {
     /// sensor ray starts at the body center, so a support reported closer
     /// than this is inside the capsule (penetrating), not under it.
     pub capsule_half_extent: f32,
+    /// Horizontal velocity from impulses applied to the character (wind, knock-back); it decays over time.
+    pub external_velocity: [f32; 2],
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -107,6 +129,7 @@ impl PhysicsWorld {
             horizontal_velocity: [0.0, 0.0],
             collision_group: CollisionGroupMask::default(),
             capsule_half_extent: height * 0.5,
+            external_velocity: [0.0, 0.0],
         };
 
         self.character_controllers.insert(lua_id, state);
@@ -118,6 +141,21 @@ impl PhysicsWorld {
         self.collider_to_lua.insert(collider_handle, lua_id);
 
         body_handle
+    }
+
+    /// Adds a velocity change from an impulse on the character's root part (impulse / mass): the vertical
+    /// part goes straight into the fall speed, the horizontal part decays like a shove.
+    pub fn add_character_velocity(&mut self, lua_id: u64, dv: [f32; 3]) -> bool {
+        let Some(state) = self.character_controllers.get_mut(&lua_id) else {
+            return false;
+        };
+        state.vertical_velocity += dv[1];
+        if dv[1] > 0.0 {
+            state.grounded = false;
+        }
+        state.external_velocity[0] += dv[0];
+        state.external_velocity[1] += dv[2];
+        true
     }
 
     /// Sets the target position for a character (for Goto action)
@@ -497,12 +535,12 @@ impl PhysicsWorld {
             // Larger offset prevents getting stuck when sliding against surfaces
             offset: CharacterLength::Absolute(0.05),
             autostep: Some(CharacterAutostep {
-                max_height: CharacterLength::Absolute(consts::AUTOSTEP_MAX_HEIGHT),
+                max_height: CharacterLength::Absolute(self.character_tuning.step_height),
                 min_width: CharacterLength::Absolute(consts::AUTOSTEP_MIN_WIDTH),
                 include_dynamic_bodies: true,
             }),
-            max_slope_climb_angle: 45.0_f32.to_radians(),
-            min_slope_slide_angle: 30.0_f32.to_radians(),
+            max_slope_climb_angle: self.character_tuning.max_slope_deg.to_radians(),
+            min_slope_slide_angle: (self.character_tuning.max_slope_deg - 15.0).max(0.0).to_radians(),
             snap_to_ground: Some(CharacterLength::Absolute(consts::SNAP_TO_GROUND)),
             ..Default::default()
         };

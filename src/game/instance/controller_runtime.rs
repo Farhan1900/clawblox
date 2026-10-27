@@ -122,6 +122,7 @@ pub(super) fn update_character_movement(instance: &mut GameInstance, dt: f32) {
             grounded,
             move_to_elapsed,
             capsule_half_extent,
+            external_velocity,
         ) = {
             let Some(state) = instance.physics.get_character_state(hrp_id) else {
                 continue;
@@ -137,6 +138,7 @@ pub(super) fn update_character_movement(instance: &mut GameInstance, dt: f32) {
                 state.grounded,
                 state.move_to_elapsed,
                 state.capsule_half_extent,
+                state.external_velocity,
             )
         };
 
@@ -144,7 +146,8 @@ pub(super) fn update_character_movement(instance: &mut GameInstance, dt: f32) {
             .physics
             .get_character_walk_speed(hrp_id)
             .unwrap_or(consts::WALK_SPEED);
-        let gravity = instance.physics.gravity.y * consts::CHARACTER_GRAVITY_MULTIPLIER;
+        let tuning = instance.physics.character_tuning;
+        let gravity = instance.physics.gravity.y * tuning.gravity_multiplier;
         let controller_config = ControllerManagerConfig {
             ground_query_distance: consts::CHARACTER_GROUND_QUERY_DISTANCE,
             platform_stick_distance: consts::CHARACTER_PLATFORM_STICK_DISTANCE,
@@ -229,6 +232,20 @@ pub(super) fn update_character_movement(instance: &mut GameInstance, dt: f32) {
             motion_plan.new_vertical_velocity = motion_plan.new_vertical_velocity.max(0.0);
         }
 
+        // Shoves from impulses (wind, knock-back) ride on top of walking and fade: quickly with feet on the
+        // ground, slowly in the air.
+        motion_plan.desired[0] += external_velocity[0] * dt;
+        motion_plan.desired[2] += external_velocity[1] * dt;
+        let decay = (-(if grounded { 8.0 } else { 0.5 }) * dt).exp();
+        let mut new_external = [external_velocity[0] * decay, external_velocity[1] * decay];
+        if new_external[0].abs() + new_external[1].abs() < 0.01 {
+            new_external = [0.0, 0.0];
+        }
+        motion_plan.new_vertical_velocity = motion_plan.new_vertical_velocity.max(-tuning.terminal_velocity);
+        if motion_plan.desired[1] < 0.0 {
+            motion_plan.desired[1] = motion_plan.desired[1].max(-tuning.terminal_velocity * dt);
+        }
+
         let mut new_vertical_velocity = motion_plan.new_vertical_velocity;
         let mut new_move_to_elapsed = move_to_elapsed;
         if motion_plan.reached_move_to {
@@ -288,6 +305,7 @@ pub(super) fn update_character_movement(instance: &mut GameInstance, dt: f32) {
         if let Some(state) = instance.physics.get_character_state_mut(hrp_id) {
             state.vertical_velocity = new_vertical_velocity;
             state.move_to_elapsed = new_move_to_elapsed;
+            state.external_velocity = new_external;
             if dt > 0.0 {
                 state.horizontal_velocity =
                     [applied_horizontal[0] / dt, applied_horizontal[1] / dt];
@@ -345,7 +363,7 @@ fn apply_character_support_load(instance: &mut GameInstance, hrp_id: u64, max_di
     );
 }
 
-fn character_part_mass(instance: &GameInstance, hrp_id: u64) -> Option<f32> {
+pub(super) fn character_part_mass(instance: &GameInstance, hrp_id: u64) -> Option<f32> {
     let runtime = instance.lua_runtime.as_ref()?;
     for candidate in runtime.workspace().get_descendants() {
         let data = candidate.data.lock().unwrap();
