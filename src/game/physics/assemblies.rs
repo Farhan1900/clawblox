@@ -427,12 +427,14 @@ impl PhysicsWorld {
             self.sync_assembly_spec(spec, dt, &mut stats);
         }
 
-        let orphaned_roots: Vec<u64> = self
+        let mut orphaned_roots: Vec<u64> = self
             .assembly_signatures
             .keys()
             .copied()
             .filter(|root_id| !active_roots.contains(root_id))
             .collect();
+        // Removal order reshapes Rapier's contact graph (swap-remove); HashMap order is random per process.
+        orphaned_roots.sort_unstable();
         let orphaned_root_count = orphaned_roots.len();
         for root_id in orphaned_roots {
             self.remove_assembly_by_root(root_id);
@@ -445,7 +447,9 @@ impl PhysicsWorld {
             .filter(|lua_id| {
                 !active_lua_ids.contains(lua_id) && !self.character_controllers.contains_key(lua_id)
             })
-            .collect();
+            .collect::<Vec<u64>>();
+        let mut orphaned_parts = orphaned_parts;
+        orphaned_parts.sort_unstable();
         let orphaned_part_count = orphaned_parts.len();
         for lua_id in orphaned_parts {
             self.remove_part(lua_id);

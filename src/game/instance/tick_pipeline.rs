@@ -119,7 +119,9 @@ pub(super) fn run_tick_phases(instance: &mut GameInstance, dt: f32) {
     }
 
     // Step physics simulation.
+    trace_state(instance, "pre");
     instance.physics.step(dt);
+    trace_state(instance, "post");
     if let Some(profile) = profile.as_mut() {
         profile.mark("physics_step");
     }
@@ -153,5 +155,44 @@ pub(super) fn run_tick_phases(instance: &mut GameInstance, dt: f32) {
     }
     if let Some(profile) = profile {
         profile.finish();
+    }
+}
+
+/// Debug aid for determinism: with CLAWBLOX_STATE_TRACE=<file>, append every body's exact state (bit patterns)
+/// in Rapier handle order before and after each physics step, so two runs can be diffed tick by tick.
+fn trace_state(instance: &GameInstance, phase: &str) {
+    let Some(path) = std::env::var_os("CLAWBLOX_STATE_TRACE") else {
+        return;
+    };
+    use std::io::Write;
+    let mut out = String::new();
+    for (handle, body) in instance.physics.rigid_body_set.iter() {
+        let lua = instance.physics.body_to_lua.get(&handle).copied().unwrap_or(0);
+        let p = body.position();
+        let (v, w) = (body.linvel(), body.angvel());
+        let (uf, ut) = (body.user_force(), body.user_torque());
+        let bits: Vec<String> = [
+            uf.x, uf.y, uf.z, ut.x, ut.y, ut.z,
+            p.translation.x, p.translation.y, p.translation.z,
+            p.rotation.i, p.rotation.j, p.rotation.k, p.rotation.w,
+            v.x, v.y, v.z, w.x, w.y, w.z,
+        ]
+        .iter()
+        .map(|f| format!("{:08x}", f.to_bits()))
+        .collect();
+        out.push_str(&format!(
+            "{} {} h{} lua{} sleep{} {}\n",
+            instance.tick, phase, handle.into_raw_parts().0, lua, body.is_sleeping() as u8, bits.join(" ")
+        ));
+    }
+    if phase == "pre" {
+        for (ch, collider) in instance.physics.collider_set.iter() {
+            let lua = instance.physics.collider_to_lua.get(&ch).copied().unwrap_or(0);
+            let parent = collider.parent().map(|h| h.into_raw_parts().0).unwrap_or(u32::MAX);
+            out.push_str(&format!("{} col c{} lua{} parent{}\n", instance.tick, ch.into_raw_parts().0, lua, parent));
+        }
+    }
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+        let _ = f.write_all(out.as_bytes());
     }
 }

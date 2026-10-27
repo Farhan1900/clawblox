@@ -253,12 +253,13 @@ impl PhysicsWorld {
     /// Removes motor joints whose align constraint no longer exists (or is
     /// no longer in motor mode) this tick.
     pub fn retain_align_motors(&mut self, live: &HashSet<u64>) {
-        let stale: Vec<u64> = self
+        let mut stale: Vec<u64> = self
             .align_joints
             .keys()
             .filter(|align_id| !live.contains(align_id))
             .copied()
             .collect();
+        stale.sort_unstable();
         for align_id in stale {
             self.remove_align_motor(align_id);
         }

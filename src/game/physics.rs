@@ -1089,7 +1089,9 @@ impl PhysicsWorld {
 
     /// Gets all Lua part IDs that have physics bodies
     pub fn get_all_part_ids(&self) -> Vec<u64> {
-        self.lua_to_body.keys().copied().collect()
+        let mut ids: Vec<u64> = self.lua_to_body.keys().copied().collect();
+        ids.sort_unstable(); // callers may add or remove bodies in this order
+        ids
     }
 
     pub fn has_exact_part_ids<I>(&self, ids: I, count: usize) -> bool
