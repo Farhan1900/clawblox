@@ -200,6 +200,12 @@ pub struct PhysicsConfig {
     /// Fastest a character falls, in studs per second.
     #[serde(default = "default_character_terminal_velocity")]
     pub character_terminal_velocity: f32,
+    /// Radius of a player's character capsule, in studs (upstream: 1).
+    #[serde(default = "default_character_radius")]
+    pub character_radius: f32,
+    /// Total height of a player's character capsule, in studs (upstream: 5).
+    #[serde(default = "default_character_height")]
+    pub character_height: f32,
 }
 
 impl Default for PhysicsConfig {
@@ -210,6 +216,8 @@ impl Default for PhysicsConfig {
             character_step_height: default_character_step_height(),
             character_max_slope_deg: default_character_max_slope_deg(),
             character_terminal_velocity: default_character_terminal_velocity(),
+            character_radius: default_character_radius(),
+            character_height: default_character_height(),
         }
     }
 }
@@ -228,6 +236,14 @@ fn default_character_max_slope_deg() -> f32 {
 
 fn default_character_terminal_velocity() -> f32 {
     crate::game::constants::physics::CHARACTER_TERMINAL_FALL_SPEED
+}
+
+fn default_character_radius() -> f32 {
+    1.0
+}
+
+fn default_character_height() -> f32 {
+    5.0
 }
 
 fn default_physics_solver_iterations() -> usize {

@@ -223,6 +223,8 @@ impl GameInstance {
             step_height: config.character_step_height,
             max_slope_deg: config.character_max_slope_deg,
             terminal_velocity: config.character_terminal_velocity,
+            radius: config.character_radius,
+            height: config.character_height,
         };
     }
 

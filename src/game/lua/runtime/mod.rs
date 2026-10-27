@@ -566,6 +566,11 @@ impl LuaRuntime {
 
     /// Adds a player and returns (Player instance, HumanoidRootPart lua_id)
     pub fn add_player(&self, user_id: u64, name: &str) -> (Instance, u64) {
+        self.add_player_sized(user_id, name, 2.0, 5.0)
+    }
+
+    /// Like `add_player`, with the HumanoidRootPart sized to the world's character capsule.
+    pub fn add_player_sized(&self, user_id: u64, name: &str, diameter: f32, height: f32) -> (Instance, u64) {
         let player = Instance::from_data(InstanceData::new_player(user_id, name));
 
         // Create character model (Roblox-compatible)
@@ -574,7 +579,7 @@ impl LuaRuntime {
         // Create HumanoidRootPart as a Cylinder (capsule-like shape for player)
         let mut hrp_data = InstanceData::new_part("HumanoidRootPart");
         if let Some(part) = &mut hrp_data.part_data {
-            part.size = super::types::Vector3::new(2.0, 5.0, 2.0); // diameter, height, diameter (R15 scale)
+            part.size = super::types::Vector3::new(diameter, height, diameter); // diameter, height, diameter
             part.position = super::types::Vector3::new(0.0, 6.0, 0.0); // Spawn above floor
             part.anchored = false;
             part.shape = super::types::PartType::Cylinder;

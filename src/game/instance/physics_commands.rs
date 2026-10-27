@@ -304,4 +304,38 @@ mod tests {
         let (_, light_y) = root(&light);
         assert!(light_y > heavy_y + 1.0, "low character gravity should fall slower: {light_y} vs {heavy_y}");
     }
+
+    #[test]
+    fn character_capsule_size_comes_from_physics_config() {
+        let mut instance = GameInstance::new(Uuid::new_v4(), None);
+        let mut config = crate::config::PhysicsConfig::default();
+        config.character_radius = 0.35;
+        config.character_height = 1.8;
+        instance.set_physics_config(&config);
+        instance.load_script(
+            r#"
+            Workspace.Gravity = 10
+            local floor = Instance.new("Part")
+            floor.Size = Vector3.new(400, 2, 400)
+            floor.Position = Vector3.new(0, -1, 0)
+            floor.Anchored = true
+            floor.Parent = Workspace
+            game:GetService("Players").PlayerAdded:Connect(function(p) _G.player = p end)
+        "#,
+        );
+        assert!(instance.add_player(Uuid::new_v4(), "Small"));
+        for _ in 0..180 {
+            instance.tick();
+        }
+        let (size_x, size_y, y): (f64, f64, f64) = instance
+            .lua_runtime
+            .as_ref()
+            .unwrap()
+            .lua()
+            .load("local r = _G.player.Character.HumanoidRootPart return r.Size.X, r.Size.Y, r.Position.Y")
+            .eval()
+            .unwrap();
+        assert!((size_x - 0.7).abs() < 1e-4 && (size_y - 1.8).abs() < 1e-4, "part size {size_x} x {size_y}");
+        assert!((y - 0.9).abs() < 0.15, "a 1.8 m capsule should rest with its centre about 0.9 m up: {y}");
+    }
 }

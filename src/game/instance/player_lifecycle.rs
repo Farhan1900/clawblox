@@ -25,7 +25,9 @@ impl GameInstance {
         self.player_last_activity.insert(agent_id, Instant::now());
 
         if let Some(runtime) = &self.lua_runtime {
-            let (player, hrp_id) = runtime.add_player(user_id, name);
+            let tuning = self.physics.character_tuning;
+            let (player, hrp_id) =
+                runtime.add_player_sized(user_id, name, tuning.radius * 2.0, tuning.height);
 
             // Offset spawn position based on player count to avoid overlap
             let player_index = self.players.len() as f32;
@@ -34,7 +36,7 @@ impl GameInstance {
 
             // Register character controller for player movement
             self.physics
-                .add_character(hrp_id, [spawn_x, 6.0, spawn_z], 1.0, 5.0);
+                .add_character(hrp_id, [spawn_x, 6.0, spawn_z], tuning.radius, tuning.height);
             self.player_hrp_ids.insert(agent_id, hrp_id);
 
             if let Err(e) = runtime.fire_player_added(&player) {

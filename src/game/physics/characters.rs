@@ -23,6 +23,9 @@ pub struct CharacterTuning {
     pub step_height: f32,
     pub max_slope_deg: f32,
     pub terminal_velocity: f32,
+    /// Capsule radius and total height (studs) of characters created for joining players.
+    pub radius: f32,
+    pub height: f32,
 }
 
 impl Default for CharacterTuning {
@@ -32,6 +35,8 @@ impl Default for CharacterTuning {
             step_height: consts::AUTOSTEP_MAX_HEIGHT,
             max_slope_deg: 45.0,
             terminal_velocity: consts::CHARACTER_TERMINAL_FALL_SPEED,
+            radius: 1.0,
+            height: 5.0,
         }
     }
 }
