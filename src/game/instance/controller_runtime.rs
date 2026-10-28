@@ -81,8 +81,12 @@ pub(super) fn sync_move_targets(instance: &mut GameInstance) {
                     if let Some(current) = instance.physics.get_character_position(hrp_id) {
                         let dir = humanoid.move_input_direction.unit();
                         // Keep a short lookahead target so Move() acts like
-                        // continuous directional locomotion.
-                        let lookahead = (humanoid.walk_speed * 0.25).max(0.5);
+                        // continuous directional locomotion. It must stay beyond
+                        // MOVE_TO_REACHED_EPSILON_XZ: at the old 0.5 m floor a
+                        // character at 2 m/s or less counted as arrived every
+                        // tick (no motion, MoveToFinished each tick).
+                        let lookahead = (humanoid.walk_speed * 0.25)
+                            .max(humanoid_consts::MOVE_TO_REACHED_EPSILON_XZ + 0.5);
                         instance.physics.set_character_target(
                             hrp_id,
                             Some([

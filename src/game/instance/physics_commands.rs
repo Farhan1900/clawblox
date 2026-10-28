@@ -305,6 +305,80 @@ mod tests {
         assert!(light_y > heavy_y + 1.0, "low character gravity should fall slower: {light_y} vs {heavy_y}");
     }
 
+    /// A 0.35 x 1.8 m character on a floor (grounded) or on a plane only characters collide with under a
+    /// non-colliding water part (swimming, as the archipelago does), walking with Humanoid:Move at `speed`.
+    fn move_world(speed: f32, swimming: bool) -> GameInstance {
+        let mut instance = GameInstance::new(Uuid::new_v4(), None);
+        let mut config = crate::config::PhysicsConfig::default();
+        config.character_radius = 0.35;
+        config.character_height = 1.8;
+        instance.set_physics_config(&config);
+        instance.load_script(&format!(
+            r#"
+            Workspace.Gravity = 10
+            local PhysicsService = game:GetService("PhysicsService")
+            PhysicsService:RegisterCollisionGroup("Agents")
+            PhysicsService:RegisterCollisionGroup("SwimPlane")
+            PhysicsService:CollisionGroupSetCollidable("SwimPlane", "Default", false)
+            local floor = Instance.new("Part")
+            floor.Size = Vector3.new(400, 1, 400)
+            floor.Position = Vector3.new(0, -0.5, 0)
+            floor.Anchored = true
+            if {swimming} then
+                floor.CollisionGroup = "SwimPlane"
+                local water = Instance.new("Part")
+                water.Size = Vector3.new(400, 0.2, 400)
+                water.Position = Vector3.new(0, 1.2, 0)
+                water.Anchored = true
+                water.CanCollide = false
+                water.Parent = Workspace
+            end
+            floor.Parent = Workspace
+            _G.finished = 0
+            game:GetService("Players").PlayerAdded:Connect(function(p)
+                _G.player = p
+                p.CharacterAdded:Connect(function(c)
+                    c:WaitForChild("HumanoidRootPart").CollisionGroup = "Agents"
+                    local hum = c:WaitForChild("Humanoid")
+                    hum.WalkSpeed = {speed}
+                    hum.MoveToFinished:Connect(function() _G.finished = _G.finished + 1 end)
+                end)
+            end)
+        "#
+        ));
+        assert!(instance.add_player(Uuid::new_v4(), "Mover"));
+        instance
+    }
+
+    #[test]
+    fn move_keeps_slow_characters_moving_and_never_finishes() {
+        for swimming in [false, true] {
+            for speed in [0.5_f32, 1.5, 2.0, 2.5] {
+                let mut instance = move_world(speed, swimming);
+                for _ in 0..90 {
+                    instance.tick();
+                }
+                let lua = instance.lua_runtime.as_ref().unwrap().lua();
+                lua.load("local h = _G.player.Character.Humanoid h.WalkSpeed = ... h:Move(Vector3.new(1, 0, 0))")
+                    .call::<()>(speed)
+                    .unwrap();
+                instance.tick();
+                let (mut x, _) = root(&instance);
+                let x0 = x;
+                for t in 0..600 {
+                    instance.tick();
+                    let (nx, _) = root(&instance);
+                    assert!(nx > x + 1e-4, "swimming={swimming} at {speed} m/s stood still on tick {t}: {x} -> {nx}");
+                    x = nx;
+                }
+                let expected = f64::from(speed) * 10.0;
+                assert!((x - x0 - expected).abs() < expected * 0.1, "swimming={swimming} at {speed} m/s went {} m in 10 s", x - x0);
+                let finished: i64 = instance.lua_runtime.as_ref().unwrap().lua().load("return _G.finished").eval().unwrap();
+                assert_eq!(finished, 0, "swimming={swimming} at {speed} m/s fired MoveToFinished");
+            }
+        }
+    }
+
     #[test]
     fn character_capsule_size_comes_from_physics_config() {
         let mut instance = GameInstance::new(Uuid::new_v4(), None);
