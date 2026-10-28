@@ -647,6 +647,71 @@ fn test_character_movement_after_landing_on_thin_platform() {
     );
 }
 
+/// Patch 11: running down a 9 degree ramp keeps the character grounded every tick (it used to leave the ground each
+/// tick and cycle Freefall and Landed); walking off a 0.45 m drop still falls.
+#[test]
+fn test_character_stays_grounded_running_down_a_ramp() {
+    let mut world = PhysicsWorld::new();
+    let a = 9.0_f32.to_radians();
+    // 40 m long, its +z end lower: the top surface is y = 0.5 cos(a) - z sin(a)
+    world.add_part(
+        1,
+        [0.0, 0.0, 0.0],
+        &[[1.0, 0.0, 0.0], [0.0, a.cos(), -a.sin()], [0.0, a.sin(), a.cos()]],
+        [6.0, 1.0, 40.0],
+        true,
+        true,
+        true,
+        true,
+        PartType::Block,
+        None,
+    );
+    // a flat floor 0.45 m below the ramp's low end
+    let low = 0.5 * a.cos() - 20.0 * a.sin();
+    world.add_part(
+        2,
+        [0.0, low - 0.45 - 0.5, 30.0],
+        &[[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
+        [6.0, 1.0, 20.0],
+        true,
+        true,
+        true,
+        true,
+        PartType::Block,
+        None,
+    );
+    let id = 100;
+    world.add_character(id, [0.0, 0.5 * a.cos() + 15.0 * a.sin() + 1.0, -15.0], 0.35, 1.8);
+    let dt = 1.0 / 60.0;
+    let mut grounded = false;
+    for _ in 0..30 {
+        world.query_pipeline.update(&world.collider_set);
+        grounded = world.move_character(id, [0.0, -0.05, 0.0], dt).unwrap().grounded;
+        world.step(dt);
+    }
+    assert!(grounded, "the character never landed on the ramp");
+    let (mut airborne, mut fell) = (0, false);
+    for _ in 0..600 {
+        world.query_pipeline.update(&world.collider_set);
+        let z = world.get_character_position(id).unwrap()[2];
+        let on_ramp = z < 19.0;
+        let m = world.move_character(id, [0.0, if grounded { 0.0 } else { -0.05 }, 4.5 * dt], dt).unwrap();
+        grounded = m.grounded;
+        world.step(dt);
+        if on_ramp && !grounded {
+            airborne += 1;
+        }
+        if z > 20.0 && !grounded {
+            fell = true;
+        }
+        if z > 24.0 {
+            break;
+        }
+    }
+    assert_eq!(airborne, 0, "airborne ticks running down the ramp");
+    assert!(fell, "the 0.45 m drop at the ramp's foot should still be a fall");
+}
+
 #[test]
 fn test_character_direction_reversal() {
     let mut world = PhysicsWorld::new();
@@ -1243,3 +1308,102 @@ fn raycast_cost_query_pipeline() {
         assert_eq!(hits, n);
     }
 }
+
+
+/// The archipelago's start-island collision mesh (worlds/archipelago/terrain, harness/scripts/sync_terrain.py) as a
+/// static part in a fresh world, with the world's swim plane (top -1.3) and one character standing at (x, z).
+fn start_island_with_character(x: f32, z: f32) -> (PhysicsWorld, u64) {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../worlds/archipelago/terrain/start.awmesh");
+    let mesh = super::load_collision_mesh(&path).expect("worlds/archipelago/terrain/start.awmesh");
+    let mut world = PhysicsWorld::new();
+    let half = mesh.half_extents;
+    let mut terrain = assembly_part(1, mesh.center, [half[0] * 2.0, half[1] * 2.0, half[2] * 2.0], true);
+    terrain.mesh = Some(mesh.shape.clone());
+    let plane = assembly_part(2, [0.0, -1.8, -100.0], [900.0, 1.0, 900.0], true);
+    world.sync_assemblies(vec![single_part_spec(terrain), single_part_spec(plane)], 1.0 / 60.0);
+    let id = 100;
+    world.add_character(id, [x, 2.5, z], 0.35, 1.8);
+    for _ in 0..60 {
+        world.query_pipeline.update(&world.collider_set);
+        world.move_character(id, [0.0, -0.05, 0.0], 1.0 / 60.0);
+        world.step(1.0 / 60.0);
+    }
+    (world, id)
+}
+
+/// Patch 11 on the authored mesh: walking north at swimming pace down the start island's 13 degree sand slope keeps
+/// the character grounded every tick (it cycled Freefall and Landed before the ground snap).
+#[test]
+fn test_character_stays_grounded_down_the_mesh_sand_slope() {
+    let (mut world, id) = start_island_with_character(5.0, -26.0);
+    let dt = 1.0 / 60.0;
+    let y0 = world.get_character_position(id).unwrap()[1];
+    let mut airborne = 0;
+    for _ in 0..240 {
+        world.query_pipeline.update(&world.collider_set);
+        if !world.move_character(id, [0.0, 0.0, -1.5 * dt], dt).unwrap().grounded {
+            airborne += 1;
+        }
+        world.step(dt);
+    }
+    let y1 = world.get_character_position(id).unwrap()[1];
+    assert!(y0 - y1 > 0.8, "the character should have walked down the slope: {} -> {}", y0, y1);
+    assert_eq!(airborne, 0, "airborne ticks walking down the sand slope");
+}
+
+/// Patch 11 on the authored mesh: pressed against the 0.45 m rock ledge's east riser, a jump rises (the upward sweep
+/// was wedged on the riser's top edge and the hop went nowhere).
+#[test]
+fn test_character_jumps_when_pressed_against_a_mesh_riser() {
+    let (mut world, id) = start_island_with_character(-9.5, 16.7);
+    let dt = 1.0 / 60.0;
+    for _ in 0..60 {
+        world.query_pipeline.update(&world.collider_set);
+        world.move_character(id, [-2.0 * dt, 0.0, 0.0], dt);
+        world.step(dt);
+    }
+    let pressed = world.get_character_position(id).unwrap();
+    assert!(pressed[0] > -10.5, "the riser should stop the walk: {:?}", pressed);
+    let mut top = pressed[1];
+    let mut v = 7.0_f32; // the archipelago's JumpPower
+    for _ in 0..30 {
+        world.query_pipeline.update(&world.collider_set);
+        world.move_character(id, [0.0, v * dt, 0.0], dt);
+        world.step(dt);
+        v -= 30.0 * dt;
+        top = top.max(world.get_character_position(id).unwrap()[1]);
+    }
+    assert!(top - pressed[1] > 0.5, "the jump did not rise: {} -> {}", pressed[1], top);
+}
+
+
+/// Patch 11: the ground snap keeps the controller's 5 cm offset, so a swimmer walking off the bottom of the start
+/// island's sand slope onto the swim plane (top -1.3) carries on instead of wedging against the floor.
+#[test]
+fn test_character_walks_off_the_mesh_onto_the_swim_plane() {
+    let (mut world, id) = start_island_with_character(5.0, -26.0);
+    let dt = 1.0 / 60.0;
+    for _ in 0..600 {
+        world.query_pipeline.update(&world.collider_set);
+        world.move_character(id, [0.0, 0.0, -1.5 * dt], dt);
+        world.step(dt);
+    }
+    let p = world.get_character_position(id).unwrap();
+    assert!(p[2] < -40.0, "the swimmer stopped at {:?}", p);
+}
+
+/// Patch 11: swimming in on the swim plane from open water and up onto the start island's sand slope never wedges
+/// against the flat plane (the ground snap leaves flat floors, and the floor-wedge lift, alone).
+#[test]
+fn test_character_swims_in_onto_the_mesh_slope() {
+    let (mut world, id) = start_island_with_character(40.0, -12.0);
+    let dt = 1.0 / 60.0;
+    for _ in 0..480 {
+        world.query_pipeline.update(&world.collider_set);
+        world.move_character(id, [-1.5 * dt, 0.0, 0.0], dt);
+        world.step(dt);
+    }
+    let p = world.get_character_position(id).unwrap();
+    assert!(p[0] < 29.5 && p[1] > -0.2, "the swimmer stopped at {:?}", p);
+}
+

@@ -2,6 +2,7 @@ use nalgebra::UnitQuaternion;
 use rapier3d::control::{
     CharacterAutostep, CharacterLength, EffectiveCharacterMovement, KinematicCharacterController,
 };
+use rapier3d::parry::query::ShapeCastOptions;
 use rapier3d::prelude::*;
 
 use super::{rotation_matrix_to_quaternion, PhysicsWorld};
@@ -530,6 +531,7 @@ impl PhysicsWorld {
         let body_handle = state.body_handle;
         let collider_handle = state.collider_handle;
         let collision_group = state.collision_group;
+        let was_grounded = state.grounded;
 
         let body = self.rigid_body_set.get(body_handle)?;
         let collider = self.collider_set.get(collider_handle)?;
@@ -590,6 +592,7 @@ impl PhysicsWorld {
         // requested, none applied, every blocking contact floor-like) and
         // redo the sweep once from a slightly lifted pose; snap-to-ground
         // restores proper clearance within the same call.
+        let mut wedge_lifted = false;
         let desired_horiz = (desired.x * desired.x + desired.z * desired.z).sqrt();
         let applied_horiz = (movement.translation.x * movement.translation.x
             + movement.translation.z * movement.translation.z)
@@ -626,6 +629,84 @@ impl PhysicsWorld {
                 movement = lifted_movement;
                 movement.translation.y += WEDGE_LIFT;
                 collisions = lifted_collisions;
+                wedge_lifted = true;
+            }
+        }
+
+        // Patch 11: wall-wedge recovery, the vertical twin of the floor wedge above. A capsule pressed against a
+        // riser of a collision mesh can sit within the contact offset of the riser's top edge, where the edge's
+        // normals disagree; every upward sweep (a jump) then returns an immediate toi=0 hit against that wall-like
+        // contact and the jump goes nowhere. Redo the sweep once from a pose eased 3 cm off the wall.
+        let desired_up = desired.y;
+        if desired_up > 1.0e-4
+            && movement.translation.y < desired_up * 0.05
+            && !collisions.is_empty()
+            && collisions.iter().all(|c| c.hit.normal1.y.abs() < 0.3)
+        {
+            let away = collisions.iter().fold(vector![0.0, 0.0, 0.0], |acc, c| {
+                acc + vector![c.hit.normal1.x, 0.0, c.hit.normal1.z]
+            });
+            if let Some(away) = UnitVector::try_new(away, 1.0e-6) {
+                const WALL_EASE: f32 = 0.03;
+                let mut eased_pos = current_pos;
+                eased_pos.translation.vector += *away * WALL_EASE;
+                let mut eased_collisions = Vec::new();
+                let eased = controller.move_shape(
+                    dt,
+                    &self.rigid_body_set,
+                    &self.collider_set,
+                    &self.query_pipeline,
+                    shape,
+                    &eased_pos,
+                    desired,
+                    filter,
+                    |collision| eased_collisions.push(collision),
+                );
+                if eased.translation.y > movement.translation.y + 1.0e-5 {
+                    movement = eased;
+                    movement.translation += *away * WALL_EASE;
+                    collisions = eased_collisions;
+                }
+            }
+        }
+
+        // Patch 11: ground snap on slopes. A supported character moves with no downward component, and Rapier's
+        // snap_to_ground only runs on a downward move, so walking down a slope lifted the capsule a little off the
+        // ground every tick until it lost contact (Freefall, then Landed, over and over). Snap it back down every
+        // step by at most the drop a walkable slope makes over that step; a ledge drop is deeper and still falls.
+        // Flat ground needs no snap (and keeps the floor-wedge lift above).
+        const OFFSET: f32 = 0.05; // the controller's offset, below
+        if was_grounded && desired.y == 0.0 && !wedge_lifted {
+            let step = (movement.translation.x * movement.translation.x
+                + movement.translation.z * movement.translation.z)
+                .sqrt();
+            let reach = (step * self.character_tuning.max_slope_deg.to_radians().tan())
+                .min(consts::SNAP_TO_GROUND);
+            if reach > 1.0e-5 {
+                let at = Translation::from(movement.translation) * current_pos;
+                if let Some((_, hit)) = self.query_pipeline.cast_shape(
+                    &self.rigid_body_set,
+                    &self.collider_set,
+                    &at,
+                    &vector![0.0, -1.0, 0.0],
+                    shape,
+                    ShapeCastOptions {
+                        target_distance: 0.0,
+                        stop_at_penetration: false,
+                        max_time_of_impact: reach + OFFSET,
+                        compute_impact_geometry_on_penetration: true,
+                    },
+                    filter,
+                ) {
+                    // down to the contact, less the controller's offset (a cast with that target distance
+                    // undershot it on meshes and left the capsule wedged against the floor)
+                    let drop = hit.time_of_impact - OFFSET;
+                    let up = hit.normal1.y.abs().max(hit.normal2.y.abs());
+                    if drop > 0.0 && up < 0.999 && up >= self.character_tuning.max_slope_deg.to_radians().cos() {
+                        movement.translation.y -= drop;
+                        movement.grounded = true;
+                    }
+                }
             }
         }
 

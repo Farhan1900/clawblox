@@ -515,6 +515,7 @@ fn spectator_render_matches(a: &SpectatorRender, b: &SpectatorRender) -> bool {
         && a.receives_shadow == b.receives_shadow
         && a.visible == b.visible
         && a.double_sided == b.double_sided
+        && a.mesh == b.mesh
         && a.transparency == b.transparency
 }
 
@@ -1089,6 +1090,7 @@ mod tests {
             receives_shadow: true,
             visible: true,
             double_sided: false,
+            mesh: None,
             transparency: None,
         }
     }

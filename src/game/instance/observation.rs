@@ -161,7 +161,15 @@ fn build_render(
     let role =
         attr_string(&data.attributes, "RenderRole").unwrap_or_else(|| "unspecified".to_string());
     let preset_id = attr_string(&data.attributes, "RenderPresetId");
-    let kind = if preset_id.is_some() {
+    // Patch 11: a collision-mesh part (patch 10) is drawn from a file, not as its bounding box: the RenderMesh
+    // attribute (an asset path) or else its CollisionMeshFile.
+    let mesh = part_data.collision_mesh.as_ref().map(|_| {
+        attr_string(&data.attributes, "RenderMesh")
+            .unwrap_or_else(|| part_data.collision_mesh_file.clone())
+    });
+    let kind = if mesh.is_some() {
+        "mesh"
+    } else if preset_id.is_some() {
         "preset"
     } else {
         "primitive"
@@ -195,6 +203,7 @@ fn build_render(
         receives_shadow,
         visible,
         double_sided: false,
+        mesh,
         transparency: if part_data.transparency != 0.0 {
             Some(part_data.transparency)
         } else {
@@ -230,11 +239,15 @@ fn build_spectator_entity_from_data(
             part_data.position.z,
         ]),
         rotation: if is_identity { None } else { Some(rot) },
-        size: Some(round_position([
-            part_data.size.x,
-            part_data.size.y,
-            part_data.size.z,
-        ])),
+        size: if part_data.collision_mesh.is_some() {
+            None // patch 11: the box is only the mesh's bounds; render.mesh names what to draw
+        } else {
+            Some(round_position([
+                part_data.size.x,
+                part_data.size.y,
+                part_data.size.z,
+            ]))
+        },
         shape: Some(part_data.shape.name().to_string()),
         render: build_render(data, part_data),
         health: None,
@@ -1796,6 +1809,9 @@ pub struct SpectatorRender {
     pub receives_shadow: bool,
     pub visible: bool,
     pub double_sided: bool,
+    /// Patch 11: what a collision-mesh part draws (RenderMesh, else CollisionMeshFile); None for other parts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mesh: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub transparency: Option<f32>,
 }

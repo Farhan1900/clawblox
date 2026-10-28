@@ -4086,9 +4086,12 @@ fn test_model_repeated_pivot_to_preserves_rigid_part_basis() {
 
 /// Patch 10: a slanted closed box written as an .awmesh; queries hit its triangles, not its bounding box, and a
 /// box wholly inside the solid overlaps it.
-#[test]
-fn test_collision_mesh_queries_hit_triangles() {
-    let dir = std::env::temp_dir().join(format!("awmesh-test-{}", Uuid::new_v4()));
+/// The world folder for mesh tests (one per process, as WORLD_DIR is) holding ground.awmesh: a slanted closed box,
+/// x and z from -5 to 5, bottom at y = 0, top at y = 1 + 0.1 x (0.5 to 1.5), outward-facing triangles.
+fn ground_mesh_dir() -> std::path::PathBuf {
+    let dir = crate::game::script_bundle::WORLD_DIR
+        .get_or_init(|| std::env::temp_dir().join(format!("awmesh-test-{}", Uuid::new_v4())))
+        .clone();
     std::fs::create_dir_all(&dir).unwrap();
     // x and z from -5 to 5, bottom at y = 0, top at y = 1 + 0.1 x (0.5 to 1.5); outward-facing triangles
     let top = |x: f32| 1.0 + 0.1 * x;
@@ -4125,14 +4128,16 @@ fn test_collision_mesh_queries_hit_triangles() {
     t.iter()
         .flatten()
         .for_each(|i| bytes.extend(i.to_le_bytes()));
-    std::fs::write(dir.join("ground.awmesh"), bytes).unwrap();
-    let _ = crate::game::script_bundle::WORLD_DIR.set(dir.clone());
-    assert_eq!(
-        crate::game::script_bundle::WORLD_DIR.get(),
-        Some(&dir),
-        "another test set WORLD_DIR first"
-    );
+    let tmp = dir.join(format!("ground-{}.tmp", Uuid::new_v4())); // tests run in parallel: write, then rename
+    std::fs::write(&tmp, bytes).unwrap();
+    std::fs::rename(&tmp, dir.join("ground.awmesh")).unwrap();
+    dir
+}
 
+#[test]
+fn test_collision_mesh_queries_hit_triangles() {
+    let top = |x: f32| 1.0 + 0.1 * x;
+    ground_mesh_dir();
     let mut runtime = test_runtime();
     runtime
         .load_script(
@@ -4187,5 +4192,82 @@ fn test_collision_mesh_queries_hit_triangles() {
     assert!(g.get::<bool>("buried").unwrap());
     assert!(!g.get::<bool>("unanchor").unwrap());
     assert!(!g.get::<bool>("escape").unwrap());
-    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// Patch 11: restoring a snapshot (a world reset, a resumed save) reloads a part's CollisionMeshFile, so rays hit
+/// the triangles again rather than the mesh's bounding box.
+#[test]
+fn test_snapshot_restore_reloads_collision_mesh() {
+    ground_mesh_dir();
+    let game_id = Uuid::new_v4();
+    let mut instance = crate::game::instance::GameInstance::new(game_id, None);
+    instance.load_script(
+        r#"
+        local g = Instance.new("Part")
+        g.Name = "Ground"
+        g.Anchored = true
+        g.CollisionMeshFile = "ground.awmesh"
+        g.Parent = Workspace
+        "#,
+    );
+    instance.tick();
+    let snapshot = crate::snapshot::capture_game_instance(&instance).unwrap();
+    let mut restored = crate::game::instance::GameInstance::new(game_id, None);
+    restored.init_runtime();
+    crate::snapshot::restore_game_instance(&mut restored, &snapshot).unwrap();
+    restored.load_script(
+        r#"
+        local g = Workspace:FindFirstChild("Ground")
+        _G.file = g.CollisionMeshFile
+        local hit = Workspace:Raycast(Vector3.new(-4, 10, 1), Vector3.new(0, -20, 0))
+        _G.y = hit and hit.Position.Y or -99
+        "#,
+    );
+    let g: mlua::Table = restored
+        .lua_runtime
+        .as_ref()
+        .unwrap()
+        .lua()
+        .globals()
+        .get("_G")
+        .unwrap();
+    assert_eq!(g.get::<String>("file").unwrap(), "ground.awmesh");
+    let y: f32 = g.get("y").unwrap();
+    assert!((y - 0.6).abs() < 1e-4, "ray hit {} (the bounding box top is 1.5)", y);
+}
+
+/// Patch 11: the spectator stream sends a collision-mesh part as its render role and file (RenderMesh, else the
+/// CollisionMeshFile), with no bounding-box size; other parts keep their size.
+#[test]
+fn test_spectator_sends_mesh_parts_as_their_file() {
+    ground_mesh_dir();
+    let mut instance = crate::game::instance::GameInstance::new(Uuid::new_v4(), None);
+    instance.load_script(
+        r#"
+        for i, mesh in ipairs({ "terrain/start.json", "" }) do
+            local g = Instance.new("Part")
+            g.Name = "Ground" .. i
+            g.Anchored = true
+            g.CollisionMeshFile = "ground.awmesh"
+            g:SetAttribute("RenderRole", "terrain_mesh")
+            if mesh ~= "" then g:SetAttribute("RenderMesh", mesh) end
+            g.Parent = Workspace
+        end
+        local b = Instance.new("Part")
+        b.Name = "Box"
+        b.Anchored = true
+        b.Size = Vector3.new(2, 1, 2)
+        b.Parent = Workspace
+        "#,
+    );
+    instance.tick();
+    let obs = instance.get_spectator_observation();
+    let meshes: Vec<_> = obs.entities.iter().filter(|e| e.render.kind == "mesh").collect();
+    assert_eq!(meshes.len(), 2, "two mesh parts");
+    assert!(meshes.iter().all(|e| e.size.is_none() && e.render.role == "terrain_mesh"));
+    let mut files: Vec<_> = meshes.iter().map(|e| e.render.mesh.clone().unwrap()).collect();
+    files.sort();
+    assert_eq!(files, vec!["ground.awmesh".to_string(), "terrain/start.json".to_string()]);
+    let boxes: Vec<_> = obs.entities.iter().filter(|e| e.render.kind != "mesh").collect();
+    assert!(boxes.iter().any(|e| e.size == Some([2.0, 1.0, 2.0]) && e.render.mesh.is_none()));
 }

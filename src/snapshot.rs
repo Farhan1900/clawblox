@@ -366,6 +366,9 @@ pub struct PartSnapshot {
     #[serde(default)]
     pub custom_physical_properties: Option<PhysicalPropertiesSnapshot>,
     pub shape: String,
+    /// Patch 11: the part's CollisionMeshFile (patch 10), reloaded from the world folder on restore.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub collision_mesh_file: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -2257,6 +2260,18 @@ fn apply_part_snapshot(part: &mut PartData, snapshot: &PartSnapshot) -> Result<(
         .as_ref()
         .map(restore_physical_properties);
     part.shape = restore_part_type(&snapshot.shape)?;
+    part.collision_mesh = if snapshot.collision_mesh_file.is_empty() {
+        None
+    } else {
+        let dir = crate::game::script_bundle::WORLD_DIR
+            .get()
+            .cloned()
+            .unwrap_or_default();
+        Some(crate::game::physics::load_collision_mesh(
+            &dir.join(&snapshot.collision_mesh_file),
+        )?)
+    };
+    part.collision_mesh_file = snapshot.collision_mesh_file.clone();
     part.position_dirty = false;
     part.size_dirty = false;
     part.anchored_dirty = false;
@@ -2354,6 +2369,7 @@ fn snapshot_part_data(part: &PartData) -> PartSnapshot {
             .custom_physical_properties
             .map(snapshot_physical_properties),
         shape: snapshot_part_type(part.shape),
+        collision_mesh_file: part.collision_mesh_file.clone(),
     }
 }
 
