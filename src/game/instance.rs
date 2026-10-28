@@ -221,6 +221,7 @@ impl GameInstance {
         self.physics.character_tuning = crate::game::physics::CharacterTuning {
             gravity_multiplier: config.character_gravity_multiplier,
             step_height: config.character_step_height,
+            step_min_width: config.character_step_min_width,
             max_slope_deg: config.character_max_slope_deg,
             terminal_velocity: config.character_terminal_velocity,
             radius: config.character_radius,

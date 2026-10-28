@@ -88,6 +88,9 @@ fn assembly_signature(
     let mut out = format!("anchored={};", anchored);
     for (part, local) in parts.iter().zip(local_frames) {
         out.push_str(&format!("id={};shape={:?};", part.lua_id, part.shape));
+        if let Some(mesh) = &part.mesh {
+            out.push_str(&format!("mesh={:p};", std::sync::Arc::as_ptr(&mesh.0)));
+        }
         out.push_str("size=");
         fmt_vec3(&mut out, part.size);
         out.push_str(";local=");
@@ -574,6 +577,7 @@ impl PhysicsWorld {
             let mut collider = build_collider_with_physical_properties(
                 part.size,
                 part.shape,
+                part.mesh.as_ref(),
                 interaction_state,
                 part.physical_properties,
             );
@@ -588,6 +592,10 @@ impl PhysicsWorld {
             self.lua_to_collider.insert(part.lua_id, collider_handle);
             self.lua_to_local_frame.insert(part.lua_id, local_frame);
             self.lua_to_shape.insert(part.lua_id, part.shape);
+            match &part.mesh {
+                Some(mesh) => self.lua_to_mesh.insert(part.lua_id, mesh.clone()),
+                None => self.lua_to_mesh.remove(&part.lua_id),
+            };
             self.lua_to_physical_properties
                 .insert(part.lua_id, part.physical_properties);
             self.lua_to_interactions

@@ -42,7 +42,12 @@ struct ScriptFile {
     service: ServiceRoot,
 }
 
+/// The loaded world's folder, for files scripts name (collision meshes, patch 10).
+// shortcut: one world per process, which is how agent-worlds runs them; key it by instance if a process hosts several.
+pub static WORLD_DIR: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
+
 pub fn load_world_and_entry_script(game_dir: &Path) -> Result<(WorldConfig, String), String> {
+    let _ = WORLD_DIR.set(game_dir.to_path_buf());
     let config = WorldConfig::from_game_dir(game_dir)
         .map_err(|e| format!("Error loading world.toml: {}", e))?;
     let entry_script = build_entry_script(game_dir, &config)?;

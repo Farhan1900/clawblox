@@ -21,6 +21,8 @@ fn interaction_groups(collision_group: CollisionGroupMask) -> InteractionGroups 
 pub struct CharacterTuning {
     pub gravity_multiplier: f32,
     pub step_height: f32,
+    /// How far past a step's edge autostep checks for room (patch 10; upstream 0.01).
+    pub step_min_width: f32,
     pub max_slope_deg: f32,
     pub terminal_velocity: f32,
     /// Capsule radius and total height (studs) of characters created for joining players.
@@ -33,6 +35,7 @@ impl Default for CharacterTuning {
         Self {
             gravity_multiplier: consts::CHARACTER_GRAVITY_MULTIPLIER,
             step_height: consts::AUTOSTEP_MAX_HEIGHT,
+            step_min_width: consts::AUTOSTEP_MIN_WIDTH,
             max_slope_deg: 45.0,
             terminal_velocity: consts::CHARACTER_TERMINAL_FALL_SPEED,
             radius: 1.0,
@@ -541,11 +544,13 @@ impl PhysicsWorld {
             offset: CharacterLength::Absolute(0.05),
             autostep: Some(CharacterAutostep {
                 max_height: CharacterLength::Absolute(self.character_tuning.step_height),
-                min_width: CharacterLength::Absolute(consts::AUTOSTEP_MIN_WIDTH),
+                min_width: CharacterLength::Absolute(self.character_tuning.step_min_width),
                 include_dynamic_bodies: true,
             }),
             max_slope_climb_angle: self.character_tuning.max_slope_deg.to_radians(),
-            min_slope_slide_angle: (self.character_tuning.max_slope_deg - 15.0).max(0.0).to_radians(),
+            min_slope_slide_angle: (self.character_tuning.max_slope_deg - 15.0)
+                .max(0.0)
+                .to_radians(),
             snap_to_ground: Some(CharacterLength::Absolute(consts::SNAP_TO_GROUND)),
             ..Default::default()
         };

@@ -194,6 +194,9 @@ pub struct PhysicsConfig {
     /// Highest step, in studs, a walking character climbs without jumping.
     #[serde(default = "default_character_step_height")]
     pub character_step_height: f32,
+    /// Room past a step's edge autostep needs, in studs (patch 10; upstream 0.01).
+    #[serde(default = "default_character_step_min_width")]
+    pub character_step_min_width: f32,
     /// Steepest slope, in degrees, a walking character climbs.
     #[serde(default = "default_character_max_slope_deg")]
     pub character_max_slope_deg: f32,
@@ -214,6 +217,7 @@ impl Default for PhysicsConfig {
             solver_iterations: default_physics_solver_iterations(),
             character_gravity_multiplier: default_character_gravity_multiplier(),
             character_step_height: default_character_step_height(),
+            character_step_min_width: default_character_step_min_width(),
             character_max_slope_deg: default_character_max_slope_deg(),
             character_terminal_velocity: default_character_terminal_velocity(),
             character_radius: default_character_radius(),
@@ -228,6 +232,10 @@ fn default_character_gravity_multiplier() -> f32 {
 
 fn default_character_step_height() -> f32 {
     crate::game::constants::physics::AUTOSTEP_MAX_HEIGHT
+}
+
+fn default_character_step_min_width() -> f32 {
+    crate::game::constants::physics::AUTOSTEP_MIN_WIDTH
 }
 
 fn default_character_max_slope_deg() -> f32 {

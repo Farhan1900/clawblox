@@ -4083,3 +4083,109 @@ fn test_model_repeated_pivot_to_preserves_rigid_part_basis() {
     assert!(rl < 1e-3);
     assert!(ul < 1e-3);
 }
+
+/// Patch 10: a slanted closed box written as an .awmesh; queries hit its triangles, not its bounding box, and a
+/// box wholly inside the solid overlaps it.
+#[test]
+fn test_collision_mesh_queries_hit_triangles() {
+    let dir = std::env::temp_dir().join(format!("awmesh-test-{}", Uuid::new_v4()));
+    std::fs::create_dir_all(&dir).unwrap();
+    // x and z from -5 to 5, bottom at y = 0, top at y = 1 + 0.1 x (0.5 to 1.5); outward-facing triangles
+    let top = |x: f32| 1.0 + 0.1 * x;
+    let v: [[f32; 3]; 8] = [
+        [-5.0, 0.0, -5.0],
+        [5.0, 0.0, -5.0],
+        [5.0, 0.0, 5.0],
+        [-5.0, 0.0, 5.0],
+        [-5.0, top(-5.0), -5.0],
+        [5.0, top(5.0), -5.0],
+        [5.0, top(5.0), 5.0],
+        [-5.0, top(-5.0), 5.0],
+    ];
+    let t: [[u32; 3]; 12] = [
+        [0, 1, 2],
+        [0, 2, 3],
+        [4, 6, 5],
+        [4, 7, 6],
+        [0, 5, 1],
+        [0, 4, 5],
+        [1, 6, 2],
+        [1, 5, 6],
+        [2, 7, 3],
+        [2, 6, 7],
+        [3, 4, 0],
+        [3, 7, 4],
+    ];
+    let mut bytes = b"AWMESH01".to_vec();
+    bytes.extend(8u32.to_le_bytes());
+    bytes.extend(12u32.to_le_bytes());
+    v.iter()
+        .flatten()
+        .for_each(|f| bytes.extend(f.to_le_bytes()));
+    t.iter()
+        .flatten()
+        .for_each(|i| bytes.extend(i.to_le_bytes()));
+    std::fs::write(dir.join("ground.awmesh"), bytes).unwrap();
+    let _ = crate::game::script_bundle::WORLD_DIR.set(dir.clone());
+    assert_eq!(
+        crate::game::script_bundle::WORLD_DIR.get(),
+        Some(&dir),
+        "another test set WORLD_DIR first"
+    );
+
+    let mut runtime = test_runtime();
+    runtime
+        .load_script(
+            r#"
+            local g = Instance.new("Part")
+            g.Name = "Ground"
+            g.Anchored = true
+            g.CollisionMeshFile = "ground.awmesh"
+            g.Parent = Workspace
+            _G.size, _G.pos = g.Size, g.Position
+            _G.heights = {}
+            for _, x in ipairs({ -4, -1, 0, 2.5, 4 }) do
+                local hit = Workspace:Raycast(Vector3.new(x, 10, 1), Vector3.new(0, -20, 0))
+                table.insert(_G.heights, hit and hit.Instance.Name == "Ground" and hit.Position.Y or -99)
+            end
+            local function inBox(y)
+                for _, p in ipairs(Workspace:GetPartBoundsInBox(CFrame.new(-4, y, 0), Vector3.new(0.5, 0.2, 0.5))) do
+                    if p.Name == "Ground" then return true end
+                end
+                return false
+            end
+            _G.above = inBox(1.0) -- top is 0.6 at x = -4: inside the bounding box but above the triangles
+            _G.across = inBox(0.6)
+            _G.buried = inBox(0.2) -- wholly inside the solid
+            _G.unanchor = pcall(function() g.Anchored = false end)
+            _G.escape = pcall(function() g.CollisionMeshFile = "../x.awmesh" end)
+        "#,
+        )
+        .expect("Failed to load script");
+
+    let g: mlua::Table = runtime.lua().globals().get("_G").unwrap();
+    let size: crate::game::lua::types::Vector3 = g.get("size").unwrap();
+    let pos: crate::game::lua::types::Vector3 = g.get("pos").unwrap();
+    assert!(
+        (size.x - 10.0).abs() < 1e-5 && (size.y - 1.5).abs() < 1e-5,
+        "bounds {:?}",
+        size
+    );
+    assert!((pos.y - 0.75).abs() < 1e-5, "centre {:?}", pos);
+    let heights: Vec<f32> = g.get("heights").unwrap();
+    for (x, y) in [-4.0f32, -1.0, 0.0, 2.5, 4.0].iter().zip(heights) {
+        assert!(
+            (y - top(*x)).abs() < 1e-4,
+            "x {} hit {} want {}",
+            x,
+            y,
+            top(*x)
+        );
+    }
+    assert!(!g.get::<bool>("above").unwrap());
+    assert!(g.get::<bool>("across").unwrap());
+    assert!(g.get::<bool>("buried").unwrap());
+    assert!(!g.get::<bool>("unanchor").unwrap());
+    assert!(!g.get::<bool>("escape").unwrap());
+    let _ = std::fs::remove_dir_all(dir);
+}

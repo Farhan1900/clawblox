@@ -75,6 +75,7 @@ fn assembly_part(
         can_query: true,
         collision_group: CollisionGroupMask::default(),
         shape: PartType::Block,
+        mesh: None,
         physical_properties: None,
         velocity: [0.0, 0.0, 0.0],
         angular_velocity: [0.0, 0.0, 0.0],
@@ -1139,6 +1140,7 @@ fn test_partial_single_part_sync_preserves_omitted_assemblies() {
             can_query: true,
             collision_group: CollisionGroupMask::default(),
             shape: PartType::Block,
+            mesh: None,
             physical_properties: None,
             velocity: [0.0, 0.0, 0.0],
             angular_velocity: [0.0, 0.0, 0.0],
@@ -1196,4 +1198,48 @@ fn test_inert_part_disables_collider_participation() {
 
     world.set_can_query(1, false);
     assert_eq!(world.collider_enabled_for_lua(1), Some(false));
+}
+
+/// Patch 10 cost probe (ignored; `cargo test --release --lib raycast_cost -- --ignored --nocapture`): load time of the
+/// concept mesh and downward rays over it through Rapier's query pipeline, with 0, 139 and 1000 idle boxes.
+#[test]
+#[ignore]
+fn raycast_cost_query_pipeline() {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../worlds/spike-trimesh/terrain.awmesh");
+    let t = std::time::Instant::now();
+    let mesh = super::load_collision_mesh(&path).expect("run the spike's convert check first");
+    println!("load {:.2} ms", t.elapsed().as_secs_f64() * 1000.0);
+    for extra in [0u64, 139, 1000] {
+        let mut world = PhysicsWorld::new();
+        let half = mesh.half_extents;
+        let mut terrain = assembly_part(1, mesh.center, [half[0] * 2.0, half[1] * 2.0, half[2] * 2.0], true);
+        terrain.mesh = Some(mesh.shape.clone());
+        let mut specs = vec![single_part_spec(terrain)];
+        for i in 0..extra {
+            let at = [300.0 + (i % 20) as f32 * 4.0, -20.0, 200.0 + (i / 20) as f32 * 4.0];
+            specs.push(single_part_spec(assembly_part(10 + i, at, [2.0, 2.0, 2.0], true)));
+        }
+        let t = std::time::Instant::now();
+        world.sync_assemblies(specs, 1.0 / 60.0);
+        world.query_pipeline.update(&world.collider_set);
+        let build = t.elapsed().as_secs_f64() * 1000.0;
+        let n = 20_000;
+        let t = std::time::Instant::now();
+        let mut hits = 0;
+        for i in 0..n {
+            let (x, z) = ((i as f32 * 7.31) % 40.0 - 20.0, (i as f32 * 3.17) % 40.0 - 20.0);
+            let ray = Ray::new(point![x, 20.0, z], vector![0.0, -1.0, 0.0]);
+            let filter = QueryFilter::default();
+            if world
+                .query_pipeline
+                .cast_ray(&world.rigid_body_set, &world.collider_set, &ray, 40.0, true, filter)
+                .is_some()
+            {
+                hits += 1;
+            }
+        }
+        let per = t.elapsed().as_secs_f64() * 1e6 / n as f64;
+        println!("extra {extra}: build {build:.2} ms, {per:.3} us per ray, {hits} hits");
+        assert_eq!(hits, n);
+    }
 }

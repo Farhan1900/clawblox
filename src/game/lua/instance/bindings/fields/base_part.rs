@@ -1,7 +1,7 @@
 use mlua::{AnyUserData, UserDataFields};
 
 use crate::game::lua::runtime::Game;
-use crate::game::lua::types::{Color3, Material, PartType, PhysicalProperties, Vector3};
+use crate::game::lua::types::{CFrame, Color3, Material, PartType, PhysicalProperties, Vector3};
 
 use super::super::super::*;
 
@@ -13,6 +13,11 @@ pub(super) fn add_fields<F: UserDataFields<Instance>>(fields: &mut F) {
     fields.add_field_method_set("Anchored", |lua, this, anchored: bool| {
         let mut data = this.data.lock().unwrap();
         if let Some(part) = &mut data.part_data {
+            if !anchored && part.collision_mesh.is_some() {
+                return Err(mlua::Error::runtime(
+                    "a part with a CollisionMeshFile stays anchored",
+                ));
+            }
             part.anchored = anchored;
             part.anchored_dirty = true;
             drop(data);
@@ -424,6 +429,66 @@ pub(super) fn add_fields<F: UserDataFields<Instance>>(fields: &mut F) {
         let mut data = this.data.lock().unwrap();
         if let Some(part) = &mut data.part_data {
             part.shape = shape;
+            part.shape_dirty = true;
+            drop(data);
+            this.mark_replication_dirty(lua);
+        }
+        Ok(())
+    });
+
+    fields.add_field_method_get("CollisionMeshFile", |_, this| {
+        let data = this.data.lock().unwrap();
+        Ok(data
+            .part_data
+            .as_ref()
+            .map(|p| p.collision_mesh_file.clone()))
+    });
+    // Patch 10: an anchored part collides and answers queries with the triangles in this file (relative to the
+    // world folder). The part's box becomes the mesh's bounding box, placed where the file's coordinates put it.
+    fields.add_field_method_set("CollisionMeshFile", |lua, this, file: String| {
+        let mesh = if file.is_empty() {
+            None
+        } else {
+            let rel = std::path::Path::new(&file);
+            if rel.is_absolute()
+                || rel
+                    .components()
+                    .any(|c| c == std::path::Component::ParentDir)
+            {
+                return Err(mlua::Error::runtime(
+                    "CollisionMeshFile must be a path inside the world folder",
+                ));
+            }
+            let dir = crate::game::script_bundle::WORLD_DIR
+                .get()
+                .cloned()
+                .unwrap_or_default();
+            Some(
+                crate::game::physics::load_collision_mesh(&dir.join(rel))
+                    .map_err(mlua::Error::runtime)?,
+            )
+        };
+        let mut data = this.data.lock().unwrap();
+        if let Some(part) = &mut data.part_data {
+            if mesh.is_some() && !part.anchored {
+                return Err(mlua::Error::runtime(
+                    "CollisionMeshFile needs an anchored part",
+                ));
+            }
+            if let Some(m) = &mesh {
+                let c = Vector3::new(m.center[0], m.center[1], m.center[2]);
+                part.size = Vector3::new(
+                    m.half_extents[0] * 2.0,
+                    m.half_extents[1] * 2.0,
+                    m.half_extents[2] * 2.0,
+                );
+                part.position = c;
+                part.cframe = CFrame::new(c.x, c.y, c.z);
+                part.size_dirty = true;
+                part.position_dirty = true;
+            }
+            part.collision_mesh = mesh;
+            part.collision_mesh_file = file;
             part.shape_dirty = true;
             drop(data);
             this.mark_replication_dirty(lua);

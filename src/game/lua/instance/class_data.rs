@@ -34,6 +34,9 @@ pub struct PartData {
     pub custom_physical_properties: Option<PhysicalProperties>,
     pub custom_physical_properties_dirty: bool,
     pub shape: PartType,
+    /// Static collision mesh loaded from `CollisionMeshFile` (patch 10); replaces the shape for physics and queries.
+    pub collision_mesh: Option<crate::game::physics::CollisionMesh>,
+    pub collision_mesh_file: String,
     pub position_dirty: bool,
     /// Distinguishes Roblox's welded-part transform semantics:
     /// Position changes recompute the weld offset, while CFrame changes move the
@@ -75,6 +78,8 @@ impl Default for PartData {
             custom_physical_properties: None,
             custom_physical_properties_dirty: false,
             shape: PartType::Block,
+            collision_mesh: None,
+            collision_mesh_file: String::new(),
             position_dirty: false,
             cframe_dirty: false,
             size_dirty: false,

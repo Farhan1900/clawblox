@@ -16,6 +16,7 @@ mod parts;
 pub use align_motors::{AlignKind, AlignMotorSpec, AlignTarget};
 pub use characters::{CharacterControllerState, CharacterTuning, GroundKinematicSupport};
 use parts::build_collider_with_physical_properties;
+pub use parts::{load_collision_mesh, CollisionMesh};
 
 /// Large enough for normal worlds, small enough to keep Rapier broad-phase keys
 /// away from overflow and floating-point precision collapse.
@@ -97,6 +98,8 @@ pub struct PhysicsAssemblyPart {
     pub can_query: bool,
     pub collision_group: CollisionGroupMask,
     pub shape: PartType,
+    /// Static triangle mesh collider (patch 10); replaces the shape when set. Anchored parts only.
+    pub mesh: Option<SharedShape>,
     pub physical_properties: Option<PhysicalProperties>,
     pub velocity: [f32; 3],
     pub angular_velocity: [f32; 3],
@@ -139,6 +142,8 @@ pub struct PhysicsWorld {
     pub body_to_lua: HashMap<RigidBodyHandle, u64>,
     /// Maps Lua instance ID to its PartType shape (for collider rebuilds)
     pub lua_to_shape: HashMap<u64, PartType>,
+    /// Collision meshes by Lua id, kept for collider rebuilds (patch 10)
+    pub lua_to_mesh: HashMap<u64, SharedShape>,
     /// Maps Lua instance ID to current collider physical properties.
     pub lua_to_physical_properties: HashMap<u64, Option<PhysicalProperties>>,
     /// Maps Lua instance ID to current interaction flags used to configure colliders.
@@ -568,6 +573,7 @@ impl PhysicsWorld {
             self.lua_to_collider.remove(&lua_id);
             self.lua_to_local_frame.remove(&lua_id);
             self.lua_to_shape.remove(&lua_id);
+            self.lua_to_mesh.remove(&lua_id);
             self.lua_to_physical_properties.remove(&lua_id);
             self.lua_to_interactions.remove(&lua_id);
         }
@@ -633,6 +639,7 @@ impl PhysicsWorld {
             lua_to_body: HashMap::new(),
             body_to_lua: HashMap::new(),
             lua_to_shape: HashMap::new(),
+            lua_to_mesh: HashMap::new(),
             lua_to_physical_properties: HashMap::new(),
             lua_to_interactions: HashMap::new(),
             character_controllers: HashMap::new(),
@@ -754,6 +761,7 @@ impl PhysicsWorld {
         let collider = build_collider_with_physical_properties(
             size,
             shape,
+            None,
             interaction_state,
             physical_properties,
         );
@@ -800,6 +808,7 @@ impl PhysicsWorld {
             }
             self.lua_to_body.remove(&lua_id);
             self.lua_to_shape.remove(&lua_id);
+            self.lua_to_mesh.remove(&lua_id);
             self.lua_to_physical_properties.remove(&lua_id);
             self.lua_to_interactions.remove(&lua_id);
             self.lua_to_collider.remove(&lua_id);

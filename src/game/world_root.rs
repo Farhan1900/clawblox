@@ -1,6 +1,6 @@
 use nalgebra::{Isometry3, Matrix3, Rotation3, Translation3, UnitQuaternion};
 use rapier3d::parry::query::intersection_test;
-use rapier3d::prelude::{point, SharedShape};
+use rapier3d::prelude::{point, vector, Ray, SharedShape};
 
 use crate::game::lua::instance::{Instance, TerrainCell, TerrainVoxel, TERRAIN_VOXEL_SIZE};
 use crate::game::lua::services::PhysicsService;
@@ -73,6 +73,8 @@ impl WorldRoot {
                         part.cframe.rotation,
                         part.shape,
                         part.material,
+                        part.collision_mesh.as_ref().map(|m| m.shape.clone()),
+                        part.cframe,
                     )
                 })
             };
@@ -86,6 +88,8 @@ impl WorldRoot {
                 rotation,
                 shape,
                 material,
+                mesh,
+                cframe,
             )) = part_info
             else {
                 continue;
@@ -119,14 +123,31 @@ impl WorldRoot {
             );
             let local_dir = mat_t_mul_vec(&rotation, ray_direction);
 
-            let hit = match shape {
-                PartType::Block => intersect_box_local(local_origin, local_dir, half),
-                PartType::Ball => intersect_sphere_local(local_origin, local_dir, half[0]),
-                PartType::Cylinder => {
+            let hit = match (&mesh, shape) {
+                // exact triangle hit (patch 10); not solid, so a ray starting inside still finds the surface
+                (Some(mesh), _) => {
+                    let ray = Ray::new(
+                        point![origin.x, origin.y, origin.z],
+                        vector![ray_dir.x, ray_dir.y, ray_dir.z],
+                    );
+                    mesh.cast_ray_and_get_normal(
+                        &cframe_to_isometry(cframe),
+                        &ray,
+                        ray_length,
+                        false,
+                    )
+                    .map(|h| {
+                        let n = cframe_to_isometry(cframe).rotation.inverse() * h.normal;
+                        (h.time_of_impact, [n.x, n.y, n.z])
+                    })
+                }
+                (None, PartType::Block) => intersect_box_local(local_origin, local_dir, half),
+                (None, PartType::Ball) => intersect_sphere_local(local_origin, local_dir, half[0]),
+                (None, PartType::Cylinder) => {
                     intersect_cylinder_local(local_origin, local_dir, half[0], half[1])
                 }
-                PartType::Ring => intersect_ring_local(local_origin, local_dir, size),
-                PartType::Wedge => intersect_wedge_local(local_origin, local_dir, half),
+                (None, PartType::Ring) => intersect_ring_local(local_origin, local_dir, size),
+                (None, PartType::Wedge) => intersect_wedge_local(local_origin, local_dir, half),
             };
 
             if let Some((t, local_normal)) = hit {
@@ -220,14 +241,23 @@ impl WorldRoot {
                         let part_rot = part.cframe.rotation;
                         let part_half = [part.size.x / 2.0, part.size.y / 2.0, part.size.z / 2.0];
 
-                        obb_intersects_obb(
-                            query_center,
-                            query_rot,
-                            query_half,
-                            part_center,
-                            part_rot,
-                            part_half,
-                        )
+                        if let Some(mesh) = &part.collision_mesh {
+                            mesh_intersects(
+                                &mesh.shape,
+                                part.cframe,
+                                &cuboid_query(query_half),
+                                cframe,
+                            )
+                        } else {
+                            obb_intersects_obb(
+                                query_center,
+                                query_rot,
+                                query_half,
+                                part_center,
+                                part_rot,
+                                part_half,
+                            )
+                        }
                     }
                 } else {
                     false
@@ -275,13 +305,22 @@ impl WorldRoot {
                         let part_center = [part.position.x, part.position.y, part.position.z];
                         let part_rot = part.cframe.rotation;
                         let part_half = [part.size.x / 2.0, part.size.y / 2.0, part.size.z / 2.0];
-                        sphere_intersects_obb(
-                            sphere_center,
-                            radius,
-                            part_center,
-                            part_rot,
-                            part_half,
-                        )
+                        if let Some(mesh) = &part.collision_mesh {
+                            mesh_intersects(
+                                &mesh.shape,
+                                part.cframe,
+                                &SharedShape::ball(radius),
+                                CFrame::new(position.x, position.y, position.z),
+                            )
+                        } else {
+                            sphere_intersects_obb(
+                                sphere_center,
+                                radius,
+                                part_center,
+                                part_rot,
+                                part_half,
+                            )
+                        }
                     }
                 } else {
                     false
@@ -338,12 +377,13 @@ impl WorldRoot {
                             p.size,
                             p.cframe,
                             p.shape,
+                            p.collision_mesh.as_ref().map(|m| m.shape.clone()),
                         )
                     })
                 }
             };
 
-            let Some((can_query, can_collide, collision_group_id, size, cframe, shape_type)) =
+            let Some((can_query, can_collide, collision_group_id, size, cframe, shape_type, mesh)) =
                 part_data
             else {
                 continue;
@@ -359,7 +399,7 @@ impl WorldRoot {
                 continue;
             }
 
-            let Some(shape) = shape_from_part(size, shape_type) else {
+            let Some(shape) = mesh.or_else(|| shape_from_part(size, shape_type)) else {
                 continue;
             };
             let iso = cframe_to_isometry(cframe);
@@ -375,6 +415,25 @@ impl WorldRoot {
         }
         Ok(out)
     }
+}
+
+fn cuboid_query(half: [f32; 3]) -> SharedShape {
+    SharedShape::cuboid(half[0], half[1], half[2])
+}
+
+/// Overlap with a collision mesh (patch 10), as with a solid part: the query shape touches a triangle or lies wholly
+/// inside the closed mesh (its centre is inside).
+fn mesh_intersects(
+    mesh: &SharedShape,
+    mesh_cframe: CFrame,
+    query: &SharedShape,
+    query_cframe: CFrame,
+) -> bool {
+    let (mesh_iso, query_iso) = (cframe_to_isometry(mesh_cframe), cframe_to_isometry(query_cframe));
+    intersection_test(&query_iso, query.as_ref(), &mesh_iso, mesh.as_ref()).unwrap_or(false)
+        || mesh
+            .project_point(&mesh_iso, &query_iso.translation.vector.into(), true)
+            .is_inside
 }
 
 fn resolve_query_collision_group(

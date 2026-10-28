@@ -63,13 +63,110 @@ fn build_shared_shape(size: [f32; 3], shape: PartType) -> SharedShape {
     }
 }
 
+/// A static collision mesh (patch 10): triangles recentred on their bounding box, so the part's box is the
+/// mesh's bounds; `half_extents` and `center` are that box in the file's coordinates.
+#[derive(Clone)]
+pub struct CollisionMesh {
+    pub shape: SharedShape,
+    pub center: [f32; 3],
+    pub half_extents: [f32; 3],
+}
+
+impl std::fmt::Debug for CollisionMesh {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CollisionMesh")
+            .field("center", &self.center)
+            .field("half_extents", &self.half_extents)
+            .finish()
+    }
+}
+
+const MESH_MAGIC: &[u8; 8] = b"AWMESH01";
+
+/// Reads an `.awmesh` file: `AWMESH01`, u32 vertex count, u32 triangle count, f32 xyz per vertex, u32 abc
+/// per triangle, all little-endian. Internal-edge fixing is on so characters and items slide over seams; the mesh
+/// is taken as closed with outward normals (ORIENTED), so point queries know inside from outside.
+pub fn load_collision_mesh(path: &std::path::Path) -> Result<CollisionMesh, String> {
+    let bytes = std::fs::read(path).map_err(|e| format!("{}: {}", path.display(), e))?;
+    let u32_at = |o: usize| -> Result<u32, String> {
+        bytes
+            .get(o..o + 4)
+            .map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+            .ok_or_else(|| format!("{}: truncated", path.display()))
+    };
+    if bytes.len() < 16 || &bytes[0..8] != MESH_MAGIC {
+        return Err(format!("{}: not an AWMESH01 file", path.display()));
+    }
+    let (nv, nt) = (u32_at(8)? as usize, u32_at(12)? as usize);
+    if bytes.len() != 16 + nv * 12 + nt * 12 || nv == 0 || nt == 0 {
+        return Err(format!(
+            "{}: size does not match {} vertices, {} triangles",
+            path.display(),
+            nv,
+            nt
+        ));
+    }
+    let f = |o: usize| f32::from_le_bytes([bytes[o], bytes[o + 1], bytes[o + 2], bytes[o + 3]]);
+    let raw: Vec<[f32; 3]> = (0..nv)
+        .map(|i| [f(16 + i * 12), f(20 + i * 12), f(24 + i * 12)])
+        .collect();
+    if raw.iter().flatten().any(|v| !v.is_finite()) {
+        return Err(format!("{}: non-finite vertex", path.display()));
+    }
+    let (mut lo, mut hi) = ([f32::MAX; 3], [f32::MIN; 3]);
+    for v in &raw {
+        for k in 0..3 {
+            lo[k] = lo[k].min(v[k]);
+            hi[k] = hi[k].max(v[k]);
+        }
+    }
+    let center = [0, 1, 2].map(|k| (lo[k] + hi[k]) / 2.0);
+    let half_extents = [0, 1, 2].map(|k| (hi[k] - lo[k]) / 2.0);
+    let base = 16 + nv * 12;
+    let mut indices = Vec::with_capacity(nt);
+    for t in 0..nt {
+        let tri = [
+            u32_at(base + t * 12)?,
+            u32_at(base + t * 12 + 4)?,
+            u32_at(base + t * 12 + 8)?,
+        ];
+        if tri.iter().any(|&i| i as usize >= nv) {
+            return Err(format!(
+                "{}: triangle {} indexes past the vertices",
+                path.display(),
+                t
+            ));
+        }
+        indices.push(tri);
+    }
+    let vertices = raw
+        .iter()
+        .map(|v| point![v[0] - center[0], v[1] - center[1], v[2] - center[2]])
+        .collect();
+    let shape =
+        SharedShape::trimesh_with_flags(
+        vertices,
+        indices,
+        TriMeshFlags::FIX_INTERNAL_EDGES | TriMeshFlags::ORIENTED,
+    )
+            .map_err(|e| format!("{}: {:?}", path.display(), e))?;
+    Ok(CollisionMesh {
+        shape,
+        center,
+        half_extents,
+    })
+}
+
 fn build_collider(
     size: [f32; 3],
     shape: PartType,
+    mesh: Option<&SharedShape>,
     can_collide: bool,
     interaction_state: PartInteractionState,
 ) -> Collider {
-    let shared_shape = build_shared_shape(size, shape);
+    let shared_shape = mesh
+        .cloned()
+        .unwrap_or_else(|| build_shared_shape(size, shape));
     ColliderBuilder::new(shared_shape)
         .enabled(interaction_state.collider_enabled())
         .sensor(!can_collide)
@@ -91,6 +188,7 @@ fn build_collider(
 pub(super) fn build_collider_with_physical_properties(
     size: [f32; 3],
     shape: PartType,
+    mesh: Option<&SharedShape>,
     interaction_state: PartInteractionState,
     physical_properties: Option<PhysicalProperties>,
 ) -> Collider {
@@ -98,6 +196,7 @@ pub(super) fn build_collider_with_physical_properties(
     let mut collider = build_collider(
         size,
         shape,
+        mesh,
         interaction_state.can_collide,
         interaction_state,
     );
@@ -149,6 +248,7 @@ impl PhysicsWorld {
             let mut collider = build_collider_with_physical_properties(
                 size,
                 shape,
+                self.lua_to_mesh.get(&lua_id),
                 interaction_state,
                 physical_properties,
             );
@@ -267,6 +367,7 @@ impl PhysicsWorld {
             let mut collider = build_collider_with_physical_properties(
                 size,
                 shape,
+                self.lua_to_mesh.get(&lua_id),
                 interaction_state,
                 physical_properties,
             );
