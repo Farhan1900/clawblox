@@ -1735,7 +1735,7 @@ function setChatLocalStatus(text) {
 
 function updateChatSendUi() {
   if (chatSendEl) chatSendEl.disabled = chatState.sending
-  if (chatInputEl) chatInputEl.disabled = false
+  if (chatInputEl) chatInputEl.disabled = !!SPECTATOR_TOKEN
 }
 
 function setChatPanelOpen(open) {
@@ -1759,6 +1759,7 @@ function makeLocalPlayerName() {
 
 async function ensureChatSession() {
   if (chatState.sessionToken) return
+  if (SPECTATOR_TOKEN) throw new Error('Spectating: read-only')
   const playerName = chatState.playerName || makeLocalPlayerName()
   chatState.playerName = playerName
   const resp = await fetch(withBasePath(`/join?name=${encodeURIComponent(playerName)}`), { method: 'POST' })
@@ -1936,7 +1937,7 @@ window.addEventListener('keydown', (ev) => {
 
 updateChatSendUi()
 renderChatFeed()
-setChatLocalStatus('Read-only until you send a message.')
+setChatLocalStatus(SPECTATOR_TOKEN ? 'Spectating: read-only' : 'Read-only until you send a message.')
 setChatConnection('Connecting...')
 
 if (!chatState.open) {
