@@ -1,6 +1,10 @@
 use super::*;
 use crate::game::profiling::{record_values, ProfileFrame};
 
+/// Other players within this distance (studs) are in an observation whatever the observer's facing and line of
+/// sight; beyond it the view cone and line of sight still apply.
+pub(super) const SENSE_RADIUS: f32 = 5.0;
+
 /// Round a float to 2 decimal places (reduces JSON payload size)
 #[inline]
 pub(super) fn round_f32(v: f32) -> f32 {
@@ -1322,8 +1326,12 @@ impl GameInstance {
                 continue;
             }
 
+            // Close enough to hear and feel: sensed whatever the facing and whatever stands between.
+            let sensed = distance <= SENSE_RADIUS;
             let target_eye = [position[0], position[1] + 2.0, position[2]];
-            if !self.player_can_see_target_in_fov(exclude_agent_id, observer_eye, target_eye) {
+            if !sensed
+                && !self.player_can_see_target_in_fov(exclude_agent_id, observer_eye, target_eye)
+            {
                 continue;
             }
 
@@ -1332,9 +1340,10 @@ impl GameInstance {
                 .get(&agent_id)
                 .and_then(|&hrp_id| self.physics.get_character_state(hrp_id))
                 .map(|state| state.body_handle);
-            if !self
-                .physics
-                .has_line_of_sight(observer_eye, target_eye, observer_body, target_body)
+            if !sensed
+                && !self
+                    .physics
+                    .has_line_of_sight(observer_eye, target_eye, observer_body, target_body)
             {
                 continue;
             }

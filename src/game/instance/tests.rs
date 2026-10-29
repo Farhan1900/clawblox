@@ -1096,6 +1096,54 @@ fn test_other_players_filtered_by_view_cone() {
 }
 
 #[test]
+fn test_other_players_close_by_are_sensed_whatever_the_facing() {
+    let mut instance = GameInstance::new(Uuid::new_v4(), None);
+
+    // A wall between the observer and the player beside it, and none towards the far one.
+    instance.load_script(
+        r#"
+            local floor = Instance.new("Part")
+            floor.Name = "Floor"
+            floor.Size = Vector3.new(100, 1, 100)
+            floor.Position = Vector3.new(0, 0, 0)
+            floor.Anchored = true
+            floor.Parent = Workspace
+            local wall = Instance.new("Part")
+            wall.Name = "Wall"
+            wall.Size = Vector3.new(0.2, 10, 10)
+            wall.Position = Vector3.new(1.25, 5, 0)
+            wall.Anchored = true
+            wall.Parent = Workspace
+        "#,
+    );
+
+    let (agent_a, agent_b, agent_c) = (Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
+    instance.add_player(agent_a, "PlayerA");
+    instance.add_player(agent_b, "PlayerB");
+    instance.add_player(agent_c, "PlayerC");
+    for _ in 0..5 {
+        instance.tick();
+    }
+    for (agent, pos) in [
+        (agent_a, [0.0, 2.0, 0.0]),
+        (agent_b, [3.0, 2.0, 0.0]),
+        (agent_c, [-6.0, 2.0, 0.0]),
+    ] {
+        let hrp = *instance.player_hrp_ids.get(&agent).unwrap();
+        instance.physics.set_character_position(hrp, pos);
+    }
+    instance
+        .physics
+        .query_pipeline
+        .update(&instance.physics.collider_set);
+
+    // A faces -Z: B (3 m east, behind the wall) is sensed; C (6 m west, in the open) is outside the cone.
+    let obs = instance.get_player_observation(agent_a).unwrap();
+    let ids: Vec<Uuid> = obs.other_players.iter().map(|p| p.id).collect();
+    assert_eq!(ids, vec![agent_b], "only the player within the sense radius");
+}
+
+#[test]
 fn test_other_player_attribute_policy_none_hides_target_attributes() {
     let mut instance = GameInstance::new(Uuid::new_v4(), None);
 
